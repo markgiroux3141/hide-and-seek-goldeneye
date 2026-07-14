@@ -1,0 +1,912 @@
+# Blender 4.1.1 MTL File: 'None'
+# www.blender.org
+
+newmtl UNTEXTURED
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Kd 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+
+newmtl m0
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02CF.bmp
+
+newmtl m1
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02B7.bmp
+
+newmtl m10
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd00B5.bmp
+
+newmtl m11
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02D3.bmp
+
+newmtl m12
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0101.bmp
+
+newmtl m13TransparentCullBothClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02BE.bmp
+
+newmtl m14
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0123.bmp
+
+newmtl m15
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0120.bmp
+
+newmtl m16
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02A6.bmp
+
+newmtl m17TopFlagTransparentClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0422.bmp
+
+newmtl m18TopFlagTransparentClampS
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd041E.bmp
+
+newmtl m19TopFlagTransparentClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd041B.bmp
+
+newmtl m2
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02D1.bmp
+
+newmtl m20
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd05E5.bmp
+
+newmtl m21
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd05B4.bmp
+
+newmtl m22
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd00A0.bmp
+
+newmtl m23
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd058B.bmp
+
+newmtl m24TopFlagTransparentClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd05D4.bmp
+
+newmtl m25TopFlagTransparentClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd05D0.bmp
+
+newmtl m26TransparentClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd058C.bmp
+
+newmtl m27
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd029F.bmp
+
+newmtl m28
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02A1.bmp
+
+newmtl m29
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02A0.bmp
+
+newmtl m3
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0471.bmp
+
+newmtl m30Transparent
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd05B9.bmp
+
+newmtl m31TransparentCullBoth
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02A2.bmp
+
+newmtl m32
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02BD.bmp
+
+newmtl m33
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02C1.bmp
+
+newmtl m34
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0493.bmp
+
+newmtl m35
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0125.bmp
+
+newmtl m36TopFlagTransparent
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd00FD.bmp
+
+newmtl m37
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0102.bmp
+
+newmtl m38
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02B9.bmp
+
+newmtl m39
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd011B.bmp
+
+newmtl m4
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02C2.bmp
+
+newmtl m40
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd011A.bmp
+
+newmtl m41
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0118.bmp
+
+newmtl m42
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02CE.bmp
+
+newmtl m43TopFlagTransparentClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd05D9.bmp
+
+newmtl m44TopFlagTransparentClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd05D6.bmp
+
+newmtl m45
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0137.bmp
+
+newmtl m46TopFlagTransparent
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 0.298039
+illum 9
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0008.bmp
+
+newmtl m47TopFlagTransparentClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd05D5.bmp
+
+newmtl m48CullBoth
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd00F0.bmp
+
+newmtl m49CullBoth
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0393.bmp
+
+newmtl m5
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd00F0.bmp
+
+newmtl m50TopFlagTransparentClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd05D1.bmp
+
+newmtl m51
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd00EB.bmp
+
+newmtl m52TopFlagTransparentClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd05D3.bmp
+
+newmtl m53CullBoth
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd00EB.bmp
+
+newmtl m54CullBoth
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02C5.bmp
+
+newmtl m55
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0119.bmp
+
+newmtl m56TopFlagTransparentClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 0.298039
+illum 9
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd03DD.bmp
+
+newmtl m57TopFlagTransparentClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 0.298039
+illum 9
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd01A8.bmp
+
+newmtl m58TopFlagTransparentClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 0.298039
+illum 9
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd03E0.bmp
+
+newmtl m59TopFlagTransparentClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 0.298039
+illum 9
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd03DE.bmp
+
+newmtl m6
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02AB.bmp
+
+newmtl m60
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02B8.bmp
+
+newmtl m61
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02BA.bmp
+
+newmtl m62CullBoth
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02C4.bmp
+
+newmtl m63
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02C4.bmp
+
+newmtl m64CullBoth
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02C6.bmp
+
+newmtl m65TopFlagTransparentClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0420.bmp
+
+newmtl m66
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02C6.bmp
+
+newmtl m67
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0393.bmp
+
+newmtl m68TopFlagTransparent
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 0.498039
+illum 9
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0008.bmp
+
+newmtl m69
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0128.bmp
+
+newmtl m70
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0140.bmp
+
+newmtl m71
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02A3.bmp
+
+newmtl m72
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02BB.bmp
+
+newmtl m73
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0134.bmp
+
+newmtl m74
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02D5.bmp
+
+newmtl m75CullBoth
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02C0.bmp
+
+newmtl m76CullBoth
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02C7.bmp
+
+newmtl m77
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02D4.bmp
+
+newmtl m78
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02A5.bmp
+
+newmtl m79TopFlagTransparent
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02B3.bmp
+
+newmtl m7TopFlagTransparent
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02AC.bmp
+
+newmtl m80TopFlagTransparent
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02B1.bmp
+
+newmtl m81TopFlagTransparent
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02B2.bmp
+
+newmtl m82TransparentCullBoth
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd0105.bmp
+
+newmtl m83TopFlagTransparentClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd05CF.bmp
+
+newmtl m84
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02C5.bmp
+
+newmtl m85ClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02AA.bmp
+
+newmtl m86ClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02A9.bmp
+
+newmtl m87ClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02A8.bmp
+
+newmtl m88ClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02A7.bmp
+
+newmtl m89CullBoth
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd02C2.bmp
+
+newmtl m8TopFlagTransparentClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd05D2.bmp
+
+newmtl m9TopFlagTransparentClampSClampT
+Ns 64.000023
+Ka 1.000000 1.000000 1.000000
+Ks 1.000000 1.000000 1.000000
+Ke 0.000000 0.000000 0.000000
+Ni 1.500000
+d 1.000000
+illum 2
+map_Kd D:/GoldenPerfectModding/Levels/Level Objects/facility 2/tempImgEd05D8.bmp

@@ -1,0 +1,19 @@
+.DS_Store
+Thumbs.db
+*.log
+node_modules/
+dist/
+public/existing goldeneye levels/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Rust / WASM
+target/
+pkg/
+Cargo.lock
+*.wasm
+# ...but the prebuilt CSG/cave WASM binaries are committed runtime deps (app imports them).
+!src/core/csg/wasm/csg_wasm_bg.wasm
+!src/core/cave/wasm/cave_wasm_bg.wasm

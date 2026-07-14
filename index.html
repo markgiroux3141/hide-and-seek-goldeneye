@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GoldenEye Level Editor</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { overflow: hidden; background: #000; font-family: 'Courier New', monospace; }
+        canvas { display: block; }
+
+        #hud {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        #crosshair {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 20px; height: 20px;
+        }
+        #crosshair::before, #crosshair::after {
+            content: '';
+            position: absolute;
+            background: #0f0;
+        }
+        #crosshair::before {
+            top: 0; left: 50%;
+            width: 2px; height: 100%;
+            transform: translateX(-50%);
+        }
+        #crosshair::after {
+            top: 50%; left: 0;
+            width: 100%; height: 2px;
+            transform: translateY(-50%);
+        }
+
+        #status {
+            position: absolute;
+            bottom: 20px; left: 300px;
+            color: #0f0;
+            font-size: 14px;
+            line-height: 1.6;
+            text-shadow: 1px 1px 2px #000;
+        }
+
+        #tool-info {
+            position: absolute;
+            top: 20px; right: 20px;
+            color: #0f0;
+            font-size: 14px;
+            text-align: right;
+            line-height: 1.6;
+            text-shadow: 1px 1px 2px #000;
+        }
+
+        /* Left Sidebar */
+        #sidebar {
+            position: absolute;
+            top: 0; left: 0; bottom: 0;
+            width: 260px;
+            background: rgba(0, 15, 0, 0.92);
+            border-right: 1px solid #0a0;
+            color: #0f0;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            pointer-events: auto;
+            display: flex;
+            flex-direction: column;
+            transition: width 0.18s ease;
+            overflow: hidden;
+        }
+        #sidebar.collapsed {
+            width: 32px;
+        }
+        .sidebar-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            border-bottom: 1px solid #0a0;
+            background: rgba(0, 30, 0, 0.6);
+            flex-shrink: 0;
+        }
+        .sidebar-title {
+            font-size: 13px;
+            color: #0f0;
+            text-shadow: 0 0 4px #0f0;
+            letter-spacing: 1px;
+            white-space: nowrap;
+            overflow: hidden;
+        }
+        #sidebar.collapsed .sidebar-title {
+            display: none;
+        }
+        #sidebar-toggle {
+            background: transparent;
+            border: 1px solid #0a0;
+            color: #0f0;
+            font-family: inherit;
+            font-size: 12px;
+            cursor: pointer;
+            padding: 2px 8px;
+            line-height: 1;
+            transition: border-color 0.15s, color 0.15s;
+        }
+        #sidebar-toggle:hover {
+            border-color: #0f0;
+            color: #ff0;
+        }
+        .sidebar-sections {
+            flex: 1;
+            overflow-y: auto;
+            overflow-x: hidden;
+        }
+        #sidebar.collapsed .sidebar-sections {
+            display: none;
+        }
+        .sidebar-sections::-webkit-scrollbar {
+            width: 6px;
+        }
+        .sidebar-sections::-webkit-scrollbar-thumb {
+            background: #0a0;
+        }
+        .sidebar-section {
+            border-bottom: 1px solid #030;
+        }
+        .sidebar-section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 8px 12px;
+            cursor: pointer;
+            color: #0f0;
+            background: rgba(0, 25, 0, 0.5);
+            user-select: none;
+            transition: background 0.12s;
+        }
+        .sidebar-section-header:hover {
+            background: rgba(0, 45, 0, 0.7);
+        }
+        .section-title {
+            font-size: 12px;
+            letter-spacing: 0.5px;
+            color: #ff0;
+        }
+        .section-chevron {
+            color: #0a0;
+            font-size: 10px;
+            transition: transform 0.15s;
+        }
+        .sidebar-section.collapsed .section-chevron {
+            transform: rotate(-90deg);
+        }
+        .section-body {
+            padding: 8px 12px;
+        }
+        .sidebar-section.collapsed .section-body {
+            display: none;
+        }
+        .section-body label {
+            display: grid;
+            grid-template-columns: 1fr 72px;
+            align-items: center;
+            gap: 8px;
+            margin: 5px 0;
+            color: #0f0;
+        }
+        .section-body input[type="number"],
+        .section-body input[type="text"] {
+            background: #0a1a0a;
+            color: #0f0;
+            border: 1px solid #0a0;
+            padding: 3px 6px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            width: 100%;
+        }
+        .section-body input[type="color"] {
+            background: #0a1a0a;
+            border: 1px solid #0a0;
+            padding: 0;
+            height: 22px;
+            width: 100%;
+            cursor: pointer;
+        }
+        .section-body input[type="checkbox"] {
+            accent-color: #0f0;
+            justify-self: start;
+        }
+        .section-body input:focus {
+            outline: none;
+            border-color: #0f0;
+            box-shadow: 0 0 6px rgba(0, 255, 0, 0.4);
+        }
+        .keybinds-body {
+            color: #0a0;
+            font-size: 11px;
+            line-height: 1.7;
+        }
+        .keybinds-body .kb-group {
+            color: #0f0;
+            margin-top: 6px;
+        }
+        .keybinds-body .kb-group:first-child {
+            margin-top: 0;
+        }
+
+        #lock-prompt {
+            position: absolute;
+            top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            color: #0f0;
+            font-size: 24px;
+            text-align: center;
+            text-shadow: 2px 2px 4px #000;
+        }
+        #lock-prompt .subtitle {
+            display: block;
+            font-size: 14px;
+            margin-top: 10px;
+            color: #0a0;
+        }
+        #mode-chooser {
+            margin-top: 24px;
+            display: flex;
+            gap: 16px;
+            justify-content: center;
+        }
+        .mode-btn {
+            background: rgba(0, 20, 0, 0.92);
+            border: 2px solid #0a0;
+            color: #0f0;
+            font-family: 'Courier New', monospace;
+            font-size: 16px;
+            padding: 14px 28px;
+            cursor: pointer;
+            text-align: center;
+            transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+            pointer-events: auto;
+        }
+        .mode-btn:hover {
+            border-color: #0f0;
+            box-shadow: 0 0 16px rgba(0, 255, 0, 0.4);
+            background: rgba(0, 40, 0, 0.95);
+        }
+        .mode-btn .mode-desc {
+            display: block;
+            font-size: 11px;
+            color: #0a0;
+            margin-top: 6px;
+        }
+
+        #message {
+            position: absolute;
+            top: 40%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #ff0;
+            font-size: 16px;
+            text-shadow: 1px 1px 2px #000;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+
+        /* Radial Menu */
+        #radial-menu {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 20;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0, 0, 0, 0.6);
+            cursor: default;
+        }
+        .radial-center {
+            position: absolute;
+            width: 80px; height: 80px;
+            border-radius: 50%;
+            background: rgba(0, 20, 0, 0.95);
+            border: 2px solid #0f0;
+            color: #0f0;
+            font-family: 'Courier New', monospace;
+            font-size: 11px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            text-shadow: 0 0 6px #0f0;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.15);
+        }
+        .radial-item {
+            position: absolute;
+            background: rgba(0, 20, 0, 0.92);
+            border: 1px solid #0a0;
+            color: #0f0;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            padding: 8px 16px;
+            cursor: pointer;
+            border-radius: 4px;
+            text-align: center;
+            white-space: nowrap;
+            transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
+            user-select: none;
+        }
+        .radial-item:hover {
+            border-color: #0f0;
+            box-shadow: 0 0 12px rgba(0, 255, 0, 0.5);
+            background: rgba(0, 40, 0, 0.95);
+        }
+        .radial-hotkey {
+            display: block;
+            font-size: 10px;
+            color: #0a0;
+            margin-top: 2px;
+        }
+        .radial-back {
+            color: #0a0;
+            font-size: 12px;
+        }
+        .radial-back:hover {
+            color: #0f0;
+        }
+        .radial-item-active {
+            border-color: #ff0;
+            box-shadow: 0 0 16px rgba(255, 255, 0, 0.5);
+            background: rgba(40, 40, 0, 0.95);
+        }
+    </style>
+</head>
+<body>
+    <div id="hud">
+        <div id="crosshair"></div>
+        <div id="status"></div>
+        <div id="tool-info"></div>
+        <div id="sidebar">
+            <div class="sidebar-header">
+                <span class="sidebar-title">GOLDENEYE EDITOR</span>
+                <button id="sidebar-toggle" title="Toggle sidebar">&lt;&lt;</button>
+            </div>
+            <div class="sidebar-sections">
+                <div class="sidebar-section collapsed" data-section="keybinds">
+                    <div class="sidebar-section-header">
+                        <span class="section-title">KEYBINDS</span>
+                        <span class="section-chevron">&#9660;</span>
+                    </div>
+                    <div class="section-body keybinds-body">
+                        <div class="kb-group">-- Indoor --</div>
+                        WASD - Move | Mouse - Look<br>
+                        Middle Click - Tool/Texture Menu<br>
+                        Click - Select Face<br>
+                        +/- Push/Pull Face<br>
+                        V - Toggle View (Grid/Textured)<br>
+                        E - Toggle Wireframe<br>
+                        T - Cycle Tool<br>
+                        M - Toggle Indoor/Terrain Mode<br>
+                        Shift+Click - Multi-Select coplanar<br>
+                        C - Connect Stairs | N - Simple Stairs<br>
+                        R - Railings | F - Grounded<br>
+                        1-9 - Set Texture Scheme<br>
+                        X - Delete | Ctrl+Z - Undo<br>
+                        Ctrl+S - Save | Ctrl+O - Load
+                        <div class="kb-group">-- Terrain --</div>
+                        Tab - Toggle Ortho/Perspective<br>
+                        T - Cycle Tool<br>
+                        G - Generate Mesh | Shift+W - Wall Style<br>
+                        B - Cycle Brush | +/- Radius | [/] Strength<br>
+                        Scroll - Zoom (ortho) | MMB - Pan (ortho)
+                    </div>
+                </div>
+                <div class="sidebar-section" data-section="stair">
+                    <div class="sidebar-section-header">
+                        <span class="section-title">STAIR</span>
+                        <span class="section-chevron">&#9660;</span>
+                    </div>
+                    <div class="section-body">
+                        <label>Width<input id="stair-width" type="number" value="4" min="1" max="40" step="1"></label>
+                        <label>Step Height<input id="stair-step-height" type="number" value="1" min="1" max="10" step="1"></label>
+                        <label>Rise/Run<input id="stair-rise-run" type="number" value="1" min="0.1" max="10" step="0.1"></label>
+                    </div>
+                </div>
+                <div class="sidebar-section" data-section="platform">
+                    <div class="sidebar-section-header">
+                        <span class="section-title">PLATFORM</span>
+                        <span class="section-chevron">&#9660;</span>
+                    </div>
+                    <div class="section-body">
+                        <label>Size X<input id="platform-size-x" type="number" value="4" min="1" max="40" step="1"></label>
+                        <label>Size Z<input id="platform-size-z" type="number" value="4" min="1" max="40" step="1"></label>
+                        <label>Thickness<input id="platform-thickness" type="number" value="1" min="1" max="10" step="1"></label>
+                    </div>
+                </div>
+                <div class="sidebar-section" id="terrain-settings" data-section="terrain" style="display:none;">
+                    <div class="sidebar-section-header">
+                        <span class="section-title">TERRAIN</span>
+                        <span class="section-chevron">&#9660;</span>
+                    </div>
+                    <div class="section-body">
+                        <label>Subdivision<input id="terrain-subdivision" type="number" value="8" min="1" max="20" step="1"></label>
+                        <label>Wall Height<input id="terrain-wall-height" type="number" value="20" min="1" max="100" step="1"></label>
+                        <label>Brush Radius<input id="terrain-brush-radius" type="number" value="8" min="1" max="50" step="1"></label>
+                        <label>Brush Strength<input id="terrain-brush-strength" type="number" value="0.5" min="0.1" max="1" step="0.1"></label>
+                    </div>
+                </div>
+                <div class="sidebar-section" id="light-settings" data-section="light" style="display:none;">
+                    <div class="sidebar-section-header">
+                        <span class="section-title">LIGHT</span>
+                        <span class="section-chevron">&#9660;</span>
+                    </div>
+                    <div class="section-body">
+                        <label>Color<input id="light-color" type="color" value="#ffffff"></label>
+                        <label>Intensity<input id="light-intensity" type="number" value="5" min="0.1" max="10" step="0.1"></label>
+                        <label>Range<input id="light-range" type="number" value="20" min="1" max="100" step="1"></label>
+                        <label>Cast Shadow<input id="light-cast-shadow" type="checkbox" checked></label>
+                        <label>Ambient<input id="light-ambient" type="number" value="1" min="0" max="3" step="0.05"></label>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div id="lock-prompt">
+            GoldenEye Level Editor
+            <span class="subtitle">Choose a mode to begin</span>
+            <div id="mode-chooser">
+                <button class="mode-btn" id="btn-indoor">Indoor Level<span class="mode-desc">Rooms, corridors, doors</span></button>
+                <button class="mode-btn" id="btn-terrain">Outdoor Terrain<span class="mode-desc">Open areas, heightmaps</span></button>
+            </div>
+        </div>
+        <div id="message"></div>
+    </div>
+
+    <div id="radial-menu"></div>
+
+    <script type="module" src="dist/bundle.js"></script>
+</body>
+</html>

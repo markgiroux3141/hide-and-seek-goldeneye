@@ -1,0 +1,142 @@
+{
+    "facility_white_tile": {
+        "label": "Facility White Tile",
+        "group": "Facility",
+        "key": "1",
+        "zones": {
+            "0": { "texture": "grey_tile_floor", "repeat": 0.35 },
+            "1": { "texture": "brown_wall", "repeat": 0.10 },
+            "2": { "texture": "white_tile", "repeat": 1.0 },
+            "3": { "texture": "brown_wall", "repeat": 0.5 },
+            "4": { "texture": null, "color": "#8B7355" },
+            "5": { "texture": "stair_gradient", "repeat": 1.0 },
+            "6": { "texture": "floor_doorframe", "repeat": 0.35 }
+        }
+    },
+    "facility_blue_brick": {
+        "label": "Facility Blue Brick",
+        "group": "Facility",
+        "key": "2",
+        "zones": {
+            "0": { "texture": "grey_tile_floor", "repeat": 0.35 },
+            "1": { "texture": "foam_ceiling", "repeat": 0.25 },
+            "2": { "texture": "blue_brick_wall", "repeat": 0.45 },
+            "3": { "texture": "blue_brick_wall", "repeat": 0.45 },
+            "4": { "texture": null, "color": "#8B7355" },
+            "5": { "texture": "stair_gradient", "repeat": 1.0 },
+            "6": { "texture": "floor_doorframe", "repeat": 0.35 },
+            "7": { "texture": "white_brace", "repeat": 0.25 }
+        }
+    },
+    "facility_industrial_room": {
+        "label": "Facility Industrial",
+        "group": "Facility",
+        "key": "3",
+        "zones": {
+            "0": { "texture": "yellow_floor", "repeat": 0.1 },
+            "1": { "texture": "dark_ceiling", "repeat": 0.8 },
+            "2": { "texture": "grey_line_wall", "repeat": 0.18 },
+            "3": { "texture": "grey_line_wall", "repeat": 0.18 },
+            "4": { "texture": null, "color": "#8B7355" },
+            "5": { "texture": "stair_gradient", "repeat": 1.0 },
+            "6": { "texture": "floor_doorframe", "repeat": 0.35 },
+            "7": { "texture": "white_brace", "repeat": 0.25 }
+        }
+    },
+    "facility_split_wall_a": {
+        "label": "Facility Split Wall A",
+        "group": "Facility",
+        "key": "4",
+        "zones": {
+            "0": { "texture": "tempImgEd02B7", "repeat": 0.35 },
+            "1": { "texture": "tempImgEd0102", "repeat": 0.35 },
+            "2": { "texture": "tempImgEd02CE", "repeat": 1.0 },
+            "3": { "texture": "tempImgEd0123", "repeat": 0.1667 },
+            "4": { "texture": null, "color": "#8B7355" },
+            "5": { "texture": "stair_gradient", "repeat": 1.0 },
+            "6": { "texture": "floor_doorframe", "repeat": 0.35 }
+        }
+    },
+    "facility_split_wall_b": {
+        "label": "Facility Split Wall B",
+        "group": "Facility",
+        "key": "5",
+        "zones": {
+            "0": { "texture": "tempImgEd02B7", "repeat": 0.35 },
+            "1": { "texture": "tempImgEd0102", "repeat": 0.35 },
+            "2": { "texture": "tempImgEd02CE", "repeat": 1.0 },
+            "3": { "texture": "tempImgEd0125", "repeat": 0.1667 },
+            "4": { "texture": null, "color": "#8B7355" },
+            "5": { "texture": "stair_gradient", "repeat": 1.0 },
+            "6": { "texture": "floor_doorframe", "repeat": 0.35 }
+        }
+    },
+    "facility_solid_wall_a": {
+        "label": "Facility Solid Wall A",
+        "group": "Facility",
+        "key": "6",
+        "zones": {
+            "0": { "texture": "tempImgEd02B7", "repeat": 0.35 },
+            "1": { "texture": "tempImgEd0102", "repeat": 0.35 },
+            "2": { "texture": "tempImgEd02D4", "repeat": 1.0 },
+            "3": { "texture": "tempImgEd02D4", "repeat": 1.0 },
+            "4": { "texture": null, "color": "#8B7355" },
+            "5": { "texture": "stair_gradient", "repeat": 1.0 },
+            "6": { "texture": "floor_doorframe", "repeat": 0.35 }
+        }
+    },
+    "facility_solid_wall_b": {
+        "label": "Facility Solid Wall B",
+        "group": "Facility",
+        "key": "7",
+        "zones": {
+            "0": { "texture": "tempImgEd02B7", "repeat": 0.35 },
+            "1": { "texture": "tempImgEd0102", "repeat": 0.35 },
+            "2": { "texture": "tempImgEd02D5", "repeat": 1.0 },
+            "3": { "texture": "tempImgEd02D5", "repeat": 1.0 },
+            "4": { "texture": null, "color": "#8B7355" },
+            "5": { "texture": "stair_gradient", "repeat": 1.0 },
+            "6": { "texture": "floor_doorframe", "repeat": 0.35 }
+        }
+    },
+    "archives_1": {
+        "label": "Archives 1",
+        "group": "Archives",
+        "key": "8",
+        "zones": {
+            "0": { "texture": "tempImgEd00EB", "repeat": 0.35 },
+            "1": { "texture": "tempImgEd05F4", "repeat": 0.35 },
+            "2": { "texture": "tempImgEd05C2", "repeat": 0.1667 },
+            "3": { "texture": "tempImgEd05BC", "repeat": 0.1667 },
+            "4": { "texture": null, "color": "#8B7355" },
+            "5": { "texture": "stair_gradient", "repeat": 1.0 },
+            "6": { "texture": "floor_doorframe", "repeat": 0.35 }
+        }
+    },
+    "bunker_1": {
+        "label": "Bunker 1",
+        "group": "Bunker",
+        "key": "9",
+        "zones": {
+            "0": { "texture": "tempImgEd0385", "repeat": 0.35 },
+            "1": { "texture": "tempImgEd0101", "repeat": 0.35 },
+            "2": { "texture": "tempImgEd013B", "repeat": 0.25 },
+            "3": { "texture": "tempImgEd013B", "repeat": 0.25 },
+            "4": { "texture": null, "color": "#8B7355" },
+            "5": { "texture": "stair_gradient", "repeat": 1.0 },
+            "6": { "texture": "floor_doorframe", "repeat": 0.35 }
+        }
+    },
+    "simple_blue": {
+        "label": "Simple Blue",
+        "group": "Simple",
+        "zones": {
+            "0": { "texture": "floor_doorframe", "repeat": 1.0 },
+            "1": { "texture": "floor_doorframe", "repeat": 1.0 },
+            "2": { "texture": "blue_stairs", "repeat": 1.0 },
+            "3": { "texture": "blue_stairs", "repeat": 1.0 },
+            "4": { "texture": null, "color": "#8B7355" },
+            "5": { "texture": "blue_stairs", "repeat": 1.0 }
+        }
+    }
+}
