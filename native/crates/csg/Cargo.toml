@@ -1,0 +1,10 @@
+[package]
+name = "csg"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+# rlib so the workspace consumes it as a normal dependency (the wasm build used
+# cdylib). No wasm-bindgen / js-sys here — the ~303-line lib.rs wrapper from the
+# source crate is discarded; only csg.rs (the pure-Rust BSP core) is vendored.
+crate-type = ["rlib"]

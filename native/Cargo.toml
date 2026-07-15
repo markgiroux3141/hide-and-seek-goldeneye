@@ -1,0 +1,28 @@
+# BUILD & HIDE — native Rust engine port.
+# See ../ENGINE_PORT_PLAN.md. The JS game (../src) stays as the design spec /
+# behavioral regression oracle; nothing here deletes or depends on it.
+[workspace]
+resolver = "2"
+members = ["crates/csg", "crates/engine", "crates/game"]
+
+# Locked stack — pinned once here, consumed by member crates via `workspace = true`.
+# Versions chosen for the Rust 1.92 toolchain (late-2025 ecosystem).
+[workspace.dependencies]
+glam = "0.29"
+winit = "0.30"
+wgpu = "24"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+gltf = { version = "1.4", features = ["import", "utils"] }
+rapier3d = "0.22"
+env_logger = "0.11"
+log = "0.4"
+
+# Local crates.
+csg = { path = "crates/csg" }
+engine = { path = "crates/engine" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

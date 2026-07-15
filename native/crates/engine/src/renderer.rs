@@ -1,0 +1,764 @@
+//! wgpu renderer (Vulkan backend). Phase 1 scope: one forward pipeline with a
+//! depth buffer and a single camera uniform, drawing per-region meshes that can
+//! be replaced live as brushes are edited. The camera is external (a
+//! [`crate::camera::FlyCamera`]); the renderer just consumes a view-proj matrix.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use glam::Mat4;
+use wgpu::util::DeviceExt;
+use winit::window::Window;
+
+use crate::mesh::{ColorVertex, ColoredMesh, CpuMesh, GpuMesh, Vertex};
+
+const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct CameraUniform {
+    view_proj: [[f32; 4]; 4],
+}
+
+pub struct Renderer {
+    surface: wgpu::Surface<'static>,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    config: wgpu::SurfaceConfiguration,
+
+    pipeline: wgpu::RenderPipeline,
+    camera_buf: wgpu::Buffer,
+    camera_bind_group: wgpu::BindGroup,
+    depth_view: wgpu::TextureView,
+
+    /// One GPU mesh per CSG region, replaced in place on every edit.
+    regions: HashMap<u32, GpuMesh>,
+
+    // Selection highlight (world-space quad over the picked face).
+    highlight_pipeline: wgpu::RenderPipeline,
+    highlight_mesh: Option<GpuMesh>,
+
+    // Pending-stair ghost (translucent step preview). Same look as the highlight
+    // but depth-test disabled, so it shows *through* the wall the stair carves
+    // into (the steps sit behind the wall until confirmed).
+    stair_ghost_pipeline: wgpu::RenderPipeline,
+    stair_ghost_mesh: Option<GpuMesh>,
+
+    // Dynamic entities (the hunter) — opaque, solid-colored.
+    entity_pipeline: wgpu::RenderPipeline,
+    entity_mesh: Option<GpuMesh>,
+
+    // Breakable door panels — opaque brown; combined mesh, cleared on breach.
+    door_pipeline: wgpu::RenderPipeline,
+    door_mesh: Option<GpuMesh>,
+
+    // Platform gizmo — unlit per-vertex-colored handles, drawn always-on-top
+    // (depth-test disabled) so the move arrows / scale handles stay visible.
+    gizmo_pipeline: wgpu::RenderPipeline,
+    gizmo_mesh: Option<GpuMesh>,
+
+    // Screen-space crosshair.
+    crosshair_pipeline: wgpu::RenderPipeline,
+    overlay_buf: wgpu::Buffer,
+    overlay_bind_group: wgpu::BindGroup,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct OverlayUniform {
+    aspect_fix: f32,
+    _pad: [f32; 3],
+}
+
+impl Renderer {
+    pub async fn new(window: Arc<Window>) -> Renderer {
+        let size = window.inner_size();
+
+        let backends = pick_backends();
+        log::info!("requesting backend(s): {backends:?}");
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            backends,
+            ..Default::default()
+        });
+        let surface = instance
+            .create_surface(window.clone())
+            .expect("create wgpu surface");
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: Some(&surface),
+                force_fallback_adapter: false,
+            })
+            .await
+            .expect("request adapter");
+        log::info!("adapter: {:?}", adapter.get_info());
+
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("engine-device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    memory_hints: wgpu::MemoryHints::default(),
+                },
+                None,
+            )
+            .await
+            .expect("request device");
+
+        let caps = surface.get_capabilities(&adapter);
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|f| f.is_srgb())
+            .unwrap_or(caps.formats[0]);
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size.width.max(1),
+            height: size.height.max(1),
+            present_mode: pick_present_mode(&caps.present_modes),
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+            // 1 = lowest input-to-photon latency (don't let the GPU queue ahead).
+            desired_maximum_frame_latency: 1,
+        };
+        log::info!("present mode: {:?}", config.present_mode);
+        surface.configure(&device, &config);
+
+        // Camera uniform + bind group.
+        let camera_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("camera-uniform"),
+            contents: bytemuck::cast_slice(&[CameraUniform {
+                view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+            }]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let camera_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("camera-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let camera_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("camera-bg"),
+            layout: &camera_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: camera_buf.as_entire_binding(),
+            }],
+        });
+
+        // Pipeline.
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("forward-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader.wgsl").into()),
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("forward-layout"),
+            bind_group_layouts: &[&camera_layout],
+            push_constant_ranges: &[],
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("forward-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // ── Highlight pipeline: translucent quad over the selected face.
+        // Shares the camera bind group; blends; depth-tests but doesn't write,
+        // with a small bias so it sits in front of the coplanar wall.
+        let highlight_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("highlight-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader_highlight.wgsl").into()),
+        });
+        let highlight_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("highlight-pipeline"),
+            layout: Some(&pipeline_layout), // same layout: camera bind group only
+            vertex: wgpu::VertexState {
+                module: &highlight_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &highlight_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None, // visible from either side
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: -1,
+                    slope_scale: -1.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // ── Stair-ghost pipeline: the highlight shader, but depth-test disabled
+        // (Always) so the pending steps preview *through* the wall they carve
+        // into. Otherwise the ghost would be hidden behind solid geometry.
+        let stair_ghost_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("stair-ghost-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &highlight_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &highlight_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always, // x-ray through walls
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // ── Entity pipeline: opaque solid-color props (hunter). Same camera
+        // layout + vertex layout as geometry; normal depth-test/write.
+        let entity_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("entity-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader_entity.wgsl").into()),
+        });
+        let entity_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("entity-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &entity_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &entity_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // ── Door pipeline: same layout as entities, brown fragment shader.
+        let door_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("door-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader_door.wgsl").into()),
+        });
+        let door_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("door-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &door_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &door_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // ── Gizmo pipeline: unlit, per-vertex color, drawn always-on-top
+        // (depth-test disabled + no depth write) so the move/scale handles are
+        // never hidden by the geometry they sit on. Same camera layout.
+        let gizmo_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("gizmo-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("gizmo.wgsl").into()),
+        });
+        let gizmo_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("gizmo-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &gizmo_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[ColorVertex::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &gizmo_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // ── Crosshair pipeline: screen-space `+`, no camera, no depth test.
+        let overlay_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("overlay-uniform"),
+            contents: bytemuck::cast_slice(&[OverlayUniform {
+                aspect_fix: config.height as f32 / config.width.max(1) as f32,
+                _pad: [0.0; 3],
+            }]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let overlay_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("overlay-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let overlay_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("overlay-bg"),
+            layout: &overlay_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: overlay_buf.as_entire_binding(),
+            }],
+        });
+        let crosshair_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("crosshair-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader_crosshair.wgsl").into()),
+        });
+        let crosshair_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("crosshair-layout"),
+            bind_group_layouts: &[&overlay_layout],
+            push_constant_ranges: &[],
+        });
+        let crosshair_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("crosshair-pipeline"),
+            layout: Some(&crosshair_layout),
+            vertex: wgpu::VertexState {
+                module: &crosshair_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &crosshair_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let depth_view = create_depth(&device, config.width, config.height);
+
+        Renderer {
+            surface,
+            device,
+            queue,
+            config,
+            pipeline,
+            camera_buf,
+            camera_bind_group,
+            depth_view,
+            regions: HashMap::new(),
+            highlight_pipeline,
+            highlight_mesh: None,
+            stair_ghost_pipeline,
+            stair_ghost_mesh: None,
+            entity_pipeline,
+            entity_mesh: None,
+            door_pipeline,
+            door_mesh: None,
+            gizmo_pipeline,
+            gizmo_mesh: None,
+            crosshair_pipeline,
+            overlay_buf,
+            overlay_bind_group,
+        }
+    }
+
+    /// Set (or clear) the selection-highlight quad mesh.
+    pub fn set_highlight(&mut self, mesh: Option<&CpuMesh>) {
+        self.highlight_mesh = match mesh {
+            Some(m) if !m.indices.is_empty() => Some(GpuMesh::upload(&self.device, m)),
+            _ => None,
+        };
+    }
+
+    /// Set (or clear) the pending-stair ghost mesh (x-ray step preview).
+    pub fn set_stair_ghost(&mut self, mesh: Option<&CpuMesh>) {
+        self.stair_ghost_mesh = match mesh {
+            Some(m) if !m.indices.is_empty() => Some(GpuMesh::upload(&self.device, m)),
+            _ => None,
+        };
+    }
+
+    /// Set (or clear) the dynamic entity mesh (the hunter). Re-uploaded each
+    /// frame at its new position — cheap for a single small box.
+    pub fn set_entity_mesh(&mut self, mesh: Option<&CpuMesh>) {
+        self.entity_mesh = match mesh {
+            Some(m) if !m.indices.is_empty() => Some(GpuMesh::upload(&self.device, m)),
+            _ => None,
+        };
+    }
+
+    /// Set (or clear) the combined door-panel mesh. Re-uploaded when a door
+    /// breaches (a breached panel drops out of the combined mesh); `None` clears.
+    pub fn set_door_mesh(&mut self, mesh: Option<&CpuMesh>) {
+        self.door_mesh = match mesh {
+            Some(m) if !m.indices.is_empty() => Some(GpuMesh::upload(&self.device, m)),
+            _ => None,
+        };
+    }
+
+    /// Set (or clear) the platform gizmo overlay mesh. Rebuilt each frame while a
+    /// platform is selected (handle colors track hover / active drag); `None` clears.
+    pub fn set_gizmo_mesh(&mut self, mesh: Option<&ColoredMesh>) {
+        self.gizmo_mesh = match mesh {
+            Some(m) if !m.indices.is_empty() => Some(GpuMesh::upload_colored(&self.device, m)),
+            _ => None,
+        };
+    }
+
+    /// Insert or replace a region's mesh. Called on every brush edit; an empty
+    /// mesh removes the region.
+    pub fn set_region_mesh(&mut self, region_id: u32, mesh: &CpuMesh) {
+        if mesh.indices.is_empty() {
+            self.regions.remove(&region_id);
+            return;
+        }
+        self.regions
+            .insert(region_id, GpuMesh::upload(&self.device, mesh));
+    }
+
+    /// Current framebuffer aspect ratio (for the camera's projection).
+    pub fn aspect(&self) -> f32 {
+        self.config.width as f32 / self.config.height.max(1) as f32
+    }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+        self.depth_view = create_depth(&self.device, width, height);
+        // Keep the crosshair square after a resize.
+        self.queue.write_buffer(
+            &self.overlay_buf,
+            0,
+            bytemuck::cast_slice(&[OverlayUniform {
+                aspect_fix: height as f32 / width.max(1) as f32,
+                _pad: [0.0; 3],
+            }]),
+        );
+    }
+
+    pub fn render(&mut self, view_proj: Mat4) {
+        self.queue.write_buffer(
+            &self.camera_buf,
+            0,
+            bytemuck::cast_slice(&[CameraUniform {
+                view_proj: view_proj.to_cols_array_2d(),
+            }]),
+        );
+
+        let frame = match self.surface.get_current_texture() {
+            Ok(f) => f,
+            Err(_) => {
+                self.surface.configure(&self.device, &self.config);
+                return;
+            }
+        };
+        let view_tex = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("frame-encoder"),
+            });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("forward-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view_tex,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.02,
+                            g: 0.02,
+                            b: 0.05,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            // 1) Opaque region meshes.
+            rp.set_pipeline(&self.pipeline);
+            rp.set_bind_group(0, &self.camera_bind_group, &[]);
+            for m in self.regions.values() {
+                rp.set_vertex_buffer(0, m.vertex_buf.slice(..));
+                rp.set_index_buffer(m.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..m.index_count, 0, 0..1);
+            }
+
+            // 2) Dynamic entities (opaque, before the translucent highlight).
+            if let Some(e) = &self.entity_mesh {
+                rp.set_pipeline(&self.entity_pipeline);
+                rp.set_bind_group(0, &self.camera_bind_group, &[]);
+                rp.set_vertex_buffer(0, e.vertex_buf.slice(..));
+                rp.set_index_buffer(e.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..e.index_count, 0, 0..1);
+            }
+
+            // 2.5) Breakable door panels (opaque brown).
+            if let Some(dm) = &self.door_mesh {
+                rp.set_pipeline(&self.door_pipeline);
+                rp.set_bind_group(0, &self.camera_bind_group, &[]);
+                rp.set_vertex_buffer(0, dm.vertex_buf.slice(..));
+                rp.set_index_buffer(dm.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..dm.index_count, 0, 0..1);
+            }
+
+            // 3) Selection highlight (translucent, over the picked face).
+            if let Some(h) = &self.highlight_mesh {
+                rp.set_pipeline(&self.highlight_pipeline);
+                rp.set_bind_group(0, &self.camera_bind_group, &[]);
+                rp.set_vertex_buffer(0, h.vertex_buf.slice(..));
+                rp.set_index_buffer(h.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..h.index_count, 0, 0..1);
+            }
+
+            // 3.5) Pending-stair ghost (translucent, x-ray through the wall).
+            if let Some(g) = &self.stair_ghost_mesh {
+                rp.set_pipeline(&self.stair_ghost_pipeline);
+                rp.set_bind_group(0, &self.camera_bind_group, &[]);
+                rp.set_vertex_buffer(0, g.vertex_buf.slice(..));
+                rp.set_index_buffer(g.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..g.index_count, 0, 0..1);
+            }
+
+            // 3.6) Platform gizmo handles (always-on-top, unlit colored).
+            if let Some(g) = &self.gizmo_mesh {
+                rp.set_pipeline(&self.gizmo_pipeline);
+                rp.set_bind_group(0, &self.camera_bind_group, &[]);
+                rp.set_vertex_buffer(0, g.vertex_buf.slice(..));
+                rp.set_index_buffer(g.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..g.index_count, 0, 0..1);
+            }
+
+            // 4) Screen-space crosshair, last (no depth, no camera).
+            rp.set_pipeline(&self.crosshair_pipeline);
+            rp.set_bind_group(0, &self.overlay_bind_group, &[]);
+            rp.draw(0..12, 0..1);
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+        frame.present();
+    }
+}
+
+/// Graphics backend, overridable via `BH_BACKEND=dx12|vulkan|gl` so we can A/B
+/// the presentation path at runtime. Default Vulkan (Phase 0's locked choice).
+/// DX12 is the flip-model path a browser uses on Windows — useful for latency
+/// comparisons.
+fn pick_backends() -> wgpu::Backends {
+    match std::env::var("BH_BACKEND").unwrap_or_default().to_lowercase().as_str() {
+        "dx12" | "d3d12" => wgpu::Backends::DX12,
+        "gl" | "opengl" => wgpu::Backends::GL,
+        "vulkan" | "vk" | "" => wgpu::Backends::VULKAN,
+        other => {
+            log::warn!("unknown BH_BACKEND={other:?}; using Vulkan");
+            wgpu::Backends::VULKAN
+        }
+    }
+}
+
+/// Present mode, overridable via `BH_PRESENT=mailbox|immediate|fifo`. Default
+/// prefers Mailbox (present newest frame, no vsync wait — lowest latency) and
+/// falls back to Fifo where it isn't supported.
+fn pick_present_mode(available: &[wgpu::PresentMode]) -> wgpu::PresentMode {
+    use wgpu::PresentMode::*;
+    let pref: &[wgpu::PresentMode] =
+        match std::env::var("BH_PRESENT").unwrap_or_default().to_lowercase().as_str() {
+            "fifo" | "vsync" => &[Fifo],
+            "immediate" | "novsync" => &[Immediate, Mailbox, Fifo],
+            "mailbox" => &[Mailbox, Immediate, Fifo],
+            _ => &[Mailbox, Fifo], // default: low-latency where possible
+        };
+    pref.iter()
+        .copied()
+        .find(|p| available.contains(p))
+        .unwrap_or(wgpu::PresentMode::Fifo)
+}
+
+fn create_depth(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("depth"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    tex.create_view(&wgpu::TextureViewDescriptor::default())
+}

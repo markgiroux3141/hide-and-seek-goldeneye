@@ -1,0 +1,13 @@
+[package]
+name = "game"
+version = "0.1.0"
+edition = "2021"
+
+# BUILD & HIDE — the game. Links and calls the engine (one-way dependency).
+# Phase 0: just boots the engine's window/clear loop.
+[[bin]]
+name = "build-and-hide"
+path = "src/main.rs"
+
+[dependencies]
+engine = { workspace = true }

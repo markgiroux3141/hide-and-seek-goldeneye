@@ -1,0 +1,19 @@
+[package]
+name = "engine"
+version = "0.1.0"
+edition = "2021"
+
+# Domain-agnostic runtime: renderer (wgpu), windowing (winit), CSG runtime,
+# resource/asset load (gltf), physics wrapper (rapier3d). Knows nothing about
+# hide-and-seek. One-way boundary: engine never references `game`.
+[dependencies]
+csg = { workspace = true }
+glam = { workspace = true }
+winit = { workspace = true }
+wgpu = { workspace = true }
+pollster = { workspace = true }
+bytemuck = { workspace = true }
+gltf = { workspace = true }
+rapier3d = { workspace = true }
+log = { workspace = true }
+env_logger = { workspace = true }
