@@ -12,6 +12,7 @@ use glam::Vec3;
 use std::collections::{BinaryHeap, HashMap};
 
 use crate::csg_runtime::{Brush, Region, WORLD_SCALE};
+use crate::geom;
 
 /// Agent vertical clearance in WT cells (~1.5 m tall = 6 × 0.25 m).
 pub const AGENT_HEIGHT_CELLS: i32 = 6;
@@ -405,15 +406,6 @@ impl NavWorld {
     }
 }
 
-/// Whether a WT point is inside an extra-solid box `[x, y, z, w, h, d]`
-/// (half-open, matching `Brush::contains`).
-#[inline]
-fn in_box(b: &[f32; 6], x: f32, y: f32, z: f32) -> bool {
-    x >= b[0] && x < b[0] + b[3]
-        && y >= b[1] && y < b[1] + b[4]
-        && z >= b[2] && z < b[2] + b[5]
-}
-
 /// Bake a [`NavWorld`] from the frozen regions. Bounds = union of region shells
 /// and every extra solid; each cell is solid if any region's CSG membership says
 /// so at its center **or** it falls inside an extra-solid box. The extra solids
@@ -467,7 +459,7 @@ pub fn bake(regions: &mut [Region], structure_solids: &[[f32; 6]]) -> Option<Nav
             for ix in 0..nx {
                 let wx = x0 as f32 + ix as f32 + 0.5;
                 if regions.iter().any(|r| r.solid_at(wx, wy, wz))
-                    || extras.iter().any(|b| in_box(b, wx, wy, wz))
+                    || extras.iter().any(|b| geom::point_in_box(b, wx, wy, wz))
                 {
                     solid[((iy * nz + iz) * nx + ix) as usize] = 1;
                 }

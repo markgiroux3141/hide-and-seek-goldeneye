@@ -44,6 +44,48 @@ impl CpuMesh {
     }
 }
 
+/// One interleaved vertex for the textured region/structure pipeline:
+/// position + normal + tile-unit UV. Matches `shader_textured.wgsl` and the
+/// checkerboard `shader.wgsl` (which ignores the UV).
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TexVertex {
+    pub pos: [f32; 3],
+    pub normal: [f32; 3],
+    pub uv: [f32; 2],
+}
+
+impl TexVertex {
+    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<TexVertex>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+    };
+}
+
+/// A contiguous run of indices sharing one (scheme, zone) material. Drawn as one
+/// indexed range binding `materials[scheme][zone]`. Scheme is per-triangle (via
+/// the owning brush) so one region can mix schemes — e.g. a room and the room
+/// beyond its door.
+#[derive(Clone, Copy, Debug)]
+pub struct ZoneGroup {
+    pub scheme: u16,
+    pub zone: u8,
+    /// Offset into the index buffer (in indices, not triangles).
+    pub start: u32,
+    pub count: u32,
+}
+
+/// A classified, UV'd region/structure mesh: un-indexed vertices (3 per triangle)
+/// plus an index buffer sorted so each (scheme, zone) forms one contiguous
+/// [`ZoneGroup`]. The output of [`crate::uv_zones`].
+#[derive(Clone, Default)]
+pub struct TexturedMesh {
+    pub vertices: Vec<TexVertex>,
+    pub indices: Vec<u32>,
+    pub groups: Vec<ZoneGroup>,
+}
+
 /// One interleaved position + RGB color vertex — for the unlit gizmo overlay
 /// (each handle a different color in one mesh). Matches `gizmo.wgsl`.
 #[repr(C)]

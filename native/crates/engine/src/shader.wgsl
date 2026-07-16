@@ -10,6 +10,8 @@ struct Camera {
 struct VsIn {
     @location(0) pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    // UV is present in the shared TexVertex layout but unused in grid view.
+    @location(2) uv: vec2<f32>,
 };
 
 struct VsOut {
@@ -37,7 +39,9 @@ const CHECK_CELL: f32 = 0.25;
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let l = normalize(vec3<f32>(0.4, 1.0, 0.6));
-    let ndl = max(dot(normalize(in.normal), l), 0.0);
+    // Two-sided: the region mesh is now drawn with culling off and some geometry
+    // (stairs, structures) is single-winding — abs keeps both faces lit.
+    let ndl = abs(dot(normalize(in.normal), l));
 
     // 3D checkerboard in world space: on any axis-aligned face the constant axis
     // drops out, leaving a 2D checker. A tiny bias keeps faces sitting exactly on

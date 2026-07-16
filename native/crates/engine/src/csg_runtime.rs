@@ -17,8 +17,12 @@
 //! behavior diffs 1:1 against the reference build.
 
 use csg::{csg_subtract, csg_union, polygons_to_mesh, Polygon};
+use glam::Vec3;
 
-use crate::mesh::CpuMesh;
+use crate::geom;
+use crate::mesh::{CpuMesh, TexturedMesh};
+use crate::textures::DEFAULT_SCHEME;
+use crate::uv_zones::{self, BrushInfo, ZonedBuilder};
 
 /// Meters per world tile. Mirrors `src/core/constants.js` `WORLD_SCALE`.
 pub const WORLD_SCALE: f32 = 0.25;
@@ -40,6 +44,66 @@ pub enum Axis {
     X,
     Y,
     Z,
+}
+
+impl Axis {
+    /// Array index of this axis into an `[x, y, z]` triple (X→0, Y→1, Z→2).
+    #[inline]
+    pub fn index(self) -> usize {
+        match self {
+            Axis::X => 0,
+            Axis::Y => 1,
+            Axis::Z => 2,
+        }
+    }
+
+    /// The positive unit normal along this axis.
+    #[inline]
+    pub fn normal(self) -> [f32; 3] {
+        match self {
+            Axis::X => [1.0, 0.0, 0.0],
+            Axis::Y => [0.0, 1.0, 0.0],
+            Axis::Z => [0.0, 0.0, 1.0],
+        }
+    }
+
+    /// The component of a vector along this axis.
+    #[inline]
+    pub fn component(self, v: Vec3) -> f32 {
+        match self {
+            Axis::X => v.x,
+            Axis::Y => v.y,
+            Axis::Z => v.z,
+        }
+    }
+
+    /// The two axes orthogonal to this one as (U, V), matching the JS oracle's
+    /// `getFaceUVInfo` convention. Crucially, for both vertical walls (X- and
+    /// Z-facing) **V is the world-up axis Y**, so a door/opening keeps its width
+    /// horizontal and height vertical regardless of which wall it's cut into.
+    /// Y-facing faces (floor/ceiling) use (X, Z).
+    #[inline]
+    pub fn orthogonals(self) -> (Axis, Axis) {
+        match self {
+            Axis::X => (Axis::Z, Axis::Y),
+            Axis::Y => (Axis::X, Axis::Z),
+            Axis::Z => (Axis::X, Axis::Y),
+        }
+    }
+
+    /// The dominant axis of a surface normal — the axis whose (absolute)
+    /// component is largest, i.e. which face plane the normal points out of.
+    #[inline]
+    pub fn dominant(normal: Vec3) -> Axis {
+        let n = normal.abs();
+        if n.x >= n.y && n.x >= n.z {
+            Axis::X
+        } else if n.y >= n.z {
+            Axis::Y
+        } else {
+            Axis::Z
+        }
+    }
 }
 
 /// Which end of an axis a face sits on: `Min` (the `x`/`y`/`z` corner) or `Max`
@@ -71,11 +135,30 @@ pub struct Brush {
     pub h: f32,
     pub d: f32,
     pub door: bool,
+    /// Marks a door/hole **opening frame** carve (JS `isDoorframe`/`isHoleFrame`):
+    /// its interior reveals texture as the tunnel zones (5/6) instead of room
+    /// walls. Set on both door and hole frames in `World::cut_opening`; `door`
+    /// distinguishes the two (doorframe floor → 6, hole-frame floor → 5).
+    pub frame: bool,
+    /// WT-space floor anchor for this brush's wall texture (JS `BrushDef.floorY`,
+    /// recovered per-triangle via `uv_zones` face-map). Defaults to `y`; a room's
+    /// walls anchor to its floor, a stair pit's walls to the pit floor, so a
+    /// down-stair no longer shifts the whole level's wall texture.
+    pub floor_y: f32,
+    /// Texture scheme index (JS `BrushDef.schemeKey`), set per room by the
+    /// number-key flood-fill retexture. Defaults to [`crate::textures::DEFAULT_SCHEME`].
+    pub scheme: usize,
 }
 
 impl Brush {
     pub fn new(id: u32, op: Op, x: f32, y: f32, z: f32, w: f32, h: f32, d: f32) -> Self {
-        Brush { id, op, x, y, z, w, h, d, door: false }
+        Brush {
+            id, op, x, y, z, w, h, d,
+            door: false,
+            frame: false,
+            floor_y: y,
+            scheme: crate::textures::DEFAULT_SCHEME,
+        }
     }
 
     /// Size along an axis (`w`/`h`/`d`).
@@ -102,12 +185,7 @@ impl Brush {
     /// — coarse nav is fine). Mirrors JS `pointInBrush`.
     #[inline]
     pub fn contains(&self, x: f32, y: f32, z: f32) -> bool {
-        x >= self.x
-            && x < self.x + self.w
-            && y >= self.y
-            && y < self.y + self.h
-            && z >= self.z
-            && z < self.z + self.d
+        geom::point_in_box(&[self.x, self.y, self.z, self.w, self.h, self.d], x, y, z)
     }
 
     /// The WT coordinate of the plane of the given face.
@@ -130,6 +208,10 @@ impl Brush {
                 self.set_dim(axis, self.dim(axis) + step);
             }
         }
+        // A moved floor re-anchors the wall texture (JS `applyFullFacePush`).
+        if axis == Axis::Y && side == Side::Min {
+            self.floor_y = self.y;
+        }
     }
 
     /// Shrink this brush's face inward by `step` WT (JS `applyFullFacePull`).
@@ -144,6 +226,9 @@ impl Brush {
                 self.set_min(axis, self.min(axis) + step);
                 self.set_dim(axis, self.dim(axis) - step);
             }
+        }
+        if axis == Axis::Y && side == Side::Min {
+            self.floor_y = self.y;
         }
         true
     }
@@ -212,6 +297,15 @@ pub struct StairDesc {
     /// Face bottom (vMin) and the stairwell ceiling H, in WT Y.
     pub floor: f32,
     pub ceil: f32,
+    /// Wall-texture floor anchor in WT (JS descriptor `floorY` = the pit/dest
+    /// floor). Used to anchor the stair side-wall UVs so they don't shift.
+    pub floor_y: f32,
+    /// Texture scheme index inherited from the wall the stair was cut into, and
+    /// updated when its room is retextured.
+    pub scheme: usize,
+    /// The two void-brush ids this stair carved (JS `voidBrushIds`), so a room
+    /// retexture flood-fill can find and re-scheme the matching tread mesh.
+    pub void_ids: [u32; 2],
 }
 
 impl StairDesc {
@@ -221,9 +315,9 @@ impl StairDesc {
     #[inline]
     fn tw(&self, n: f32, y: f32, u: f32) -> [f32; 3] {
         let mut p = [0.0f32; 3];
-        p[axis_index(self.axis)] = n;
+        p[self.axis.index()] = n;
         p[1] = y;
-        p[axis_index(self.u_axis)] = u;
+        p[self.u_axis.index()] = u;
         p
     }
 
@@ -241,7 +335,7 @@ impl StairDesc {
         let sc = self.step_count as i32;
 
         let mut quad = |a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3]| {
-            push_quad_double(pos, norm, idx, a, b, c, d, ws);
+            geom::push_quad_double(pos, norm, idx, a, b, c, d, ws);
         };
 
         for k in 0..sc {
@@ -351,6 +445,155 @@ impl StairDesc {
         CpuMesh::from_csg(&pos, &norm, &idx)
     }
 
+    /// Emit this stair's tread/riser/side/fill geometry into a [`ZonedBuilder`]
+    /// with **explicit texture zones + UVs**, matching JS `buildCsgStairGeometry`:
+    /// tread → 0 (floor), riser → 5 (stair_gradient), and **everything else
+    /// (side walls, far ceiling panel, ceiling-drop wall, up-fill) → 3 (upper
+    /// wall / brown)** — not the gradient. Per-quad UVs so the gradient riser maps
+    /// 0..1 vertically per step. Single-winding (rendered with culling off).
+    fn append_zoned(&self, b: &mut ZonedBuilder) {
+        let dir = if self.side == Side::Max { 1.0 } else { -1.0 };
+        let (u0, u1) = (self.u0, self.u1);
+        let floor = self.floor;
+        let h_ceil = self.ceil;
+        let sc = self.step_count as i32;
+        let step_width = u1 - u0;
+        let sch = self.scheme;
+        const TREAD: u8 = 0;
+        const RISER: u8 = 5;
+        const SIDE: u8 = 3;
+
+        for k in 0..sc {
+            let kf = k as f32;
+            let (n_lo, n_hi) = if dir > 0.0 {
+                (self.face_pos + kf, self.face_pos + kf + 1.0)
+            } else {
+                (self.face_pos - (kf + 1.0), self.face_pos - kf)
+            };
+            let (step_floor, step_top) = match self.direction {
+                StairDir::Down => (floor - (kf + 1.0), floor - kf),
+                StairDir::Up => (floor + kf, floor + kf + 1.0),
+            };
+            let riser_h = step_top - step_floor;
+
+            // Tread (top surface): U across the 1-WT depth, V across the width.
+            b.emit_quad_uv(
+                [
+                    self.tw(n_lo, step_top, u0),
+                    self.tw(n_hi, step_top, u0),
+                    self.tw(n_hi, step_top, u1),
+                    self.tw(n_lo, step_top, u1),
+                ],
+                [[0.0, 0.0], [1.0, 0.0], [1.0, step_width], [0.0, step_width]],
+                sch,
+                TREAD,
+            );
+
+            // Riser (front face): the gradient maps 0..1 top-to-bottom per step.
+            let riser_pos = match self.direction {
+                StairDir::Down => if dir > 0.0 { n_hi } else { n_lo },
+                StairDir::Up => if dir > 0.0 { n_lo } else { n_hi },
+            };
+            let riser_u = step_width / riser_h;
+            b.emit_quad_uv(
+                [
+                    self.tw(riser_pos, step_floor, u0),
+                    self.tw(riser_pos, step_floor, u1),
+                    self.tw(riser_pos, step_top, u1),
+                    self.tw(riser_pos, step_top, u0),
+                ],
+                [[0.0, 0.0], [riser_u, 0.0], [riser_u, 1.0], [0.0, 1.0]],
+                sch,
+                RISER,
+            );
+
+            // Left/right side walls → upper-wall zone.
+            b.emit_quad_uv(
+                [
+                    self.tw(n_lo, step_floor, u0),
+                    self.tw(n_hi, step_floor, u0),
+                    self.tw(n_hi, step_top, u0),
+                    self.tw(n_lo, step_top, u0),
+                ],
+                [[0.0, 0.0], [1.0, 0.0], [1.0, riser_h], [0.0, riser_h]],
+                sch,
+                SIDE,
+            );
+            b.emit_quad_uv(
+                [
+                    self.tw(n_hi, step_floor, u1),
+                    self.tw(n_lo, step_floor, u1),
+                    self.tw(n_lo, step_top, u1),
+                    self.tw(n_hi, step_top, u1),
+                ],
+                [[0.0, 0.0], [1.0, 0.0], [1.0, riser_h], [0.0, riser_h]],
+                sch,
+                SIDE,
+            );
+        }
+
+        match self.direction {
+            StairDir::Down if sc > 0 => {
+                let scf = sc as f32;
+                let (last_lo, last_hi) = if dir > 0.0 {
+                    (self.face_pos + (scf - 1.0), self.face_pos + scf)
+                } else {
+                    (self.face_pos - scf, self.face_pos - (scf - 1.0))
+                };
+                let ceil_drop = h_ceil - scf;
+                // Far-column ceiling panel → upper-wall zone (JS sideZone).
+                b.emit_quad_uv(
+                    [
+                        self.tw(last_lo, ceil_drop, u0),
+                        self.tw(last_hi, ceil_drop, u0),
+                        self.tw(last_hi, ceil_drop, u1),
+                        self.tw(last_lo, ceil_drop, u1),
+                    ],
+                    [[0.0, 0.0], [1.0, 0.0], [1.0, step_width], [0.0, step_width]],
+                    sch,
+                    SIDE,
+                );
+                // Vertical ceiling-drop wall (the dipping "roof") → upper-wall.
+                let ceil_wall = if dir > 0.0 { last_lo } else { last_hi };
+                let drop_h = h_ceil - ceil_drop;
+                b.emit_quad_uv(
+                    [
+                        self.tw(ceil_wall, ceil_drop, u0),
+                        self.tw(ceil_wall, ceil_drop, u1),
+                        self.tw(ceil_wall, h_ceil, u1),
+                        self.tw(ceil_wall, h_ceil, u0),
+                    ],
+                    [[0.0, 0.0], [step_width, 0.0], [step_width, drop_h], [0.0, drop_h]],
+                    sch,
+                    SIDE,
+                );
+            }
+            StairDir::Up if sc > 0 => {
+                for k in 0..(sc - 1) {
+                    let kf = k as f32;
+                    let (fill_lo, fill_hi) = if dir > 0.0 {
+                        (self.face_pos + kf, self.face_pos + kf + 1.0)
+                    } else {
+                        (self.face_pos - (kf + 1.0), self.face_pos - kf)
+                    };
+                    let fill_y = floor + (kf + 1.0);
+                    b.emit_quad_uv(
+                        [
+                            self.tw(fill_lo, fill_y, u0),
+                            self.tw(fill_hi, fill_y, u0),
+                            self.tw(fill_hi, fill_y, u1),
+                            self.tw(fill_lo, fill_y, u1),
+                        ],
+                        [[0.0, 0.0], [1.0, 0.0], [1.0, step_width], [0.0, step_width]],
+                        sch,
+                        SIDE,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Reconstruct the solid step blocks (WT AABBs `[x, y, z, w, h, d]`) — one per
     /// step, from the void floor up to that step's tread. Direct port of
     /// `navWorld.stairSolidBoxes`; fed to the nav voxelizer so grid nav sees the
@@ -385,67 +628,6 @@ impl StairDesc {
             }
         }
         boxes
-    }
-}
-
-/// Append one double-sided quad (corners in WT, scaled to meters) as four
-/// triangles: front + back, each with its own winding normal. Shared by the
-/// stair geometry so treads render correctly regardless of view side.
-fn push_quad_double(
-    pos: &mut Vec<f32>,
-    norm: &mut Vec<f32>,
-    idx: &mut Vec<u32>,
-    p0: [f32; 3],
-    p1: [f32; 3],
-    p2: [f32; 3],
-    p3: [f32; 3],
-    ws: f32,
-) {
-    let s = |p: [f32; 3]| [p[0] * ws, p[1] * ws, p[2] * ws];
-    let (q0, q1, q2, q3) = (s(p0), s(p1), s(p2), s(p3));
-    let n = quad_normal(q0, q1, q2);
-    let nb = [-n[0], -n[1], -n[2]];
-
-    // Front side (CCW p0→p1→p2→p3), normal +n.
-    let base = (pos.len() / 3) as u32;
-    for (p, nn) in [(q0, n), (q1, n), (q2, n), (q3, n)] {
-        pos.extend_from_slice(&p);
-        norm.extend_from_slice(&nn);
-    }
-    idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-
-    // Back side (reversed winding), normal -n.
-    let base = (pos.len() / 3) as u32;
-    for (p, nn) in [(q0, nb), (q1, nb), (q2, nb), (q3, nb)] {
-        pos.extend_from_slice(&p);
-        norm.extend_from_slice(&nn);
-    }
-    idx.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
-}
-
-/// Unit normal of the triangle `a→b→c` (right-hand rule); zero if degenerate.
-fn quad_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
-    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    let n = [
-        u[1] * v[2] - u[2] * v[1],
-        u[2] * v[0] - u[0] * v[2],
-        u[0] * v[1] - u[1] * v[0],
-    ];
-    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-    if len > 1e-8 {
-        [n[0] / len, n[1] / len, n[2] / len]
-    } else {
-        [0.0, 0.0, 0.0]
-    }
-}
-
-#[inline]
-fn axis_index(axis: Axis) -> usize {
-    match axis {
-        Axis::X => 0,
-        Axis::Y => 1,
-        Axis::Z => 2,
     }
 }
 
@@ -679,6 +861,37 @@ impl Region {
             s.append_geometry(&mut pos, &mut norm, &mut idx, WORLD_SCALE);
         }
         CpuMesh::from_csg(&pos, &norm, &idx)
+    }
+
+    /// Re-run CSG and classify the result into a textured, per-zone-grouped mesh
+    /// for rendering (port of `assignUVsAndZones` + the stair zoned emission). The
+    /// collider still comes from [`evaluate`](Self::evaluate); this is render-only.
+    pub fn evaluate_textured(&mut self) -> TexturedMesh {
+        self.update_shell();
+        let polys = evaluate(&self.shell, &self.brushes, WORLD_SCALE);
+        let (pos, _norm, idx) = polygons_to_mesh(&polys);
+
+        // Per-brush attributes drive per-triangle scheme + wall-UV floor anchor
+        // (the face-map recovers the owner inside `classify_soup`).
+        let brush_infos: Vec<BrushInfo> = self
+            .brushes
+            .iter()
+            .map(|b| BrushInfo {
+                min: [b.x, b.y, b.z],
+                max: [b.x + b.w, b.y + b.h, b.z + b.d],
+                floor_y: b.floor_y,
+                scheme: b.scheme,
+                frame: b.frame,
+                door: b.door,
+            })
+            .collect();
+
+        let mut b = ZonedBuilder::new();
+        uv_zones::classify_soup(&mut b, &pos, &idx, &brush_infos, DEFAULT_SCHEME);
+        for s in &self.stairs {
+            s.append_zoned(&mut b);
+        }
+        b.finish()
     }
 
     /// Recompute the shell to fit the current brushes (call before querying

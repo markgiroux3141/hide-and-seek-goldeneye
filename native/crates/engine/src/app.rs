@@ -50,10 +50,11 @@ struct App {
 }
 
 impl App {
-    /// Upload a region's mesh to the renderer (after an edit or at startup).
-    fn upload(&mut self, id: u32, mesh: &crate::mesh::CpuMesh) {
+    /// Upload a region's textured mesh + scheme to the renderer (after an edit or
+    /// at startup).
+    fn upload(&mut self, rm: &crate::world::RegionMesh) {
         if let Some(r) = self.renderer.as_mut() {
-            r.set_region_mesh(id, mesh);
+            r.set_region_textured(rm.id, &rm.mesh);
         }
     }
 
@@ -92,6 +93,22 @@ impl App {
     }
 }
 
+/// Map a number-row / numpad digit key to its '1'..'9' char (for scheme keys).
+fn digit_char(code: KeyCode) -> Option<char> {
+    Some(match code {
+        KeyCode::Digit1 | KeyCode::Numpad1 => '1',
+        KeyCode::Digit2 | KeyCode::Numpad2 => '2',
+        KeyCode::Digit3 | KeyCode::Numpad3 => '3',
+        KeyCode::Digit4 | KeyCode::Numpad4 => '4',
+        KeyCode::Digit5 | KeyCode::Numpad5 => '5',
+        KeyCode::Digit6 | KeyCode::Numpad6 => '6',
+        KeyCode::Digit7 | KeyCode::Numpad7 => '7',
+        KeyCode::Digit8 | KeyCode::Numpad8 => '8',
+        KeyCode::Digit9 | KeyCode::Numpad9 => '9',
+        _ => return None,
+    })
+}
+
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -106,10 +123,10 @@ impl ApplicationHandler for App {
         // Build the world, upload its initial region meshes.
         let mut world = World::new();
         for rm in world.initial_meshes() {
-            renderer.set_region_mesh(rm.id, &rm.mesh);
+            renderer.set_region_textured(rm.id, &rm.mesh);
         }
         log::info!(
-            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  G=HUNT"
+            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  G=HUNT"
         );
 
         window.request_redraw();
@@ -166,7 +183,7 @@ impl ApplicationHandler for App {
                         None
                     };
                     if let Some(rm) = rm {
-                        self.upload(rm.id, &rm.mesh);
+                        self.upload(&rm);
                     }
                     self.refresh_highlight();
                 }
@@ -245,7 +262,7 @@ impl ApplicationHandler for App {
                     let (mdx, mdy) = self.input.take_mouse_delta();
                     let rm = self.world.as_mut().and_then(|w| w.gizmo_drag_delta(mdx, mdy));
                     if let Some(rm) = rm {
-                        self.upload(rm.id, &rm.mesh);
+                        self.upload(&rm);
                     }
                 } else if let Some(world) = self.world.as_mut() {
                     world.look(&mut self.input);
@@ -370,15 +387,35 @@ impl App {
                 }
             }
             if let Some(rm) = changed {
-                self.upload(rm.id, &rm.mesh);
+                self.upload(&rm);
             }
             if !handled {
                 self.set_pointer_lock(false);
             }
             return;
         }
+        // Backslash toggles the checkerboard "grid" view vs the textured view
+        // (JS `toggle_view`). Works whether or not the cursor is grabbed.
+        if code == KeyCode::Backslash {
+            if let Some(r) = self.renderer.as_mut() {
+                let grid = !r.is_grid_mode();
+                r.set_grid_mode(grid);
+                log::info!("view: {}", if grid { "grid" } else { "textured" });
+            }
+            return;
+        }
         // Authoring only while grabbed (crosshair is meaningful).
         if !self.input.pointer_locked {
+            return;
+        }
+        // Number keys 1-9 retexture the room under the crosshair (flood-fill,
+        // bounded by door/hole frames).
+        if let Some(key) = digit_char(code) {
+            if let Some(scheme) = crate::textures::scheme_for_key(key) {
+                if let Some(rm) = self.world.as_mut().and_then(|w| w.set_scheme_at_crosshair(scheme)) {
+                    self.upload(&rm);
+                }
+            }
             return;
         }
         // G toggles BUILD ↔ HUNT (freeze + drop in as the player, or back).
@@ -451,7 +488,7 @@ impl App {
                 _ => w.delete_selected(),
             });
             if let Some(rm) = rm {
-                self.upload(rm.id, &rm.mesh);
+                self.upload(&rm);
                 self.refresh_highlight();
             }
             return;
@@ -477,7 +514,7 @@ impl App {
         }
         if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
             if let Some(rm) = self.world.as_mut().and_then(|w| w.confirm_stairs()) {
-                self.upload(rm.id, &rm.mesh);
+                self.upload(&rm);
                 self.refresh_highlight();
             }
             return;
@@ -497,7 +534,7 @@ impl App {
             _ => None,
         };
         if let Some(rm) = result {
-            self.upload(rm.id, &rm.mesh);
+            self.upload(&rm);
             // The selected face moved with the edit — redraw its highlight.
             self.refresh_highlight();
         }

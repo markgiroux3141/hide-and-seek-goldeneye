@@ -10,7 +10,8 @@ use glam::Mat4;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
-use crate::mesh::{ColorVertex, ColoredMesh, CpuMesh, GpuMesh, Vertex};
+use crate::mesh::{ColorVertex, ColoredMesh, CpuMesh, GpuMesh, TexVertex, TexturedMesh, Vertex, ZoneGroup};
+use crate::textures;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
@@ -20,19 +21,51 @@ struct CameraUniform {
     view_proj: [[f32; 4]; 4],
 }
 
+/// Per-material uniform: `params.x` = the tile-unit → texture-space repeat scale
+/// (JS `texture.repeat`). A vec4 (16 bytes) to match the WGSL std140 layout.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct MaterialUniform {
+    params: [f32; 4],
+}
+
+/// A region's textured GPU mesh: vertex + index buffers and the per-(scheme,zone)
+/// draw groups. Scheme is carried per group (via the owning brush), so one region
+/// can mix schemes across rooms.
+struct TexturedRegion {
+    vertex_buf: wgpu::Buffer,
+    index_buf: wgpu::Buffer,
+    index_count: u32,
+    groups: Vec<ZoneGroup>,
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
 
+    /// Checkerboard "grid" view pipeline (TexVertex layout; ignores UV).
     pipeline: wgpu::RenderPipeline,
+    /// Textured view pipeline — samples the per-zone BMP × directional light.
+    textured_pipeline: wgpu::RenderPipeline,
     camera_buf: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
     depth_view: wgpu::TextureView,
 
-    /// One GPU mesh per CSG region, replaced in place on every edit.
-    regions: HashMap<u32, GpuMesh>,
+    /// One classified, per-zone-grouped GPU mesh per CSG region (+ the reserved
+    /// structures mesh), replaced in place on every edit.
+    regions: HashMap<u32, TexturedRegion>,
+
+    /// `materials[scheme][zone]` → the texture+sampler+repeat bind group for that
+    /// zone, or `None` when the scheme doesn't define the zone. Built once at init.
+    materials: Vec<[Option<wgpu::BindGroup>; 8]>,
+    /// Keeps the GPU textures + per-material uniform buffers alive for the bind
+    /// groups above (never read directly).
+    _material_keepalive: Vec<wgpu::Texture>,
+    _material_buffers: Vec<wgpu::Buffer>,
+    /// `true` = checkerboard grid view; `false` = textured. Toggled by Backslash.
+    grid_mode: bool,
 
     // Selection highlight (world-space quad over the picked face).
     highlight_pipeline: wgpu::RenderPipeline,
@@ -173,7 +206,7 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_main"),
-                buffers: &[Vertex::LAYOUT],
+                buffers: &[TexVertex::LAYOUT],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -188,7 +221,9 @@ impl Renderer {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
+                // Culling off: some region geometry (stairs, structures) is
+                // single-winding and must show from both sides.
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -202,6 +237,98 @@ impl Renderer {
             multiview: None,
             cache: None,
         });
+
+        // ── Textured pipeline + per-(scheme,zone) materials. A material bind
+        // group at group(1) supplies the zone's texture, a shared repeat-wrap
+        // sampler, and its repeat scale. Same camera layout at group(0).
+        let material_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("material-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("texture-sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let textured_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("textured-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shader_textured.wgsl").into()),
+        });
+        let textured_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("textured-layout"),
+            bind_group_layouts: &[&camera_layout, &material_layout],
+            push_constant_ranges: &[],
+        });
+        let textured_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("textured-pipeline"),
+            layout: Some(&textured_layout),
+            vertex: wgpu::VertexState {
+                module: &textured_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[TexVertex::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &textured_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let (materials, material_keepalive, material_buffers) =
+            build_materials(&device, &queue, &material_layout, &sampler);
 
         // ── Highlight pipeline: translucent quad over the selected face.
         // Shares the camera bind group; blends; depth-tests but doesn't write,
@@ -498,10 +625,15 @@ impl Renderer {
             queue,
             config,
             pipeline,
+            textured_pipeline,
             camera_buf,
             camera_bind_group,
             depth_view,
             regions: HashMap::new(),
+            materials,
+            _material_keepalive: material_keepalive,
+            _material_buffers: material_buffers,
+            grid_mode: false,
             highlight_pipeline,
             highlight_mesh: None,
             stair_ghost_pipeline,
@@ -561,15 +693,42 @@ impl Renderer {
         };
     }
 
-    /// Insert or replace a region's mesh. Called on every brush edit; an empty
-    /// mesh removes the region.
-    pub fn set_region_mesh(&mut self, region_id: u32, mesh: &CpuMesh) {
+    /// Insert or replace a region's textured mesh. Called on every brush edit; an
+    /// empty mesh removes the region.
+    pub fn set_region_textured(&mut self, region_id: u32, mesh: &TexturedMesh) {
         if mesh.indices.is_empty() {
             self.regions.remove(&region_id);
             return;
         }
-        self.regions
-            .insert(region_id, GpuMesh::upload(&self.device, mesh));
+        let vertex_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("region-tex-vertices"),
+            contents: bytemuck::cast_slice(&mesh.vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("region-tex-indices"),
+            contents: bytemuck::cast_slice(&mesh.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        self.regions.insert(
+            region_id,
+            TexturedRegion {
+                vertex_buf,
+                index_buf,
+                index_count: mesh.indices.len() as u32,
+                groups: mesh.groups.clone(),
+            },
+        );
+    }
+
+    /// Toggle checkerboard "grid" view (`true`) vs textured view (`false`).
+    pub fn set_grid_mode(&mut self, grid: bool) {
+        self.grid_mode = grid;
+    }
+
+    /// Whether the checkerboard grid view is active.
+    pub fn is_grid_mode(&self) -> bool {
+        self.grid_mode
     }
 
     /// Current framebuffer aspect ratio (for the camera's projection).
@@ -647,13 +806,33 @@ impl Renderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            // 1) Opaque region meshes.
-            rp.set_pipeline(&self.pipeline);
+            // 1) Opaque region meshes — grid (checkerboard) or textured view.
             rp.set_bind_group(0, &self.camera_bind_group, &[]);
-            for m in self.regions.values() {
-                rp.set_vertex_buffer(0, m.vertex_buf.slice(..));
-                rp.set_index_buffer(m.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-                rp.draw_indexed(0..m.index_count, 0, 0..1);
+            if self.grid_mode {
+                rp.set_pipeline(&self.pipeline);
+                for m in self.regions.values() {
+                    rp.set_vertex_buffer(0, m.vertex_buf.slice(..));
+                    rp.set_index_buffer(m.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                    rp.draw_indexed(0..m.index_count, 0, 0..1);
+                }
+            } else {
+                rp.set_pipeline(&self.textured_pipeline);
+                for m in self.regions.values() {
+                    rp.set_vertex_buffer(0, m.vertex_buf.slice(..));
+                    rp.set_index_buffer(m.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                    for g in &m.groups {
+                        // Bind the (scheme, zone) material for this group; skip the
+                        // (rare) undefined zone rather than draw untextured.
+                        if let Some(bg) = self
+                            .materials
+                            .get(g.scheme as usize)
+                            .and_then(|z| z[g.zone as usize].as_ref())
+                        {
+                            rp.set_bind_group(1, bg, &[]);
+                            rp.draw_indexed(g.start..(g.start + g.count), 0, 0..1);
+                        }
+                    }
+                }
             }
 
             // 2) Dynamic entities (opaque, before the translucent highlight).
@@ -743,6 +922,101 @@ fn pick_present_mode(available: &[wgpu::PresentMode]) -> wgpu::PresentMode {
         .copied()
         .find(|p| available.contains(p))
         .unwrap_or(wgpu::PresentMode::Fifo)
+}
+
+/// Decode every scheme's textures (deduped by name) into GPU textures and build
+/// the `materials[scheme][zone]` bind-group table. Returns the table plus the
+/// textures and uniform buffers that must be kept alive for the bind groups.
+fn build_materials(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+) -> (Vec<[Option<wgpu::BindGroup>; 8]>, Vec<wgpu::Texture>, Vec<wgpu::Buffer>) {
+    let mut keepalive: Vec<wgpu::Texture> = Vec::new();
+    let mut buffers: Vec<wgpu::Buffer> = Vec::new();
+    let mut view_by_name: HashMap<&'static str, wgpu::TextureView> = HashMap::new();
+
+    let mut materials: Vec<[Option<wgpu::BindGroup>; 8]> = Vec::new();
+    for scheme in textures::SCHEMES {
+        let mut zones: [Option<wgpu::BindGroup>; 8] = std::array::from_fn(|_| None);
+        for (zi, zone) in scheme.zones.iter().enumerate() {
+            let Some(zdef) = zone else { continue };
+            let Some(name) = zdef.texture else { continue };
+
+            if !view_by_name.contains_key(name) {
+                let Some(dec) = textures::decode(name) else {
+                    log::warn!("texture {name} failed to decode; zone left untextured");
+                    continue;
+                };
+                let size = wgpu::Extent3d {
+                    width: dec.width,
+                    height: dec.height,
+                    depth_or_array_layers: 1,
+                };
+                let tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(name),
+                    size,
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    // sRGB: the BMPs are authored in gamma space and the surface
+                    // is sRGB, so decode-on-sample + encode-on-write is correct.
+                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                    view_formats: &[],
+                });
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &tex,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &dec.rgba,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4 * dec.width),
+                        rows_per_image: Some(dec.height),
+                    },
+                    size,
+                );
+                view_by_name.insert(name, tex.create_view(&wgpu::TextureViewDescriptor::default()));
+                keepalive.push(tex);
+            }
+
+            let Some(view) = view_by_name.get(name) else { continue };
+            let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("material-uniform"),
+                contents: bytemuck::cast_slice(&[MaterialUniform {
+                    params: [zdef.repeat, 0.0, 0.0, 0.0],
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("material-bg"),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(sampler),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: ubuf.as_entire_binding(),
+                    },
+                ],
+            });
+            buffers.push(ubuf);
+            zones[zi] = Some(bg);
+        }
+        materials.push(zones);
+    }
+    (materials, keepalive, buffers)
 }
 
 fn create_depth(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {

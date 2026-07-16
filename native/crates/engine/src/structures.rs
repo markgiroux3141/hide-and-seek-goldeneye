@@ -19,7 +19,8 @@
 //! Coordinate spaces match the rest of the engine: fields are **world tiles
 //! (WT)**; geometry is emitted in **meters** (WT × [`WORLD_SCALE`]).
 
-use crate::csg_runtime::{Brush, Op, WORLD_SCALE};
+use crate::csg_runtime::{Brush, Op};
+use crate::uv_zones::ZonedBuilder;
 
 /// Railing height above the walking surface, in WT (JS `RAILING_HEIGHT`).
 const RAILING_HEIGHT: f32 = 3.0;
@@ -463,53 +464,102 @@ const PILLAR_WIDTH: f32 = 0.5;
 /// treads, matching the original (JS `RISER_FRACTION`).
 const RISER_FRACTION: f32 = 0.55;
 
-/// Append a platform's simple-style shell (top + skirt + grounded legs) in
-/// meters. Port of `buildSimplePlatformGeometry`.
-pub fn append_platform_mesh(
-    p: &Platform,
-    brushes: &[Brush],
-    pos: &mut Vec<f32>,
-    norm: &mut Vec<f32>,
-    idx: &mut Vec<u32>,
-) {
+/// Simple-style texture zones (JS `simplePlatformGeometry`): top/tread = the
+/// floor zone (0), every vertical surface (skirt, risers, stringers, pillars) =
+/// the wall zone (3). Both are `blue_stairs`/`floor_doorframe` in `simple_blue`.
+const TOP_ZONE: u8 = 0;
+const SIDE_ZONE: u8 = 3;
+
+/// three.js loads textures with `flipY = true`; our BMPs upload un-flipped, so
+/// authored UVs (ported 1:1 from the JS builders) need V mirrored to reproduce
+/// the original's look — most visibly the railing's solid top bar.
+#[inline]
+fn fv(uv: [[f32; 2]; 4]) -> [[f32; 2]; 4] {
+    uv.map(|c| [c[0], 1.0 - c[1]])
+}
+
+/// Append a platform's simple-style shell (top + skirt + grounded legs) into the
+/// zoned builder, with the JS per-face zones + UVs. Port of
+/// `buildSimplePlatformGeometry`.
+pub fn append_platform_mesh(p: &Platform, brushes: &[Brush], b: &mut ZonedBuilder, scheme: usize) {
     let (x_min, x_max) = (p.x, p.max_x());
     let (z_min, z_max) = (p.z, p.max_z());
     let y_top = p.y;
     let y_bot = p.y - p.thickness;
-    let mut q = |a, b, c, d| push_quad_double(pos, norm, idx, a, b, c, d);
+    let (w, d) = (p.size_x, p.size_z);
 
-    // Top plane (+Y).
-    q(
-        [x_min, y_top, z_min],
-        [x_min, y_top, z_max],
-        [x_max, y_top, z_max],
-        [x_max, y_top, z_min],
+    // Top plane (+Y) — floor texture tiled in both directions by the footprint.
+    b.emit_quad_uv(
+        [
+            [x_min, y_top, z_min],
+            [x_min, y_top, z_max],
+            [x_max, y_top, z_max],
+            [x_max, y_top, z_min],
+        ],
+        fv([[0.0, 0.0], [0.0, d], [w, d], [w, 0.0]]),
+        scheme,
+        TOP_ZONE,
     );
-    // Skirt — 4 vertical quads yTop→yBot.
-    q(
-        [x_min, y_bot, z_min],
-        [x_min, y_top, z_min],
-        [x_max, y_top, z_min],
-        [x_max, y_bot, z_min],
-    );
-    q(
-        [x_max, y_bot, z_max],
-        [x_max, y_top, z_max],
-        [x_min, y_top, z_max],
-        [x_min, y_bot, z_max],
-    );
-    q(
-        [x_min, y_bot, z_max],
-        [x_min, y_top, z_max],
-        [x_min, y_top, z_min],
-        [x_min, y_bot, z_min],
-    );
-    q(
-        [x_max, y_bot, z_min],
-        [x_max, y_top, z_min],
-        [x_max, y_top, z_max],
-        [x_max, y_bot, z_max],
-    );
+    // Skirt — 4 vertical quads yTop→yBot, one tile tall, tiled along the edge.
+    // A skirt whose edge is flush against a wall is culled (it would z-fight the
+    // wall face); `is_edge_against_wall` probes at mid-skirt height.
+    let sk_y = y_top - 0.5;
+    let sk_zmin = is_edge_against_wall(p, Edge::ZMin, brushes, 0.5, sk_y);
+    let sk_zmax = is_edge_against_wall(p, Edge::ZMax, brushes, 0.5, sk_y);
+    let sk_xmin = is_edge_against_wall(p, Edge::XMin, brushes, 0.5, sk_y);
+    let sk_xmax = is_edge_against_wall(p, Edge::XMax, brushes, 0.5, sk_y);
+    if !sk_zmin {
+        b.emit_quad_uv(
+            [
+                [x_min, y_bot, z_min],
+                [x_min, y_top, z_min],
+                [x_max, y_top, z_min],
+                [x_max, y_bot, z_min],
+            ],
+            fv([[0.0, 0.0], [0.0, 1.0], [w, 1.0], [w, 0.0]]),
+            scheme,
+            SIDE_ZONE,
+        );
+    }
+    if !sk_zmax {
+        b.emit_quad_uv(
+            [
+                [x_max, y_bot, z_max],
+                [x_max, y_top, z_max],
+                [x_min, y_top, z_max],
+                [x_min, y_bot, z_max],
+            ],
+            fv([[0.0, 0.0], [0.0, 1.0], [w, 1.0], [w, 0.0]]),
+            scheme,
+            SIDE_ZONE,
+        );
+    }
+    if !sk_xmin {
+        b.emit_quad_uv(
+            [
+                [x_min, y_bot, z_max],
+                [x_min, y_top, z_max],
+                [x_min, y_top, z_min],
+                [x_min, y_bot, z_min],
+            ],
+            fv([[0.0, 0.0], [0.0, 1.0], [d, 1.0], [d, 0.0]]),
+            scheme,
+            SIDE_ZONE,
+        );
+    }
+    if !sk_xmax {
+        b.emit_quad_uv(
+            [
+                [x_max, y_bot, z_min],
+                [x_max, y_top, z_min],
+                [x_max, y_top, z_max],
+                [x_max, y_bot, z_max],
+            ],
+            fv([[0.0, 0.0], [0.0, 1.0], [d, 1.0], [d, 0.0]]),
+            scheme,
+            SIDE_ZONE,
+        );
+    }
 
     // Corner pillar legs — grounded only. Each corner contributes up to two
     // perpendicular planes (one per adjacent edge) from yBot down to the floor,
@@ -526,58 +576,59 @@ pub fn append_platform_mesh(
 
     let y_pillar_top = y_bot;
     let y_pillar_bot = find_floor_y_at(p.center_x(), p.center_z(), y_bot, brushes);
+    let ph = y_pillar_top - y_pillar_bot;
+    let leg_w = PILLAR_WIDTH;
+    // Pillar UVs are 90° rotated vs the skirt (JS `addPillarPlane`): u runs up
+    // the pillar height (tiled by pH), v fits once across the narrow leg — so the
+    // texture's long axis climbs the support instead of wrapping around it.
     let mut leg = |ax: f32, az: f32, bx: f32, bz: f32| {
-        push_quad_double(
-            pos,
-            norm,
-            idx,
-            [ax, y_pillar_bot, az],
-            [ax, y_pillar_top, az],
-            [bx, y_pillar_top, bz],
-            [bx, y_pillar_bot, bz],
+        b.emit_quad_uv(
+            [
+                [ax, y_pillar_bot, az],
+                [ax, y_pillar_top, az],
+                [bx, y_pillar_top, bz],
+                [bx, y_pillar_bot, bz],
+            ],
+            fv([[0.0, 0.0], [ph, 0.0], [ph, 1.0], [0.0, 1.0]]),
+            scheme,
+            SIDE_ZONE,
         );
     };
-    let w = PILLAR_WIDTH;
-    // Corner (xMin, zMin).
-    if !z_min_wall {
-        leg(x_min, z_min, x_min + w, z_min);
+    // A corner's L-leg is dropped whole when EITHER adjacent edge is against a
+    // wall — otherwise the arm perpendicular to the wall survives as a stub
+    // hugging it. Each surviving corner still emits both of its planes.
+    // Corner (xMin, zMin) — edges XMin + ZMin.
+    if !x_min_wall && !z_min_wall {
+        leg(x_min, z_min, x_min + leg_w, z_min);
+        leg(x_min, z_min, x_min, z_min + leg_w);
     }
-    if !x_min_wall {
-        leg(x_min, z_min, x_min, z_min + w);
+    // Corner (xMax, zMin) — edges XMax + ZMin.
+    if !x_max_wall && !z_min_wall {
+        leg(x_max - leg_w, z_min, x_max, z_min);
+        leg(x_max, z_min, x_max, z_min + leg_w);
     }
-    // Corner (xMax, zMin).
-    if !z_min_wall {
-        leg(x_max - w, z_min, x_max, z_min);
+    // Corner (xMax, zMax) — edges XMax + ZMax.
+    if !x_max_wall && !z_max_wall {
+        leg(x_max - leg_w, z_max, x_max, z_max);
+        leg(x_max, z_max - leg_w, x_max, z_max);
     }
-    if !x_max_wall {
-        leg(x_max, z_min, x_max, z_min + w);
-    }
-    // Corner (xMax, zMax).
-    if !z_max_wall {
-        leg(x_max - w, z_max, x_max, z_max);
-    }
-    if !x_max_wall {
-        leg(x_max, z_max - w, x_max, z_max);
-    }
-    // Corner (xMin, zMax).
-    if !z_max_wall {
-        leg(x_min, z_max, x_min + w, z_max);
-    }
-    if !x_min_wall {
-        leg(x_min, z_max - w, x_min, z_max);
+    // Corner (xMin, zMax) — edges XMin + ZMax.
+    if !x_min_wall && !z_max_wall {
+        leg(x_min, z_max, x_min + leg_w, z_max);
+        leg(x_min, z_max - leg_w, x_min, z_max);
     }
 }
 
 /// Append a stair-run's simple-style shell (treads + short risers + two sloped
-/// stringers + bridge) in meters. Port of `buildSimpleStairGeometry`.
+/// stringers + bridge) into the zoned builder, with the JS per-face zones + UVs.
+/// Port of `buildSimpleStairGeometry`.
 pub fn append_stair_mesh(
     run: &StairRun,
     from_platform: Option<&Platform>,
     to_platform: Option<&Platform>,
     brushes: &[Brush],
-    pos: &mut Vec<f32>,
-    norm: &mut Vec<f32>,
-    idx: &mut Vec<u32>,
+    b: &mut ZonedBuilder,
+    scheme: usize,
 ) {
     let Some(g) = resolve_run(run, from_platform, to_platform, brushes) else {
         return;
@@ -589,7 +640,8 @@ pub fn append_stair_mesh(
             RunAxis::Z => [perp, y, r],
         }
     };
-    let mut q = |a, b, c, d| push_quad_double(pos, norm, idx, a, b, c, d);
+    let step_width = g.perp_max - g.perp_min;
+    let abs_step_run = g.step_run.abs();
 
     // Per step: tread + a short front riser (slit visible between treads).
     let riser_height = g.step_rise * RISER_FRACTION;
@@ -598,25 +650,37 @@ pub fn append_stair_mesh(
         let r_front = g.top_run + (steps - i) * g.step_run;
         let r_back = g.top_run + (steps - i - 1.0) * g.step_run;
         let step_top = g.stair_base_y + (i + 1.0) * g.step_rise;
-        // Tread.
-        q(
-            tw(r_back, step_top, g.perp_min),
-            tw(r_front, step_top, g.perp_min),
-            tw(r_front, step_top, g.perp_max),
-            tw(r_back, step_top, g.perp_max),
+        // Tread — floor texture, u along the width, v along the run (tile both).
+        b.emit_quad_uv(
+            [
+                tw(r_back, step_top, g.perp_min),
+                tw(r_front, step_top, g.perp_min),
+                tw(r_front, step_top, g.perp_max),
+                tw(r_back, step_top, g.perp_max),
+            ],
+            fv([[0.0, 0.0], [0.0, abs_step_run], [step_width, abs_step_run], [step_width, 0.0]]),
+            scheme,
+            TOP_ZONE,
         );
-        // Riser (front, shorter than the full rise).
+        // Riser (front, shorter than the full rise) — u across the width, v fits 1.
         let riser_bot = step_top - riser_height;
-        q(
-            tw(r_front, riser_bot, g.perp_min),
-            tw(r_front, riser_bot, g.perp_max),
-            tw(r_front, step_top, g.perp_max),
-            tw(r_front, step_top, g.perp_min),
+        b.emit_quad_uv(
+            [
+                tw(r_front, riser_bot, g.perp_min),
+                tw(r_front, riser_bot, g.perp_max),
+                tw(r_front, step_top, g.perp_max),
+                tw(r_front, step_top, g.perp_min),
+            ],
+            fv([[0.0, 0.0], [step_width, 0.0], [step_width, 1.0], [0.0, 1.0]]),
+            scheme,
+            SIDE_ZONE,
         );
     }
 
     // Two sloped stringer boards (perpMin + perpMax), starting one stepRun in
-    // from the upper platform's edge.
+    // from the upper platform's edge. UV u runs ALONG the slope (tiled by the
+    // slope length), v fits once across the board depth — the runner texture is
+    // aligned with the stringer, not laid horizontally.
     let front_run = g.top_run + steps * g.step_run;
     let stringer_back_run = g.top_run + g.step_run;
     let stringer_front_run = front_run;
@@ -625,88 +689,74 @@ pub fn append_stair_mesh(
     let board_depth = g.step_rise;
     let stringer_back_bot = stringer_back_top - board_depth;
     let stringer_front_bot = stringer_front_top - board_depth;
+    let slope_len = ((stringer_front_run - stringer_back_run).powi(2)
+        + (stringer_front_top - stringer_back_top).powi(2))
+    .sqrt();
 
-    q(
-        tw(stringer_front_run, stringer_front_bot, g.perp_min),
-        tw(stringer_back_run, stringer_back_bot, g.perp_min),
-        tw(stringer_back_run, stringer_back_top, g.perp_min),
-        tw(stringer_front_run, stringer_front_top, g.perp_min),
-    );
-    q(
-        tw(stringer_back_run, stringer_back_bot, g.perp_max),
-        tw(stringer_front_run, stringer_front_bot, g.perp_max),
-        tw(stringer_front_run, stringer_front_top, g.perp_max),
-        tw(stringer_back_run, stringer_back_top, g.perp_max),
-    );
-
-    // Bridge — fill the small gap under the topmost tread between the upper
-    // platform edge and the stringer's start.
+    // Bridge — fills the small gap under the topmost tread between the upper
+    // platform edge and the stringer's start (same side board, so gated together).
     let bridge_run = g.top_run;
     let bridge_front = g.top_run + g.step_run;
     let bridge_top = g.top_y;
     let bridge_bot = g.top_y - board_depth;
-    q(
-        tw(bridge_front, bridge_bot, g.perp_min),
-        tw(bridge_run, bridge_bot, g.perp_min),
-        tw(bridge_run, bridge_top, g.perp_min),
-        tw(bridge_front, bridge_top, g.perp_min),
-    );
-    q(
-        tw(bridge_run, bridge_bot, g.perp_max),
-        tw(bridge_front, bridge_bot, g.perp_max),
-        tw(bridge_front, bridge_top, g.perp_max),
-        tw(bridge_run, bridge_top, g.perp_max),
-    );
+
+    // Cull each side's stringer + bridge board when that side is flush against a
+    // wall, so the thin board doesn't z-fight the wall face. Railings run the
+    // same test, so a walled side drops its board AND its rail together.
+    let left_walled = stair_side_against_wall(&g, g.perp_min, -1.0, brushes);
+    let right_walled = stair_side_against_wall(&g, g.perp_max, 1.0, brushes);
+
+    if !left_walled {
+        b.emit_quad_uv(
+            [
+                tw(stringer_front_run, stringer_front_bot, g.perp_min),
+                tw(stringer_back_run, stringer_back_bot, g.perp_min),
+                tw(stringer_back_run, stringer_back_top, g.perp_min),
+                tw(stringer_front_run, stringer_front_top, g.perp_min),
+            ],
+            fv([[0.0, 0.0], [slope_len, 0.0], [slope_len, 1.0], [0.0, 1.0]]),
+            scheme,
+            SIDE_ZONE,
+        );
+        b.emit_quad_uv(
+            [
+                tw(bridge_front, bridge_bot, g.perp_min),
+                tw(bridge_run, bridge_bot, g.perp_min),
+                tw(bridge_run, bridge_top, g.perp_min),
+                tw(bridge_front, bridge_top, g.perp_min),
+            ],
+            fv([[0.0, 0.0], [abs_step_run, 0.0], [abs_step_run, 1.0], [0.0, 1.0]]),
+            scheme,
+            SIDE_ZONE,
+        );
+    }
+    if !right_walled {
+        b.emit_quad_uv(
+            [
+                tw(stringer_back_run, stringer_back_bot, g.perp_max),
+                tw(stringer_front_run, stringer_front_bot, g.perp_max),
+                tw(stringer_front_run, stringer_front_top, g.perp_max),
+                tw(stringer_back_run, stringer_back_top, g.perp_max),
+            ],
+            fv([[0.0, 0.0], [slope_len, 0.0], [slope_len, 1.0], [0.0, 1.0]]),
+            scheme,
+            SIDE_ZONE,
+        );
+        b.emit_quad_uv(
+            [
+                tw(bridge_run, bridge_bot, g.perp_max),
+                tw(bridge_front, bridge_bot, g.perp_max),
+                tw(bridge_front, bridge_top, g.perp_max),
+                tw(bridge_run, bridge_top, g.perp_max),
+            ],
+            fv([[0.0, 0.0], [abs_step_run, 0.0], [abs_step_run, 1.0], [0.0, 1.0]]),
+            scheme,
+            SIDE_ZONE,
+        );
+    }
 }
 
 // ─── Railings (render-only) ──────────────────────────────────────────
-
-/// Append a double-sided quad (WT corners → meters) as two triangles per side,
-/// each with its own winding normal, so the render is view-independent.
-fn push_quad_double(
-    pos: &mut Vec<f32>,
-    norm: &mut Vec<f32>,
-    idx: &mut Vec<u32>,
-    p0: [f32; 3],
-    p1: [f32; 3],
-    p2: [f32; 3],
-    p3: [f32; 3],
-) {
-    let s = |p: [f32; 3]| [p[0] * WORLD_SCALE, p[1] * WORLD_SCALE, p[2] * WORLD_SCALE];
-    let (q0, q1, q2, q3) = (s(p0), s(p1), s(p2), s(p3));
-    let n = tri_normal(q0, q1, q2);
-    let nb = [-n[0], -n[1], -n[2]];
-
-    let base = (pos.len() / 3) as u32;
-    for (p, nn) in [(q0, n), (q1, n), (q2, n), (q3, n)] {
-        pos.extend_from_slice(&p);
-        norm.extend_from_slice(&nn);
-    }
-    idx.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-
-    let base = (pos.len() / 3) as u32;
-    for (p, nn) in [(q0, nb), (q1, nb), (q2, nb), (q3, nb)] {
-        pos.extend_from_slice(&p);
-        norm.extend_from_slice(&nn);
-    }
-    idx.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
-}
-
-fn tri_normal(a: [f32; 3], b: [f32; 3], c: [f32; 3]) -> [f32; 3] {
-    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    let n = [
-        u[1] * v[2] - u[2] * v[1],
-        u[2] * v[0] - u[0] * v[2],
-        u[0] * v[1] - u[1] * v[0],
-    ];
-    let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-    if len > 1e-8 {
-        [n[0] / len, n[1] / len, n[2] / len]
-    } else {
-        [0.0, 0.0, 0.0]
-    }
-}
 
 /// Whether a WT point lies inside any subtract brush's interior (open bounds, to
 /// match the JS probe). Doorframe carves count, so railings stay across doorways.
@@ -748,6 +798,34 @@ fn is_edge_against_wall(p: &Platform, edge: Edge, brushes: &[Brush], probe_dist:
         };
         if point_in_any_subtract(brushes, px, y_probe, pz) {
             return false; // open air past the edge → not fully walled
+        }
+    }
+    true
+}
+
+/// Whether a stair's side at `perp` (pushed outward by `normal_sign`) is flush
+/// against solid wall along its whole sloped run — the per-side analogue of
+/// [`is_edge_against_wall`], shared by the stringer/bridge boards and the side
+/// railing so a walled side drops both together (no z-fighting into the wall).
+/// Samples along the run at each point's stair height; if every probe past the
+/// side lands in solid shell (not in any subtract cavity), the side is walled.
+fn stair_side_against_wall(g: &RunGeom, perp: f32, normal_sign: f32, brushes: &[Brush]) -> bool {
+    if brushes.is_empty() {
+        return false;
+    }
+    const PROBE_DIST: f32 = 0.5;
+    const SAMPLES: i32 = 8;
+    for i in 0..SAMPLES {
+        let t = (i as f32 + 0.5) / SAMPLES as f32;
+        let run_pos = g.bottom_run + t * (g.top_run - g.bottom_run);
+        let y_probe = g.stair_base_y + t * (g.top_y - g.stair_base_y) + 0.5;
+        let perp_probe = perp + normal_sign * PROBE_DIST;
+        let (px, pz) = match g.run_axis {
+            RunAxis::X => (run_pos, perp_probe),
+            RunAxis::Z => (perp_probe, run_pos),
+        };
+        if point_in_any_subtract(brushes, px, y_probe, pz) {
+            return false; // open air past the side → not walled here
         }
     }
     true
@@ -868,17 +946,19 @@ fn free_edge_segments(
     free
 }
 
-/// Append a platform's railing quads (render-only). Railings rise on the free
-/// segments of each exposed edge (not against a wall, not occupied by a stair or
-/// adjacent platform). Port of `buildPlatformRailingGeometry`.
+/// Append a platform's railing quads (render-only) into the zoned builder,
+/// tagged `(scheme, zone)` with explicit UVs (JS uses `uTiles = segLen/1.5`
+/// along the rail, one tile over its height). Railings rise on the free segments
+/// of each exposed edge (not against a wall, not occupied by a stair or adjacent
+/// platform). Port of `buildPlatformRailingGeometry`.
 pub fn append_platform_railings(
     p: &Platform,
     runs: &[StairRun],
     all: &[Platform],
     brushes: &[Brush],
-    pos: &mut Vec<f32>,
-    norm: &mut Vec<f32>,
-    idx: &mut Vec<u32>,
+    b: &mut ZonedBuilder,
+    scheme: usize,
+    zone: u8,
 ) {
     let y_top = p.y;
     let rail_top = y_top + RAILING_HEIGHT;
@@ -898,42 +978,48 @@ pub fn append_platform_railings(
             let z0 = start.1 + (end.1 - start.1) * seg[0];
             let x1 = start.0 + (end.0 - start.0) * seg[1];
             let z1 = start.1 + (end.1 - start.1) * seg[1];
-            // Vertical rail plane.
-            push_quad_double(
-                pos,
-                norm,
-                idx,
-                [x0, y_top, z0],
-                [x1, y_top, z1],
-                [x1, rail_top, z1],
-                [x0, rail_top, z0],
+            let u = seg_len / 1.5;
+            // Vertical rail plane (one tile tall, `u` tiles along the run).
+            b.emit_quad_uv(
+                [
+                    [x0, y_top, z0],
+                    [x1, y_top, z1],
+                    [x1, rail_top, z1],
+                    [x0, rail_top, z0],
+                ],
+                fv([[0.0, 0.0], [u, 0.0], [u, 1.0], [0.0, 1.0]]),
+                scheme,
+                zone,
             );
-            // Handrail cap (thin horizontal strip).
+            // Handrail cap (thin horizontal strip along the top edge of the tile).
             let (dx, dz) = (nx * HANDRAIL_DEPTH, nz * HANDRAIL_DEPTH);
-            push_quad_double(
-                pos,
-                norm,
-                idx,
-                [x0, rail_top, z0],
-                [x1, rail_top, z1],
-                [x1 + dx, rail_top, z1 + dz],
-                [x0 + dx, rail_top, z0 + dz],
+            b.emit_quad_uv(
+                [
+                    [x0, rail_top, z0],
+                    [x1, rail_top, z1],
+                    [x1 + dx, rail_top, z1 + dz],
+                    [x0 + dx, rail_top, z0 + dz],
+                ],
+                fv([[0.0, 0.95], [u, 0.95], [u, 1.0], [0.0, 1.0]]),
+                scheme,
+                zone,
             );
         }
     }
 }
 
-/// Append a stair-run's side railing quads (render-only): a sloped plane +
-/// handrail cap on each side not blocked by a wall. Port of
+/// Append a stair-run's side railing quads (render-only) into the zoned builder:
+/// a sloped plane + handrail cap on each side not blocked by a wall, with the
+/// same UV convention as platform railings (`uTiles = slopeLen/1.5`). Port of
 /// `buildStairRunRailingGeometry`.
 pub fn append_stair_railings(
     run: &StairRun,
     from_platform: Option<&Platform>,
     to_platform: Option<&Platform>,
     brushes: &[Brush],
-    pos: &mut Vec<f32>,
-    norm: &mut Vec<f32>,
-    idx: &mut Vec<u32>,
+    b: &mut ZonedBuilder,
+    scheme: usize,
+    zone: u8,
 ) {
     let Some(g) = resolve_run(run, from_platform, to_platform, brushes) else {
         return;
@@ -942,6 +1028,10 @@ pub fn append_stair_railings(
     let top_y = g.top_y;
     let bot_run = g.bottom_run;
     let top_run = g.top_run;
+    // Tiles along the sloped rail length (JS `slopeLen / 1.5`).
+    let total_run = (top_run - bot_run).abs();
+    let rise = top_y - bot_y;
+    let u = (total_run * total_run + rise * rise).sqrt() / 1.5;
 
     // to_world maps (run, y, perp) → WT [x,y,z] for the run axis.
     let tw = |r: f32, y: f32, perp: f32| -> [f32; 3] {
@@ -952,39 +1042,23 @@ pub fn append_stair_railings(
     };
 
     for (perp, normal_sign) in [(g.perp_min, -1.0f32), (g.perp_max, 1.0f32)] {
-        // Wall probe: if every sample past this side sits in solid, omit it.
-        let mut blocked = !brushes.is_empty();
-        if blocked {
-            const PROBE_DIST: f32 = 0.5;
-            const SAMPLES: i32 = 5;
-            for i in 0..SAMPLES {
-                let t = (i as f32 + 0.5) / SAMPLES as f32;
-                let run_pos = bot_run + t * (top_run - bot_run);
-                let y_probe = bot_y + t * (top_y - bot_y) + 0.5;
-                let perp_probe = perp + normal_sign * PROBE_DIST;
-                let (px, pz) = match g.run_axis {
-                    RunAxis::X => (run_pos, perp_probe),
-                    RunAxis::Z => (perp_probe, run_pos),
-                };
-                if point_in_any_subtract(brushes, px, y_probe, pz) {
-                    blocked = false;
-                    break;
-                }
-            }
-        }
-        if blocked {
+        // Omit the rail on a side flush against a wall — the same test the
+        // stringer/bridge boards use, so a walled side loses both together.
+        if stair_side_against_wall(&g, perp, normal_sign, brushes) {
             continue;
         }
         let inset = perp - normal_sign * RAILING_INSET;
-        // Sloped side plane.
-        push_quad_double(
-            pos,
-            norm,
-            idx,
-            tw(bot_run, bot_y, inset),
-            tw(top_run, top_y, inset),
-            tw(top_run, top_y + RAILING_HEIGHT, inset),
-            tw(bot_run, bot_y + RAILING_HEIGHT, inset),
+        // Sloped side plane (one tile tall, `u` tiles along the slope).
+        b.emit_quad_uv(
+            [
+                tw(bot_run, bot_y, inset),
+                tw(top_run, top_y, inset),
+                tw(top_run, top_y + RAILING_HEIGHT, inset),
+                tw(bot_run, bot_y + RAILING_HEIGHT, inset),
+            ],
+            fv([[0.0, 0.0], [u, 0.0], [u, 1.0], [0.0, 1.0]]),
+            scheme,
+            zone,
         );
         // Handrail cap following the slope.
         let (nx, nz) = match g.run_axis {
@@ -993,14 +1067,16 @@ pub fn append_stair_railings(
         };
         let p4 = tw(bot_run, bot_y + RAILING_HEIGHT, inset);
         let p5 = tw(top_run, top_y + RAILING_HEIGHT, inset);
-        push_quad_double(
-            pos,
-            norm,
-            idx,
-            p4,
-            p5,
-            [p5[0] + nx, p5[1], p5[2] + nz],
-            [p4[0] + nx, p4[1], p4[2] + nz],
+        b.emit_quad_uv(
+            [
+                p4,
+                p5,
+                [p5[0] + nx, p5[1], p5[2] + nz],
+                [p4[0] + nx, p4[1], p4[2] + nz],
+            ],
+            fv([[0.0, 0.95], [u, 0.95], [u, 1.0], [0.0, 1.0]]),
+            scheme,
+            zone,
         );
     }
 }
@@ -1075,5 +1151,24 @@ mod tests {
             boxes.iter().all(|b| (b[3] - 1.0).abs() < 1e-3),
             "each step is 1 WT deep along the run axis"
         );
+    }
+
+    #[test]
+    fn edge_flush_with_a_wall_is_detected_open_edge_is_not() {
+        // A room cavity subtract on x∈[0,20]; a platform whose xMax (=20) is flush
+        // with the cavity's +X wall, while xMin (=16) faces open interior.
+        let room = Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 16.0, 20.0);
+        let p = plat(2, 16.0, 6.0, 8.0); // x∈[16,20], z∈[8,12]
+        let y = p.y - 0.5;
+        assert!(
+            is_edge_against_wall(&p, Edge::XMax, &[room], 0.5, y),
+            "xMax is flush against the +X wall → walled (feature culled)"
+        );
+        assert!(
+            !is_edge_against_wall(&p, Edge::XMin, &[room], 0.5, y),
+            "xMin faces open interior → not walled (feature kept)"
+        );
+        // No brushes at all → never treated as walled (free-standing platform).
+        assert!(!is_edge_against_wall(&p, Edge::XMax, &[], 0.5, y));
     }
 }
