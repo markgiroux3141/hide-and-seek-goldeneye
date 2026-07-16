@@ -40,6 +40,30 @@ impl World {
     pub fn crosshair_visible(&self) -> bool {
         self.aiming
     }
+
+    /// The ammo-counter HUD quads for this frame, or `None` outside HUNT (BUILD is
+    /// the fly-cam editor — no HUD). Right-aligned bottom-right; shows `MAG / RESERVE`,
+    /// or `RELOADING` mid-reload. `aspect` = framebuffer w/h. Fed to the renderer's
+    /// HUD pipeline each frame.
+    pub fn hud_mesh(&self, aspect: f32) -> Option<Vec<engine::render::mesh::HudVertex>> {
+        if self.mode != Mode::Hunt {
+            return None;
+        }
+        Some(crate::hud::ammo_quads(
+            self.weapon.magazine(),
+            self.weapon.reserve(),
+            aspect,
+        ))
+    }
+
+    /// Manual weapon reload (the `R` key in HUNT). No-op outside HUNT; the weapon
+    /// itself gates the request (not already reloading, not mid post-fire delay,
+    /// magazine not full, reserve remaining).
+    pub fn reload_weapon(&mut self) {
+        if self.mode == Mode::Hunt {
+            self.weapon.request_reload();
+        }
+    }
     /// The weapon's static gun mesh, for one-time GPU upload at startup. `None` if
     /// the asset failed to load.
     pub fn gun_model(&self) -> Option<&TexturedModel> {

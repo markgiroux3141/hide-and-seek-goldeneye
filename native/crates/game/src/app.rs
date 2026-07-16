@@ -149,8 +149,12 @@ impl ApplicationHandler for App {
         if let Some(m) = world.muzzle_model() {
             renderer.upload_muzzle(m);
         }
+        // Player Combat P3: upload the code-defined HUD glyph atlas once (the ammo
+        // counter's bitmap font); the per-frame text quads are set below.
+        let (hw, hh, hpx) = crate::hud::atlas_rgba();
+        renderer.upload_hud_atlas(hw, hh, &hpx);
         log::info!(
-            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  L=char walk/jog/run  Z=fire N=hit M=death  G=HUNT  [HUNT: click=fire  RMB=aim]"
+            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  L=char walk/jog/run  Z=fire N=hit M=death  G=HUNT  [HUNT: click=fire  RMB=aim  R=reload]"
         );
 
         window.request_redraw();
@@ -376,6 +380,8 @@ impl ApplicationHandler for App {
                         renderer.set_crosshair_offset(crosshair);
                     }
                     renderer.set_spark_mesh(world.spark_mesh().as_ref());
+                    // Player Combat P3: the ammo-counter HUD (HUNT only; `None` in BUILD).
+                    renderer.set_hud_mesh(world.hud_mesh(aspect).as_deref());
                     renderer.set_door_mesh(world.door_mesh().as_ref());
                     // Pending-stair ghost — `None` (auto-clears) unless a stair op
                     // is in progress in BUILD.
@@ -514,6 +520,15 @@ impl App {
             // frame's preview to repopulate the highlight.
             if self.world.as_ref().map(|w| !w.is_opening_arming()).unwrap_or(true) {
                 self.refresh_highlight();
+            }
+            return;
+        }
+        // R in HUNT reloads the weapon (in BUILD it's the brace tool, below).
+        if code == KeyCode::KeyR
+            && self.world.as_ref().map(|w| !w.is_build()).unwrap_or(false)
+        {
+            if let Some(world) = self.world.as_mut() {
+                world.reload_weapon();
             }
             return;
         }

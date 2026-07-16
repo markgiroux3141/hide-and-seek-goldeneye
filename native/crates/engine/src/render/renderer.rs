@@ -196,6 +196,17 @@ pub struct Renderer {
     _crosshair_sampler: wgpu::Sampler,
     /// Whether to draw the crosshair this frame (shown only while aiming / in BUILD).
     crosshair_visible: bool,
+
+    // Screen-space HUD text (the ammo counter; later health etc.). The pipeline +
+    // sampler are fixed; the glyph atlas is uploaded once after `new()` and the
+    // quad mesh is rebuilt each frame from the current HUD state.
+    hud_pipeline: wgpu::RenderPipeline,
+    hud_sampler: wgpu::Sampler,
+    /// The glyph-atlas bind group (group 0), `None` until [`Self::upload_hud_atlas`].
+    hud_atlas_bind: Option<wgpu::BindGroup>,
+    _hud_atlas_tex: Option<wgpu::Texture>,
+    /// This frame's HUD quads: (vertex buffer, vertex count). `None` = nothing to draw.
+    hud_mesh: Option<(wgpu::Buffer, u32)>,
 }
 
 #[repr(C)]
@@ -992,6 +1003,62 @@ impl Renderer {
             cache: None,
         });
 
+        // ── HUD pipeline: screen-space textured quads (the ammo counter and later
+        // HUD text), sampling a code-defined glyph atlas. Positions are already in
+        // NDC (built CPU-side each frame), so no camera/uniform — just the atlas
+        // texture (group 0, reusing `char_tex_layout`). Alpha-blended, no depth,
+        // drawn last in the overlay pass. The atlas + mesh are set after `new()`.
+        let hud_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("hud-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shader_hud.wgsl").into()),
+        });
+        let hud_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("hud-sampler"),
+            mag_filter: wgpu::FilterMode::Nearest, // crisp pixel-font blocks
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let hud_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("hud-layout"),
+            bind_group_layouts: &[&char_tex_layout],
+            push_constant_ranges: &[],
+        });
+        let hud_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("hud-pipeline"),
+            layout: Some(&hud_layout),
+            vertex: wgpu::VertexState {
+                module: &hud_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[crate::render::mesh::HudVertex::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &hud_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         let depth_view = create_depth(&device, config.width, config.height);
 
         Renderer {
@@ -1040,6 +1107,11 @@ impl Renderer {
             _crosshair_tex: crosshair_tex,
             _crosshair_sampler: crosshair_sampler,
             crosshair_visible: true,
+            hud_pipeline,
+            hud_sampler,
+            hud_atlas_bind: None,
+            _hud_atlas_tex: None,
+            hud_mesh: None,
         }
     }
 
@@ -1372,6 +1444,46 @@ impl Renderer {
         };
     }
 
+    /// Upload the HUD glyph atlas once (the code-defined bitmap font as an RGBA8
+    /// texture; white glyphs on a transparent background). Called at init with the
+    /// game's `hud` atlas. Until this runs, HUD draws nothing.
+    pub fn upload_hud_atlas(&mut self, width: u32, height: u32, rgba: &[u8]) {
+        let tex = upload_rgba_srgb(&self.device, &self.queue, width, height, rgba, "hud-atlas");
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("hud-atlas-bg"),
+            layout: &self.char_tex_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.hud_sampler),
+                },
+            ],
+        });
+        self.hud_atlas_bind = Some(bind);
+        self._hud_atlas_tex = Some(tex);
+    }
+
+    /// Set (or clear) this frame's HUD quads (screen-space NDC verts). Rebuilt each
+    /// frame from the current ammo/HUD state; `None` or empty draws nothing.
+    pub fn set_hud_mesh(&mut self, verts: Option<&[crate::render::mesh::HudVertex]>) {
+        self.hud_mesh = match verts {
+            Some(v) if !v.is_empty() => {
+                let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("hud-vertices"),
+                    contents: bytemuck::cast_slice(v),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                Some((buf, v.len() as u32))
+            }
+            _ => None,
+        };
+    }
+
     /// Insert or replace a region's textured mesh. Called on every brush edit; an
     /// empty mesh removes the region.
     pub fn set_region_textured(&mut self, region_id: u32, mesh: &TexturedMesh) {
@@ -1682,13 +1794,21 @@ impl Renderer {
                 }
             }
 
-            // Screen-space crosshair, last (textured, alpha-blended, no depth).
+            // Screen-space crosshair (textured, alpha-blended, no depth).
             // Shown only while aiming (HUNT) or in BUILD (editor pick cursor).
             if self.crosshair_visible {
                 rp.set_pipeline(&self.crosshair_pipeline);
                 rp.set_bind_group(0, &self.overlay_bind_group, &[]);
                 rp.set_bind_group(1, &self.crosshair_bind, &[]);
                 rp.draw(0..6, 0..1);
+            }
+
+            // HUD text (ammo counter), last — on top of everything.
+            if let (Some(bind), Some((buf, count))) = (&self.hud_atlas_bind, &self.hud_mesh) {
+                rp.set_pipeline(&self.hud_pipeline);
+                rp.set_bind_group(0, bind, &[]);
+                rp.set_vertex_buffer(0, buf.slice(..));
+                rp.draw(0..*count, 0..1);
             }
         }
         self.queue.submit(std::iter::once(encoder.finish()));

@@ -54,7 +54,9 @@ pub const PP7: WeaponStats = WeaponStats {
     name: "PP7",
     fire_cooldown: 0.4,
     magazine_size: 7,
-    reload_time: 1.5,
+    // ~half the JS 1.5 s (user call 2026-07-16) — snappier reload; also shortens
+    // the viewmodel dip, which spans `reload_time`.
+    reload_time: 0.75,
     damage: 25.0,
     range: 100.0,
     gun_path: "pp7/gun.glb",

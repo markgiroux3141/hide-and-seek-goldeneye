@@ -10,6 +10,7 @@ pub mod app;
 pub mod character;
 pub mod combat;
 pub mod enemy;
+pub mod hud;
 pub mod world;
 
 /// Launch the game: open the window and run the event loop.

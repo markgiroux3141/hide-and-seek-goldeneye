@@ -40,14 +40,21 @@ pub fn load_flash(path: &str) -> Result<TexturedModel, String> {
 /// against the scene. JS used a separate 75° weapon camera; we keep one FOV.
 const VIEWMODEL_FOV: f32 = 60.0;
 
+/// How far the gun dips out of view at the low point of the reload animation
+/// (view-space metres downward). JS `WeaponViewmodel` uses `0.6`.
+const RELOAD_DIP: f32 = 0.6;
+
 /// The runtime viewmodel state: the weapon config plus the animated overlay state
-/// (recoil now; bob/sway later). Ported from `WeaponViewmodel.ts`.
+/// (recoil + the reload dip; bob/sway later). Ported from `WeaponViewmodel.ts`.
 pub struct ViewModel {
     pub config: WeaponStats,
     /// Recoil kick-back distance (metres, +Z = toward the viewer) and muzzle-up
     /// tilt (radians). Set on fire, decayed each frame (JS `recoilZ`/`recoilRot`).
     recoil_z: f32,
     recoil_rot: f32,
+    /// Reload dip progress in `[0, 1]`, or `-1` when not reloading (JS
+    /// `reloadProgress`). Drives the gun lowering out of view + returning.
+    reload_progress: f32,
 }
 
 impl ViewModel {
@@ -56,6 +63,7 @@ impl ViewModel {
             config,
             recoil_z: 0.0,
             recoil_rot: 0.0,
+            reload_progress: -1.0,
         }
     }
 
@@ -66,11 +74,48 @@ impl ViewModel {
         self.recoil_rot = self.config.recoil_rot;
     }
 
-    /// Decay the recoil toward rest each frame (JS: `recoilZ *= 1 - dt*15`,
-    /// `recoilRot *= 1 - dt*10` — the kick-back snaps back faster than the tilt).
-    pub fn tick_recoil(&mut self, dt: f32) {
+    /// Start the reload dip (JS `WeaponViewmodel.playReloadAnimation`): the gun
+    /// lowers out of view and returns. Called from [`super::Weapon::start_reload`]
+    /// so both the manual `R` and the empty auto-reload play it.
+    pub fn play_reload(&mut self) {
+        self.reload_progress = 0.0;
+    }
+
+    /// Whether the reload dip is currently animating.
+    pub fn is_reloading(&self) -> bool {
+        self.reload_progress >= 0.0
+    }
+
+    /// Advance the per-frame viewmodel animation: decay the recoil toward rest
+    /// (JS: `recoilZ *= 1 - dt*15`, `recoilRot *= 1 - dt*10` — the kick-back snaps
+    /// back faster than the tilt) and advance the reload dip.
+    ///
+    /// **Deviation from JS (deliberate):** the JS advances `reloadProgress` at
+    /// `dt / (reloadTime * 0.5)` (a "2× speed" dip that finishes at half the reload,
+    /// leaving the gun up-but-unfireable for the rest). We advance over the *full*
+    /// `reload_time`, so the gun stays lowered for the whole reload and returns
+    /// exactly as firing re-enables — better feel. Revert by dividing dt by
+    /// `reload_time * 0.5` to match the oracle.
+    pub fn tick(&mut self, dt: f32) {
         self.recoil_z *= (1.0 - dt * 15.0).max(0.0);
         self.recoil_rot *= (1.0 - dt * 10.0).max(0.0);
+        if self.reload_progress >= 0.0 {
+            self.reload_progress += dt / self.config.reload_time.max(1e-3);
+            if self.reload_progress >= 1.0 {
+                self.reload_progress = -1.0;
+            }
+        }
+    }
+
+    /// This frame's reload dip offset (view-space metres, ≤ 0 = down). A half-sine
+    /// over the reload: 0 at the ends, `-RELOAD_DIP` at the midpoint (JS
+    /// `-sin(progress·π) · 0.6`). Zero when not reloading.
+    fn reload_offset_y(&self) -> f32 {
+        if self.reload_progress >= 0.0 {
+            -(self.reload_progress * std::f32::consts::PI).sin() * RELOAD_DIP
+        } else {
+            0.0
+        }
     }
 
     /// The clip transform for the gun this frame: `projection · viewmodel`, where
@@ -94,7 +139,11 @@ impl ViewModel {
         let yaw = (aim_x * tan).atan();
         let pitch = (aim_y * tan).atan();
         let aim_rot = Mat4::from_rotation_y(-yaw) * Mat4::from_rotation_x(pitch + self.recoil_rot);
-        let model = Mat4::from_translation(c.model_offset + Vec3::new(0.0, 0.0, self.recoil_z))
+        // The reload dip lowers the whole gun group in view space (Y down), like
+        // recoil kick-back (Z) — both on the outer `model` translation.
+        let model = Mat4::from_translation(
+            c.model_offset + Vec3::new(0.0, self.reload_offset_y(), self.recoil_z),
+        )
             * aim_rot
             * Mat4::from_translation(c.pivot_offset)
             * Mat4::from_quat(euler_xyz(c.model_rotation))
@@ -143,5 +192,30 @@ mod tests {
         // Centered and at a free-aim offset — both finite.
         assert!(vm.clip_transform(16.0 / 9.0, 0.0, 0.0).to_cols_array().iter().all(|v| v.is_finite()));
         assert!(vm.clip_transform(16.0 / 9.0, 0.5, -0.3).to_cols_array().iter().all(|v| v.is_finite()));
+    }
+
+    /// The reload dip lowers the gun (negative Y offset) at mid-reload and returns
+    /// it to rest by the end of `reload_time` (whatever that is configured to).
+    #[test]
+    fn reload_dips_the_gun_then_returns() {
+        let vm0 = ViewModel::new(crate::combat::config::PP7);
+        let reload_time = vm0.config.reload_time;
+        let dt = 0.001; // fine steps so the frame count tracks reload_time exactly
+        let mid = (reload_time * 0.5 / dt) as u32; // frames to the deepest dip
+        let end = (reload_time * 1.2 / dt) as u32; // comfortably past the end
+
+        let mut vm = vm0;
+        assert_eq!(vm.reload_offset_y(), 0.0, "at rest before reload");
+        vm.play_reload();
+        assert!(vm.is_reloading());
+        for _ in 0..mid {
+            vm.tick(dt);
+        }
+        assert!(vm.reload_offset_y() < -0.4, "gun dipped out of view mid-reload");
+        for _ in 0..(end - mid) {
+            vm.tick(dt);
+        }
+        assert!(!vm.is_reloading(), "reload dip finished");
+        assert_eq!(vm.reload_offset_y(), 0.0, "gun returned to rest");
     }
 }

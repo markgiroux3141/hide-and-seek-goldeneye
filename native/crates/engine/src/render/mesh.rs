@@ -134,6 +134,25 @@ pub struct ColoredMesh {
     pub indices: Vec<u32>,
 }
 
+/// One screen-space HUD vertex: NDC position + atlas UV. Drawn un-indexed (6 verts
+/// per quad) by the HUD pipeline, sampling the glyph atlas. No depth, alpha-keyed.
+/// Matches `shader_hud.wgsl`. Positions are already in clip space (−1..1), so the
+/// HUD needs no camera or projection.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct HudVertex {
+    pub pos: [f32; 2],
+    pub uv: [f32; 2],
+}
+
+impl HudVertex {
+    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<HudVertex>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2],
+    };
+}
+
 /// GPU-resident mesh: vertex + index buffers ready to draw.
 pub struct GpuMesh {
     pub vertex_buf: wgpu::Buffer,
