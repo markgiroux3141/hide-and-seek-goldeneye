@@ -3,11 +3,19 @@ name = "game"
 version = "0.1.0"
 edition = "2021"
 
-# BUILD & HIDE — the game. Links and calls the engine (one-way dependency).
-# Phase 0: just boots the engine's window/clear loop.
+# BUILD & HIDE — the game. Owns the authored world, weapons, enemy/player
+# controllers, and the winit event loop; consumes `engine` as a library
+# (one-way dependency). `src/lib.rs` is the crate; the bin is a thin launcher.
 [[bin]]
 name = "build-and-hide"
 path = "src/main.rs"
 
 [dependencies]
 engine = { workspace = true }
+csg = { workspace = true }
+glam = { workspace = true }
+winit = { workspace = true }
+pollster = { workspace = true }
+rapier3d = { workspace = true }
+env_logger = { workspace = true }
+log = { workspace = true }

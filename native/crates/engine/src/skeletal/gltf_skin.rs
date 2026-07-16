@@ -5,14 +5,14 @@
 //!
 //! Node transforms are **not** baked into skinned-mesh positions — a skinned
 //! primitive's vertices live in skin space and are placed by the joint matrices,
-//! per the glTF spec. Baking the node transform (as the static [`crate::gltf_load`]
+//! per the glTF spec. Baking the node transform (as the static [`crate::assets::gltf_load`]
 //! loader does) would double-transform them.
 
 use std::collections::HashMap;
 
 use glam::{Mat4, Vec3};
 
-use crate::mesh::SkinVertex;
+use crate::render::mesh::SkinVertex;
 use crate::skeletal::Skeleton;
 
 /// One decoded RGBA8 texture image from the GLB.
@@ -242,8 +242,9 @@ pub fn load(path: &str) -> Result<SkinnedModel, String> {
 /// Convert a `gltf`-decoded image (whatever channel layout) to tightly-packed
 /// RGBA8. Covers the formats the character PNGs actually use (RGB / RGBA) plus
 /// grayscale, with a magenta fallback for anything unexpected so a decode gap is
-/// obvious on screen rather than silent. Shared with the weapon-viewmodel loader
-/// (`crate::combat::viewmodel`), which loads the same GoldenEye GLB asset family.
+/// obvious on screen rather than silent. Shared with the static textured-model
+/// loader ([`crate::assets::textured_model`]), which decodes the same GLB
+/// asset family (weapons/props).
 pub(crate) fn to_rgba8(img: &gltf::image::Data) -> TexImage {
     use gltf::image::Format;
     let (w, h) = (img.width, img.height);

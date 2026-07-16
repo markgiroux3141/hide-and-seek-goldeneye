@@ -1,24 +1,20 @@
-//! BUILD & HIDE engine — domain-agnostic runtime.
+//! BUILD & HIDE engine — the runtime the game crate drives.
 //!
-//! Modules land as the game needs them (no speculative API up front). Phase 0
-//! stands up windowing + renderer, glTF loading, and the Rapier link; later
-//! phases add the CSG runtime subsystem, character controller, and nav.
+//! Organized by subsystem rather than a flat file list:
+//! - [`platform`] — winit window helper + input state + frame clock.
+//! - [`render`]   — wgpu pipelines, meshes, textures, UV zones, camera, shaders.
+//! - [`geometry`] — runtime CSG, platform/stair authoring, shared math.
+//! - [`sim`]      — Rapier physics + nav grid / A*.
+//! - [`assets`]   — glTF/GLB loading (skinned loading lives in [`skeletal`]).
+//! - [`skeletal`] — shared-skeleton skinned character animation.
+//!
+//! Game-specific code (the authored `world`, weapon combat, enemy/player
+//! controllers, and the winit event loop) lives in the `game` crate, which
+//! consumes this engine as a library — the dependency is one-way.
 
-pub mod app;
-pub mod camera;
-pub mod character;
-pub mod combat;
-pub mod csg_runtime;
-pub mod enemy;
-pub mod geom;
-pub mod gltf_load;
-pub mod input;
-pub mod mesh;
-pub mod nav;
-pub mod physics;
-pub mod renderer;
+pub mod assets;
+pub mod geometry;
+pub mod platform;
+pub mod render;
+pub mod sim;
 pub mod skeletal;
-pub mod structures;
-pub mod textures;
-pub mod uv_zones;
-pub mod world;
