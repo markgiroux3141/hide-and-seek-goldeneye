@@ -86,6 +86,30 @@ pub struct TexturedMesh {
     pub groups: Vec<ZoneGroup>,
 }
 
+/// One interleaved vertex for the **skinned character** pipeline: position +
+/// tile-unit UV + 4 joint indices + 4 skin weights. Deliberately has **no
+/// normal** — the GoldenEye character GLBs carry no `NORMAL` attribute and render
+/// unlit (N64 look), so lighting is impossible and unwanted. Matches
+/// `shader_skinned.wgsl`.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct SkinVertex {
+    pub pos: [f32; 3],
+    pub uv: [f32; 2],
+    pub joints: [u32; 4],
+    pub weights: [f32; 4],
+}
+
+impl SkinVertex {
+    pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<SkinVertex>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![
+            0 => Float32x3, 1 => Float32x2, 2 => Uint32x4, 3 => Float32x4
+        ],
+    };
+}
+
 /// One interleaved position + RGB color vertex — for the unlit gizmo overlay
 /// (each handle a different color in one mesh). Matches `gizmo.wgsl`.
 #[repr(C)]

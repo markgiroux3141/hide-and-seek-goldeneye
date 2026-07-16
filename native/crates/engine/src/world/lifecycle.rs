@@ -2,16 +2,42 @@
 //! projection, the BUILD↔HUNT toggle, and the spawn floor probe.
 
 use super::*;
+use crate::camera::apply_look_delta;
 
 impl World {
     /// Apply mouse-look — once per rendered frame, so aim is decoupled from the
-    /// fixed sim rate.
-    pub fn look(&mut self, input: &mut InputState) {
+    /// fixed sim rate. In HUNT, holding RMB switches to GoldenEye free-aim: the
+    /// mouse floats the crosshair within a circular boundary and only pans the
+    /// camera once the crosshair is pinned at the rim; releasing springs it back
+    /// to center. `dt` drives that spring.
+    pub fn look(&mut self, input: &mut InputState, dt: f32) {
         match self.mode {
-            Mode::Build => self.camera.apply_look(input),
+            Mode::Build => {
+                self.aiming = false;
+                self.camera.apply_look(input);
+            }
             Mode::Hunt => {
-                if let Some(c) = self.character.as_mut() {
-                    c.apply_look(input);
+                let (dx, dy) = input.take_mouse_delta();
+                self.aiming = input.pointer_locked && input.mouse_right_down();
+                if !input.pointer_locked {
+                    return; // delta already drained so a re-lock doesn't jump
+                }
+                if input.mouse_right_down() {
+                    // Free-aim: move the floating crosshair; rim overflow pans view.
+                    let (ax, ay, pan_dx, pan_dy) = super::combat::resolve_aim(self.aim_x, self.aim_y, dx, dy);
+                    self.aim_x = ax;
+                    self.aim_y = ay;
+                    if let Some(c) = self.character.as_mut() {
+                        (c.yaw, c.pitch) = apply_look_delta(c.yaw, c.pitch, pan_dx, pan_dy);
+                    }
+                } else {
+                    // Normal look; crosshair springs back to center.
+                    if let Some(c) = self.character.as_mut() {
+                        (c.yaw, c.pitch) = apply_look_delta(c.yaw, c.pitch, dx, dy);
+                    }
+                    let k = (AIM_RETURN_SPRING * dt).min(1.0);
+                    self.aim_x += (0.0 - self.aim_x) * k;
+                    self.aim_y += (0.0 - self.aim_y) * k;
                 }
             }
         }
@@ -64,6 +90,10 @@ impl World {
         self.place_tool = None;
         self.clear_platform_state();
         self.reset_subface();
+        // Reset the free-aim crosshair (centered, disengaged) on any mode switch.
+        self.aim_x = 0.0;
+        self.aim_y = 0.0;
+        self.aiming = false;
         match self.mode {
             Mode::Build => {
                 let Some(feet) = self.floor_under(self.camera.pos) else {
@@ -123,6 +153,7 @@ impl World {
                 self.nav = None;
                 self.enemy = None;
                 self.caught = false;
+                self.sparks.clear();
                 self.physics.clear_door_colliders();
                 self.doors.clear();
                 self.mode = Mode::Build;

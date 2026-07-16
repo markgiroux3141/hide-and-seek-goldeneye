@@ -5,6 +5,23 @@
 use super::*;
 use super::editing::find_room_brushes;
 
+    /// Free-aim: a small mouse delta floats the crosshair inside the boundary with
+    /// no camera pan; a big delta pins it to the rim and spills the rest to a pan.
+    #[test]
+    fn free_aim_floats_then_pans_at_the_rim() {
+        use super::combat::resolve_aim;
+        // Small move from center — stays inside the circle, no pan.
+        let (ax, ay, pdx, pdy) = resolve_aim(0.0, 0.0, 20.0, 0.0);
+        assert!((ax * ax + ay * ay).sqrt() < AIM_MAX_RANGE, "inside the boundary");
+        assert!(ax > 0.0, "moved right");
+        assert_eq!((pdx, pdy), (0.0, 0.0), "no camera pan inside the boundary");
+        // Huge move — crosshair pinned at the rim, remainder becomes a pan.
+        let (ax, ay, pdx, _pdy) = resolve_aim(0.0, 0.0, 100_000.0, 0.0);
+        let mag = (ax * ax + ay * ay).sqrt();
+        assert!((mag - AIM_MAX_RANGE).abs() < 1e-3, "clamped to the rim: {mag}");
+        assert!(pdx > 0.0, "overflow pans the camera right");
+    }
+
     /// End-to-end authoring loop with no GPU: build the room + collider, aim the
     /// crosshair at the −Z wall, push it, and confirm the whole pipeline fires
     /// (raycast pick → brush resize → re-evaluate → collider rebuilt → new mesh).
@@ -81,6 +98,45 @@ use super::editing::find_room_brushes;
             }
         }
         assert!(caught, "hunter should reach and catch the stationary player");
+    }
+
+    /// B5: in HUNT the animated model *is* the hunter — the placeholder box is
+    /// gone and the model tracks the enemy's nav-driven position + faces its
+    /// travel direction while it moves.
+    #[test]
+    fn hunter_drives_the_animated_model_not_a_box() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT: bake nav + spawn hunter
+        assert!(world.enemy.is_some(), "hunter spawned");
+        assert!(world.char_model.is_some(), "character model loaded");
+        // The placeholder box is suppressed (the model is the hunter).
+        assert!(world.enemy_mesh().is_none(), "box replaced by the model");
+
+        // Step the hunter, then advance the animation driver.
+        let input = InputState::default();
+        for _ in 0..30 {
+            world.fixed_step(1.0 / 120.0, &input);
+        }
+        world.advance_animation(1.0 / 60.0);
+
+        let epos = world.enemy.as_ref().unwrap().pos;
+        assert!(
+            (world.char_pos - epos).length() < 1e-4,
+            "model position {:?} should track the hunter {:?}",
+            world.char_pos,
+            epos
+        );
+        // Once moving, yaw faces the hunter's heading.
+        let h = world.enemy.as_ref().unwrap().heading();
+        if world.enemy.as_ref().unwrap().speed() > 0.0 {
+            let expect = h.x.atan2(h.z);
+            let d = (world.char_yaw - expect).abs();
+            assert!(d < 1e-4, "yaw {} should face heading {}", world.char_yaw, expect);
+        }
+        // The pose is a real 15-joint skinning set.
+        let (_, joints) = world.character_pose().expect("character present in HUNT");
+        assert_eq!(joints.len(), 15);
     }
 
     /// The door tool: `B` arms a preview on the wall, a left-click cuts a

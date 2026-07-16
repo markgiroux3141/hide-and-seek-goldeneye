@@ -39,6 +39,11 @@ pub struct Enemy {
     path: Vec<Vec3>,
     path_idx: usize,
     repath_timer: f32,
+    /// Horizontal facing (unit vector) — the last direction of travel. Drives
+    /// the visual model's yaw (B5) and, later, the perception cone.
+    heading: Vec3,
+    /// Whether the hunter advanced this step (false while breaching / pathless).
+    moving: bool,
 }
 
 impl Enemy {
@@ -48,11 +53,28 @@ impl Enemy {
             path: Vec::new(),
             path_idx: 0,
             repath_timer: 0.0, // repath immediately on first step
+            heading: Vec3::NEG_Z,
+            moving: false,
+        }
+    }
+
+    /// Horizontal facing (unit vector) — the last direction of travel.
+    pub fn heading(&self) -> Vec3 {
+        self.heading
+    }
+
+    /// Current speed (m/s): the chase speed while advancing, else 0.
+    pub fn speed(&self) -> f32 {
+        if self.moving {
+            SPEED_CHASE
+        } else {
+            0.0
         }
     }
 
     /// Advance one step toward the player, or breach a blocking door.
     pub fn update(&mut self, dt: f32, player_feet: Vec3, nav: &NavWorld) -> EnemyStep {
+        self.moving = false; // set true below only if we actually advance
         // Periodically recompute the route to the player's current position.
         self.repath_timer -= dt;
         if self.repath_timer <= 0.0 {
@@ -86,6 +108,12 @@ impl Enemy {
             if dist > 1e-4 {
                 let step = (SPEED_CHASE * dt).min(dist);
                 self.pos += to / dist * step;
+                // Face the horizontal direction of travel (ignore vertical).
+                let flat = Vec3::new(to.x, 0.0, to.z);
+                if flat.length_squared() > 1e-6 {
+                    self.heading = flat.normalize();
+                }
+                self.moving = true;
             }
             if self.pos.distance(target) < WAYPOINT_EPS && self.path_idx < self.path.len() - 1 {
                 self.path_idx += 1;

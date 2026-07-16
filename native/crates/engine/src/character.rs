@@ -104,7 +104,18 @@ impl CharacterController {
     }
 
     pub fn view_proj(&self, aspect: f32) -> glam::Mat4 {
-        let eye = self.pos + Vec3::new(0.0, EYE, 0.0);
-        view_proj_from(eye, forward_from(self.yaw, self.pitch), aspect)
+        view_proj_from(self.eye(), self.forward(), aspect)
+    }
+
+    /// Eye (camera) position in world space — feet + eye height. The fire ray
+    /// originates here (the crosshair is at the eye centre).
+    pub fn eye(&self) -> Vec3 {
+        self.pos + Vec3::new(0.0, EYE, 0.0)
+    }
+
+    /// Unit look direction (yaw + pitch). The fire ray travels along this, and the
+    /// camera looks along it.
+    pub fn forward(&self) -> Vec3 {
+        forward_from(self.yaw, self.pitch)
     }
 }

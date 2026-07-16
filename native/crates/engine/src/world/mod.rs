@@ -13,6 +13,10 @@ use glam::{Mat4, Vec3};
 
 use crate::camera::FlyCamera;
 use crate::character::CharacterController;
+// NB: `crate::combat` (the subsystem) vs `world::combat` (the `mod combat;` wiring
+// submodule below) share a name — import only the types, and reach the crate
+// module fully-qualified (`crate::combat::…`) to avoid the shadow.
+use crate::combat::{GunModel, Weapon};
 use crate::csg_runtime::{
     Axis, Brush, Op, Region, Side, StairDesc, StairDir, WALL_THICKNESS, WORLD_SCALE,
 };
@@ -21,11 +25,16 @@ use crate::input::InputState;
 use crate::mesh::{ColorVertex, ColoredMesh, CpuMesh, TexturedMesh};
 use crate::nav::{self, NavWorld};
 use crate::physics::PhysicsWorld;
+use crate::skeletal::anim::AnimPlayer;
+use crate::skeletal::anim_set;
+use crate::skeletal::clip;
+use crate::skeletal::gltf_skin::{self, SkinnedModel};
 use crate::structures::{self, Anchor, Edge, Platform, StairRun};
 use crate::textures::DEFAULT_SCHEME;
 use crate::uv_zones::ZonedBuilder;
 
 // ─── Submodule tree (the `impl World` methods are spread across these) ──
+mod combat;
 mod editing;
 mod geom;
 mod hunt;
@@ -43,6 +52,37 @@ pub(crate) use pick::{flip, same_face};
 
 /// Default push/pull increment, in WT (JS `PUSH_PULL_STEP`). Shift → 1 WT.
 pub const PUSH_PULL_STEP: f32 = 4.0;
+
+// ─── GoldenEye free-aim (Player Combat; hold RMB) ──────────────────────────
+/// The crosshair floats within this circular radius in "aim space" (an isotropic
+/// NDC-like space); drawn aspect-corrected so the boundary reads circular on
+/// screen. Ported from GamepadManager `AIM_MAX_RANGE`.
+pub(crate) const AIM_MAX_RANGE: f32 = 0.6;
+/// Mouse pixels → aim-space units. Equal to the camera `LOOK_SPEED` so that when
+/// the crosshair is pinned at the rim the leftover motion pans the view seamlessly.
+pub(crate) const AIM_SENS: f32 = 0.002;
+/// Crosshair snap-back-to-center speed when not aiming (JS `RETURN_SPRING`).
+pub(crate) const AIM_RETURN_SPRING: f32 = 15.0;
+/// tan(½ · 60°) — the world/viewmodel vertical FOV. Maps an aim-space offset to
+/// an angular offset for the gun tilt + the fire ray.
+pub(crate) const AIM_FOV_TAN: f32 = 0.577_350_3;
+
+/// Skinned-character model scale: GoldenEye units → metres. 0.00104 = base
+/// 0.001 + ~4% (matches the 3DS FPS port, sized to level proportions).
+pub(crate) const CHAR_SCALE: f32 = 0.00104;
+
+/// B3 locomotion demo: linear speed (m/s) per band, indexed by `demo_band`
+/// (0=idle,1=walk,2=jog,3=run). Walk/jog/run match `SPEED_THRESHOLDS` so the
+/// JS `_playLocomotion` band selection lands exactly on each clip.
+pub(crate) const LOCO_SPEEDS: [f32; 4] = [0.0, 1.5, 3.5, 5.0];
+/// Demo circle the character paces (room centre, radius in metres).
+pub(crate) const DEMO_CENTER: Vec3 = Vec3::new(3.0, 0.0, 3.0);
+pub(crate) const DEMO_RADIUS: f32 = 1.6;
+
+/// Clip indices within the character's [`AnimPlayer`], set by the fixed load
+/// order in `World::new`: 0–3 locomotion, 4 fire, then the hit set, then death.
+pub(crate) const CHAR_FIRE_IDX: usize = 4;
+pub(crate) const CHAR_HIT_START: usize = 5;
 
 /// Door opening size in WT (JS `DOOR_WIDTH` / `DOOR_HEIGHT`): 3 × 7 = 0.75 × 1.75 m.
 const DOOR_WIDTH: f32 = 3.0;
@@ -132,6 +172,20 @@ pub(crate) struct Door {
     /// The panel collider's index in [`PhysicsWorld`], removed on breach.
     panel: usize,
 }
+
+/// A live hit spark (Player Combat P2): a bright marker at a shot's impact point,
+/// nudged just off the surface, that fades out after [`SPARK_TTL`] seconds. Purely
+/// visual feedback that a shot registered at the right spot.
+#[derive(Clone, Copy)]
+pub(crate) struct Spark {
+    pos: Vec3,
+    ttl: f32,
+}
+
+/// How long a hit spark lives (s) and its half-extent (metres). Small + brief:
+/// enough to see where the shot landed, not a persistent decal.
+const SPARK_TTL: f32 = 0.12;
+const SPARK_HALF: f32 = 0.02;
 
 /// Which opening the crosshair tool cuts. A `Door` is a fixed 3×7 wall opening
 /// that becomes breakable at HUNT (frame marked `door`); a `Hole` is an
@@ -298,6 +352,56 @@ pub struct World {
     /// Baked nav grid + hunter; `Some` only in HUNT mode.
     nav: Option<NavWorld>,
     enemy: Option<Enemy>,
+    /// B1 skinned-character viewer: one loaded character rendered in bind pose so
+    /// the skinning pipeline can be verified live. Later milestones drive its pose
+    /// from clips and hand it to the enemy. `None` if the asset failed to load.
+    char_model: Option<SkinnedModel>,
+    /// B2/B3: the crossfade mixer driving the character (idle + walk/jog/run),
+    /// or `None` → static bind pose. Clip indices: 0=idle,1=walk,2=jog,3=run.
+    char_anim: Option<AnimPlayer>,
+    /// B3 demo: locomotion band (0=idle,1=walk,2=jog,3=run) cycled by `L`, and
+    /// the character's angle around the demo circle. Replaced by enemy/nav-driven
+    /// movement in B5.
+    demo_band: usize,
+    demo_angle: f32,
+    /// Character feet position (metres) + facing yaw, updated by the demo mover.
+    char_pos: Vec3,
+    char_yaw: f32,
+    /// B4: `true` while a death one-shot is clamped on its last frame (press `L`
+    /// to revive). Fire/hit are suppressed while dead.
+    char_dead: bool,
+    /// Last fire-window state, to log OPEN/closed transitions once.
+    char_fire_open: bool,
+    /// xorshift state for the hit/death random pick (no `rand` dep — a demo pick,
+    /// not a statistical roll; combat can bring `rand` when it needs one).
+    char_rng: u64,
+    /// World-space Y offset that seats the character's feet on the floor.
+    /// Computed from the **lowest skinned point of the actual idle pose** (the
+    /// bind-pose AABB can't be used — the bind pose is a splayed star with the
+    /// feet spread high, so seating by it leaves the standing pose sunk).
+    char_feet_offset: f32,
+
+    // ─── Player Combat (HUNT-phase weapon; see `world/combat.rs`) ──
+    /// P1: the first-person weapon's static gun mesh (CPU side), uploaded once to
+    /// the renderer at startup. `None` if the asset failed to load.
+    gun_model: Option<GunModel>,
+    /// P2: the muzzle-flash mesh (separate GLB), uploaded once; drawn additively
+    /// on top of the gun while a shot's flash is active. `None` if load failed.
+    muzzle_model: Option<GunModel>,
+    /// The active weapon: config + viewmodel + fire timing (+ ammo P3, recoil P4).
+    weapon: Weapon,
+    /// P2: live hit sparks — a short-lived bright marker at each impact point, so
+    /// wall hits read at the right spot. Decayed each frame in HUNT.
+    sparks: Vec<Spark>,
+    /// GoldenEye free-aim crosshair offset in aim space (see `AIM_MAX_RANGE`).
+    /// Moves while RMB is held (HUNT), springs back to center on release. Drives
+    /// the crosshair position, the gun tilt, and the fire-ray direction. 0 = center.
+    aim_x: f32,
+    aim_y: f32,
+    /// Whether free-aim is currently engaged (RMB held in HUNT). The crosshair is
+    /// shown only while aiming (HUNT) — matching GoldenEye's aim-mode reticle.
+    aiming: bool,
+
     caught: bool,
     regions: Vec<Region>,
     selected: Option<Selection>,
@@ -389,6 +493,120 @@ impl World {
         // Spawn at the room's horizontal center, ~1.5 m up, looking toward −Z.
         let camera = FlyCamera::new(Vec3::new(3.0, 1.5, 3.0), 0.0, 0.0);
 
+        // B1: load the first skinned character (a warning, not a panic, if the
+        // asset is missing — the editor still runs without it).
+        let char_path = format!(
+            "{}/../../assets/enemies/characters/russian-guard_karl.glb",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let char_model = match gltf_skin::load(&char_path) {
+            Ok(m) => {
+                log::info!(
+                    "loaded character russian-guard_karl: {} verts, {} primitives, {} joints",
+                    m.vertices.len(),
+                    m.primitives.len(),
+                    m.skeleton.joint_count()
+                );
+                Some(m)
+            }
+            Err(e) => {
+                log::warn!("character load failed: {e}");
+                None
+            }
+        };
+
+        // B2/B3/B4: load the clip set bound to the character's skeleton, in a
+        // FIXED index order (locomotion 0–3, fire 4, then the hit set, then the
+        // death set — see CHAR_*_IDX), into a crossfade mixer.
+        let char_anim = char_model.as_ref().and_then(|m| {
+            let mut files: Vec<&str> =
+                vec!["00-idle.glb", "28-walking.glb", "2A-jogging.glb", "29-running.glb"];
+            files.push(anim_set::FIRE_CLIP);
+            files.extend_from_slice(anim_set::HIT_CLIPS);
+            files.extend_from_slice(anim_set::DEATH_CLIPS);
+            let mut clips = Vec::new();
+            for f in &files {
+                let path =
+                    format!("{}/../../assets/enemies/animations/{f}", env!("CARGO_MANIFEST_DIR"));
+                match clip::load(&path, &m.skeleton) {
+                    Ok(c) => clips.push(c),
+                    Err(e) => log::warn!("clip {f} load failed: {e}"),
+                }
+            }
+            if clips.len() == files.len() {
+                log::info!("loaded {} character clips (idle/walk/jog/run + fire + 12 hit + 17 death)", clips.len());
+                Some(AnimPlayer::new(clips, 0))
+            } else {
+                log::warn!("only {}/{} clips loaded; character animation disabled", clips.len(), files.len());
+                None
+            }
+        });
+
+        // Seat the feet: sample the idle across its loop, skin each pose on the
+        // CPU, and take the global lowest Y (the most-planted foot). Seating that
+        // at the floor keeps the feet grounded while the animation's own vertical
+        // motion still reads. Falls back to the bind-pose AABB with no clip.
+        let char_feet_offset = match (&char_model, char_anim.as_ref().and_then(|a| a.clip(0))) {
+            (Some(m), Some(idle)) => {
+                let samples = 24;
+                let mut min_y = f32::INFINITY;
+                for i in 0..samples {
+                    let t = idle.duration * i as f32 / samples as f32;
+                    let mats = idle.skinning_matrices(t, &m.skeleton);
+                    min_y = min_y.min(m.skinned_min_y(&mats));
+                }
+                -min_y * CHAR_SCALE
+            }
+            (Some(m), _) => -m.bounds_min.y * CHAR_SCALE,
+            _ => 0.0,
+        };
+
+        // Player Combat: build the weapon (PP7, the P0 pick) and load its gun +
+        // muzzle-flash meshes. Warn-not-panic if an asset is missing — the rest
+        // still runs. Both GLBs live under `native/assets/weapons/`.
+        let weapon = Weapon::new(crate::combat::config::PP7);
+        let asset = |rel: &str| {
+            format!("{}/../../assets/weapons/{}", env!("CARGO_MANIFEST_DIR"), rel)
+        };
+        let gun_model = match crate::combat::load_gun(&asset(weapon.config().gun_path)) {
+            Ok(m) => {
+                log::info!(
+                    "loaded weapon {}: {} verts, {} primitives",
+                    weapon.config().name,
+                    m.vertices.len(),
+                    m.primitives.len()
+                );
+                Some(m)
+            }
+            Err(e) => {
+                log::warn!("weapon load failed: {e}");
+                None
+            }
+        };
+        let muzzle_model = if weapon.config().muzzle_path.is_empty() {
+            None
+        } else {
+            // `load_flash` keeps only the additive flash billboards — the GoldenEye
+            // muzzle.glb is the whole firing pose (gun body + hand + flash), so
+            // drawing all of it flashed a hand into view.
+            match crate::combat::load_flash(&asset(weapon.config().muzzle_path)) {
+                Ok(m) => {
+                    log::info!("loaded muzzle flash: {} verts", m.vertices.len());
+                    Some(m)
+                }
+                Err(e) => {
+                    log::warn!("muzzle-flash load failed: {e}");
+                    None
+                }
+            }
+        };
+
+        // Demo character starts on the circle at 270° — the nice centre-front
+        // spot in front of the spawn camera — facing +Z (toward the camera).
+        let demo_angle = std::f32::consts::FRAC_PI_2 * 3.0;
+        let char_pos = DEMO_CENTER
+            + Vec3::new(DEMO_RADIUS * demo_angle.cos(), 0.0, DEMO_RADIUS * demo_angle.sin());
+
         World {
             camera,
             physics: PhysicsWorld::new(),
@@ -396,6 +614,23 @@ impl World {
             character: None,
             nav: None,
             enemy: None,
+            char_model,
+            char_anim,
+            demo_band: 0,
+            demo_angle,
+            char_pos,
+            char_yaw: 0.0,
+            char_dead: false,
+            char_fire_open: false,
+            char_rng: 0x9E37_79B9_7F4A_7C15,
+            char_feet_offset,
+            gun_model,
+            muzzle_model,
+            weapon,
+            sparks: Vec::new(),
+            aim_x: 0.0,
+            aim_y: 0.0,
+            aiming: false,
             caught: false,
             regions: vec![region],
             selected: None,

@@ -7,6 +7,7 @@
 pub mod app;
 pub mod camera;
 pub mod character;
+pub mod combat;
 pub mod csg_runtime;
 pub mod enemy;
 pub mod geom;
@@ -16,6 +17,7 @@ pub mod mesh;
 pub mod nav;
 pub mod physics;
 pub mod renderer;
+pub mod skeletal;
 pub mod structures;
 pub mod textures;
 pub mod uv_zones;

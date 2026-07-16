@@ -154,12 +154,33 @@ impl PhysicsWorld {
     /// Cast a ray and return the first hit point + normal, if any. `dir` need
     /// not be normalized. Used for crosshair face-picking.
     pub fn raycast(&mut self, origin: Vec3, dir: Vec3, max_toi: f32) -> Option<RayHit> {
+        self.raycast_excluding(origin, dir, max_toi, None)
+    }
+
+    /// As [`PhysicsWorld::raycast`], but excluding one collider from the query.
+    /// Player hitscan uses this to exclude the player's own capsule (JS
+    /// `castRayAndGetNormal(..., playerCollider)`).
+    ///
+    /// NB: today the native player is a *transient shape-cast* (see
+    /// [`PhysicsWorld::move_character`]), not a registered collider — so there's
+    /// no player handle to pass and this is effectively `raycast`. The exclude
+    /// path is threaded now for when Track A adds enemy/player colliders.
+    pub fn raycast_excluding(
+        &mut self,
+        origin: Vec3,
+        dir: Vec3,
+        max_toi: f32,
+        exclude: Option<ColliderHandle>,
+    ) -> Option<RayHit> {
         self.ensure_current();
         let ray = Ray::new(
             point![origin.x, origin.y, origin.z],
             vector![dir.x, dir.y, dir.z],
         );
-        let filter = QueryFilter::default();
+        let mut filter = QueryFilter::default();
+        if let Some(h) = exclude {
+            filter = filter.exclude_collider(h);
+        }
         let (_handle, intersection) = self.query_pipeline.cast_ray_and_get_normal(
             &self.bodies,
             &self.colliders,

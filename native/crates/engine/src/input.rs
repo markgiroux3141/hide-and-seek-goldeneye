@@ -12,6 +12,12 @@ pub struct InputState {
     mouse_dx: f32,
     mouse_dy: f32,
     pub pointer_locked: bool,
+    /// Left mouse button held (JS `InputManager.mouseButtons`). Combat reads this
+    /// each frame for firing; edge detection (semi-auto) is done in the weapon.
+    mouse_left: bool,
+    /// Right mouse button held — the GoldenEye free-aim modifier (hold to float
+    /// the crosshair; the future N64-controller path will drive aim mode instead).
+    mouse_right: bool,
 }
 
 impl InputState {
@@ -25,6 +31,26 @@ impl InputState {
 
     pub fn key_down(&self, key: KeyCode) -> bool {
         self.keys.contains(&key)
+    }
+
+    /// Set the left-mouse-button held state (from winit press/release events).
+    pub fn set_mouse_left(&mut self, down: bool) {
+        self.mouse_left = down;
+    }
+
+    /// Whether the left mouse button is currently held.
+    pub fn mouse_left_down(&self) -> bool {
+        self.mouse_left
+    }
+
+    /// Set the right-mouse-button held state (from winit press/release events).
+    pub fn set_mouse_right(&mut self, down: bool) {
+        self.mouse_right = down;
+    }
+
+    /// Whether the right mouse button is currently held (free-aim modifier).
+    pub fn mouse_right_down(&self) -> bool {
+        self.mouse_right
     }
 
     pub fn add_mouse(&mut self, dx: f32, dy: f32) {

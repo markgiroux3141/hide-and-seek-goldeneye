@@ -3,16 +3,188 @@
 
 use super::*;
 
+/// Locomotion band (clip index 0=idle,1=walk,2=jog,3=run) for a speed (m/s),
+/// matching the JS `_playLocomotion` thresholds.
+fn band_for_speed(speed: f32) -> usize {
+    if speed >= anim_set::SPEED_RUN {
+        3
+    } else if speed >= anim_set::SPEED_JOG {
+        2
+    } else if speed > 0.0 {
+        1
+    } else {
+        0
+    }
+}
+
 impl World {
     /// A box mesh for the hunter at its current position (meters), for the
     /// renderer's entity pass. `None` when no hunter is active.
     pub fn enemy_mesh(&self) -> Option<CpuMesh> {
+        // B5: when the skinned character loaded, IT is the hunter (drawn via the
+        // skinned pipeline in `character_pose`), so no placeholder box. The box
+        // remains only as a fallback when the model failed to load.
+        if self.char_model.is_some() {
+            return None;
+        }
         let e = self.enemy.as_ref()?;
         // Capsule-sized box: 0.5 × 1.5 × 0.5 m, centered above the feet.
         let c = e.pos + Vec3::new(0.0, 0.75, 0.0);
         let polys = csg::box_polygons([c.x, c.y, c.z], [0.25, 0.75, 0.25]);
         let (p, n, i) = csg::polygons_to_mesh(&polys);
         Some(CpuMesh::from_csg(&p, &n, &i))
+    }
+
+    /// The B1 skinned character's CPU model, for one-time GPU upload at startup.
+    /// `None` if the asset failed to load.
+    pub fn character_model(&self) -> Option<&SkinnedModel> {
+        self.char_model.as_ref()
+    }
+
+    /// B3 demo: cycle the locomotion band idle → walk → jog → run → idle. Bound
+    /// to `L`. Crossfades to the band's clip over 0.15 s (JS `crossFadeFrom`).
+    /// Also revives the character if it was in a death pose.
+    pub fn cycle_char_speed(&mut self) {
+        self.char_dead = false;
+        self.demo_band = (self.demo_band + 1) % LOCO_SPEEDS.len();
+        if let Some(anim) = &mut self.char_anim {
+            anim.play(self.demo_band, 0.15);
+        }
+        log::info!(
+            "locomotion band {} ({:.1} m/s)",
+            self.demo_band,
+            LOCO_SPEEDS[self.demo_band]
+        );
+    }
+
+    /// B4 demo: fire the standing rifle one-shot (with its FIRE_TIMING window),
+    /// returning to the current locomotion when done. Suppressed while dead.
+    pub fn char_fire(&mut self) {
+        if self.char_dead {
+            return;
+        }
+        let band = self.demo_band;
+        if let Some(anim) = &mut self.char_anim {
+            anim.play_once(CHAR_FIRE_IDX, 0.15, Some(band), Some(anim_set::FIRE_WINDOW));
+            log::info!("fire");
+        }
+    }
+
+    /// B4 demo: play a random hit reaction, returning to locomotion when done.
+    pub fn char_hit(&mut self) {
+        if self.char_dead {
+            return;
+        }
+        let idx = CHAR_HIT_START + self.rand_below(anim_set::HIT_CLIPS.len());
+        let band = self.demo_band;
+        if let Some(anim) = &mut self.char_anim {
+            anim.play_once(idx, 0.1, Some(band), None);
+            log::info!("hit ({})", anim_set::HIT_CLIPS[idx - CHAR_HIT_START]);
+        }
+    }
+
+    /// B4 demo: play a random death (clamps on the last frame — body stays down;
+    /// press `L` to revive).
+    pub fn char_death(&mut self) {
+        if self.char_dead {
+            return;
+        }
+        let death_start = CHAR_HIT_START + anim_set::HIT_CLIPS.len();
+        let pick = self.rand_below(anim_set::DEATH_CLIPS.len());
+        let idx = death_start + pick;
+        self.char_dead = true;
+        if let Some(anim) = &mut self.char_anim {
+            anim.play_once(idx, 0.15, None, None);
+            log::info!("death ({}) — press L to reset", anim_set::DEATH_CLIPS[pick]);
+        }
+    }
+
+    /// xorshift64 → an index in `[0, n)`. A demo pick, not a statistical roll.
+    fn rand_below(&mut self, n: usize) -> usize {
+        let mut x = self.char_rng;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.char_rng = x;
+        (x % n.max(1) as u64) as usize
+    }
+
+    /// Advance the character each render frame (JS `mixer.update(delta)` cadence):
+    /// walk the demo circle at the current band's speed, face the direction of
+    /// travel, keep the clip selection in sync, and step the crossfade mixer.
+    pub fn advance_animation(&mut self, dt: f32) {
+        if self.char_anim.is_none() {
+            return;
+        }
+
+        // B5: in HUNT the model IS the hunter — position/facing/locomotion band
+        // come from the nav/AI-driven enemy (the model is purely visual, mirroring
+        // the JS separation of movement from the mixer). In BUILD it's the demo
+        // viewer paced around a circle by the `L`/`Z`/`N`/`M` keys.
+        let hunt = !self.is_build() && self.enemy.is_some();
+        if hunt {
+            let e = self.enemy.as_ref().unwrap();
+            let (pos, heading, speed) = (e.pos, e.heading(), e.speed());
+            self.char_pos = pos;
+            if speed > 0.0 {
+                // Model faces +Z at yaw 0 → yaw = atan2(vx, vz).
+                self.char_yaw = heading.x.atan2(heading.z);
+            }
+            // Select the locomotion band from the hunter's speed (chase 2.8 → walk;
+            // stopped/breaching → idle). Hardened `play` guard makes the per-frame
+            // call a no-op once settled.
+            let band = band_for_speed(speed);
+            self.char_anim.as_mut().unwrap().play(band, 0.15);
+        } else {
+            // BUILD demo: stand still during a one-shot / death, else pace the
+            // circle at the current band's speed facing the travel tangent.
+            let oneshot = self.char_anim.as_ref().unwrap().is_playing_oneshot();
+            let speed = if !oneshot && !self.char_dead {
+                LOCO_SPEEDS[self.demo_band]
+            } else {
+                0.0
+            };
+            if speed > 0.0 {
+                self.demo_angle =
+                    (self.demo_angle + speed / DEMO_RADIUS * dt).rem_euclid(std::f32::consts::TAU);
+                let (s, c) = self.demo_angle.sin_cos();
+                self.char_pos = DEMO_CENTER + Vec3::new(DEMO_RADIUS * c, 0.0, DEMO_RADIUS * s);
+                self.char_yaw = (-s).atan2(c);
+            }
+        }
+
+        // Advance the clocks + crossfade (clip selection happens above / on
+        // keypress — re-`play`ing here would be fine now but is unnecessary).
+        let anim = self.char_anim.as_mut().unwrap();
+        anim.update(dt);
+        let open = anim.fire_window_open();
+        if open != self.char_fire_open {
+            self.char_fire_open = open;
+            log::info!("{}", if open { "  fire window OPEN — shot" } else { "  fire window closed" });
+        }
+    }
+
+    /// The character's world placement + joint (skinning) matrices this frame:
+    /// the mixer's (possibly mid-crossfade) pose, positioned + faced by the demo
+    /// mover. `None` if the character isn't loaded.
+    pub fn character_pose(&self) -> Option<(Mat4, Vec<Mat4>)> {
+        let m = self.char_model.as_ref()?;
+        // `char_pos` is the feet position (floor y); `char_feet_offset` lifts the
+        // model origin so the feet sit on that floor. In BUILD the floor is y=0;
+        // in HUNT it's the hunter's nav-cell y.
+        let pos = Vec3::new(
+            self.char_pos.x,
+            self.char_pos.y + self.char_feet_offset,
+            self.char_pos.z,
+        );
+        let model = Mat4::from_translation(pos)
+            * Mat4::from_rotation_y(self.char_yaw)
+            * Mat4::from_scale(Vec3::splat(CHAR_SCALE));
+        let joints = match &self.char_anim {
+            Some(anim) => anim.skinning_matrices(&m.skeleton),
+            None => m.skeleton.bind_pose_matrices(),
+        };
+        Some((model, joints))
     }
 
     /// Arm breakable doors for the hunt (JS `door.js` `buildDoors`): scan every

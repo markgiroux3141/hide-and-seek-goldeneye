@@ -125,8 +125,22 @@ impl ApplicationHandler for App {
         for rm in world.initial_meshes() {
             renderer.set_region_textured(rm.id, &rm.mesh);
         }
+        // B1: upload the skinned character once (geometry + textures); its pose is
+        // driven per frame below.
+        if let Some(m) = world.character_model() {
+            renderer.upload_character(m);
+        }
+        // Player Combat P1: upload the weapon viewmodel once (gun geometry +
+        // textures); its overlay transform is driven per frame + it's shown only
+        // in HUNT.
+        if let Some(g) = world.gun_model() {
+            renderer.upload_viewmodel(g);
+        }
+        if let Some(m) = world.muzzle_model() {
+            renderer.upload_muzzle(m);
+        }
         log::info!(
-            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  G=HUNT"
+            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  L=char walk/jog/run  Z=fire N=hit M=death  G=HUNT  [HUNT: click=fire  RMB=aim]"
         );
 
         window.request_redraw();
@@ -158,35 +172,56 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseInput {
-                state: ElementState::Pressed,
+                state,
                 button: MouseButton::Left,
                 ..
             } => {
+                // Record the held state (combat reads it each frame for firing).
+                let pressed = state == ElementState::Pressed;
+                self.input.set_mouse_left(pressed);
+                if !pressed {
+                    return; // release: state recorded, nothing else to do
+                }
                 if !self.input.pointer_locked {
                     self.set_pointer_lock(true);
-                } else {
-                    // Grabbed: confirm an armed opening (door/hole) or placement
-                    // (pillar/brace), else select the crosshair face.
-                    let opening = self.world.as_ref().map(|w| w.is_opening_arming()).unwrap_or(false);
-                    let placing = self.world.as_ref().map(|w| w.is_placing()).unwrap_or(false);
-                    let platform = self.world.as_ref().map(|w| w.is_platform_tool()).unwrap_or(false);
-                    let rm = if opening {
-                        self.world.as_mut().and_then(|w| w.confirm_opening())
-                    } else if placing {
-                        self.world.as_mut().and_then(|w| w.confirm_place())
-                    } else if platform {
-                        self.world.as_mut().and_then(|w| w.platform_click())
-                    } else {
-                        if let Some(world) = self.world.as_mut() {
-                            world.select_at_crosshair();
-                        }
-                        None
-                    };
-                    if let Some(rm) = rm {
-                        self.upload(&rm);
-                    }
-                    self.refresh_highlight();
+                    return;
                 }
+                // Grabbed + HUNT: left-click FIRES (handled per-frame in
+                // `combat_step`), so authoring is skipped here.
+                if self.world.as_ref().map(|w| !w.is_build()).unwrap_or(false) {
+                    return;
+                }
+                // Grabbed + BUILD: confirm an armed opening (door/hole) or
+                // placement (pillar/brace), else select the crosshair face.
+                let opening = self.world.as_ref().map(|w| w.is_opening_arming()).unwrap_or(false);
+                let placing = self.world.as_ref().map(|w| w.is_placing()).unwrap_or(false);
+                let platform = self.world.as_ref().map(|w| w.is_platform_tool()).unwrap_or(false);
+                let rm = if opening {
+                    self.world.as_mut().and_then(|w| w.confirm_opening())
+                } else if placing {
+                    self.world.as_mut().and_then(|w| w.confirm_place())
+                } else if platform {
+                    self.world.as_mut().and_then(|w| w.platform_click())
+                } else {
+                    if let Some(world) = self.world.as_mut() {
+                        world.select_at_crosshair();
+                    }
+                    None
+                };
+                if let Some(rm) = rm {
+                    self.upload(&rm);
+                }
+                self.refresh_highlight();
+            }
+
+            // Right mouse = the GoldenEye free-aim modifier (hold in HUNT). Just
+            // record the held state; `World::look` reads it each frame.
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Right,
+                ..
+            } => {
+                self.input.set_mouse_right(state == ElementState::Pressed);
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
@@ -265,7 +300,7 @@ impl ApplicationHandler for App {
                         self.upload(&rm);
                     }
                 } else if let Some(world) = self.world.as_mut() {
-                    world.look(&mut self.input);
+                    world.look(&mut self.input, dt);
                 }
                 if let Some(world) = self.world.as_mut() {
                     let mut steps = 0;
@@ -277,6 +312,12 @@ impl ApplicationHandler for App {
                     if steps == MAX_SUBSTEPS {
                         self.accumulator = 0.0; // drop backlog after a stall
                     }
+                    // Advance the skinned character's animation once per frame
+                    // (visual; JS mixer.update(delta) cadence, real dt).
+                    world.advance_animation(dt);
+                    // Player Combat: advance the weapon + fire on trigger (HUNT
+                    // only; JS WeaponSystem.update(dt) cadence, real dt).
+                    world.combat_step(dt, &self.input);
                 }
                 // Per-frame highlight in BUILD while grabbed: the door ghost, or
                 // the crosshair-tracked selection sub-rect (camera look was
@@ -312,6 +353,22 @@ impl ApplicationHandler for App {
                     (self.world.as_ref(), self.renderer.as_mut())
                 {
                     renderer.set_entity_mesh(world.enemy_mesh().as_ref());
+                    // B1: drive the skinned character's pose (bind pose for now).
+                    if let Some((model, joints)) = world.character_pose() {
+                        renderer.set_character_pose(model, &joints);
+                    }
+                    // Player Combat: drive the gun + muzzle-flash overlay
+                    // transforms (shown only in HUNT; `None` hides them) and the
+                    // live hit-spark markers.
+                    let aspect = renderer.aspect();
+                    renderer.set_viewmodel_transform(world.viewmodel_transform(aspect));
+                    renderer.set_muzzle_transform(world.muzzle_transform(aspect));
+                    // Crosshair shown only while aiming (HUNT) or in BUILD.
+                    let crosshair = world
+                        .crosshair_visible()
+                        .then(|| world.aim_offset(aspect));
+                    renderer.set_crosshair_offset(crosshair);
+                    renderer.set_spark_mesh(world.spark_mesh().as_ref());
                     renderer.set_door_mesh(world.door_mesh().as_ref());
                     // Pending-stair ghost — `None` (auto-clears) unless a stair op
                     // is in progress in BUILD.
@@ -424,6 +481,21 @@ impl App {
                 world.toggle_mode();
             }
             self.refresh_highlight(); // cleared when entering HUNT
+            return;
+        }
+        // Character animation demo (BUILD only — in HUNT the model is the
+        // nav/AI-driven hunter). L cycles locomotion; Z/N/M fire/hit/death.
+        if matches!(code, KeyCode::KeyL | KeyCode::KeyZ | KeyCode::KeyN | KeyCode::KeyM) {
+            if let Some(world) = self.world.as_mut() {
+                if world.is_build() {
+                    match code {
+                        KeyCode::KeyL => world.cycle_char_speed(),
+                        KeyCode::KeyZ => world.char_fire(),
+                        KeyCode::KeyN => world.char_hit(),
+                        _ => world.char_death(),
+                    }
+                }
+            }
             return;
         }
         // B / H toggle the opening tools (door / hole): arm a ghost preview that
