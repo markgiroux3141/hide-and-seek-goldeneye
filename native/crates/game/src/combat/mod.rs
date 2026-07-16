@@ -34,6 +34,22 @@ const RELOAD_DELAY: f32 = 0.5;
 /// `reserveAmmo: w.magazineSize * 10`).
 const RESERVE_MULTIPLIER: u32 = 10;
 
+/// Fixed one-shot volumes (linear amplitude gain), mirroring the JS
+/// `WeaponSystem` play-sites: fire `0.6`, reload `0.7`, empty `0.5`.
+const FIRE_VOL: f32 = 0.6;
+const RELOAD_VOL: f32 = 0.7;
+const EMPTY_VOL: f32 = 0.5;
+
+/// A queued sound to play this frame: an asset-relative name + a linear amplitude
+/// volume. The [`Weapon`] stays audio-free (headless-testable) and instead queues
+/// these; the game layer (`world::combat`) drains them and plays them through
+/// `engine::audio`. Mirrors the JS `audio.play(url, volume)` call arguments.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SoundCue {
+    pub name: &'static str,
+    pub volume: f32,
+}
+
 /// The runtime weapon: its config, the view-space [`ViewModel`], fire timing, and
 /// the ammo/reload state machine. Orchestrator port of `src/weapons/WeaponSystem.ts`
 /// (minus audio + rendering, which the renderer owns). Recoil lands on [`ViewModel`].
@@ -61,6 +77,10 @@ pub struct Weapon {
     /// Post-fire delay countdown (s) before the empty auto-reload starts
     /// (JS `reloadDelayTimer`); also gates manual reload while >0.
     reload_delay_timer: f32,
+    /// Sound cues queued this frame by [`Self::fire`]/[`Self::start_reload`]/the
+    /// empty-click branch, drained by the game layer via [`Self::take_cues`]. Keeps
+    /// the fire model audio-free so it stays headless-testable.
+    cues: Vec<SoundCue>,
 }
 
 impl Weapon {
@@ -76,7 +96,15 @@ impl Weapon {
             reloading: false,
             reload_timer: 0.0,
             reload_delay_timer: 0.0,
+            cues: Vec::new(),
         }
+    }
+
+    /// Drain the sound cues queued since the last call (fire/reload/empty). The
+    /// game layer plays these through `engine::audio` each frame; the weapon itself
+    /// never touches audio hardware.
+    pub fn take_cues(&mut self) -> Vec<SoundCue> {
+        std::mem::take(&mut self.cues)
     }
 
     pub fn config(&self) -> &WeaponStats {
@@ -157,9 +185,22 @@ impl Weapon {
             if self.magazine > 0 && fire_ready {
                 self.fire();
                 fired = true;
-            } else if self.magazine == 0 && trigger && self.reload_delay_timer <= 0.0 && self.reserve > 0 {
-                // Trigger pulled on an empty gun → auto-reload (JS empty-click path).
-                self.start_reload();
+            } else if self.magazine == 0 && edge {
+                // Empty click: a fresh trigger pull on an empty magazine clicks.
+                //
+                // DEVIATION from the JS oracle (flagged): JS queued `empty` then
+                // `startReload` in a branch gated on `reloadDelayTimer <= 0 &&
+                // reserve > 0`, but the auto-reload in the `reload_delay_timer`
+                // block above *always* wins that race the moment the delay elapses
+                // (it sets `reloading` first), so the JS empty sound was effectively
+                // dead code. We instead click on each fresh pull of an empty mag —
+                // audible feedback whether or not a reload is pending. The reserve
+                // auto-reload still runs from the delay block above, so reload
+                // timing is unchanged; this only adds the click.
+                self.cues.push(SoundCue {
+                    name: self.config().empty_sound,
+                    volume: EMPTY_VOL,
+                });
             }
         }
         fired
@@ -193,6 +234,10 @@ impl Weapon {
         }
         self.flash_timer = MUZZLE_FLASH_TIME;
         self.view.play_recoil();
+        self.cues.push(SoundCue {
+            name: self.config().fire_sound,
+            volume: FIRE_VOL,
+        });
     }
 
     /// Begin a reload (JS `startReload`): sets the timer + plays the viewmodel dip;
@@ -201,6 +246,10 @@ impl Weapon {
         self.reloading = true;
         self.reload_timer = self.config().reload_time;
         self.view.play_reload();
+        self.cues.push(SoundCue {
+            name: self.config().reload_sound,
+            volume: RELOAD_VOL,
+        });
     }
 
     /// Refill the magazine from reserve, capped at the magazine size and available
@@ -231,6 +280,67 @@ mod tests {
         let mut w = Weapon::new(config::PP7);
         assert!(w.update(0.016, true), "first trigger pull fires");
         assert!(w.flash_active(), "flash armed on fire");
+    }
+
+    /// Firing queues exactly one fire cue (the right sound + JS's 0.6 volume), and
+    /// draining clears it so the next frame starts empty.
+    #[test]
+    fn firing_queues_a_fire_cue() {
+        let mut w = Weapon::new(config::PP7);
+        w.update(0.016, true);
+        let cues = w.take_cues();
+        assert_eq!(
+            cues,
+            vec![SoundCue {
+                name: config::PP7.fire_sound,
+                volume: FIRE_VOL
+            }],
+            "one fire cue at the fire volume"
+        );
+        assert!(w.take_cues().is_empty(), "cues drained");
+    }
+
+    /// A manual reload queues a reload cue (the shared reload sound + 0.7 volume).
+    #[test]
+    fn reload_queues_a_reload_cue() {
+        let mut w = Weapon::new(config::PP7);
+        // Spend a round so a reload is allowed, and clear the fire cue it queued.
+        w.update(0.016, true);
+        w.take_cues();
+        w.request_reload();
+        assert_eq!(
+            w.take_cues(),
+            vec![SoundCue {
+                name: config::PP7.reload_sound,
+                volume: RELOAD_VOL
+            }],
+            "manual reload queues the reload cue"
+        );
+    }
+
+    /// A fresh trigger pull on an empty magazine queues the empty-click sound (and
+    /// only that — no fire, no accompanying reload cue on the click itself).
+    #[test]
+    fn empty_click_queues_the_empty_sound() {
+        let mut w = Weapon::new(config::PP7); // mag 7
+        // Drain the magazine (release between pulls for a fresh edge each shot).
+        for _ in 0..7 {
+            w.update(0.016, true);
+            w.update(0.016, false);
+        }
+        assert_eq!(w.magazine(), 0, "magazine emptied");
+        w.take_cues(); // discard the 7 fire cues
+        // The post-fire delay is still counting (well under 0.5 s elapsed), so no
+        // auto-reload has started — a fresh pull is a clean empty click.
+        w.update(0.016, true);
+        assert_eq!(
+            w.take_cues(),
+            vec![SoundCue {
+                name: config::PP7.empty_sound,
+                volume: EMPTY_VOL
+            }],
+            "a dry pull queues exactly the empty-click sound"
+        );
     }
 
     /// Semi-auto is edge-triggered: holding the trigger fires exactly once — you

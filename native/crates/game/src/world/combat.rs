@@ -6,6 +6,11 @@
 
 use super::*;
 
+/// The looping background-music track (asset-relative under `native/assets/audio/`).
+/// The JS default (`Game.ts`: `/music/102 Facility.mp3`). Plays in both BUILD and
+/// HUNT, started once when the audio subsystem attaches and never stopped.
+const BG_MUSIC: &str = "music/102 Facility.mp3";
+
 /// Resolve one frame of free-aim from a mouse delta (pixels). Moves the crosshair
 /// in aim space, clamps it to the [`AIM_MAX_RANGE`] circle, and returns the leftover
 /// motion beyond the rim as a camera pan (in pixels, for `apply_look_delta`).
@@ -26,6 +31,19 @@ pub(crate) fn resolve_aim(aim_x: f32, aim_y: f32, dx: f32, dy: f32) -> (f32, f32
 }
 
 impl World {
+    /// Attach the audio subsystem (called once at startup by the app, after the
+    /// device is initialized). Preloads the weapon's fire/reload/empty sounds so
+    /// the first shot doesn't hitch, starts the looping background music, and
+    /// stores the manager so `combat_step` can play the weapon's queued cues.
+    pub fn attach_audio(&mut self, mut audio: AudioManager) {
+        let cfg = self.weapon.config();
+        audio.load(cfg.fire_sound);
+        audio.load(cfg.reload_sound);
+        audio.load(cfg.empty_sound);
+        audio.play_music(BG_MUSIC, true);
+        self.audio = Some(audio);
+    }
+
     /// The crosshair's screen-space offset this frame, in aspect-corrected NDC
     /// (so the circular aim boundary reads round on screen). `aspect` = w/h.
     /// `(0, 0)` = centered (BUILD, or HUNT not aiming). Fed to the renderer.
@@ -116,7 +134,20 @@ impl World {
         // Fire: left mouse held (only while the cursor is grabbed). The weapon
         // gates on cooldown + the semi/auto edge rule.
         let trigger = input.pointer_locked && input.mouse_left_down();
-        if !self.weapon.update(dt, trigger) {
+        let fired = self.weapon.update(dt, trigger);
+
+        // Play any sound cues the weapon queued this frame — fire, reload (manual
+        // `R`, empty-click auto-reload, or the post-empty auto-reload), and the
+        // empty click. Drained every frame regardless of whether a shot fired, so
+        // a reload-only frame (e.g. `R` with a partial mag) still gets its sound.
+        let cues = self.weapon.take_cues();
+        if let Some(audio) = self.audio.as_mut() {
+            for cue in cues {
+                audio.play(cue.name, cue.volume);
+            }
+        }
+
+        if !fired {
             return;
         }
 

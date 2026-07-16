@@ -19,6 +19,10 @@ image = { version = "0.25", default-features = false, features = ["bmp", "png"] 
 rapier3d = "0.22"
 env_logger = "0.11"
 log = "0.4"
+# Game-audio (kira): sound handles, per-instance volume, looping music, mixing;
+# decodes wav (SFX) + mp3 (music) via symphonia. Default features already include
+# the cpal backend + wav + mp3, so no feature list is needed.
+kira = "0.12"
 
 # Local crates.
 csg = { path = "crates/csg" }

@@ -9,8 +9,7 @@
 
 use glam::Vec3;
 
-/// Static per-weapon configuration (JS `WeaponStats`). `sounds` are omitted until
-/// an audio subsystem lands (`kira`/`rodio` are planned, not yet present).
+/// Static per-weapon configuration (JS `WeaponStats`).
 #[derive(Clone, Copy, Debug)]
 pub struct WeaponStats {
     pub name: &'static str,
@@ -21,6 +20,14 @@ pub struct WeaponStats {
     pub damage: f32,
     /// Hitscan range in metres.
     pub range: f32,
+    /// Audio asset names (relative to `native/assets/audio/`) for the fire,
+    /// reload, and empty-click sounds (JS `sounds:{fire,reload,empty}`). Reload +
+    /// empty are shared across weapons; fire is per-weapon. The `Weapon` queues
+    /// these as sound cues the game layer plays through `engine::audio` — the
+    /// volumes are fixed (see `combat::mod`'s `*_VOL` consts, mirroring JS).
+    pub fire_sound: &'static str,
+    pub reload_sound: &'static str,
+    pub empty_sound: &'static str,
     /// Relative asset path under `native/assets/weapons/` (gun GLB).
     pub gun_path: &'static str,
     /// Relative asset path (muzzle-flash GLB), empty when the weapon has none.
@@ -59,6 +66,9 @@ pub const PP7: WeaponStats = WeaponStats {
     reload_time: 0.75,
     damage: 25.0,
     range: 100.0,
+    fire_sound: "sounds/weapons/pp7-fire.wav",
+    reload_sound: "sounds/weapons/reload.wav",
+    empty_sound: "sounds/weapons/empty.wav",
     gun_path: "pp7/gun.glb",
     muzzle_path: "pp7/muzzle.glb",
     model_scale: 0.0007,

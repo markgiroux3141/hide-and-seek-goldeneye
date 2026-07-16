@@ -153,6 +153,11 @@ impl ApplicationHandler for App {
         // counter's bitmap font); the per-frame text quads are set below.
         let (hw, hh, hpx) = crate::hud::atlas_rgba();
         renderer.upload_hud_atlas(hw, hh, &hpx);
+        // Audio: initialize the device (silent if none), then hand it to the world,
+        // which preloads the weapon SFX and starts the looping background music.
+        if let Some(audio) = engine::audio::AudioManager::new() {
+            world.attach_audio(audio);
+        }
         log::info!(
             "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  L=char walk/jog/run  Z=fire N=hit M=death  G=HUNT  [HUNT: click=fire  RMB=aim  R=reload]"
         );

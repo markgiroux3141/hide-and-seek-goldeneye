@@ -19,3 +19,4 @@ image = { workspace = true }
 rapier3d = { workspace = true }
 log = { workspace = true }
 env_logger = { workspace = true }
+kira = { workspace = true }

@@ -17,6 +17,7 @@ use crate::character::CharacterController;
 // submodule below) share a name — import only the types, and reach the crate
 // module fully-qualified (`crate::combat::…`) to avoid the shadow.
 use engine::assets::textured_model::TexturedModel;
+use engine::audio::AudioManager;
 use crate::combat::Weapon;
 use engine::geometry::csg_runtime::{
     Axis, Brush, Op, Region, Side, StairDesc, StairDir, WALL_THICKNESS, WORLD_SCALE,
@@ -402,6 +403,11 @@ pub struct World {
     /// Whether free-aim is currently engaged (RMB held in HUNT). The crosshair is
     /// shown only while aiming (HUNT) — matching GoldenEye's aim-mode reticle.
     aiming: bool,
+    /// The audio subsystem (one-shot weapon SFX + looping background music).
+    /// `None` until the app attaches it post-construction (see `attach_audio`) —
+    /// so headless tests, which never attach it, run silently. Cue draining and
+    /// music are no-ops while `None`.
+    audio: Option<AudioManager>,
 
     caught: bool,
     regions: Vec<Region>,
@@ -632,6 +638,7 @@ impl World {
             aim_x: 0.0,
             aim_y: 0.0,
             aiming: false,
+            audio: None,
             caught: false,
             regions: vec![region],
             selected: None,

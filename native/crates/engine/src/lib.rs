@@ -7,12 +7,14 @@
 //! - [`sim`]      — Rapier physics + nav grid / A*.
 //! - [`assets`]   — glTF/GLB loading (skinned loading lives in [`skeletal`]).
 //! - [`skeletal`] — shared-skeleton skinned character animation.
+//! - [`audio`]    — kira-backed one-shot SFX + looping background music.
 //!
 //! Game-specific code (the authored `world`, weapon combat, enemy/player
 //! controllers, and the winit event loop) lives in the `game` crate, which
 //! consumes this engine as a library — the dependency is one-way.
 
 pub mod assets;
+pub mod audio;
 pub mod geometry;
 pub mod platform;
 pub mod render;
