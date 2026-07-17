@@ -79,6 +79,32 @@ impl App {
         }
     }
 
+    /// Begin a weapon switch (HUNT). This only kicks off the lower→raise dip; the
+    /// mesh actually swaps at the bottom of the dip inside `World::combat_step`,
+    /// which flips `models_dirty` — drained each frame below via
+    /// [`Self::upload_weapon_meshes`] to re-upload the new gun/muzzle to the GPU.
+    fn begin_weapon_switch(&mut self) {
+        if let Some(world) = self.world.as_mut() {
+            world.begin_weapon_switch();
+        }
+    }
+
+    /// Re-upload the active weapon's gun + muzzle-flash meshes to the renderer,
+    /// replacing the GPU viewmodel/muzzle in place (a weapon with no muzzle, e.g.
+    /// the sniper, keeps the previous GPU mesh but stays hidden via its `None`
+    /// transform each frame). Called after a switch swaps the meshes.
+    fn upload_weapon_meshes(&mut self) {
+        let (Some(world), Some(renderer)) = (self.world.as_ref(), self.renderer.as_mut()) else {
+            return;
+        };
+        if let Some(g) = world.gun_model() {
+            renderer.upload_viewmodel(g);
+        }
+        if let Some(m) = world.muzzle_model() {
+            renderer.upload_muzzle(m);
+        }
+    }
+
     /// Push the current selection's highlight quad to the renderer.
     fn refresh_highlight(&mut self) {
         if let (Some(world), Some(renderer)) = (self.world.as_ref(), self.renderer.as_mut()) {
@@ -182,7 +208,7 @@ impl ApplicationHandler for App {
             world.attach_audio(audio);
         }
         log::info!(
-            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  L=char walk/jog/run  Z=fire N=hit M=death  G=HUNT  [HUNT: click=fire  RMB=aim  R=reload]"
+            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  L=char walk/jog/run  Z=fire N=hit M=death  G=HUNT  [HUNT: click=fire  RMB=aim  R=reload  Q=weapon]"
         );
 
         window.request_redraw();
@@ -325,12 +351,11 @@ impl ApplicationHandler for App {
                 // USB-N64 gamepad: poll + apply the solitaire scheme. This injects
                 // held buttons + analog move into `input` and drives HUNT look/aim
                 // directly, so it runs before mouse-look (which the pad supersedes
-                // in HUNT). Keyboard/mouse remain live in BUILD and when unplugged.
-                let mut pad_connected = false;
+                // only while actively used — see `pad_actions.active`). Keyboard/mouse
+                // remain live in BUILD, when unplugged, and whenever the pad is idle.
                 let mut pad_actions = crate::gamepad::PadActions::default();
                 if let (Some(pad), Some(world)) = (self.gamepad.as_mut(), self.world.as_mut()) {
                     pad_actions = pad.update(dt, &mut self.input, world);
-                    pad_connected = pad.connected();
                 }
                 if pad_actions.just_connected {
                     // Drop straight into gameplay — no mouse click needed to grab.
@@ -351,6 +376,9 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
+                if pad_actions.cycle {
+                    self.begin_weapon_switch();
+                }
 
                 // Apply mouse-look — unless a gizmo drag is active, in which case
                 // the mouse motion drives the drag (move/scale) instead of the cam.
@@ -366,9 +394,10 @@ impl ApplicationHandler for App {
                         self.upload(&rm);
                     }
                 } else if let Some(world) = self.world.as_mut() {
-                    // The pad drives HUNT look/aim above; mouse-look still runs in
-                    // BUILD and whenever no pad is connected.
-                    if world.is_build() || !pad_connected {
+                    // The pad drives HUNT look/aim only while it's actively used;
+                    // mouse-look runs in BUILD and whenever the pad is idle (so a
+                    // connected-but-untouched pad doesn't disable the mouse).
+                    if world.is_build() || !pad_actions.active {
                         world.look(&mut self.input, dt);
                     }
                 }
@@ -385,6 +414,11 @@ impl ApplicationHandler for App {
                     // A3: pump the hunter's rifle shots (FIRE_TIMING window) + decay
                     // the player damage-flash / HUD-pop timers (HUNT only).
                     world.enemy_combat_step(dt);
+                }
+                // A weapon switch swaps the gun/muzzle meshes at the bottom of its
+                // dip (mid-`combat_step`); re-upload them to the GPU when it does.
+                if self.world.as_mut().map(|w| w.take_models_dirty()).unwrap_or(false) {
+                    self.upload_weapon_meshes();
                 }
                 // Per-frame highlight in BUILD while grabbed: the door ghost, or
                 // the crosshair-tracked selection sub-rect (camera look was
@@ -580,6 +614,14 @@ impl App {
                 world.toggle_mode();
             }
             self.refresh_highlight(); // cleared when entering HUNT
+            return;
+        }
+        // Q cycles the player's weapon (HUNT only; the JS `KeyQ` bind). BUILD leaves
+        // Q free for future editor use.
+        if code == KeyCode::KeyQ {
+            if self.world.as_ref().map(|w| !w.is_build()).unwrap_or(false) {
+                self.begin_weapon_switch();
+            }
             return;
         }
         // Character animation demo (BUILD only — in HUNT the model is the

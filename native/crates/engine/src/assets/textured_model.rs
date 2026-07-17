@@ -21,6 +21,14 @@ pub struct TexturedPrimitive {
     /// Index into [`TexturedModel::images`], or `None` for an untextured
     /// material (drawn with a white fallback).
     pub image: Option<usize>,
+    /// Index into [`TexturedModel::images`] of the model's **environment/reflection**
+    /// map, or `None` for a non-metallic model. Populated for every primitive of a
+    /// GoldenEye metallic gun (one that has an `*EnvMapping*` material) — the shiny
+    /// gold/silver/chrome guns. Their base-color textures are mostly BLACK (the
+    /// metal was meant to be filled by an environment reflection), so the renderer
+    /// samples THIS texture by the surface normal (matcap-style) and adds it, which
+    /// turns the black metal gold/silver. Plain guns leave it `None`.
+    pub emissive: Option<usize>,
 }
 
 /// A loaded static textured model: one shared vertex/index buffer split into
@@ -58,6 +66,31 @@ pub fn load(path: &str, keep: impl Fn(&str) -> bool + Copy) -> Result<TexturedMo
     if model.vertices.is_empty() {
         return Err(format!("{path}: no drawable geometry found (after material filter)"));
     }
+
+    // Metallic guns (gold/silver/chrome) — environment mapping. GoldenEye tags the
+    // reflective surface with an `*EnvMapping*` material whose texture is the metal
+    // reflection map (gold for the Golden Gun, chrome for the Magnum, …). The gun's
+    // BASE textures are mostly black — the metal was meant to be filled by that
+    // reflection, so unlit it renders near-black with only a few gold accents.
+    // Rather than the base color, the renderer samples this reflection map by the
+    // surface normal (matcap-style, see `shader_viewmodel`) and adds it, turning
+    // the black metal into uniform gold/silver like the original. Point EVERY
+    // primitive of such a model at the (first) EnvMapping material's texture so the
+    // whole gun reflects; plain guns have no EnvMapping material and stay `None`.
+    let env_image = doc
+        .materials()
+        .find(|m| m.name().is_some_and(|n| n.contains("EnvMapping")))
+        .and_then(|m| {
+            m.pbr_metallic_roughness()
+                .base_color_texture()
+                .map(|info| info.texture().source().index())
+        });
+    if let Some(env) = env_image {
+        for p in &mut model.primitives {
+            p.emissive = Some(env);
+        }
+    }
+
     model.images = images.iter().map(to_rgba8).collect();
     Ok(model)
 }
@@ -133,11 +166,41 @@ fn visit_node(
                 index_start,
                 index_count,
                 image,
+                // Filled in the metallic post-pass below (env reflection map).
+                emissive: None,
             });
         }
     }
 
     for child in node.children() {
         visit_node(child, world, buffers, out, keep);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A metallic gun (golden-gun contains an `*EnvMapping*` material) points EVERY
+    /// primitive at the SAME reflection texture (the env map), so the whole gun
+    /// reflects gold — not each primitive's own (mostly black) base texture. A
+    /// plain gun (pp7, no EnvMapping) gets no reflection map.
+    #[test]
+    fn metallic_gun_env_maps_every_primitive_others_none() {
+        let asset =
+            |g: &str| format!("{}/../../assets/weapons/{}/gun.glb", env!("CARGO_MANIFEST_DIR"), g);
+
+        let gold = load(&asset("golden-gun"), |_| true).expect("load golden gun");
+        let env = gold.primitives[0].emissive;
+        assert!(env.is_some(), "golden-gun is metallic → has a reflection map");
+        for (i, p) in gold.primitives.iter().enumerate() {
+            assert_eq!(p.emissive, env, "golden-gun prim[{i}] shares the one env map");
+        }
+
+        let pp7 = load(&asset("pp7"), |_| true).expect("load pp7");
+        assert!(
+            pp7.primitives.iter().all(|p| p.emissive.is_none()),
+            "pp7 is not metallic → no reflection map"
+        );
     }
 }

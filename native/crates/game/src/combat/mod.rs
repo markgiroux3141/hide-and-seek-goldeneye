@@ -211,6 +211,18 @@ impl Weapon {
         self.flash_timer > 0.0
     }
 
+    /// Abort an in-progress reload without refilling the magazine (weapon swap —
+    /// JS `cycleWeapon` sets `reloading = false`). Also clears the post-fire
+    /// auto-reload delay so a holstered weapon doesn't silently top up while it's
+    /// away, and resets the viewmodel dip. The ammo state (mag/reserve) is
+    /// preserved, so switching back resumes exactly where you left off.
+    pub fn cancel_reload(&mut self) {
+        self.reloading = false;
+        self.reload_timer = 0.0;
+        self.reload_delay_timer = 0.0;
+        self.view.cancel_reload();
+    }
+
     /// Manual reload request (the `R` key). Starts a reload only when one isn't
     /// already running, the post-fire delay isn't active, the magazine isn't full,
     /// and there's reserve to draw from — JS `WeaponSystem.update`'s `KeyR` branch.

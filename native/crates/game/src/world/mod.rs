@@ -145,6 +145,45 @@ pub(crate) const ENEMY_GUN_ROT: Vec3 = Vec3::new(0.0, -1.49, -1.69);
 /// The right-hand attach bone (JS matches `Bone_9` → right hand).
 pub(crate) const ENEMY_HAND_BONE: &str = "Bone_9";
 
+/// Load a weapon's `(gun, muzzle-flash)` CPU meshes from its config, resolving the
+/// asset-relative paths under `native/assets/weapons/`. Warn-not-panic: a failed
+/// load (or a weapon with no muzzle, like the sniper — `muzzle_path == ""`) yields
+/// `None` for that slot, and the renderer simply hides whatever is missing. Used at
+/// startup for the initial weapon and on every `Q`/`A` weapon switch.
+fn load_weapon_models(cfg: &crate::combat::config::WeaponStats) -> (Option<TexturedModel>, Option<TexturedModel>) {
+    let asset = |rel: &str| format!("{}/../../assets/weapons/{}", env!("CARGO_MANIFEST_DIR"), rel);
+    let gun = match crate::combat::load_gun(&asset(cfg.gun_path)) {
+        Ok(m) => {
+            log::info!(
+                "loaded weapon {}: {} verts, {} primitives",
+                cfg.name,
+                m.vertices.len(),
+                m.primitives.len()
+            );
+            Some(m)
+        }
+        Err(e) => {
+            log::warn!("weapon '{}' gun load failed: {e}", cfg.name);
+            None
+        }
+    };
+    // `load_flash` keeps only the additive flash billboards — the GoldenEye
+    // muzzle.glb is the whole firing pose (gun body + hand + flash), so drawing all
+    // of it flashed a hand into view.
+    let muzzle = if cfg.muzzle_path.is_empty() {
+        None
+    } else {
+        match crate::combat::load_flash(&asset(cfg.muzzle_path)) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                log::warn!("weapon '{}' muzzle-flash load failed: {e}", cfg.name);
+                None
+            }
+        }
+    };
+    (gun, muzzle)
+}
+
 // ─── Player health + damage feedback (P5) ───────────────────────────────────
 pub(crate) const PLAYER_MAX_HEALTH: f32 = 100.0;
 pub(crate) const PLAYER_MAX_ARMOR: f32 = 100.0;
@@ -492,8 +531,24 @@ pub struct World {
     /// drawn in world space each frame. `None` if the asset failed to load.
     enemy_gun_model: Option<TexturedModel>,
     enemy_muzzle_model: Option<TexturedModel>,
-    /// The active weapon: config + viewmodel + fire timing (+ ammo P3, recoil P4).
-    weapon: Weapon,
+    /// The player's weapon inventory (JS `WeaponSystem.slots`) — one [`Weapon`]
+    /// per `config::WEAPONS` entry, each keeping its own ammo/reload state so a
+    /// swap resumes where you left off. `Q` / N64 `A` cycles [`weapon_index`].
+    weapons: Vec<Weapon>,
+    /// Index of the active weapon in [`weapons`] (JS `currentSlotIndex`).
+    weapon_index: usize,
+    /// Weapon-switch animation state (JS `WeaponSystem.cycleWeapon`). `switching`
+    /// gates firing + re-entry; `switch_timer` runs `0..SWITCH_TIME` across the
+    /// lower→raise dip; at the halfway point the mesh swaps to `switch_target`,
+    /// `switch_swapped` latches, and `models_dirty` tells the app to re-upload the
+    /// new gun/muzzle. See `world::combat::combat_step`.
+    switching: bool,
+    switch_target: usize,
+    switch_timer: f32,
+    switch_swapped: bool,
+    /// Set when a switch swaps the active weapon's meshes mid-animation; the app
+    /// drains it via `take_models_dirty` and re-uploads the viewmodel + muzzle.
+    models_dirty: bool,
     /// P2: live hit sparks — a short-lived bright marker at each impact point, so
     /// wall hits read at the right spot. Decayed each frame in HUNT.
     sparks: Vec<Spark>,
@@ -670,45 +725,17 @@ impl World {
             _ => 0.0,
         };
 
-        // Player Combat: build the weapon (PP7, the P0 pick) and load its gun +
-        // muzzle-flash meshes. Warn-not-panic if an asset is missing — the rest
-        // still runs. Both GLBs live under `native/assets/weapons/`.
-        let weapon = Weapon::new(crate::combat::config::PP7);
-        let asset = |rel: &str| {
-            format!("{}/../../assets/weapons/{}", env!("CARGO_MANIFEST_DIR"), rel)
-        };
-        let gun_model = match crate::combat::load_gun(&asset(weapon.config().gun_path)) {
-            Ok(m) => {
-                log::info!(
-                    "loaded weapon {}: {} verts, {} primitives",
-                    weapon.config().name,
-                    m.vertices.len(),
-                    m.primitives.len()
-                );
-                Some(m)
-            }
-            Err(e) => {
-                log::warn!("weapon load failed: {e}");
-                None
-            }
-        };
-        let muzzle_model = if weapon.config().muzzle_path.is_empty() {
-            None
-        } else {
-            // `load_flash` keeps only the additive flash billboards — the GoldenEye
-            // muzzle.glb is the whole firing pose (gun body + hand + flash), so
-            // drawing all of it flashed a hand into view.
-            match crate::combat::load_flash(&asset(weapon.config().muzzle_path)) {
-                Ok(m) => {
-                    log::info!("loaded muzzle flash: {} verts", m.vertices.len());
-                    Some(m)
-                }
-                Err(e) => {
-                    log::warn!("muzzle-flash load failed: {e}");
-                    None
-                }
-            }
-        };
+        // Player Combat: build the full weapon inventory (JS `ALL_WEAPONS`) and
+        // load the *active* weapon's gun + muzzle-flash meshes. The rest of the
+        // guns load their meshes lazily on the first switch (see `cycle_weapon`) —
+        // startup only pays for PP7 (index 0). Warn-not-panic if an asset is
+        // missing. All GLBs live under `native/assets/weapons/`.
+        let weapons: Vec<Weapon> = crate::combat::config::WEAPONS
+            .iter()
+            .map(|&cfg| Weapon::new(cfg))
+            .collect();
+        let weapon_index = 0;
+        let (gun_model, muzzle_model) = load_weapon_models(weapons[weapon_index].config());
 
         // P5: the GoldenEye radial health HUD graphic (processed once into angle/
         // side maps). Warn-not-panic if the JPEG is missing.
@@ -729,6 +756,7 @@ impl World {
         // A3: the hunter's rifle (KF7) + its muzzle flash, attached to Bone_9 and
         // drawn in world space during the hunt. Same static-textured loaders as the
         // player gun (the flash keeps only the additive `CullBoth` billboards).
+        let asset = |rel: &str| format!("{}/../../assets/weapons/{}", env!("CARGO_MANIFEST_DIR"), rel);
         let enemy_gun_model = match crate::combat::load_gun(&asset(ENEMY_GUN_PATH)) {
             Ok(m) => {
                 log::info!("loaded enemy rifle: {} verts, {} primitives", m.vertices.len(), m.primitives.len());
@@ -783,7 +811,13 @@ impl World {
             muzzle_model,
             enemy_gun_model,
             enemy_muzzle_model,
-            weapon,
+            weapons,
+            weapon_index,
+            switching: false,
+            switch_target: 0,
+            switch_timer: 0.0,
+            switch_swapped: false,
+            models_dirty: false,
             sparks: Vec::new(),
             aim_x: 0.0,
             aim_y: 0.0,

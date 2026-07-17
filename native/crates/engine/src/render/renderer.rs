@@ -164,6 +164,9 @@ pub struct Renderer {
     char_uniform_layout: wgpu::BindGroupLayout,
     char_sampler: wgpu::Sampler,
     character: Option<GpuCharacter>,
+    /// Texture bind-group layout for the viewmodel/muzzle/enemy-weapon meshes:
+    /// base color + sampler + emissive (see `build_gpu_viewmodel`).
+    viewmodel_tex_layout: wgpu::BindGroupLayout,
 
     // First-person weapon viewmodel (Player Combat P1): the gun, drawn in a
     // depth-cleared overlay pass so it's always on top and never clips walls.
@@ -646,6 +649,41 @@ impl Renderer {
                 },
             ],
         });
+        // Viewmodel texture layout: base color (0) + sampler (1) + emissive (2).
+        // The extra emissive slot vs `char_tex_layout` is what lets the shiny-metal
+        // guns (`*EnvMapping*` materials) add their sheen — see `shader_viewmodel`.
+        // Non-emissive primitives bind a 1×1 black texture there.
+        let viewmodel_tex_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("viewmodel-tex-bgl"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
         let char_uniform_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("char-uniform-bgl"),
@@ -733,7 +771,7 @@ impl Renderer {
         });
         let viewmodel_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("viewmodel-layout"),
-            bind_group_layouts: &[&camera_layout, &char_tex_layout],
+            bind_group_layouts: &[&camera_layout, &viewmodel_tex_layout],
             push_constant_ranges: &[],
         });
         let viewmodel_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -857,9 +895,11 @@ impl Renderer {
         });
 
         // ── Muzzle-flash pipeline (Player Combat P2): same layout/shader as the
-        // viewmodel, but ADDITIVE blend + no depth write — a flash of light on top
-        // of the gun (JS `AdditiveBlending`, `depthWrite=false`, `DoubleSide`).
-        // Drawn in the overlay pass (depth already cleared), always over the gun.
+        // viewmodel, but ADDITIVE blend + no depth write (JS `AdditiveBlending`,
+        // `depthWrite=false`, `DoubleSide`). It still depth-TESTS (`LessEqual`, like
+        // three.js's default `depthTest=true`) so the gun — drawn first, writing
+        // depth — OCCLUDES the parts of the flash behind the barrel/slide, instead
+        // of the flash painting over the gun. The additive blend keeps it a glow.
         let muzzle_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("muzzle-pipeline"),
             layout: Some(&viewmodel_layout),
@@ -898,7 +938,7 @@ impl Renderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: false,
-                depth_compare: wgpu::CompareFunction::Always,
+                depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: Default::default(),
                 bias: Default::default(),
             }),
@@ -1238,6 +1278,7 @@ impl Renderer {
             char_uniform_layout,
             char_sampler,
             character: None,
+            viewmodel_tex_layout,
             viewmodel_pipeline,
             viewmodel: None,
             viewmodel_visible: false,
@@ -1442,15 +1483,21 @@ impl Renderer {
         let white = self.upload_char_texture(1, 1, &[255, 255, 255, 255]);
         let white_view = white.create_view(&wgpu::TextureViewDescriptor::default());
         textures.push(white);
+        // 1×1 black fallback for the emissive slot — primitives without an emissive
+        // map (everything but the shiny-metal `*EnvMapping*` guns) add nothing.
+        let black = self.upload_char_texture(1, 1, &[0, 0, 0, 255]);
+        let black_view = black.create_view(&wgpu::TextureViewDescriptor::default());
+        textures.push(black);
 
         let primitives = model
             .primitives
             .iter()
             .map(|p| {
                 let view = p.image.and_then(|i| views.get(i)).unwrap_or(&white_view);
+                let emissive_view = p.emissive.and_then(|i| views.get(i)).unwrap_or(&black_view);
                 let tex_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("viewmodel-tex-bg"),
-                    layout: &self.char_tex_layout,
+                    layout: &self.viewmodel_tex_layout,
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
@@ -1459,6 +1506,10 @@ impl Renderer {
                         wgpu::BindGroupEntry {
                             binding: 1,
                             resource: wgpu::BindingResource::Sampler(&self.char_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(emissive_view),
                         },
                     ],
                 });

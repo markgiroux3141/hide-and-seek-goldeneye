@@ -11,6 +11,11 @@ use super::*;
 /// HUNT, started once when the audio subsystem attaches and never stopped.
 const BG_MUSIC: &str = "music/102 Facility.mp3";
 
+/// Total weapon-switch dip duration (s): the outgoing gun lowers over the first
+/// half, the incoming gun rises over the second. Deliberately short + fixed (not
+/// tied to `reload_time`, which ranges 0.75–3 s) so switching stays snappy.
+const SWITCH_TIME: f32 = 0.4;
+
 /// Resolve one frame of free-aim from a mouse delta (pixels). Moves the crosshair
 /// in aim space, clamps it to the [`AIM_MAX_RANGE`] circle, and returns the leftover
 /// motion beyond the rim as a camera pan (in pixels, for `apply_look_delta`).
@@ -36,10 +41,14 @@ impl World {
     /// the first shot doesn't hitch, starts the looping background music, and
     /// stores the manager so `combat_step` can play the weapon's queued cues.
     pub fn attach_audio(&mut self, mut audio: AudioManager) {
-        let cfg = self.weapon.config();
-        audio.load(cfg.fire_sound);
-        audio.load(cfg.reload_sound);
-        audio.load(cfg.empty_sound);
+        // Preload the fire sound of EVERY weapon in the inventory (JS loads all
+        // weapon sounds upfront) so the first shot after a swap never hitches on a
+        // first-play decode. Reload/empty are shared, so load them once.
+        for w in &self.weapons {
+            audio.load(w.config().fire_sound);
+        }
+        audio.load(self.weapon().config().reload_sound);
+        audio.load(self.weapon().config().empty_sound);
         // Track A enemy-hit SFX: the flesh bullet-hit + every pain vocal, so a hit
         // never hitches on a first-play decode.
         audio.load("sounds/enemies/bullet-hit.wav");
@@ -82,8 +91,8 @@ impl World {
             Some(crate::hud::death_quads(aspect))
         } else {
             Some(crate::hud::ammo_quads(
-                self.weapon.magazine(),
-                self.weapon.reserve(),
+                self.weapon().magazine(),
+                self.weapon().reserve(),
                 aspect,
             ))
         }
@@ -94,7 +103,82 @@ impl World {
     /// magazine not full, reserve remaining).
     pub fn reload_weapon(&mut self) {
         if self.mode == Mode::Hunt {
-            self.weapon.request_reload();
+            self.weapon_mut().request_reload();
+        }
+    }
+
+    /// The active weapon (JS `WeaponSystem.slot`) — the inventory entry
+    /// [`weapon_index`] points at.
+    pub(crate) fn weapon(&self) -> &Weapon {
+        &self.weapons[self.weapon_index]
+    }
+    pub(crate) fn weapon_mut(&mut self) -> &mut Weapon {
+        &mut self.weapons[self.weapon_index]
+    }
+
+    /// Begin cycling to the next weapon (JS `WeaponSystem.cycleWeapon`, bound to
+    /// `Q` / N64 `A`). No-op outside HUNT, with a single weapon, or while a switch
+    /// is already running. Kicks off the lower→raise dip animation; the actual mesh
+    /// swap + "rack" sound happen at the bottom of the dip, driven per-frame by
+    /// [`Self::combat_step`]. Cancels any in-progress reload on the outgoing weapon
+    /// (its ammo is preserved). The app polls [`Self::take_models_dirty`] to know
+    /// when to re-upload the swapped gun/muzzle meshes.
+    pub fn begin_weapon_switch(&mut self) {
+        if self.mode != Mode::Hunt || self.weapons.len() < 2 || self.switching {
+            return;
+        }
+        self.weapon_mut().cancel_reload();
+        self.switching = true;
+        self.switch_target = (self.weapon_index + 1) % self.weapons.len();
+        self.switch_timer = 0.0;
+        self.switch_swapped = false;
+    }
+
+    /// Drain the "weapon meshes changed" flag (a switch swapped the active gun's
+    /// mesh mid-animation). The app re-uploads the viewmodel + muzzle when true.
+    pub fn take_models_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.models_dirty)
+    }
+
+    /// Advance the weapon-switch dip one frame (HUNT). Runs the outgoing gun down to
+    /// the bottom of the dip, swaps to `switch_target` there (loading its meshes +
+    /// playing the "rack" reload sound, JS `loadCurrentWeapon`), then raises the new
+    /// gun back up. Feeds the dip progress to the active viewmodel each frame. Called
+    /// from [`Self::combat_step`]; no-op when not switching.
+    fn switch_step(&mut self, dt: f32) {
+        if !self.switching {
+            return;
+        }
+        self.switch_timer += dt;
+        let t = (self.switch_timer / SWITCH_TIME).min(1.0);
+
+        // Halfway (gun at the bottom): swap the mesh + play the raise "rack".
+        if !self.switch_swapped && t >= 0.5 {
+            self.weapon_mut().view.cancel_switch(); // stop the outgoing gun's dip
+            self.weapon_index = self.switch_target;
+            let cfg = *self.weapon().config();
+            let (gun, muzzle) = load_weapon_models(&cfg);
+            self.gun_model = gun;
+            self.muzzle_model = muzzle;
+            self.models_dirty = true;
+            // 0.7 = the shared reload volume (matches `combat::mod`'s `RELOAD_VOL`).
+            if let Some(audio) = self.audio.as_mut() {
+                audio.play(cfg.reload_sound, 0.7);
+            }
+            self.switch_swapped = true;
+            log::info!(
+                "weapon → {} ({}/{})",
+                cfg.name,
+                self.weapon().magazine(),
+                self.weapon().reserve()
+            );
+        }
+
+        // Drive the active viewmodel's dip (outgoing before the swap, incoming after).
+        self.weapon_mut().view.set_switch_t(t);
+        if t >= 1.0 {
+            self.switching = false;
+            self.weapon_mut().view.cancel_switch();
         }
     }
     /// The weapon's static gun mesh, for one-time GPU upload at startup. `None` if
@@ -117,7 +201,7 @@ impl World {
         if self.mode != Mode::Hunt || self.gun_model.is_none() {
             return None;
         }
-        Some(self.weapon.view.clip_transform(aspect, self.aim_x, self.aim_y))
+        Some(self.weapon().view.clip_transform(aspect, self.aim_x, self.aim_y))
     }
 
     /// The muzzle-flash overlay transform this frame, or `None` when it shouldn't
@@ -125,10 +209,10 @@ impl World {
     /// The flash shares the gun's pivot/scale/rotation, so it uses the SAME clip
     /// transform as the gun (JS adds the flash to the same `model` group).
     pub fn muzzle_transform(&self, aspect: f32) -> Option<Mat4> {
-        if self.mode != Mode::Hunt || self.muzzle_model.is_none() || !self.weapon.flash_active() {
+        if self.mode != Mode::Hunt || self.muzzle_model.is_none() || !self.weapon().flash_active() {
             return None;
         }
-        Some(self.weapon.view.clip_transform(aspect, self.aim_x, self.aim_y))
+        Some(self.weapon().view.clip_transform(aspect, self.aim_x, self.aim_y))
     }
 
     /// Advance the weapon one frame and fire if the trigger + cooldown allow it
@@ -146,16 +230,20 @@ impl World {
         }
         self.sparks.retain(|s| s.ttl > 0.0);
 
-        // Fire: left mouse held (only while the cursor is grabbed). The weapon
-        // gates on cooldown + the semi/auto edge rule.
-        let trigger = input.pointer_locked && input.mouse_left_down();
-        let fired = self.weapon.update(dt, trigger);
+        // Advance any in-progress weapon switch (lower→swap→raise dip).
+        self.switch_step(dt);
+
+        // Fire: left mouse held (only while the cursor is grabbed), blocked mid
+        // weapon-switch (JS gates fire on `!switching`). The weapon gates on
+        // cooldown + the semi/auto edge rule.
+        let trigger = input.pointer_locked && input.mouse_left_down() && !self.switching;
+        let fired = self.weapon_mut().update(dt, trigger);
 
         // Play any sound cues the weapon queued this frame — fire, reload (manual
         // `R`, empty-click auto-reload, or the post-empty auto-reload), and the
         // empty click. Drained every frame regardless of whether a shot fired, so
         // a reload-only frame (e.g. `R` with a partial mag) still gets its sound.
-        let cues = self.weapon.take_cues();
+        let cues = self.weapon_mut().take_cues();
         if let Some(audio) = self.audio.as_mut() {
             for cue in cues {
                 audio.play(cue.name, cue.volume);
@@ -177,7 +265,7 @@ impl World {
         let up = right.cross(fwd).normalize_or_zero();
         let dir = (fwd + AIM_FOV_TAN * (self.aim_x * right + self.aim_y * up)).normalize_or_zero();
         let dir = if dir == Vec3::ZERO { fwd } else { dir };
-        let range = self.weapon.config().range;
+        let range = self.weapon().config().range;
         // Player collider excluded — `None` today (the native player is a transient
         // shape-cast, not a registered collider), threaded for Track A. Recoil is
         // gun-only (the viewmodel kick, armed in `Weapon::update`) — no camera kick,
@@ -212,7 +300,7 @@ impl World {
     /// random hit reaction that auto-returns to locomotion and stuns the hunter
     /// for the clip's length. Always plays the pain + bullet-hit SFX (JS `onHit`).
     pub(crate) fn hit_enemy(&mut self) {
-        let dmg = self.weapon.config().damage;
+        let dmg = self.weapon().config().damage;
         // Apply damage — borrow the enemy alone; bail if already dead / gone.
         let died = match self.enemy.as_mut() {
             Some(e) if !e.is_dead() => e.take_damage(dmg),

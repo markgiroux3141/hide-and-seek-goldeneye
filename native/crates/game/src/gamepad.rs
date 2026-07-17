@@ -27,8 +27,7 @@ use crate::world::{World, STICK_DEADZONE};
 // `Gamepads::pressed_raw` — confirmed against GAMEPAD_DEBUG=1 on the user's pad.
 const CODE_C_LEFT: u32 = 0; // C-Left  → strafe left
 const CODE_B: u32 = 1; // B      → reload
-#[allow(dead_code)] // A → weapon cycle: inert until a 2nd weapon lands (single PP7 today)
-const CODE_A: u32 = 2;
+const CODE_A: u32 = 2; // A      → weapon cycle (next gun in the inventory)
 const CODE_C_DOWN: u32 = 3; // C-Down → look down
 const CODE_L: u32 = 4; // L shoulder → aim
 const CODE_R: u32 = 5; // R shoulder → aim
@@ -43,6 +42,7 @@ const BTN_Z: PadButton = PadButton::LeftTrigger2;
 const BTN_L: PadButton = PadButton::LeftTrigger;
 const BTN_R: PadButton = PadButton::RightTrigger;
 const BTN_B: PadButton = PadButton::East;
+const BTN_A: PadButton = PadButton::South;
 const BTN_C_UP: PadButton = PadButton::DPadUp;
 const BTN_C_DOWN: PadButton = PadButton::DPadDown;
 const BTN_C_LEFT: PadButton = PadButton::DPadLeft;
@@ -60,14 +60,29 @@ pub struct PadActions {
     pub just_connected: bool,
     /// B pressed this frame — reload (or restart, when dead).
     pub reload: bool,
+    /// A pressed this frame — cycle to the next weapon (HUNT).
+    pub cycle: bool,
     /// Start pressed this frame — toggle pause (release/grab the cursor).
     pub pause: bool,
+    /// The pad drove movement/look/aim/fire this frame (stick deflected or a
+    /// held control pressed). The app suppresses mouse-look while this is true so a
+    /// *connected-but-idle* pad doesn't fight the keyboard/mouse — when it's false,
+    /// keyboard + mouse own input as if no pad were plugged in.
+    pub active: bool,
 }
 
 pub struct N64Pad {
     pads: Gamepads,
     prev_start: bool,
     prev_reload: bool,
+    prev_cycle: bool,
+    /// Keys the pad is currently synthesizing (from the stick / C-buttons). Tracked
+    /// so the pad only ever RELEASES a key it pressed itself — a centered stick
+    /// never clobbers a key the player is holding on the keyboard.
+    held_keys: Vec<KeyCode>,
+    /// Whether the pad is currently asserting the fire button (Z), so it likewise
+    /// never clears a mouse-driven `mouse_left`.
+    held_fire: bool,
 }
 
 impl N64Pad {
@@ -78,7 +93,51 @@ impl N64Pad {
             pads,
             prev_start: false,
             prev_reload: false,
+            prev_cycle: false,
+            held_keys: Vec::new(),
+            held_fire: false,
         })
+    }
+
+    /// Press/release a synthetic key, tracking pad ownership: press (and remember)
+    /// when `down`; on release only clear it if the PAD pressed it — never a key the
+    /// keyboard is holding. Idempotent.
+    fn drive_key(&mut self, input: &mut InputState, key: KeyCode, down: bool) {
+        let pos = self.held_keys.iter().position(|&k| k == key);
+        if down {
+            input.press(key);
+            if pos.is_none() {
+                self.held_keys.push(key);
+            }
+        } else if let Some(i) = pos {
+            input.release(key);
+            self.held_keys.remove(i);
+        }
+    }
+
+    /// Assert/release the fire button, tracking pad ownership (mirrors
+    /// [`Self::drive_key`]): only clears `mouse_left` if the pad set it, so a mouse
+    /// click still fires.
+    fn drive_fire(&mut self, input: &mut InputState, fire: bool) {
+        if fire {
+            input.set_mouse_left(true);
+            self.held_fire = true;
+        } else if self.held_fire {
+            input.set_mouse_left(false);
+            self.held_fire = false;
+        }
+    }
+
+    /// Release everything the pad currently holds (on disconnect) so a removed pad
+    /// can't strand a pressed key / held trigger.
+    fn release_all(&mut self, input: &mut InputState) {
+        for k in self.held_keys.drain(..) {
+            input.release(k);
+        }
+        if self.held_fire {
+            input.set_mouse_left(false);
+            self.held_fire = false;
+        }
     }
 
     /// Whether a pad is currently connected (the app uses this to decide whether
@@ -97,13 +156,13 @@ impl N64Pad {
             ..Default::default()
         };
         if !self.pads.connected() {
-            // Clear anything a now-removed pad might have latched.
+            // No pad → release only what the pad itself latched (leaves the
+            // keyboard/mouse untouched), and clear analog move.
+            self.release_all(input);
             input.set_analog_move(0.0, 0.0);
-            input.set_mouse_left(false);
-            input.release(KeyCode::KeyA);
-            input.release(KeyCode::KeyD);
             self.prev_start = false;
             self.prev_reload = false;
+            self.prev_cycle = false;
             return actions;
         }
 
@@ -144,41 +203,50 @@ impl N64Pad {
             self.pads.pressed_raw(CODE_C_DOWN) || self.pads.pressed(BTN_C_DOWN) || ry < -C_STICK_THRESHOLD;
         let start = self.pads.pressed_raw(CODE_START);
         let reload = self.pads.pressed_raw(CODE_B) || self.pads.pressed(BTN_B);
+        let cycle = self.pads.pressed_raw(CODE_A) || self.pads.pressed(BTN_A);
 
-        // Held inputs → InputState. C-Left/Right map to the strafe keys (the
-        // character controller reads A/D); Z is the trigger (combat reads mouse-left).
-        set_key(input, KeyCode::KeyA, c_left);
-        set_key(input, KeyCode::KeyD, c_right);
-        input.set_mouse_left(fire);
+        // Is the pad actually being used this frame? Only then does it drive
+        // movement/look — a connected-but-idle pad leaves the keyboard/mouse alone.
+        // (Momentary edge buttons like reload/cycle/pause are handled below and
+        // don't count as "driving input".)
+        let pad_active =
+            mag > 0.0 || fire || aim_mode || c_left || c_right || c_up || c_down;
+        actions.active = pad_active;
+
+        // Fire (Z) → mouse-left, pad-owned so it never clears a mouse click.
+        self.drive_fire(input, fire);
 
         // Look / aim / analog-move. HUNT runs the full solitaire path; BUILD gets a
         // simple stick-as-WASD fly so you can move while still looking with the mouse.
+        // All key writes go through `drive_key` (pad-owned) so an idle stick / unheld
+        // C-button never releases a key the keyboard is holding.
         if world.is_build() {
             input.set_analog_move(0.0, 0.0);
-            set_key(input, KeyCode::KeyW, sy < -0.5);
-            set_key(input, KeyCode::KeyS, sy > 0.5);
+            self.drive_key(input, KeyCode::KeyW, sy < -0.5);
+            self.drive_key(input, KeyCode::KeyS, sy > 0.5);
             // In BUILD the stick also strafes (no C-button strafe needed there).
-            set_key(input, KeyCode::KeyA, c_left || sx < -0.5);
-            set_key(input, KeyCode::KeyD, c_right || sx > 0.5);
+            self.drive_key(input, KeyCode::KeyA, c_left || sx < -0.5);
+            self.drive_key(input, KeyCode::KeyD, c_right || sx > 0.5);
         } else {
-            let pitch_axis = (c_down as i32 - c_up as i32) as f32;
-            world.gamepad_look(dt, sx, sy, aim_mode, pitch_axis, input);
+            // HUNT: C-Left/Right strafe (character reads A/D); stick = move/look.
+            self.drive_key(input, KeyCode::KeyA, c_left);
+            self.drive_key(input, KeyCode::KeyD, c_right);
+            if pad_active {
+                let pitch_axis = (c_down as i32 - c_up as i32) as f32;
+                world.gamepad_look(dt, sx, sy, aim_mode, pitch_axis, input);
+            } else {
+                // Idle pad → no analog move; the app runs mouse-look instead.
+                input.set_analog_move(0.0, 0.0);
+            }
         }
 
         // Edges.
         actions.reload = reload && !self.prev_reload;
+        actions.cycle = cycle && !self.prev_cycle;
         actions.pause = start && !self.prev_start;
         self.prev_reload = reload;
+        self.prev_cycle = cycle;
         self.prev_start = start;
         actions
-    }
-}
-
-/// Press/release a synthetic key to mirror a held button.
-fn set_key(input: &mut InputState, key: KeyCode, down: bool) {
-    if down {
-        input.press(key);
-    } else {
-        input.release(key);
     }
 }

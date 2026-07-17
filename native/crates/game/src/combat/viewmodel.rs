@@ -25,14 +25,20 @@ pub fn load_gun(path: &str) -> Result<TexturedModel, String> {
     textured_model::load(path, |_| true)
 }
 
-/// Load ONLY the muzzle-flash billboards from a `muzzle.glb`. These GoldenEye
-/// "muzzle" GLBs are actually the full *firing pose* — they re-contain the gun
-/// body AND a hand/arm AND the flash. Drawing all of it flashes a hand into view,
-/// so we keep only the additive flash quads, identified by their `CullBoth`
-/// material (the gun/hand use plain or `ClampSClampT` materials). Returns an error
-/// if no flash geometry is found (→ the caller renders no flash).
+/// Load the muzzle-flash billboards from a `muzzle.glb`. These GoldenEye "muzzle"
+/// GLBs are small additive quads (the flash variants). Most tag those quads with a
+/// `CullBoth` material — historically some muzzle assets also packed a gun/hand
+/// pose under other materials, so we prefer the `CullBoth`-tagged geometry to avoid
+/// flashing a hand into view.
+///
+/// But four guns (DD44, Phantom, Shotgun, Laser) name their flash quads plain
+/// `ClampSClampT` with no `CullBoth`, so that filter drops everything and they'd
+/// render no flash. Since every muzzle GLB in the set is tiny (≤24 tris — pure
+/// flash, no hand), fall back to loading the whole GLB when nothing is tagged
+/// `CullBoth`. Returns an error only if the GLB has no drawable geometry at all.
 pub fn load_flash(path: &str) -> Result<TexturedModel, String> {
     textured_model::load(path, |mat| mat.contains("CullBoth"))
+        .or_else(|_| textured_model::load(path, |_| true))
 }
 
 /// Vertical field of view for the viewmodel projection (radians). Matches the
@@ -55,6 +61,13 @@ pub struct ViewModel {
     /// Reload dip progress in `[0, 1]`, or `-1` when not reloading (JS
     /// `reloadProgress`). Drives the gun lowering out of view + returning.
     reload_progress: f32,
+    /// Weapon-switch dip progress in `[0, 1]`, or `-1` when not switching. Driven
+    /// by `World`'s switch state machine (NOT ticked here) — `< 0.5` lowers the
+    /// outgoing gun, `>= 0.5` raises the incoming one, using the same half-sine
+    /// dip curve as reload but at a fixed switch speed. Mirrors the JS
+    /// `playLowerAnimation` / `playRaiseAnimation` handoff (which swaps the mesh at
+    /// the bottom), so the old gun drops away and the new one pops up.
+    switch_t: f32,
 }
 
 impl ViewModel {
@@ -64,6 +77,7 @@ impl ViewModel {
             recoil_z: 0.0,
             recoil_rot: 0.0,
             reload_progress: -1.0,
+            switch_t: -1.0,
         }
     }
 
@@ -84,6 +98,34 @@ impl ViewModel {
     /// Whether the reload dip is currently animating.
     pub fn is_reloading(&self) -> bool {
         self.reload_progress >= 0.0
+    }
+
+    /// Snap the reload dip back to rest (weapon swap — see [`super::Weapon::cancel_reload`]).
+    pub fn cancel_reload(&mut self) {
+        self.reload_progress = -1.0;
+    }
+
+    /// Set the weapon-switch dip progress (`[0, 1]`), driven by `World`'s switch
+    /// state machine each frame. The gun sits lowest at `0.5`.
+    pub fn set_switch_t(&mut self, t: f32) {
+        self.switch_t = t;
+    }
+
+    /// End the switch dip (back to rest). Called on the outgoing gun at the swap
+    /// point and on the incoming gun when the raise completes.
+    pub fn cancel_switch(&mut self) {
+        self.switch_t = -1.0;
+    }
+
+    /// This frame's switch-dip offset (view-space metres, ≤ 0 = down): the same
+    /// half-sine as the reload dip, 0 at the ends and `-RELOAD_DIP` at `t = 0.5`.
+    /// Zero when not switching.
+    fn switch_offset_y(&self) -> f32 {
+        if self.switch_t >= 0.0 {
+            -(self.switch_t * std::f32::consts::PI).sin() * RELOAD_DIP
+        } else {
+            0.0
+        }
     }
 
     /// Advance the per-frame viewmodel animation: decay the recoil toward rest
@@ -142,7 +184,8 @@ impl ViewModel {
         // The reload dip lowers the whole gun group in view space (Y down), like
         // recoil kick-back (Z) — both on the outer `model` translation.
         let model = Mat4::from_translation(
-            c.model_offset + Vec3::new(0.0, self.reload_offset_y(), self.recoil_z),
+            c.model_offset
+                + Vec3::new(0.0, self.reload_offset_y() + self.switch_offset_y(), self.recoil_z),
         )
             * aim_rot
             * Mat4::from_translation(c.pivot_offset)
@@ -165,6 +208,23 @@ mod tests {
 
     fn pp7_path() -> String {
         format!("{}/../../assets/weapons/pp7/gun.glb", env!("CARGO_MANIFEST_DIR"))
+    }
+
+    fn muzzle_path(gun: &str) -> String {
+        format!("{}/../../assets/weapons/{}/muzzle.glb", env!("CARGO_MANIFEST_DIR"), gun)
+    }
+
+    /// The muzzle-flash loads for both the `CullBoth`-tagged guns (pp7) AND the
+    /// guns whose flash quads are plain `ClampSClampT` (dd44, phantom, shotgun,
+    /// laser) — the latter via the whole-GLB fallback. Regression for the four guns
+    /// that had no flash when the loader kept only `CullBoth` materials.
+    #[test]
+    fn muzzle_flash_loads_for_cullboth_and_plain_guns() {
+        for gun in ["pp7", "dd44", "phantom", "shotgun", "laser"] {
+            let m = load_flash(&muzzle_path(gun)).unwrap_or_else(|e| panic!("{gun} flash: {e}"));
+            assert!(!m.vertices.is_empty(), "{gun} flash has geometry");
+            assert!(!m.primitives.is_empty(), "{gun} flash has primitives");
+        }
     }
 
     /// The static gun loader works end-to-end on the real PP7 asset: textured
