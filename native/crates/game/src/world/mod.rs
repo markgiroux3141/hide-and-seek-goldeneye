@@ -9,7 +9,7 @@
 
 use std::time::Instant;
 
-use glam::{Mat4, Vec3};
+use glam::{EulerRot, Mat4, Vec3};
 
 use engine::render::camera::FlyCamera;
 use crate::character::CharacterController;
@@ -50,6 +50,7 @@ mod tests;
 // through `use super::*` regardless of which file defines them. (`find_room_brushes`
 // / `brushes_touching` are used only within `editing`, so they aren't re-exported.)
 pub(crate) use geom::{boxes_mesh, make_stair_void, make_wall_brush, push_colored_box};
+pub(crate) use hunt::band_for_speed;
 pub(crate) use pick::{flip, same_face};
 
 /// Default push/pull increment, in WT (JS `PUSH_PULL_STEP`). Shift → 1 WT.
@@ -86,6 +87,55 @@ pub(crate) const DEMO_RADIUS: f32 = 1.6;
 pub(crate) const CHAR_FIRE_IDX: usize = 4;
 pub(crate) const CHAR_HIT_START: usize = 5;
 
+// ─── Track A — killable hunter ──────────────────────────────────────────────
+/// The hunter's capsule collider dimensions in metres (recon constants): the
+/// cylindrical half-height + the cap radius. Total height ≈ 1.8 m.
+pub(crate) const ENEMY_RADIUS: f32 = 0.3;
+pub(crate) const ENEMY_HALF_HEIGHT: f32 = 0.6;
+/// Death fade duration (s) — JS `EnemyCharacter.FADE_DURATION`. The body fades
+/// its opacity 1→0 over this window after the lethal shot, then vanishes.
+pub(crate) const FADE_DURATION: f32 = 2.0;
+/// Number of enemy pain vocalisations (`sounds/enemies/pain-1..26.wav`).
+pub(crate) const PAIN_COUNT: usize = 26;
+/// On-hit SFX volumes (JS `EnemyCharacter.onHit`): the pain vocal + the flesh
+/// bullet-hit, linear amplitude.
+pub(crate) const PAIN_VOL: f32 = 0.8;
+pub(crate) const BULLET_HIT_VOL: f32 = 0.5;
+
+// ─── Enemy fires back (A3) — the hunter's KF7 rifle + probabilistic hit ──────
+/// KF7 rifle stats (JS `EnemyWeaponConfig` + `EnemyManager` overrides): damage 8
+/// per hit, accuracy 0.75, effective range 12 m, 8 shots/sec, gun sound.
+pub(crate) const ENEMY_DAMAGE: f32 = 8.0;
+pub(crate) const ENEMY_ACCURACY: f32 = 0.75;
+pub(crate) const ENEMY_MAX_RANGE: f32 = 12.0;
+pub(crate) const ENEMY_FIRE_RATE: f32 = 8.0;
+pub(crate) const ENEMY_MUZZLE_TIME: f32 = 0.1;
+pub(crate) const ENEMY_FIRE_SOUND: &str = "sounds/weapons/k47-fire.wav";
+pub(crate) const ENEMY_FIRE_VOL: f32 = 0.7;
+/// The hunter's rifle GLB (attached to Bone_9) + its muzzle flash, and the
+/// GE-unit local offset/rotation from the hand bone (JS `EnemyWeaponConfig.kf7`
+/// `position`/`rotation`). Offsets are in GE bone-local units (~1000/m), applied
+/// before the character's `CHAR_SCALE`.
+pub(crate) const ENEMY_GUN_PATH: &str = "kf7/gun.glb";
+pub(crate) const ENEMY_MUZZLE_PATH: &str = "kf7/muzzle.glb";
+pub(crate) const ENEMY_GUN_OFFSET: Vec3 = Vec3::new(-90.0, 0.0, 145.0);
+pub(crate) const ENEMY_GUN_ROT: Vec3 = Vec3::new(0.0, -1.49, -1.69);
+/// The right-hand attach bone (JS matches `Bone_9` → right hand).
+pub(crate) const ENEMY_HAND_BONE: &str = "Bone_9";
+
+// ─── Player health + damage feedback (P5) ───────────────────────────────────
+pub(crate) const PLAYER_MAX_HEALTH: f32 = 100.0;
+pub(crate) const PLAYER_MAX_ARMOR: f32 = 100.0;
+/// Red damage-flash decay (JS `HealthHUD`: alpha −= dt·2.5), and the flash's peak
+/// alpha per hit = min(0.5, dmg/40).
+pub(crate) const DAMAGE_FLASH_DECAY: f32 = 2.5;
+/// Health-HUD pop duration on damage + its fade tail (JS `showTimer = 1.5`,
+/// `FADE_DURATION = 0.5`).
+pub(crate) const HUD_SHOW_TIME: f32 = 1.5;
+pub(crate) const HUD_FADE_TAIL: f32 = 0.5;
+pub(crate) const PLAYER_HIT_SOUND: &str = "sounds/player/breathe.wav";
+pub(crate) const PLAYER_HIT_VOL: f32 = 0.7;
+
 /// Door opening size in WT (JS `DOOR_WIDTH` / `DOOR_HEIGHT`): 3 × 7 = 0.75 × 1.75 m.
 const DOOR_WIDTH: f32 = 3.0;
 const DOOR_HEIGHT: f32 = 7.0;
@@ -108,6 +158,8 @@ const BRACE_MAX: f32 = 8.0;
 const BURY_EPS: f32 = WALL_THICKNESS / 2.0;
 
 /// Seconds of sustained breaching to break a door (JS `door.js` `DOOR_HP`).
+/// Unused while breach is disabled (see [`World::build_doors`]); kept for re-enable.
+#[allow(dead_code)]
 const DOOR_HP: f32 = 2.5;
 
 /// Reserved renderer/physics id for the combined free-standing structures mesh
@@ -382,6 +434,30 @@ pub struct World {
     /// bind-pose AABB can't be used — the bind pose is a splayed star with the
     /// feet spread high, so seating by it leaves the standing pose sunk).
     char_feet_offset: f32,
+    /// Track A death fade: elapsed seconds since the lethal shot, or `None` while
+    /// the hunter is alive. Drives the character's opacity (1 → 0 over
+    /// [`FADE_DURATION`]); once complete the body holds at opacity 0.
+    enemy_fade: Option<f32>,
+    /// A3 enemy-fire cadence: seconds until the next shot may leave the hunter's
+    /// rifle during its fire-animation window (spaced by `1/ENEMY_FIRE_RATE`).
+    enemy_shot_timer: f32,
+    /// The hunter's muzzle-flash countdown (s); >0 → the enemy muzzle renders.
+    enemy_muzzle_timer: f32,
+
+    // ─── Player health + damage feedback (P5; see `world/combat.rs`) ──
+    /// Player health / armor (JS `Actor`; armor-first damage). Death at health 0.
+    player_health: f32,
+    player_armor: f32,
+    /// Dead — the YOU DIED screen is up; the sim freezes until a restart.
+    player_dead: bool,
+    /// Red full-screen damage-flash alpha (decays each frame).
+    damage_flash: f32,
+    /// Health-HUD pop timer (s); the radial HUD is shown while >0, fading over its
+    /// last [`HUD_FADE_TAIL`].
+    hud_show_timer: f32,
+    /// The processed GoldenEye radial health graphic (angle/side maps), used to
+    /// bake the HUD RGBA for the current health/armor. `None` if the JPEG failed.
+    health_hud: Option<crate::hud::health::HealthHud>,
 
     // ─── Player Combat (HUNT-phase weapon; see `world/combat.rs`) ──
     /// P1: the first-person weapon's static gun mesh (CPU side), uploaded once to
@@ -390,6 +466,10 @@ pub struct World {
     /// P2: the muzzle-flash mesh (separate GLB), uploaded once; drawn additively
     /// on top of the gun while a shot's flash is active. `None` if load failed.
     muzzle_model: Option<TexturedModel>,
+    /// A3: the hunter's rifle + its muzzle flash, attached to the hand bone and
+    /// drawn in world space each frame. `None` if the asset failed to load.
+    enemy_gun_model: Option<TexturedModel>,
+    enemy_muzzle_model: Option<TexturedModel>,
     /// The active weapon: config + viewmodel + fire timing (+ ammo P3, recoil P4).
     weapon: Weapon,
     /// P2: live hit sparks — a short-lived bright marker at each impact point, so
@@ -608,6 +688,43 @@ impl World {
             }
         };
 
+        // P5: the GoldenEye radial health HUD graphic (processed once into angle/
+        // side maps). Warn-not-panic if the JPEG is missing.
+        let health_hud = {
+            let p = format!("{}/../../assets/hud/goldeneye-health.jpg", env!("CARGO_MANIFEST_DIR"));
+            match crate::hud::health::HealthHud::load(&p) {
+                Some(h) => {
+                    log::info!("loaded health HUD graphic {}×{}", h.w, h.h);
+                    Some(h)
+                }
+                None => {
+                    log::warn!("health HUD graphic load failed");
+                    None
+                }
+            }
+        };
+
+        // A3: the hunter's rifle (KF7) + its muzzle flash, attached to Bone_9 and
+        // drawn in world space during the hunt. Same static-textured loaders as the
+        // player gun (the flash keeps only the additive `CullBoth` billboards).
+        let enemy_gun_model = match crate::combat::load_gun(&asset(ENEMY_GUN_PATH)) {
+            Ok(m) => {
+                log::info!("loaded enemy rifle: {} verts, {} primitives", m.vertices.len(), m.primitives.len());
+                Some(m)
+            }
+            Err(e) => {
+                log::warn!("enemy rifle load failed: {e}");
+                None
+            }
+        };
+        let enemy_muzzle_model = match crate::combat::load_flash(&asset(ENEMY_MUZZLE_PATH)) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                log::warn!("enemy muzzle-flash load failed: {e}");
+                None
+            }
+        };
+
         // Demo character starts on the circle at 270° — the nice centre-front
         // spot in front of the spawn camera — facing +Z (toward the camera).
         let demo_angle = std::f32::consts::FRAC_PI_2 * 3.0;
@@ -631,8 +748,19 @@ impl World {
             char_fire_open: false,
             char_rng: 0x9E37_79B9_7F4A_7C15,
             char_feet_offset,
+            enemy_fade: None,
+            enemy_shot_timer: 0.0,
+            enemy_muzzle_timer: 0.0,
+            player_health: PLAYER_MAX_HEALTH,
+            player_armor: 0.0,
+            player_dead: false,
+            damage_flash: 0.0,
+            hud_show_timer: 0.0,
+            health_hud,
             gun_model,
             muzzle_model,
+            enemy_gun_model,
+            enemy_muzzle_model,
             weapon,
             sparks: Vec::new(),
             aim_x: 0.0,

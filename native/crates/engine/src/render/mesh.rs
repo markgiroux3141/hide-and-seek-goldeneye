@@ -53,14 +53,26 @@ pub struct TexVertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
     pub uv: [f32; 2],
+    /// Per-vertex color (glTF `COLOR_0`), multiplied onto the sampled texel. The
+    /// GoldenEye weapon GLBs use a **palette texture × vertex color** scheme (a
+    /// 1-row palette strip picked per-vertex, tinted by this), so dropping it made
+    /// palette-white primitives render solid white. Region meshes have no vertex
+    /// colors → they use white (`1,1,1,1`), a no-op multiply.
+    pub color: [f32; 4],
 }
 
 impl TexVertex {
     pub const LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
         array_stride: std::mem::size_of::<TexVertex>() as wgpu::BufferAddress,
         step_mode: wgpu::VertexStepMode::Vertex,
-        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2],
+        attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2, 3 => Float32x4],
     };
+
+    /// A vertex with no tint (white `COLOR_0`) — for meshes without vertex colors
+    /// (regions/structures), where the color multiply is a no-op.
+    pub fn new(pos: [f32; 3], normal: [f32; 3], uv: [f32; 2]) -> Self {
+        TexVertex { pos, normal, uv, color: [1.0, 1.0, 1.0, 1.0] }
+    }
 }
 
 /// A contiguous run of indices sharing one (scheme, zone) material. Drawn as one

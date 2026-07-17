@@ -17,6 +17,9 @@ struct Char {
     model: mat4x4<f32>,
     // Skinning matrices: global(joint) · inverseBind(joint). Bind pose = identity.
     joints: array<mat4x4<f32>, MAX_JOINTS>,
+    // .x = whole-character opacity (Track A death fade); 1 = opaque. vec4 to keep
+    // the 16-byte std140 alignment after the joint array.
+    opacity: vec4<f32>,
 };
 @group(2) @binding(0) var<uniform> ch: Char;
 
@@ -50,5 +53,8 @@ fn vs_main(in: VsIn) -> VsOut {
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let c = textureSample(tex, samp, in.uv);
-    return vec4<f32>(c.rgb, 1.0);
+    // Opacity 1 (normal) with an alpha-blend target == opaque; <1 fades the whole
+    // character out over the death animation (Track A). Textures are opaque (a=1),
+    // so the character-wide opacity is the only alpha term.
+    return vec4<f32>(c.rgb, c.a * ch.opacity.x);
 }

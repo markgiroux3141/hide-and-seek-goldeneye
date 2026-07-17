@@ -42,6 +42,10 @@ struct App {
     fps_frames: u32,
     fps_elapsed: f32,
     fps_worst_ms: f32,
+    /// Last player health/armor uploaded to the radial-HUD texture, so it's only
+    /// re-baked + re-uploaded when they change. `-1` forces the first upload.
+    last_hud_health: f32,
+    last_hud_armor: f32,
 }
 
 impl App {
@@ -55,6 +59,8 @@ impl App {
             fps_frames: 0,
             fps_elapsed: 0.0,
             fps_worst_ms: 0.0,
+            last_hud_health: -1.0,
+            last_hud_armor: -1.0,
         }
     }
 }
@@ -149,10 +155,22 @@ impl ApplicationHandler for App {
         if let Some(m) = world.muzzle_model() {
             renderer.upload_muzzle(m);
         }
+        // A3: upload the hunter's rifle + muzzle flash once (drawn world-space in HUNT).
+        if let Some(g) = world.enemy_gun_model() {
+            renderer.upload_enemy_weapon(g);
+        }
+        if let Some(m) = world.enemy_muzzle_model() {
+            renderer.upload_enemy_muzzle(m);
+        }
         // Player Combat P3: upload the code-defined HUD glyph atlas once (the ammo
         // counter's bitmap font); the per-frame text quads are set below.
         let (hw, hh, hpx) = crate::hud::atlas_rgba();
         renderer.upload_hud_atlas(hw, hh, &hpx);
+        // P5: bake + upload the initial (full-health) radial HUD texture so it's
+        // ready to show on the first hit.
+        if let (Some((w, h)), Some(rgba)) = (world.health_hud_dims(), world.health_hud_rgba()) {
+            renderer.update_health_texture(w, h, &rgba);
+        }
         // Audio: initialize the device (silent if none), then hand it to the world,
         // which preloads the weapon SFX and starts the looping background music.
         if let Some(audio) = engine::audio::AudioManager::new() {
@@ -324,6 +342,9 @@ impl ApplicationHandler for App {
                     // Player Combat: advance the weapon + fire on trigger (HUNT
                     // only; JS WeaponSystem.update(dt) cadence, real dt).
                     world.combat_step(dt, &self.input);
+                    // A3: pump the hunter's rifle shots (FIRE_TIMING window) + decay
+                    // the player damage-flash / HUD-pop timers (HUNT only).
+                    world.enemy_combat_step(dt);
                 }
                 // Per-frame highlight in BUILD while grabbed: the door ghost, or
                 // the crosshair-tracked selection sub-rect (camera look was
@@ -359,9 +380,9 @@ impl ApplicationHandler for App {
                     (self.world.as_ref(), self.renderer.as_mut())
                 {
                     renderer.set_entity_mesh(world.enemy_mesh().as_ref());
-                    // B1: drive the skinned character's pose (bind pose for now).
-                    if let Some((model, joints)) = world.character_pose() {
-                        renderer.set_character_pose(model, &joints);
+                    // Drive the skinned character's pose + death-fade opacity.
+                    if let Some((model, joints, opacity)) = world.character_pose() {
+                        renderer.set_character_pose(model, &joints, opacity);
                     }
                     // Player Combat: drive the gun + muzzle-flash overlay
                     // transforms (shown only in HUNT; `None` hides them) and the
@@ -369,6 +390,9 @@ impl ApplicationHandler for App {
                     let aspect = renderer.aspect();
                     renderer.set_viewmodel_transform(world.viewmodel_transform(aspect));
                     renderer.set_muzzle_transform(world.muzzle_transform(aspect));
+                    // A3: the hunter's rifle + muzzle flash (world-space, HUNT only).
+                    renderer.set_enemy_weapon_transform(world.enemy_weapon_transform(aspect));
+                    renderer.set_enemy_muzzle_transform(world.enemy_muzzle_transform(aspect));
                     // Crosshair: BUILD shows the small white editor cross (while
                     // grabbed, so it marks the face-pick centre); HUNT shows the
                     // GoldenEye reticle only while aiming, and nothing otherwise.
@@ -385,8 +409,31 @@ impl ApplicationHandler for App {
                         renderer.set_crosshair_offset(crosshair);
                     }
                     renderer.set_spark_mesh(world.spark_mesh().as_ref());
-                    // Player Combat P3: the ammo-counter HUD (HUNT only; `None` in BUILD).
+                    // Player Combat P3: the ammo-counter HUD, or the YOU DIED text
+                    // when dead (HUNT only; `None` in BUILD).
                     renderer.set_hud_mesh(world.hud_mesh(aspect).as_deref());
+                    // P5: re-bake the radial health texture only when health/armor
+                    // changed, then drive the health HUD opacity + red damage flash
+                    // + death dimmer (all HUNT-only).
+                    let (hp, ap) = (world.player_health(), world.player_armor());
+                    if hp != self.last_hud_health || ap != self.last_hud_armor {
+                        if let (Some((w, h)), Some(rgba)) =
+                            (world.health_hud_dims(), world.health_hud_rgba())
+                        {
+                            renderer.update_health_texture(w, h, &rgba);
+                        }
+                        self.last_hud_health = hp;
+                        self.last_hud_armor = ap;
+                    }
+                    if world.is_build() {
+                        renderer.set_health_hud(None);
+                        renderer.set_damage_flash(0.0);
+                        renderer.set_death_screen(false);
+                    } else {
+                        renderer.set_health_hud(Some(world.hud_alpha()));
+                        renderer.set_damage_flash(world.damage_flash());
+                        renderer.set_death_screen(world.is_player_dead());
+                    }
                     renderer.set_door_mesh(world.door_mesh().as_ref());
                     // Pending-stair ghost — `None` (auto-clears) unless a stair op
                     // is in progress in BUILD.
@@ -528,12 +575,17 @@ impl App {
             }
             return;
         }
-        // R in HUNT reloads the weapon (in BUILD it's the brace tool, below).
+        // R in HUNT: restart from the YOU DIED screen if dead, else reload the
+        // weapon (in BUILD it's the brace tool, below).
         if code == KeyCode::KeyR
             && self.world.as_ref().map(|w| !w.is_build()).unwrap_or(false)
         {
             if let Some(world) = self.world.as_mut() {
-                world.reload_weapon();
+                if world.is_player_dead() {
+                    world.restart_after_death();
+                } else {
+                    world.reload_weapon();
+                }
             }
             return;
         }

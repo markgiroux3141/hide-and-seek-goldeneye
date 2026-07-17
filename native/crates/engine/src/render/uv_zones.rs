@@ -141,11 +141,11 @@ impl ZonedBuilder {
         let dot = cross[0] * n[0] + cross[1] * n[1] + cross[2] * n[2];
         let (vb, vc) = if dot < 0.0 { (p_c, p_b) } else { (p_b, p_c) };
         for v in [p_a, vb, vc] {
-            self.verts.push(TexVertex {
-                pos: v,
-                normal: n,
-                uv: Self::vertex_uv(v, axis, rotated, origin_y),
-            });
+            self.verts.push(TexVertex::new(
+                v,
+                n,
+                Self::vertex_uv(v, axis, rotated, origin_y),
+            ));
         }
         self.tri_keys.push((scheme as u16, zone));
     }
@@ -164,7 +164,7 @@ impl ZonedBuilder {
             (q1, Self::vertex_uv(q1, axis, false, origin_y)),
             (q2, Self::vertex_uv(q2, axis, false, origin_y)),
         ] {
-            self.verts.push(TexVertex { pos: t, normal: n, uv });
+            self.verts.push(TexVertex::new(t, n, uv));
         }
         self.tri_keys.push((scheme as u16, zone));
         for (t, uv) in [
@@ -172,7 +172,7 @@ impl ZonedBuilder {
             (q2, Self::vertex_uv(q2, axis, false, origin_y)),
             (q3, Self::vertex_uv(q3, axis, false, origin_y)),
         ] {
-            self.verts.push(TexVertex { pos: t, normal: n, uv });
+            self.verts.push(TexVertex::new(t, n, uv));
         }
         self.tri_keys.push((scheme as u16, zone));
     }
@@ -191,11 +191,11 @@ impl ZonedBuilder {
         let q = [m(corners[0]), m(corners[1]), m(corners[2]), m(corners[3])];
         let n = normalize(cross(sub(q[1], q[0]), sub(q[2], q[0])));
         for &i in &[0usize, 1, 2] {
-            self.verts.push(TexVertex { pos: q[i], normal: n, uv: uvs[i] });
+            self.verts.push(TexVertex::new(q[i], n, uvs[i]));
         }
         self.tri_keys.push((scheme as u16, zone));
         for &i in &[0usize, 2, 3] {
-            self.verts.push(TexVertex { pos: q[i], normal: n, uv: uvs[i] });
+            self.verts.push(TexVertex::new(q[i], n, uvs[i]));
         }
         self.tri_keys.push((scheme as u16, zone));
     }

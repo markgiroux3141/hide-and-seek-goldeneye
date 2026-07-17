@@ -31,6 +31,15 @@ struct CameraUniform {
     view_proj: [[f32; 4]; 4],
 }
 
+/// Screen-overlay tint (rgba), multiplied onto the sampled texture in
+/// `shader_screen.wgsl`. Used for the health-HUD opacity, the red damage flash,
+/// and the death dimmer.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct TintUniform {
+    color: [f32; 4],
+}
+
 /// Per-material uniform: `params.x` = the tile-unit → texture-space repeat scale
 /// (JS `texture.repeat`). A vec4 (16 bytes) to match the WGSL std140 layout.
 #[repr(C)]
@@ -47,6 +56,8 @@ struct MaterialUniform {
 struct CharUniform {
     model: [[f32; 4]; 4],
     joints: [[[f32; 4]; 4]; MAX_JOINTS],
+    /// `[0]` = whole-character opacity (death fade); the rest is std140 padding.
+    opacity: [f32; 4],
 }
 
 impl Default for CharUniform {
@@ -54,6 +65,7 @@ impl Default for CharUniform {
         CharUniform {
             model: Mat4::IDENTITY.to_cols_array_2d(),
             joints: [Mat4::IDENTITY.to_cols_array_2d(); MAX_JOINTS],
+            opacity: [1.0, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -169,6 +181,15 @@ pub struct Renderer {
     muzzle: Option<GpuViewModel>,
     muzzle_visible: bool,
 
+    // Enemy rifle + muzzle (A3): the hunter's gun attached to its hand bone. Same
+    // textured GLBs as the player gun, but drawn in the FORWARD pass (world-space,
+    // depth-tested against the scene) rather than the overlay — reusing the
+    // viewmodel/muzzle pipelines with a `view_proj · world` clip matrix.
+    enemy_weapon: Option<GpuViewModel>,
+    enemy_weapon_visible: bool,
+    enemy_muzzle: Option<GpuViewModel>,
+    enemy_muzzle_visible: bool,
+
     // Hit sparks (Player Combat P2): bright per-vertex-colored markers at shot
     // impact points. Reuses the gizmo shader (unlit color) but depth-TESTED (so
     // sparks are occluded by geometry, unlike the always-on-top gizmo). Rebuilt
@@ -207,6 +228,33 @@ pub struct Renderer {
     _hud_atlas_tex: Option<wgpu::Texture>,
     /// This frame's HUD quads: (vertex buffer, vertex count). `None` = nothing to draw.
     hud_mesh: Option<(wgpu::Buffer, u32)>,
+
+    // Full-screen overlays (P5): the radial health HUD (a dynamic RGBA texture),
+    // the red damage flash, and the death dimmer — all one pipeline (fullscreen
+    // quad × a tint), drawn in the overlay pass. group0 = texture (reuses
+    // `char_tex_layout`), group1 = tint (rgba).
+    screen_pipeline: wgpu::RenderPipeline,
+    screen_sampler: wgpu::Sampler,
+    /// Kept alive for the tint bind groups (not referenced after construction).
+    _tint_layout: wgpu::BindGroupLayout,
+    /// 1×1 white texture bind group — the solid-fill source for flash + death.
+    white_screen_bind: wgpu::BindGroup,
+    _white_screen_tex: wgpu::Texture,
+    /// The radial-health texture bind group + its dims, updated when health changes.
+    health_screen_bind: Option<wgpu::BindGroup>,
+    _health_tex: Option<wgpu::Texture>,
+    health_dims: (u32, u32),
+    /// Per-overlay tint buffers + bind groups (health opacity / flash / death).
+    health_tint_buf: wgpu::Buffer,
+    health_tint_bind: wgpu::BindGroup,
+    flash_tint_buf: wgpu::Buffer,
+    flash_tint_bind: wgpu::BindGroup,
+    /// The death dimmer's tint is a constant, so its buffer is write-once (keepalive).
+    _death_tint_buf: wgpu::Buffer,
+    death_tint_bind: wgpu::BindGroup,
+    health_visible: bool,
+    flash_visible: bool,
+    death_visible: bool,
 }
 
 #[repr(C)]
@@ -603,7 +651,9 @@ impl Renderer {
                 label: Some("char-uniform-bgl"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    // VERTEX skins with the joint matrices; FRAGMENT reads `opacity`
+                    // for the death fade — so the uniform must be visible to both.
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -646,7 +696,10 @@ impl Renderer {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: config.format,
-                    blend: Some(wgpu::BlendState::REPLACE),
+                    // Alpha-blend so the death fade works (Track A). At opacity 1
+                    // (the normal case) src-alpha 1 makes this identical to an
+                    // opaque REPLACE; only the 2 s death fade is translucent.
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -1059,6 +1112,103 @@ impl Renderer {
             cache: None,
         });
 
+        // ── Full-screen overlay pipeline (P5): fullscreen quad × tint. group0 =
+        // texture (char_tex_layout), group1 = tint (rgba). Alpha-blended, no depth.
+        let screen_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("screen-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shader_screen.wgsl").into()),
+        });
+        let screen_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("screen-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let tint_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("tint-bgl"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let screen_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("screen-layout"),
+            bind_group_layouts: &[&char_tex_layout, &tint_layout],
+            push_constant_ranges: &[],
+        });
+        let screen_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("screen-pipeline"),
+            layout: Some(&screen_layout),
+            vertex: wgpu::VertexState {
+                module: &screen_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &screen_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+        // 1×1 white source for the solid-fill overlays (flash + death).
+        let white_screen_tex =
+            upload_rgba_srgb(&device, &queue, 1, 1, &[255, 255, 255, 255], "screen-white");
+        let white_view = white_screen_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let white_screen_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("screen-white-bg"),
+            layout: &char_tex_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&white_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&screen_sampler) },
+            ],
+        });
+        // Tint buffers + bind groups (initialized transparent; written per frame).
+        let make_tint = |label: &str, color: [f32; 4]| {
+            let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some(label),
+                contents: bytemuck::cast_slice(&[TintUniform { color }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some(label),
+                layout: &tint_layout,
+                entries: &[wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() }],
+            });
+            (buf, bind)
+        };
+        let (health_tint_buf, health_tint_bind) = make_tint("health-tint", [1.0, 1.0, 1.0, 0.0]);
+        let (flash_tint_buf, flash_tint_bind) = make_tint("flash-tint", [1.0, 0.0, 0.0, 0.0]);
+        let (death_tint_buf, death_tint_bind) = make_tint("death-tint", [0.0, 0.0, 0.0, 0.85]);
+
         let depth_view = create_depth(&device, config.width, config.height);
 
         Renderer {
@@ -1093,6 +1243,10 @@ impl Renderer {
             viewmodel_visible: false,
             muzzle_pipeline,
             muzzle: None,
+            enemy_weapon: None,
+            enemy_weapon_visible: false,
+            enemy_muzzle: None,
+            enemy_muzzle_visible: false,
             muzzle_visible: false,
             spark_pipeline,
             spark_mesh: None,
@@ -1112,6 +1266,23 @@ impl Renderer {
             hud_atlas_bind: None,
             _hud_atlas_tex: None,
             hud_mesh: None,
+            screen_pipeline,
+            screen_sampler,
+            _tint_layout: tint_layout,
+            white_screen_bind,
+            _white_screen_tex: white_screen_tex,
+            health_screen_bind: None,
+            _health_tex: None,
+            health_dims: (0, 0),
+            health_tint_buf,
+            health_tint_bind,
+            flash_tint_buf,
+            flash_tint_bind,
+            _death_tint_buf: death_tint_buf,
+            death_tint_bind,
+            health_visible: false,
+            flash_visible: false,
+            death_visible: false,
         }
     }
 
@@ -1221,13 +1392,15 @@ impl Renderer {
         });
     }
 
-    /// Update the current character's world placement + joint matrices (called
-    /// each frame). `joints` is truncated/padded to `MAX_JOINTS` with identity.
+    /// Update the current character's world placement, joint matrices, and
+    /// whole-character `opacity` (1 = opaque; <1 fades it out for the death
+    /// animation). `joints` is truncated/padded to `MAX_JOINTS` with identity.
     /// No-op if no character is uploaded.
-    pub fn set_character_pose(&mut self, model: Mat4, joints: &[Mat4]) {
+    pub fn set_character_pose(&mut self, model: Mat4, joints: &[Mat4], opacity: f32) {
         let Some(ch) = &self.character else { return };
         let mut u = CharUniform {
             model: model.to_cols_array_2d(),
+            opacity: [opacity, 0.0, 0.0, 0.0],
             ..Default::default()
         };
         for (i, m) in joints.iter().take(MAX_JOINTS).enumerate() {
@@ -1376,6 +1549,55 @@ impl Renderer {
         }
     }
 
+    /// Upload the hunter's rifle (A3). Call once; show it per frame via
+    /// [`Renderer::set_enemy_weapon_transform`] with a world-space clip matrix.
+    pub fn upload_enemy_weapon(&mut self, model: &TexturedModel) {
+        self.enemy_weapon = Some(self.build_gpu_viewmodel(model, "enemy-rifle"));
+    }
+
+    /// Upload the hunter's muzzle flash (A3). Shown per frame via
+    /// [`Renderer::set_enemy_muzzle_transform`] while a shot's flash is active.
+    pub fn upload_enemy_muzzle(&mut self, model: &TexturedModel) {
+        self.enemy_muzzle = Some(self.build_gpu_viewmodel(model, "enemy-muzzle"));
+    }
+
+    /// Set the hunter rifle's world clip transform (`view_proj · world`) this frame,
+    /// or hide it (`None`). Drawn depth-tested in the forward pass.
+    pub fn set_enemy_weapon_transform(&mut self, clip: Option<Mat4>) {
+        let Some(w) = &self.enemy_weapon else { return };
+        match clip {
+            Some(clip) => {
+                self.queue.write_buffer(
+                    &w.clip_buf,
+                    0,
+                    bytemuck::cast_slice(&[CameraUniform {
+                        view_proj: clip.to_cols_array_2d(),
+                    }]),
+                );
+                self.enemy_weapon_visible = true;
+            }
+            None => self.enemy_weapon_visible = false,
+        }
+    }
+
+    /// Set the hunter muzzle-flash's world clip transform this frame, or hide it.
+    pub fn set_enemy_muzzle_transform(&mut self, clip: Option<Mat4>) {
+        let Some(m) = &self.enemy_muzzle else { return };
+        match clip {
+            Some(clip) => {
+                self.queue.write_buffer(
+                    &m.clip_buf,
+                    0,
+                    bytemuck::cast_slice(&[CameraUniform {
+                        view_proj: clip.to_cols_array_2d(),
+                    }]),
+                );
+                self.enemy_muzzle_visible = true;
+            }
+            None => self.enemy_muzzle_visible = false,
+        }
+    }
+
     /// Set (or clear) the hit-spark marker mesh (P2). Rebuilt each frame from the
     /// live spark set; `None` (or an empty mesh) clears it.
     pub fn set_spark_mesh(&mut self, mesh: Option<&ColoredMesh>) {
@@ -1482,6 +1704,60 @@ impl Renderer {
             }
             _ => None,
         };
+    }
+
+    /// Upload/replace the radial-health texture (the baked RGBA from
+    /// `hud::health::HealthHud::render`). Called only when the player's health
+    /// changes. Recreates the texture (health graphics are small).
+    pub fn update_health_texture(&mut self, width: u32, height: u32, rgba: &[u8]) {
+        let tex = upload_rgba_srgb(&self.device, &self.queue, width, height, rgba, "health-hud");
+        let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("health-hud-bg"),
+            layout: &self.char_tex_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.screen_sampler) },
+            ],
+        });
+        self.health_screen_bind = Some(bind);
+        self._health_tex = Some(tex);
+        self.health_dims = (width, height);
+    }
+
+    /// Show the radial health HUD this frame at `opacity` (0 hides it). Writes the
+    /// health tint's alpha.
+    pub fn set_health_hud(&mut self, opacity: Option<f32>) {
+        match opacity {
+            Some(a) if a > 0.0 && self.health_screen_bind.is_some() => {
+                self.queue.write_buffer(
+                    &self.health_tint_buf,
+                    0,
+                    bytemuck::cast_slice(&[TintUniform { color: [1.0, 1.0, 1.0, a] }]),
+                );
+                self.health_visible = true;
+            }
+            _ => self.health_visible = false,
+        }
+    }
+
+    /// Set the red damage-flash alpha this frame (0 hides it).
+    pub fn set_damage_flash(&mut self, alpha: f32) {
+        if alpha > 0.0 {
+            self.queue.write_buffer(
+                &self.flash_tint_buf,
+                0,
+                bytemuck::cast_slice(&[TintUniform { color: [1.0, 0.0, 0.0, alpha] }]),
+            );
+            self.flash_visible = true;
+        } else {
+            self.flash_visible = false;
+        }
+    }
+
+    /// Show/hide the death dimmer (the dark full-screen overlay behind YOU DIED).
+    pub fn set_death_screen(&mut self, visible: bool) {
+        self.death_visible = visible;
     }
 
     /// Insert or replace a region's textured mesh. Called on every brush edit; an
@@ -1704,6 +1980,31 @@ impl Renderer {
                 }
             }
 
+            // 2.3) Enemy rifle attached to the hunter's hand bone (world-space,
+            // depth-tested vs the scene — reuses the viewmodel pipeline with a
+            // view_proj·world clip matrix).
+            if let (Some(w), true) = (&self.enemy_weapon, self.enemy_weapon_visible) {
+                rp.set_pipeline(&self.viewmodel_pipeline);
+                rp.set_bind_group(0, &w.clip_bind, &[]);
+                rp.set_vertex_buffer(0, w.vertex_buf.slice(..));
+                rp.set_index_buffer(w.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                for p in &w.primitives {
+                    rp.set_bind_group(1, &p.tex_bind, &[]);
+                    rp.draw_indexed(p.index_start..(p.index_start + p.index_count), 0, 0..1);
+                }
+            }
+            // 2.4) Enemy muzzle flash (additive) while a shot is firing.
+            if let (Some(m), true) = (&self.enemy_muzzle, self.enemy_muzzle_visible) {
+                rp.set_pipeline(&self.muzzle_pipeline);
+                rp.set_bind_group(0, &m.clip_bind, &[]);
+                rp.set_vertex_buffer(0, m.vertex_buf.slice(..));
+                rp.set_index_buffer(m.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                for p in &m.primitives {
+                    rp.set_bind_group(1, &p.tex_bind, &[]);
+                    rp.draw_indexed(p.index_start..(p.index_start + p.index_count), 0, 0..1);
+                }
+            }
+
             // 2.5) Breakable door panels (opaque brown).
             if let Some(dm) = &self.door_mesh {
                 rp.set_pipeline(&self.door_pipeline);
@@ -1803,7 +2104,28 @@ impl Renderer {
                 rp.draw(0..6, 0..1);
             }
 
-            // HUD text (ammo counter), last — on top of everything.
+            // Full-screen overlays (P5), painter-ordered like the JS z-indices:
+            // red damage flash (19) → radial health HUD (20) → death dimmer (30).
+            if self.flash_visible {
+                rp.set_pipeline(&self.screen_pipeline);
+                rp.set_bind_group(0, &self.white_screen_bind, &[]);
+                rp.set_bind_group(1, &self.flash_tint_bind, &[]);
+                rp.draw(0..6, 0..1);
+            }
+            if let (true, Some(health)) = (self.health_visible, &self.health_screen_bind) {
+                rp.set_pipeline(&self.screen_pipeline);
+                rp.set_bind_group(0, health, &[]);
+                rp.set_bind_group(1, &self.health_tint_bind, &[]);
+                rp.draw(0..6, 0..1);
+            }
+            if self.death_visible {
+                rp.set_pipeline(&self.screen_pipeline);
+                rp.set_bind_group(0, &self.white_screen_bind, &[]);
+                rp.set_bind_group(1, &self.death_tint_bind, &[]);
+                rp.draw(0..6, 0..1);
+            }
+
+            // HUD text (ammo counter, or YOU DIED / PRESS R), last — on top.
             if let (Some(bind), Some((buf, count))) = (&self.hud_atlas_bind, &self.hud_mesh) {
                 rp.set_pipeline(&self.hud_pipeline);
                 rp.set_bind_group(0, bind, &[]);

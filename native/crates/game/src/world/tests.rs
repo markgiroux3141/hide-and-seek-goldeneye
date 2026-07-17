@@ -77,27 +77,38 @@ use super::editing::find_room_brushes;
         );
     }
 
-    /// Phase 3 milestone: on HUNT the nav grid bakes, a hunter spawns across the
-    /// room, and it pathfinds to a stationary player and catches them.
+    /// A3 milestone: on HUNT the hunter spawns watching the player, runs its
+    /// perception FSM (detects → alert → chase into range → attack), fires its
+    /// rifle inside the animation's FIRE_TIMING window, and damages the stationary
+    /// player. Drives a full render-frame loop (sim + animation + enemy combat).
     #[test]
-    fn hunter_pathfinds_to_and_catches_the_player() {
+    fn hunter_perceives_chases_and_shoots_the_player() {
         let mut world = World::new();
         world.initial_meshes();
-        world.toggle_mode(); // bakes nav + spawns hunter far from the player
-        assert!(world.player_pos().is_some(), "player spawned");
+        world.toggle_mode(); // bake nav + spawn the hunter watching the player
         assert!(world.enemy.is_some(), "hunter spawned");
+        assert_eq!(world.player_health(), PLAYER_MAX_HEALTH, "player starts at full health");
 
-        let input = InputState::default(); // player stands still
-        let mut caught = false;
-        for _ in 0..1800 {
-            // up to 15 s at 120 Hz
-            world.fixed_step(1.0 / 120.0, &input);
-            if world.is_caught() {
-                caught = true;
+        let input = InputState::default(); // player stands still, in the guard's view
+        let dt = 1.0 / 60.0;
+        let mut damaged = false;
+        for _ in 0..600 {
+            // up to 10 s of frames
+            world.fixed_step(dt, &input);
+            world.advance_animation(dt);
+            world.enemy_combat_step(dt);
+            if world.player_health() < PLAYER_MAX_HEALTH {
+                damaged = true;
                 break;
             }
         }
-        assert!(caught, "hunter should reach and catch the stationary player");
+        assert!(damaged, "the hunter should perceive, close in, and shoot the player");
+        // It engaged (left idle) — the perception FSM ran.
+        assert_ne!(
+            world.enemy.as_ref().unwrap().state(),
+            crate::enemy::AiState::Idle,
+            "hunter should have engaged, not stayed idle"
+        );
     }
 
     /// B5: in HUNT the animated model *is* the hunter — the placeholder box is
@@ -134,9 +145,176 @@ use super::editing::find_room_brushes;
             let d = (world.char_yaw - expect).abs();
             assert!(d < 1e-4, "yaw {} should face heading {}", world.char_yaw, expect);
         }
-        // The pose is a real 15-joint skinning set.
-        let (_, joints) = world.character_pose().expect("character present in HUNT");
+        // The pose is a real 15-joint skinning set, fully opaque while alive.
+        let (_, joints, opacity) = world.character_pose().expect("character present in HUNT");
         assert_eq!(joints.len(), 15);
+        assert_eq!(opacity, 1.0, "alive hunter is opaque");
+    }
+
+    /// Track A: four PP7 hits kill the hunter — it takes damage each shot, and the
+    /// lethal shot arms the death fade, drops the hitscan capsule (a corpse can't
+    /// be shot), and puts the model into its death state. The fade then drives the
+    /// character's opacity 1 → 0.
+    #[test]
+    fn four_shots_kill_the_hunter_then_it_fades_out() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT: bake nav + spawn hunter
+        assert!(world.enemy.is_some(), "hunter spawned");
+        assert!(
+            world.physics.enemy_collider_handle().is_some(),
+            "hunter has a hitscan capsule"
+        );
+
+        // Three non-lethal hits: alive, health ticks down, no fade yet.
+        for expect in [75.0, 50.0, 25.0] {
+            world.hit_enemy();
+            let e = world.enemy.as_ref().unwrap();
+            assert!(!e.is_dead(), "still alive at {expect} hp");
+            assert_eq!(e.health(), expect);
+            assert!(world.enemy_fade.is_none(), "no death fade while alive");
+        }
+
+        // The fourth (lethal) hit.
+        world.hit_enemy();
+        assert!(world.enemy.as_ref().unwrap().is_dead(), "dead after 4 PP7 shots");
+        assert!(world.char_dead, "model in the death state");
+        assert!(
+            world.physics.enemy_collider_handle().is_none(),
+            "the corpse's capsule is removed — can't shoot a corpse"
+        );
+        // The fade does NOT start until the death animation finishes: the body
+        // stays fully opaque while the death clip plays.
+        assert!(world.enemy_fade.is_none(), "fade not armed at the moment of death");
+        assert!((world.character_opacity() - 1.0).abs() < 1e-3, "opaque during the death anim");
+
+        // Play out the death animation, then the full fade → invisible.
+        for _ in 0..600 {
+            world.advance_animation(1.0 / 60.0);
+        }
+        assert!(world.enemy_fade.is_some(), "fade started once the anim finished");
+        assert!(world.character_opacity() <= 1e-3, "faded to invisible after the animation");
+    }
+
+    /// Track A: a shot that lands on the hunter's capsule damages it and spawns NO
+    /// wall spark; a shot that misses the hunter and hits a wall spawns a spark and
+    /// deals no damage. Exercises the real fire path (trigger → cast → branch).
+    #[test]
+    fn shooting_the_hunter_damages_it_a_wall_hit_sparks() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT
+
+        // Put the hunter directly on the player's look ray ~1.5 m ahead (inside the
+        // 6 m room, before any wall), with its capsule centred on the ray.
+        let (eye, fwd) = {
+            let c = world.character.as_ref().unwrap();
+            (c.eye(), c.forward())
+        };
+        let centre = eye + fwd * 1.5;
+        let feet = centre - Vec3::new(0.0, ENEMY_HALF_HEIGHT + ENEMY_RADIUS, 0.0);
+        world.enemy.as_mut().unwrap().pos = feet;
+        world.physics.update_enemy_collider(feet);
+        let hp0 = world.enemy.as_ref().unwrap().health();
+
+        // Fire once (a fresh edge = one semi-auto shot).
+        let mut input = InputState::default();
+        input.pointer_locked = true;
+        input.set_mouse_left(true);
+        world.combat_step(1.0 / 60.0, &input);
+        assert!(
+            world.enemy.as_ref().unwrap().health() < hp0,
+            "shooting the hunter damages it"
+        );
+        assert!(world.sparks.is_empty(), "an enemy hit spawns no wall spark");
+
+        // Move the hunter far off the ray, then fire again (release → fresh pull)
+        // so the shot flies past it into a wall → a spark, no further damage.
+        let hp1 = world.enemy.as_ref().unwrap().health();
+        let away = Vec3::new(100.0, 0.0, 100.0);
+        world.enemy.as_mut().unwrap().pos = away;
+        world.physics.update_enemy_collider(away);
+        input.set_mouse_left(false);
+        world.combat_step(1.0 / 60.0, &input); // release resets the edge
+        input.set_mouse_left(true);
+        world.combat_step(1.0 / 60.0, &input); // fresh pull → shot into the wall
+        assert!(!world.sparks.is_empty(), "a wall hit spawns a spark");
+        assert_eq!(
+            world.enemy.as_ref().unwrap().health(),
+            hp1,
+            "the wall shot dealt no damage to the (moved-away) hunter"
+        );
+    }
+
+    /// Track A: a killed hunter stops moving — its death freezes the nav-driven
+    /// chase (dead `update` is a no-op), so the corpse holds position.
+    #[test]
+    fn a_dead_hunter_stops_chasing() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT
+        // Kill it outright.
+        for _ in 0..4 {
+            world.hit_enemy();
+        }
+        assert!(world.enemy.as_ref().unwrap().is_dead());
+        let rest = world.enemy.as_ref().unwrap().pos;
+        let input = InputState::default();
+        for _ in 0..240 {
+            world.fixed_step(1.0 / 120.0, &input);
+        }
+        let after = world.enemy.as_ref().unwrap().pos;
+        assert!(
+            (after - rest).length() < 1e-4,
+            "the corpse should not move (was {rest:?}, now {after:?})"
+        );
+    }
+
+    /// P5: player damage subtracts from health (armor-first, but armor 0 here),
+    /// arms the red flash + HUD pop, and kills at 0 → the death state.
+    #[test]
+    fn player_damage_subtracts_health_and_dies() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT (player alive, full health)
+        assert_eq!(world.player_health(), PLAYER_MAX_HEALTH);
+
+        world.take_player_damage(8.0);
+        assert_eq!(world.player_health(), 92.0, "8 dmg off 100");
+        assert!(world.damage_flash() > 0.0, "damage armed the red flash");
+        assert!(world.hud_alpha() > 0.0, "damage popped the health HUD");
+        assert!(!world.is_player_dead());
+
+        world.take_player_damage(1000.0); // lethal
+        assert_eq!(world.player_health(), 0.0, "health floors at 0");
+        assert!(world.is_player_dead(), "0 health → dead");
+
+        // Restart resets health + returns to BUILD.
+        world.restart_after_death();
+        assert!(!world.is_player_dead());
+        assert_eq!(world.player_health(), PLAYER_MAX_HEALTH);
+        assert!(world.is_build(), "restart drops back to BUILD");
+    }
+
+    /// A3: in HUNT the hunter carries a rifle — its world clip transform resolves
+    /// (a bone is found + the pose is posed); once dead it drops the gun (`None`).
+    #[test]
+    fn the_hunter_carries_a_rifle_in_hunt() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT
+        assert!(world.enemy_gun_model().is_some(), "rifle asset loaded");
+        assert!(
+            world.enemy_weapon_transform(1.6).is_some(),
+            "the live hunter's rifle has a world transform"
+        );
+        for _ in 0..4 {
+            world.hit_enemy(); // kill it
+        }
+        assert!(
+            world.enemy_weapon_transform(1.6).is_none(),
+            "a dead hunter drops the rifle"
+        );
     }
 
     /// The door tool: `B` arms a preview on the wall, a left-click cuts a
@@ -336,103 +514,10 @@ use super::editing::find_room_brushes;
         assert!(d2 > d1, "the carve deepened: {d1} → {d2}");
     }
 
-    /// Two rooms in one region, joined ONLY through a door-marked opening in the
-    /// dividing wall. Room A: x∈[0,10); Room B: x∈[11,21); the wall at x∈[10,11)
-    /// is solid except where the door carves a floor-level opening. The player
-    /// (camera) is placed in Room B, aligned with the door.
-    fn two_rooms_joined_by_a_door() -> World {
-        let mut world = World::new();
-        let region = &mut world.regions[0];
-        region.brushes.clear();
-        region
-            .brushes
-            .push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 10.0, 16.0, 10.0));
-        region
-            .brushes
-            .push(Brush::new(2, Op::Subtract, 11.0, 0.0, 0.0, 10.0, 16.0, 10.0));
-        // Door through the dividing wall (x∈[10,11)), floor-level, z∈[3,6).
-        let mut door = Brush::new(3, Op::Subtract, 10.0, 0.0, 3.0, 1.0, 7.0, 3.0);
-        door.door = true;
-        region.brushes.push(door);
-        world.next_brush_id = 4;
-        // Player camera in Room B (meters), aligned with the door opening in z.
-        world.camera.pos = Vec3::new(4.0, 1.6, 1.125);
-        world
-    }
-
-    /// The intact door panel blocks the player like a wall; removing it (the
-    /// breach) makes the opening passable — collision reacts with no re-bake.
-    #[test]
-    fn intact_door_panel_blocks_the_player_until_breached() {
-        let mut world = two_rooms_joined_by_a_door();
-        world.initial_meshes();
-        world.toggle_mode(); // spawn player in B, hunter in A, arm the door
-        assert_eq!(world.doors.len(), 1, "one door armed");
-        assert_eq!(world.physics.door_collider_count(), 1, "panel collider present");
-
-        // Face −X (yaw π/2) and walk toward Room A through the door opening.
-        world.character.as_mut().unwrap().yaw = std::f32::consts::FRAC_PI_2;
-        let mut input = InputState::default();
-        input.pointer_locked = true;
-        input.press(winit::keyboard::KeyCode::KeyW);
-
-        // Short window: the door stays intact (the hunter can't breach this fast).
-        for _ in 0..180 {
-            world.fixed_step(1.0 / 120.0, &input);
-        }
-        let feet = world.player_pos().unwrap();
-        // Door plane is x∈[2.5,2.75] m; capsule radius 0.25 m → blocked above ~3.0.
-        assert!(
-            feet.x > 2.9,
-            "panel should block the player at the door, got x={}",
-            feet.x
-        );
-
-        // Breach the panel directly (isolate collision from the AI): the opening
-        // becomes passable and the player crosses into Room A.
-        let panel = world.doors[0].panel;
-        world.physics.remove_door_collider(panel);
-        assert_eq!(world.physics.door_collider_count(), 0, "panel removed");
-        for _ in 0..300 {
-            world.fixed_step(1.0 / 120.0, &input);
-        }
-        let feet = world.player_pos().unwrap();
-        assert!(
-            feet.x < 2.5,
-            "player should cross the breached opening into Room A, got x={}",
-            feet.x
-        );
-    }
-
-    /// Phase 4 thesis: a hunter walled off from the player breaches the only door
-    /// on its route, then reaches the player over the SAME baked grid. The breach
-    /// flips a live nav flag + drops one collider — no re-voxelization (nothing in
-    /// `fixed_step` re-bakes; `nav::bake` runs only at the BUILD→HUNT toggle).
-    #[test]
-    fn hunter_breaches_the_only_door_to_reach_a_walled_off_player() {
-        let mut world = two_rooms_joined_by_a_door();
-        world.initial_meshes();
-        world.toggle_mode();
-        assert!(world.enemy.is_some(), "hunter spawned");
-        assert_eq!(world.nav.as_ref().unwrap().door_count(), 1);
-        assert!(!world.nav.as_ref().unwrap().door_broken(0), "door starts intact");
-        assert_eq!(world.physics.door_collider_count(), 1);
-
-        let input = InputState::default(); // player stands still in Room B
-        let mut caught = false;
-        for _ in 0..2400 {
-            // up to 20 s at 120 Hz (travel + 2.5 s breach + travel)
-            world.fixed_step(1.0 / 120.0, &input);
-            if world.is_caught() {
-                caught = true;
-                break;
-            }
-        }
-        assert!(caught, "hunter should breach the door and catch the player");
-        assert!(world.nav.as_ref().unwrap().door_broken(0), "nav flag flipped by breach");
-        assert!(world.doors[0].broken, "world door marked broken");
-        assert_eq!(world.physics.door_collider_count(), 0, "panel collider removed by breach");
-    }
+    // NB: the door-breach tests (panel-blocks-player, hunter-breaches-to-catch)
+    // and their `two_rooms_joined_by_a_door` fixture were removed when door
+    // breach/blocking was disabled (2026-07-16, see `World::build_doors`). Restore
+    // them from git history when the breach system is re-enabled.
 
     // ─── Hole tool ─────────────────────────────────────────────────────────
 

@@ -93,6 +93,13 @@ fn visit_node(
                 Some(t) => t.into_f32().collect(),
                 None => vec![[0.0, 0.0]; positions.len()],
             };
+            // Vertex colors (glTF `COLOR_0`): the GoldenEye weapon GLBs shade a
+            // palette texture per-vertex with these, so they're multiplied onto the
+            // sampled texel. Absent → white (no tint).
+            let colors: Vec<[f32; 4]> = match reader.read_colors(0) {
+                Some(c) => c.into_rgba_f32().collect(),
+                None => vec![[1.0, 1.0, 1.0, 1.0]; positions.len()],
+            };
 
             let base = out.vertices.len() as u32;
             for i in 0..positions.len() {
@@ -103,6 +110,7 @@ fn visit_node(
                     pos: wp.to_array(),
                     normal: wn.to_array(),
                     uv: uvs.get(i).copied().unwrap_or([0.0, 0.0]),
+                    color: colors.get(i).copied().unwrap_or([1.0, 1.0, 1.0, 1.0]),
                 });
             }
 

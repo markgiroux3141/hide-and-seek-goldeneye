@@ -11,14 +11,16 @@ use rapier3d::prelude::ColliderHandle;
 
 use engine::sim::physics::PhysicsWorld;
 
-/// A resolved hitscan hit: world-space impact point, surface normal, and the
-/// distance from the ray origin (JS `HitResult` minus the collider handle, which
-/// Track A will re-add for entity lookup).
+/// A resolved hitscan hit: world-space impact point, surface normal, the distance
+/// from the ray origin, and the collider that was hit (JS `HitResult`). Track A
+/// compares `collider` against the hunter's capsule handle to tell an enemy hit
+/// from a wall hit.
 #[derive(Clone, Copy, Debug)]
 pub struct HitResult {
     pub point: Vec3,
     pub normal: Vec3,
     pub distance: f32,
+    pub collider: ColliderHandle,
 }
 
 /// Cast a shot ray from `origin` along `dir` (need not be normalized) up to
@@ -36,5 +38,6 @@ pub fn cast(
         point: hit.point,
         normal: hit.normal,
         distance: (hit.point - origin).length(),
+        collider: hit.collider,
     })
 }

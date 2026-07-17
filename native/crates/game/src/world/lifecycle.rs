@@ -48,21 +48,42 @@ impl World {
         match self.mode {
             Mode::Build => self.camera.apply_move(dt, input),
             Mode::Hunt => {
+                // On player death everything freezes behind the YOU DIED screen.
+                if self.player_dead {
+                    return;
+                }
                 let Some(c) = self.character.as_mut() else { return };
                 c.apply_move(dt, input, &mut self.physics);
                 let feet = c.pos;
-                // Advance the hunter toward the player over the baked grid.
-                let step = match (self.nav.as_ref(), self.enemy.as_mut()) {
-                    (Some(nav), Some(enemy)) => Some(enemy.update(dt, feet, nav)),
-                    _ => None,
-                };
-                if let Some(step) = step {
-                    // A blocking door: drain its hp; the breach itself flips the
-                    // nav flag + drops the collider with no re-bake.
-                    if let Some(di) = step.breaching {
-                        self.breach_tick(di, dt);
+                // Is a FIRE one-shot currently animating? (disambiguated from
+                // hit/death by the clip index) — the JS `enemyState === 'action'`
+                // proxy the FSM's attack→cooldown transition needs.
+                let fire_anim = self
+                    .char_anim
+                    .as_ref()
+                    .map(|a| a.is_playing_oneshot() && a.current_clip() == CHAR_FIRE_IDX)
+                    .unwrap_or(false);
+                // Advance the hunter's perception FSM. Take it out so `self.enemy`
+                // isn't borrowed while the FSM needs `&self.nav` + `&mut self.physics`
+                // (LOS raycast).
+                if let Some(mut enemy) = self.enemy.take() {
+                    let step = match self.nav.as_ref() {
+                        Some(nav) => enemy.update(dt, feet, nav, &mut self.physics, fire_anim),
+                        None => crate::enemy::EnemyStep::default(),
+                    };
+                    // Keep the hitscan capsule on the hunter each step (marks the
+                    // query pipeline dirty so raycasts see the move). Skipped once
+                    // dead — the collider is already gone.
+                    if !enemy.is_dead() {
+                        self.physics.update_enemy_collider(enemy.pos);
                     }
-                    if step.caught && !self.caught {
+                    let (caught, want_fire) = (step.caught, step.want_fire);
+                    self.enemy = Some(enemy);
+                    // It entered attack → start a fire burst on the shared mixer.
+                    if want_fire {
+                        self.start_enemy_fire();
+                    }
+                    if caught && !self.caught {
                         self.caught = true;
                         log::info!("CAUGHT by the hunter!");
                     }
@@ -94,6 +115,19 @@ impl World {
         self.aim_x = 0.0;
         self.aim_y = 0.0;
         self.aiming = false;
+        // A mode switch always ends any death state: drop the hunter's capsule,
+        // clear the fade, and revive the model (BUILD demo / a fresh hunt).
+        self.physics.remove_enemy_collider();
+        self.enemy_fade = None;
+        self.char_dead = false;
+        // Fresh player-combat state each mode switch (full health, no flash/HUD).
+        self.player_health = PLAYER_MAX_HEALTH;
+        self.player_armor = 0.0;
+        self.player_dead = false;
+        self.damage_flash = 0.0;
+        self.hud_show_timer = 0.0;
+        self.enemy_shot_timer = 0.0;
+        self.enemy_muzzle_timer = 0.0;
         match self.mode {
             Mode::Build => {
                 let Some(feet) = self.floor_under(self.camera.pos) else {
@@ -127,7 +161,16 @@ impl World {
                                     .total_cmp(&b.distance_squared(feet))
                             })
                         {
-                            self.enemy = Some(Enemy::new(spawn));
+                            // Spawn watching toward the player's start so the
+                            // perception FSM can engage (a guard on watch).
+                            self.enemy = Some(Enemy::new(spawn, feet));
+                            // Track A: the hunter's hitscan capsule (moved each
+                            // fixed step, removed on death / return to BUILD).
+                            self.physics.set_enemy_collider(
+                                spawn,
+                                ENEMY_RADIUS,
+                                ENEMY_HALF_HEIGHT,
+                            );
                             log::info!("hunter spawned at {spawn:?}");
                         } else {
                             log::warn!("no standable cell for the hunter");

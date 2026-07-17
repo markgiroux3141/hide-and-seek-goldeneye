@@ -40,6 +40,15 @@ impl World {
         audio.load(cfg.fire_sound);
         audio.load(cfg.reload_sound);
         audio.load(cfg.empty_sound);
+        // Track A enemy-hit SFX: the flesh bullet-hit + every pain vocal, so a hit
+        // never hitches on a first-play decode.
+        audio.load("sounds/enemies/bullet-hit.wav");
+        for n in 1..=PAIN_COUNT {
+            audio.load(&format!("sounds/enemies/pain-{n}.wav"));
+        }
+        // A3/P5: the hunter's rifle report + the player's own hit vocal.
+        audio.load(ENEMY_FIRE_SOUND);
+        audio.load(PLAYER_HIT_SOUND);
         audio.play_music(BG_MUSIC, true);
         self.audio = Some(audio);
     }
@@ -67,11 +76,17 @@ impl World {
         if self.mode != Mode::Hunt {
             return None;
         }
-        Some(crate::hud::ammo_quads(
-            self.weapon.magazine(),
-            self.weapon.reserve(),
-            aspect,
-        ))
+        // Dead → the "YOU DIED / PRESS R" text (over the dark death overlay); else
+        // the ammo counter.
+        if self.player_dead {
+            Some(crate::hud::death_quads(aspect))
+        } else {
+            Some(crate::hud::ammo_quads(
+                self.weapon.magazine(),
+                self.weapon.reserve(),
+                aspect,
+            ))
+        }
     }
 
     /// Manual weapon reload (the `R` key in HUNT). No-op outside HUNT; the weapon
@@ -168,8 +183,13 @@ impl World {
         // gun-only (the viewmodel kick, armed in `Weapon::update`) — no camera kick,
         // matching GoldenEye.
         match crate::combat::shooting::cast(&mut self.physics, eye, dir, range, None) {
+            Some(hit) if Some(hit.collider) == self.physics.enemy_collider_handle() => {
+                // Track A: the shot landed on the hunter's capsule — damage it (no
+                // wall spark; the hit reaction + pain SFX are the feedback).
+                self.hit_enemy();
+            }
             Some(hit) => {
-                // Nudge the marker just off the surface to avoid z-fighting.
+                // World geometry: nudge the marker just off the surface (z-fighting).
                 self.sparks.push(Spark {
                     pos: hit.point + hit.normal * 0.01,
                     ttl: SPARK_TTL,
@@ -183,6 +203,236 @@ impl World {
                 );
             }
             None => log::info!("shot — no hit within {range:.0} m"),
+        }
+    }
+
+    /// Apply a PP7 hit to the hunter (Track A). Damages it; on the lethal shot
+    /// plays a random death one-shot (clamps), starts the 2 s opacity fade, and
+    /// removes the capsule collider (a corpse can't be shot). Otherwise plays a
+    /// random hit reaction that auto-returns to locomotion and stuns the hunter
+    /// for the clip's length. Always plays the pain + bullet-hit SFX (JS `onHit`).
+    pub(crate) fn hit_enemy(&mut self) {
+        let dmg = self.weapon.config().damage;
+        // Apply damage — borrow the enemy alone; bail if already dead / gone.
+        let died = match self.enemy.as_mut() {
+            Some(e) if !e.is_dead() => e.take_damage(dmg),
+            _ => return,
+        };
+
+        // On-hit SFX: a random pain vocal + the flesh bullet-hit.
+        let pain = self.rand_below(PAIN_COUNT) + 1;
+        if let Some(audio) = self.audio.as_mut() {
+            audio.play(&format!("sounds/enemies/pain-{pain}.wav"), PAIN_VOL);
+            audio.play("sounds/enemies/bullet-hit.wav", BULLET_HIT_VOL);
+        }
+
+        if died {
+            self.char_dead = true;
+            // Fade is NOT started here — it begins only once the death animation
+            // finishes (see `advance_animation`), so the body stays visible while
+            // it plays out. `enemy_fade` stays `None` (opacity 1) until then.
+            self.physics.remove_enemy_collider();
+            let death_start = CHAR_HIT_START + anim_set::HIT_CLIPS.len();
+            let pick = self.rand_below(anim_set::DEATH_CLIPS.len());
+            if let Some(anim) = self.char_anim.as_mut() {
+                // No return target → the death pose clamps and holds while it fades.
+                anim.play_once(death_start + pick, 0.2, None, None);
+            }
+            log::info!("HUNTER DOWN ({})", anim_set::DEATH_CLIPS[pick]);
+        } else {
+            let idx = CHAR_HIT_START + self.rand_below(anim_set::HIT_CLIPS.len());
+            // Return to the current locomotion band so the one-shot flips
+            // `is_playing_oneshot` back off, letting the HUNT driver resume.
+            let band = band_for_speed(self.enemy.as_ref().map(|e| e.speed()).unwrap_or(0.0));
+            let dur = self
+                .char_anim
+                .as_ref()
+                .and_then(|a| a.clip(idx))
+                .map(|c| c.duration)
+                .unwrap_or(0.4);
+            if let Some(anim) = self.char_anim.as_mut() {
+                anim.play_once(idx, 0.1, Some(band), None);
+            }
+            if let Some(e) = self.enemy.as_mut() {
+                e.stun(dur);
+            }
+            let hp = self.enemy.as_ref().map(|e| e.health()).unwrap_or(0.0);
+            log::info!(
+                "hunter hit — {dmg:.0} dmg, {hp:.0} hp left ({})",
+                anim_set::HIT_CLIPS[idx - CHAR_HIT_START]
+            );
+        }
+    }
+
+    /// Start a fire burst on the shared animation mixer — the hunter entered
+    /// `attack` (A3). Plays the rifle fire one-shot with its FIRE_TIMING window;
+    /// the per-shot cadence + damage roll run in [`Self::enemy_combat_step`]. Resets
+    /// the cadence so the first shot waits for the window's `fireStart`.
+    pub(crate) fn start_enemy_fire(&mut self) {
+        if let Some(anim) = self.char_anim.as_mut() {
+            // Return to idle when done; the HUNT driver re-selects a band after.
+            anim.play_once(CHAR_FIRE_IDX, 0.1, Some(0), Some(anim_set::FIRE_WINDOW));
+        }
+        self.enemy_shot_timer = 0.0;
+        log::info!("hunter firing");
+    }
+
+    /// Per-frame enemy combat + player damage-feedback (HUNT only). Pumps the
+    /// hunter's rifle shots while its fire animation is inside the FIRE_TIMING
+    /// window — one shot per `1/ENEMY_FIRE_RATE` seconds, the JS
+    /// `EnemyCharacter.tick` pump — and decays the muzzle flash + the red damage
+    /// flash + the health-HUD pop timer. Called once per render frame after
+    /// [`Self::advance_animation`] (which advances the fire window).
+    pub fn enemy_combat_step(&mut self, dt: f32) {
+        if self.mode != Mode::Hunt {
+            return;
+        }
+        // Decay feedback timers (these run even while dead so a final flash fades).
+        if self.damage_flash > 0.0 {
+            self.damage_flash = (self.damage_flash - dt * DAMAGE_FLASH_DECAY).max(0.0);
+        }
+        if self.hud_show_timer > 0.0 {
+            self.hud_show_timer = (self.hud_show_timer - dt).max(0.0);
+        }
+        if self.enemy_muzzle_timer > 0.0 {
+            self.enemy_muzzle_timer = (self.enemy_muzzle_timer - dt).max(0.0);
+        }
+        if self.player_dead {
+            return;
+        }
+
+        // The hunter fires only while its FIRE one-shot is inside its window
+        // (the hard-won FIRE_TIMING mapping), spaced by 1/fireRate.
+        let (firing, window_open) = self
+            .char_anim
+            .as_ref()
+            .map(|a| {
+                let f = a.is_playing_oneshot() && a.current_clip() == CHAR_FIRE_IDX;
+                (f, f && a.fire_window_open())
+            })
+            .unwrap_or((false, false));
+        if !firing {
+            self.enemy_shot_timer = 0.0;
+            return;
+        }
+        if window_open {
+            self.enemy_shot_timer -= dt;
+            if self.enemy_shot_timer <= 0.0 {
+                self.enemy_shot_timer = 1.0 / ENEMY_FIRE_RATE;
+                self.emit_enemy_shot();
+            }
+        }
+    }
+
+    /// One rifle shot from the hunter (JS `EnemyCharacter.onShotFired` + the AI
+    /// damage callback): muzzle flash + gun report always; then, when LOS is clear,
+    /// roll `accuracy·(1−dist/maxRange)` and apply damage to the player on a hit.
+    fn emit_enemy_shot(&mut self) {
+        let epos = match self.enemy.as_ref() {
+            Some(e) if !e.is_dead() => e.pos,
+            _ => return,
+        };
+        let Some(ppos) = self.player_pos() else { return };
+        // Flash + report fire on every shot, hit or miss.
+        self.enemy_muzzle_timer = ENEMY_MUZZLE_TIME;
+        if let Some(audio) = self.audio.as_mut() {
+            audio.play(ENEMY_FIRE_SOUND, ENEMY_FIRE_VOL);
+        }
+        // Walls block the shot (re-checked per shot, JS-faithful).
+        if !crate::enemy::line_of_sight(&mut self.physics, epos, ppos) {
+            return;
+        }
+        let dist = Vec3::new(ppos.x - epos.x, 0.0, ppos.z - epos.z).length();
+        let dist_factor = (1.0 - dist / ENEMY_MAX_RANGE).max(0.0);
+        let hit_chance = ENEMY_ACCURACY * dist_factor;
+        if self.rand_float() < hit_chance {
+            self.take_player_damage(ENEMY_DAMAGE);
+        }
+    }
+
+    /// Apply `dmg` to the player (JS `Actor.takeDamage`: armor-first, then health)
+    /// with the damage feedback — red flash (peak α = min(0.5, dmg/40)), the
+    /// breathe SFX, and the health-HUD pop. Death (→ YOU DIED) at 0 health.
+    pub(crate) fn take_player_damage(&mut self, dmg: f32) {
+        if self.player_dead {
+            return;
+        }
+        let absorbed = self.player_armor.min(dmg);
+        self.player_armor -= absorbed;
+        let to_health = dmg - absorbed;
+        self.player_health = (self.player_health - to_health).max(0.0);
+        self.damage_flash = (dmg / 40.0).min(0.5);
+        self.hud_show_timer = HUD_SHOW_TIME;
+        if let Some(audio) = self.audio.as_mut() {
+            audio.play(PLAYER_HIT_SOUND, PLAYER_HIT_VOL);
+        }
+        if self.player_health <= 0.0 {
+            self.player_dead = true;
+            log::info!("YOU DIED — press R to restart");
+        }
+    }
+
+    /// xorshift64 → a float in `[0, 1)` (reuses the character RNG state) for the
+    /// probabilistic hit roll.
+    fn rand_float(&mut self) -> f32 {
+        (self.rand_below(1 << 24) as f32) / ((1u32 << 24) as f32)
+    }
+
+    /// Player health / armor + death, for the HUD and the app's restart routing.
+    pub fn player_health(&self) -> f32 {
+        self.player_health
+    }
+    pub fn player_armor(&self) -> f32 {
+        self.player_armor
+    }
+    pub fn is_player_dead(&self) -> bool {
+        self.player_dead
+    }
+    /// Red damage-flash alpha this frame (0 = none).
+    pub fn damage_flash(&self) -> f32 {
+        self.damage_flash
+    }
+    /// The radial health graphic's pixel dimensions (for the renderer texture),
+    /// or `None` if it failed to load.
+    pub fn health_hud_dims(&self) -> Option<(u32, u32)> {
+        self.health_hud.as_ref().map(|h| (h.w, h.h))
+    }
+
+    /// Bake the radial-health RGBA for the current health/armor (top-down segment
+    /// depletion). `None` if the graphic failed to load. Re-baked only when health
+    /// changes (the app tracks that).
+    pub fn health_hud_rgba(&self) -> Option<Vec<u8>> {
+        let h = self.health_hud.as_ref()?;
+        let hp = (self.player_health / PLAYER_MAX_HEALTH).clamp(0.0, 1.0);
+        let ap = (self.player_armor / PLAYER_MAX_ARMOR).clamp(0.0, 1.0);
+        Some(h.render(hp, ap))
+    }
+
+    /// Radial-HUD opacity this frame (pops to 1 on damage, fades over the last
+    /// [`HUD_FADE_TAIL`] seconds). 0 = hidden.
+    pub fn hud_alpha(&self) -> f32 {
+        if self.hud_show_timer <= 0.0 {
+            0.0
+        } else if self.hud_show_timer > HUD_FADE_TAIL {
+            1.0
+        } else {
+            self.hud_show_timer / HUD_FADE_TAIL
+        }
+    }
+
+    /// Restart after death (the `R` key on the YOU DIED screen): reset player
+    /// health/armor and return to BUILD (which also clears the hunter + colliders).
+    pub fn restart_after_death(&mut self) {
+        if !self.player_dead {
+            return;
+        }
+        self.player_health = PLAYER_MAX_HEALTH;
+        self.player_armor = 0.0;
+        self.player_dead = false;
+        self.damage_flash = 0.0;
+        self.hud_show_timer = 0.0;
+        if self.mode == Mode::Hunt {
+            self.toggle_mode();
         }
     }
 

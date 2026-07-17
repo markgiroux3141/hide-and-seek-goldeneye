@@ -133,6 +133,17 @@ impl AnimPlayer {
         !self.current.looping
     }
 
+    /// Whether the current one-shot has reached its last frame (clamped). For a
+    /// no-return one-shot (death) this stays true while it holds the final pose —
+    /// the cue to start the death fade once the animation is actually done.
+    pub fn oneshot_finished(&self) -> bool {
+        if self.current.looping {
+            return false;
+        }
+        let dur = self.clips[self.current.clip].duration;
+        dur > 0.0 && self.current.time >= dur
+    }
+
     /// Whether playback is currently inside a fire clip's shot window.
     pub fn fire_window_open(&self) -> bool {
         self.fire_open
@@ -174,11 +185,23 @@ impl AnimPlayer {
 
     /// The skinning matrices for the current (possibly mid-crossfade) pose.
     pub fn skinning_matrices(&self, skeleton: &Skeleton) -> Vec<Mat4> {
+        skeleton.skinning_matrices(&self.pose_locals(skeleton))
+    }
+
+    /// Global (model-space) transform of every joint for the current pose. Unlike
+    /// [`Self::skinning_matrices`] this is the raw joint transform (no inverse
+    /// bind), so a prop can be parented to a bone: `char_model · joint_global ·
+    /// local_offset` places it in the bone's frame (the JS `bone.add(mesh)`).
+    pub fn joint_global_transforms(&self, skeleton: &Skeleton) -> Vec<Mat4> {
+        skeleton.global_transforms(&self.pose_locals(skeleton))
+    }
+
+    /// Per-joint local matrices of the current (possibly blended) pose.
+    fn pose_locals(&self, skeleton: &Skeleton) -> Vec<Mat4> {
         let (t, r, s) = self.pose_trs(skeleton);
-        let locals: Vec<Mat4> = (0..skeleton.joint_count())
+        (0..skeleton.joint_count())
             .map(|i| Mat4::from_scale_rotation_translation(s[i], r[i], t[i]))
-            .collect();
-        skeleton.skinning_matrices(&locals)
+            .collect()
     }
 
     /// The blended per-joint TRS of the current pose.

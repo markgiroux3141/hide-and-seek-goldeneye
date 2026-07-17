@@ -9,6 +9,7 @@
 //! state each frame.
 
 pub mod font;
+pub mod health;
 
 use engine::render::mesh::HudVertex;
 use font::{cell_width, CHARSET, GLYPH_H, GLYPH_W};
@@ -117,6 +118,25 @@ pub fn ammo_quads(magazine: u32, reserve: u32, aspect: f32) -> Vec<HudVertex> {
 
     let mut out = Vec::with_capacity(text.chars().count() * 6);
     layout_text(&text, x_start, y_top, gw, gh, gap, &mut out);
+    out
+}
+
+/// The "YOU DIED" death-screen text quads (P5): a centered title + a smaller
+/// "PRESS R" prompt. Drawn white over the dark death overlay. `aspect` = w/h.
+pub fn death_quads(aspect: f32) -> Vec<HudVertex> {
+    let mut out = Vec::new();
+    // Title.
+    let gh = 0.13;
+    let gw = gh / aspect.max(1e-6) * (GLYPH_W as f32 / GLYPH_H as f32);
+    let gap = gw * 0.5;
+    let title = "YOU DIED";
+    layout_text(title, -text_width(title, gw, gap) / 2.0, 0.16, gw, gh, gap, &mut out);
+    // Prompt.
+    let gh2 = 0.055;
+    let gw2 = gh2 / aspect.max(1e-6) * (GLYPH_W as f32 / GLYPH_H as f32);
+    let gap2 = gw2 * 0.5;
+    let sub = "PRESS R";
+    layout_text(sub, -text_width(sub, gw2, gap2) / 2.0, -0.08, gw2, gh2, gap2, &mut out);
     out
 }
 
