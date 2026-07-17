@@ -24,6 +24,7 @@ struct Playing {
 
 /// A crossfading animation player. Holds named clips for one skeleton, the
 /// current clip, and an optional outgoing clip fading out.
+#[derive(Clone)]
 pub struct AnimPlayer {
     clips: Vec<AnimationClip>,
     current: Playing,

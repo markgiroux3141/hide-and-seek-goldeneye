@@ -56,7 +56,8 @@ struct MaterialUniform {
 struct CharUniform {
     model: [[f32; 4]; 4],
     joints: [[[f32; 4]; 4]; MAX_JOINTS],
-    /// `[0]` = whole-character opacity (death fade); the rest is std140 padding.
+    /// `[0]` = whole-character opacity (death fade); `[1..]` is std140 padding.
+    /// (Blood/damage tint is a per-vertex color in a second vertex buffer, not here.)
     opacity: [f32; 4],
 }
 
@@ -78,16 +79,46 @@ struct GpuPrimitive {
     tex_bind: wgpu::BindGroup,
 }
 
-/// A GPU-resident skinned character: shared vertex/index buffers, per-texture
-/// primitives, and the per-character joint/model uniform (rewritten each frame
-/// as the pose animates).
-struct GpuCharacter {
+/// A GPU-resident skinned character's shared geometry: vertex/index buffers +
+/// per-texture primitives + the decoded textures. One is uploaded (all hunters
+/// share the same GLB); the per-instance pose lives in [`GpuCharacterInstance`].
+struct GpuCharacterMesh {
     vertex_buf: wgpu::Buffer,
     index_buf: wgpu::Buffer,
     primitives: Vec<GpuPrimitive>,
+    /// Vertex count — sizes each instance's per-vertex blood-color buffer.
+    vertex_count: u32,
+    _textures: Vec<wgpu::Texture>,
+}
+
+/// One drawn instance of the shared character mesh: its own joint/model/opacity
+/// uniform + its own per-vertex blood-color buffer (both rewritten each frame).
+/// Pooled + reused across frames so N hunters draw the one [`GpuCharacterMesh`] N
+/// times with distinct poses and independent accumulated blood.
+struct GpuCharacterInstance {
     uniform_buf: wgpu::Buffer,
     uniform_bind: wgpu::BindGroup,
+    /// Per-vertex RGB damage/blood color (second vertex buffer). White = clean.
+    color_buf: wgpu::Buffer,
+}
+
+/// A GPU-resident enemy weapon's shared geometry (gun or muzzle-flash): the same
+/// as a [`GpuViewModel`] minus the clip uniform, so one mesh can be drawn at many
+/// transforms (dual-wield, or several hunters holding the same gun). The transforms
+/// come from a pooled [`GpuClip`].
+struct GpuWeaponMesh {
+    vertex_buf: wgpu::Buffer,
+    index_buf: wgpu::Buffer,
+    primitives: Vec<GpuPrimitive>,
     _textures: Vec<wgpu::Texture>,
+}
+
+/// A pooled clip-matrix uniform (`view_proj · world`) + its bind group, reused
+/// frame-to-frame so a variable number of enemy weapon draws each get their own
+/// transform without reallocating buffers.
+struct GpuClip {
+    clip_buf: wgpu::Buffer,
+    clip_bind: wgpu::BindGroup,
 }
 
 /// A GPU-resident weapon viewmodel (the first-person gun): shared vertex/index
@@ -163,7 +194,12 @@ pub struct Renderer {
     char_tex_layout: wgpu::BindGroupLayout,
     char_uniform_layout: wgpu::BindGroupLayout,
     char_sampler: wgpu::Sampler,
-    character: Option<GpuCharacter>,
+    /// The shared skinned-character geometry (uploaded once), and a reused pool of
+    /// per-instance pose uniforms — `character_instance_count` of them are drawn
+    /// this frame (one per hunter, or the single BUILD demo).
+    character_mesh: Option<GpuCharacterMesh>,
+    character_instances: Vec<GpuCharacterInstance>,
+    character_instance_count: usize,
     /// Texture bind-group layout for the viewmodel/muzzle/enemy-weapon meshes:
     /// base color + sampler + emissive (see `build_gpu_viewmodel`).
     viewmodel_tex_layout: wgpu::BindGroupLayout,
@@ -184,14 +220,20 @@ pub struct Renderer {
     muzzle: Option<GpuViewModel>,
     muzzle_visible: bool,
 
-    // Enemy rifle + muzzle (A3): the hunter's gun attached to its hand bone. Same
-    // textured GLBs as the player gun, but drawn in the FORWARD pass (world-space,
-    // depth-tested against the scene) rather than the overlay — reusing the
-    // viewmodel/muzzle pipelines with a `view_proj · world` clip matrix.
-    enemy_weapon: Option<GpuViewModel>,
-    enemy_weapon_visible: bool,
-    enemy_muzzle: Option<GpuViewModel>,
-    enemy_muzzle_visible: bool,
+    // Enemy weapons + muzzles (A3, arsenal): each hunter's gun(s) attached to its
+    // hand bone(s). Same textured GLBs as the player guns, but drawn in the FORWARD
+    // pass (world-space, depth-tested against the scene) rather than the overlay —
+    // reusing the viewmodel/muzzle pipelines with a `view_proj · world` clip matrix.
+    // A weapon-name-keyed mesh library (uploaded once for the whole arsenal) plus a
+    // pooled set of clip uniforms, so any number of guns (incl. dual-wield, and
+    // several hunters sharing a gun) can be drawn each frame.
+    enemy_weapon_meshes: HashMap<&'static str, GpuWeaponMesh>,
+    enemy_muzzle_meshes: HashMap<&'static str, GpuWeaponMesh>,
+    enemy_weapon_clips: Vec<GpuClip>,
+    enemy_muzzle_clips: Vec<GpuClip>,
+    /// This frame's draws as `(clip pool index, weapon-name mesh key)`.
+    enemy_weapon_draws: Vec<(usize, &'static str)>,
+    enemy_muzzle_draws: Vec<(usize, &'static str)>,
 
     // Hit sparks (Player Combat P2): bright per-vertex-colored markers at shot
     // impact points. Reuses the gizmo shader (unlit color) but depth-TESTED (so
@@ -726,7 +768,8 @@ impl Renderer {
             vertex: wgpu::VertexState {
                 module: &skinned_shader,
                 entry_point: Some("vs_main"),
-                buffers: &[SkinVertex::LAYOUT],
+                // Buffer 0 = shared geometry; buffer 1 = per-instance blood colors.
+                buffers: &[SkinVertex::LAYOUT, SkinVertex::BLOOD_LAYOUT],
                 compilation_options: Default::default(),
             },
             fragment: Some(wgpu::FragmentState {
@@ -1277,17 +1320,21 @@ impl Renderer {
             char_tex_layout,
             char_uniform_layout,
             char_sampler,
-            character: None,
+            character_mesh: None,
+            character_instances: Vec::new(),
+            character_instance_count: 0,
             viewmodel_tex_layout,
             viewmodel_pipeline,
             viewmodel: None,
             viewmodel_visible: false,
             muzzle_pipeline,
             muzzle: None,
-            enemy_weapon: None,
-            enemy_weapon_visible: false,
-            enemy_muzzle: None,
-            enemy_muzzle_visible: false,
+            enemy_weapon_meshes: HashMap::new(),
+            enemy_muzzle_meshes: HashMap::new(),
+            enemy_weapon_clips: Vec::new(),
+            enemy_muzzle_clips: Vec::new(),
+            enemy_weapon_draws: Vec::new(),
+            enemy_muzzle_draws: Vec::new(),
             muzzle_visible: false,
             spark_pipeline,
             spark_mesh: None,
@@ -1352,11 +1399,10 @@ impl Renderer {
         };
     }
 
-    /// Upload a skinned character to the GPU: shared vertex/index buffers, one
-    /// GPU texture per referenced image, per-primitive texture bind groups, and
-    /// the per-character joint/model uniform (initialized to the bind pose).
-    /// Call once per spawned character; drive the pose each frame with
-    /// [`Renderer::set_character_pose`].
+    /// Upload the shared skinned-character geometry to the GPU: shared vertex/index
+    /// buffers, one GPU texture per referenced image, and per-primitive texture bind
+    /// groups. Call once — all hunters (and the BUILD demo) share this mesh; each
+    /// drawn instance's pose comes from [`Renderer::set_character_instances`].
     pub fn upload_character(&mut self, model: &SkinnedModel) {
         let vertex_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("char-vertices"),
@@ -1409,6 +1455,19 @@ impl Renderer {
             })
             .collect();
 
+        self.character_mesh = Some(GpuCharacterMesh {
+            vertex_buf,
+            index_buf,
+            primitives,
+            vertex_count: model.vertices.len() as u32,
+            _textures: textures,
+        });
+    }
+
+    /// Build one pooled character-instance pose uniform + its bind group, plus a
+    /// per-vertex blood-color buffer initialized to white (clean). Sized to the
+    /// uploaded character mesh's vertex count.
+    fn make_character_instance(&self) -> GpuCharacterInstance {
         let uniform_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("char-uniform"),
             contents: bytemuck::cast_slice(&[CharUniform::default()]),
@@ -1422,38 +1481,51 @@ impl Renderer {
                 resource: uniform_buf.as_entire_binding(),
             }],
         });
-
-        self.character = Some(GpuCharacter {
-            vertex_buf,
-            index_buf,
-            primitives,
-            uniform_buf,
-            uniform_bind,
-            _textures: textures,
+        let n = self.character_mesh.as_ref().map(|m| m.vertex_count).unwrap_or(0) as usize;
+        let white = vec![1.0f32; n * 3];
+        let color_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("char-blood"),
+            contents: bytemuck::cast_slice(&white),
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
+        GpuCharacterInstance { uniform_buf, uniform_bind, color_buf }
     }
 
-    /// Update the current character's world placement, joint matrices, and
-    /// whole-character `opacity` (1 = opaque; <1 fades it out for the death
-    /// animation). `joints` is truncated/padded to `MAX_JOINTS` with identity.
-    /// No-op if no character is uploaded.
-    pub fn set_character_pose(&mut self, model: Mat4, joints: &[Mat4], opacity: f32) {
-        let Some(ch) = &self.character else { return };
-        let mut u = CharUniform {
-            model: model.to_cols_array_2d(),
-            opacity: [opacity, 0.0, 0.0, 0.0],
-            ..Default::default()
-        };
-        for (i, m) in joints.iter().take(MAX_JOINTS).enumerate() {
-            u.joints[i] = m.to_cols_array_2d();
+    /// Set every character instance to draw this frame as `(model, joint matrices,
+    /// opacity, blood_colors)`. `blood_colors` is the flat per-vertex RGB (len =
+    /// 3×vertex_count) painted by shots — white where clean. Grows the reused
+    /// instance pool to fit, writes each pose uniform + blood buffer, and records
+    /// the count. `joints` is truncated/padded to `MAX_JOINTS`. No-op geometry-wise
+    /// if no character mesh is uploaded.
+    pub fn set_character_instances(&mut self, instances: &[(Mat4, Vec<Mat4>, f32, &[f32])]) {
+        self.character_instance_count = instances.len();
+        while self.character_instances.len() < instances.len() {
+            let inst = self.make_character_instance();
+            self.character_instances.push(inst);
         }
-        self.queue
-            .write_buffer(&ch.uniform_buf, 0, bytemuck::cast_slice(&[u]));
+        for (slot, (model, joints, opacity, colors)) in
+            self.character_instances.iter().zip(instances)
+        {
+            let mut u = CharUniform {
+                model: model.to_cols_array_2d(),
+                opacity: [*opacity, 0.0, 0.0, 0.0],
+                ..Default::default()
+            };
+            for (i, m) in joints.iter().take(MAX_JOINTS).enumerate() {
+                u.joints[i] = m.to_cols_array_2d();
+            }
+            self.queue
+                .write_buffer(&slot.uniform_buf, 0, bytemuck::cast_slice(&[u]));
+            self.queue
+                .write_buffer(&slot.color_buf, 0, bytemuck::cast_slice(colors));
+        }
     }
 
-    /// Remove the current character.
+    /// Remove the character geometry + all instances (e.g. reload).
     pub fn clear_character(&mut self) {
-        self.character = None;
+        self.character_mesh = None;
+        self.character_instances.clear();
+        self.character_instance_count = 0;
     }
 
     /// Build a GPU viewmodel (gun or muzzle flash) from a [`TexturedModel`]:
@@ -1461,7 +1533,11 @@ impl Renderer {
     /// 1×1 white fallback), per-primitive texture bind groups, and a clip-matrix
     /// uniform (identity until the first transform set). Shared by the gun +
     /// muzzle uploads.
-    fn build_gpu_viewmodel(&self, model: &TexturedModel, label: &str) -> GpuViewModel {
+    /// Build a weapon's shared GPU geometry (gun or muzzle flash): vertex/index
+    /// buffers, one GPU texture per referenced image (+ white/black fallbacks), and
+    /// per-primitive texture bind groups (base color + sampler + emissive). No clip
+    /// uniform — see [`Renderer::make_clip`].
+    fn build_weapon_mesh(&self, model: &TexturedModel, label: &str) -> GpuWeaponMesh {
         let vertex_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
             contents: bytemuck::cast_slice(&model.vertices),
@@ -1521,29 +1597,45 @@ impl Renderer {
             })
             .collect();
 
+        GpuWeaponMesh {
+            vertex_buf,
+            index_buf,
+            primitives,
+            _textures: textures,
+        }
+    }
+
+    /// Build one pooled clip-matrix uniform (identity) + its bind group (group 0 =
+    /// clip matrix, the camera layout).
+    fn make_clip(&self, label: &str) -> GpuClip {
         let clip_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("viewmodel-clip"),
+            label: Some(label),
             contents: bytemuck::cast_slice(&[CameraUniform {
                 view_proj: Mat4::IDENTITY.to_cols_array_2d(),
             }]),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
         let clip_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("viewmodel-clip-bg"),
+            label: Some(label),
             layout: &self.camera_layout,
             entries: &[wgpu::BindGroupEntry {
                 binding: 0,
                 resource: clip_buf.as_entire_binding(),
             }],
         });
+        GpuClip { clip_buf, clip_bind }
+    }
 
+    fn build_gpu_viewmodel(&self, model: &TexturedModel, label: &str) -> GpuViewModel {
+        let mesh = self.build_weapon_mesh(model, label);
+        let clip = self.make_clip(label);
         GpuViewModel {
-            vertex_buf,
-            index_buf,
-            primitives,
-            clip_buf,
-            clip_bind,
-            _textures: textures,
+            vertex_buf: mesh.vertex_buf,
+            index_buf: mesh.index_buf,
+            primitives: mesh.primitives,
+            clip_buf: clip.clip_buf,
+            clip_bind: clip.clip_bind,
+            _textures: mesh._textures,
         }
     }
 
@@ -1600,52 +1692,61 @@ impl Renderer {
         }
     }
 
-    /// Upload the hunter's rifle (A3). Call once; show it per frame via
-    /// [`Renderer::set_enemy_weapon_transform`] with a world-space clip matrix.
-    pub fn upload_enemy_weapon(&mut self, model: &TexturedModel) {
-        self.enemy_weapon = Some(self.build_gpu_viewmodel(model, "enemy-rifle"));
+    /// Add one enemy weapon's gun mesh to the render library, keyed by weapon name
+    /// (A3, arsenal). Call once per arsenal weapon at startup; draw any number of
+    /// them per frame via [`Renderer::set_enemy_weapon_draws`].
+    pub fn upload_enemy_weapon(&mut self, key: &'static str, model: &TexturedModel) {
+        let mesh = self.build_weapon_mesh(model, "enemy-gun");
+        self.enemy_weapon_meshes.insert(key, mesh);
     }
 
-    /// Upload the hunter's muzzle flash (A3). Shown per frame via
-    /// [`Renderer::set_enemy_muzzle_transform`] while a shot's flash is active.
-    pub fn upload_enemy_muzzle(&mut self, model: &TexturedModel) {
-        self.enemy_muzzle = Some(self.build_gpu_viewmodel(model, "enemy-muzzle"));
+    /// Add one enemy weapon's muzzle-flash mesh to the render library, keyed by
+    /// weapon name. Drawn per frame via [`Renderer::set_enemy_muzzle_draws`].
+    pub fn upload_enemy_muzzle(&mut self, key: &'static str, model: &TexturedModel) {
+        let mesh = self.build_weapon_mesh(model, "enemy-muzzle");
+        self.enemy_muzzle_meshes.insert(key, mesh);
     }
 
-    /// Set the hunter rifle's world clip transform (`view_proj · world`) this frame,
-    /// or hide it (`None`). Drawn depth-tested in the forward pass.
-    pub fn set_enemy_weapon_transform(&mut self, clip: Option<Mat4>) {
-        let Some(w) = &self.enemy_weapon else { return };
-        match clip {
-            Some(clip) => {
-                self.queue.write_buffer(
-                    &w.clip_buf,
-                    0,
-                    bytemuck::cast_slice(&[CameraUniform {
-                        view_proj: clip.to_cols_array_2d(),
-                    }]),
-                );
-                self.enemy_weapon_visible = true;
-            }
-            None => self.enemy_weapon_visible = false,
+    /// Set the enemy gun draws this frame: `(weapon name, view_proj · world)` per
+    /// gun to render (one per hunter, two for dual-wield). Grows the reused clip
+    /// pool, writes each transform, and records the draw list; the draw pass looks
+    /// up each mesh by name (a draw for an unknown/failed weapon is skipped).
+    pub fn set_enemy_weapon_draws(&mut self, draws: &[(&'static str, Mat4)]) {
+        while self.enemy_weapon_clips.len() < draws.len() {
+            let clip = self.make_clip("enemy-gun-clip");
+            self.enemy_weapon_clips.push(clip);
+        }
+        self.enemy_weapon_draws.clear();
+        for (i, (key, clip)) in draws.iter().enumerate() {
+            self.queue.write_buffer(
+                &self.enemy_weapon_clips[i].clip_buf,
+                0,
+                bytemuck::cast_slice(&[CameraUniform {
+                    view_proj: clip.to_cols_array_2d(),
+                }]),
+            );
+            self.enemy_weapon_draws.push((i, key));
         }
     }
 
-    /// Set the hunter muzzle-flash's world clip transform this frame, or hide it.
-    pub fn set_enemy_muzzle_transform(&mut self, clip: Option<Mat4>) {
-        let Some(m) = &self.enemy_muzzle else { return };
-        match clip {
-            Some(clip) => {
-                self.queue.write_buffer(
-                    &m.clip_buf,
-                    0,
-                    bytemuck::cast_slice(&[CameraUniform {
-                        view_proj: clip.to_cols_array_2d(),
-                    }]),
-                );
-                self.enemy_muzzle_visible = true;
-            }
-            None => self.enemy_muzzle_visible = false,
+    /// Set the enemy muzzle-flash draws this frame (same shape as
+    /// [`Renderer::set_enemy_weapon_draws`]); shown only while a shot's flash is
+    /// active.
+    pub fn set_enemy_muzzle_draws(&mut self, draws: &[(&'static str, Mat4)]) {
+        while self.enemy_muzzle_clips.len() < draws.len() {
+            let clip = self.make_clip("enemy-muzzle-clip");
+            self.enemy_muzzle_clips.push(clip);
+        }
+        self.enemy_muzzle_draws.clear();
+        for (i, (key, clip)) in draws.iter().enumerate() {
+            self.queue.write_buffer(
+                &self.enemy_muzzle_clips[i].clip_buf,
+                0,
+                bytemuck::cast_slice(&[CameraUniform {
+                    view_proj: clip.to_cols_array_2d(),
+                }]),
+            );
+            self.enemy_muzzle_draws.push((i, key));
         }
     }
 
@@ -2017,26 +2118,38 @@ impl Renderer {
                 rp.draw_indexed(0..s.index_count, 0, 0..1);
             }
 
-            // 2.2) Skinned character (opaque, unlit textured). group(0)=camera,
-            // group(2)=joints/model set once; group(1)=texture per primitive.
-            if let Some(ch) = &self.character {
+            // 2.2) Skinned characters (opaque, unlit textured) — one draw per live
+            // hunter (or the BUILD demo). group(0)=camera; group(2)=this instance's
+            // joints/model; group(1)=texture per primitive. All share one mesh.
+            if let Some(ch) = &self.character_mesh {
                 rp.set_pipeline(&self.skinned_pipeline);
                 rp.set_bind_group(0, &self.camera_bind_group, &[]);
-                rp.set_bind_group(2, &ch.uniform_bind, &[]);
                 rp.set_vertex_buffer(0, ch.vertex_buf.slice(..));
                 rp.set_index_buffer(ch.index_buf.slice(..), wgpu::IndexFormat::Uint32);
-                for p in &ch.primitives {
-                    rp.set_bind_group(1, &p.tex_bind, &[]);
-                    rp.draw_indexed(p.index_start..(p.index_start + p.index_count), 0, 0..1);
+                for inst in self.character_instances.iter().take(self.character_instance_count) {
+                    rp.set_bind_group(2, &inst.uniform_bind, &[]);
+                    // Per-instance blood colors in the second vertex buffer.
+                    rp.set_vertex_buffer(1, inst.color_buf.slice(..));
+                    for p in &ch.primitives {
+                        rp.set_bind_group(1, &p.tex_bind, &[]);
+                        rp.draw_indexed(p.index_start..(p.index_start + p.index_count), 0, 0..1);
+                    }
                 }
             }
 
-            // 2.3) Enemy rifle attached to the hunter's hand bone (world-space,
+            // 2.3) Enemy guns attached to the hunters' hand bones (world-space,
             // depth-tested vs the scene — reuses the viewmodel pipeline with a
-            // view_proj·world clip matrix).
-            if let (Some(w), true) = (&self.enemy_weapon, self.enemy_weapon_visible) {
+            // view_proj·world clip matrix). One draw per gun (two for dual-wield),
+            // each looking up its mesh by weapon name.
+            for (clip_idx, key) in &self.enemy_weapon_draws {
+                let (Some(w), Some(clip)) = (
+                    self.enemy_weapon_meshes.get(key),
+                    self.enemy_weapon_clips.get(*clip_idx),
+                ) else {
+                    continue;
+                };
                 rp.set_pipeline(&self.viewmodel_pipeline);
-                rp.set_bind_group(0, &w.clip_bind, &[]);
+                rp.set_bind_group(0, &clip.clip_bind, &[]);
                 rp.set_vertex_buffer(0, w.vertex_buf.slice(..));
                 rp.set_index_buffer(w.index_buf.slice(..), wgpu::IndexFormat::Uint32);
                 for p in &w.primitives {
@@ -2044,10 +2157,16 @@ impl Renderer {
                     rp.draw_indexed(p.index_start..(p.index_start + p.index_count), 0, 0..1);
                 }
             }
-            // 2.4) Enemy muzzle flash (additive) while a shot is firing.
-            if let (Some(m), true) = (&self.enemy_muzzle, self.enemy_muzzle_visible) {
+            // 2.4) Enemy muzzle flashes (additive) while shots are firing.
+            for (clip_idx, key) in &self.enemy_muzzle_draws {
+                let (Some(m), Some(clip)) = (
+                    self.enemy_muzzle_meshes.get(key),
+                    self.enemy_muzzle_clips.get(*clip_idx),
+                ) else {
+                    continue;
+                };
                 rp.set_pipeline(&self.muzzle_pipeline);
-                rp.set_bind_group(0, &m.clip_bind, &[]);
+                rp.set_bind_group(0, &clip.clip_bind, &[]);
                 rp.set_vertex_buffer(0, m.vertex_buf.slice(..));
                 rp.set_index_buffer(m.index_buf.slice(..), wgpu::IndexFormat::Uint32);
                 for p in &m.primitives {

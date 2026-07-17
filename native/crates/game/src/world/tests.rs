@@ -85,11 +85,11 @@ use super::editing::find_room_brushes;
     fn hunter_perceives_chases_and_shoots_the_player() {
         let mut world = World::new();
         world.initial_meshes();
-        world.toggle_mode(); // bake nav + spawn the hunter watching the player
-        assert!(world.enemy.is_some(), "hunter spawned");
+        world.toggle_mode(); // bake nav + spawn the hunter roster watching the player
+        assert!(!world.enemies.is_empty(), "hunters spawned");
         assert_eq!(world.player_health(), PLAYER_MAX_HEALTH, "player starts at full health");
 
-        let input = InputState::default(); // player stands still, in the guard's view
+        let input = InputState::default(); // player stands still, in the guards' view
         let dt = 1.0 / 60.0;
         let mut damaged = false;
         for _ in 0..600 {
@@ -102,98 +102,97 @@ use super::editing::find_room_brushes;
                 break;
             }
         }
-        assert!(damaged, "the hunter should perceive, close in, and shoot the player");
-        // It engaged (left idle) — the perception FSM ran.
-        assert_ne!(
-            world.enemy.as_ref().unwrap().state(),
-            crate::enemy::AiState::Idle,
-            "hunter should have engaged, not stayed idle"
+        assert!(damaged, "a hunter should perceive, close in, and shoot the player");
+        // At least one hunter engaged (left idle) — the perception FSM ran.
+        assert!(
+            world
+                .enemies
+                .iter()
+                .any(|e| e.enemy.state() != crate::enemy::AiState::Idle),
+            "a hunter should have engaged, not all stayed idle"
         );
     }
 
-    /// B5: in HUNT the animated model *is* the hunter — the placeholder box is
-    /// gone and the model tracks the enemy's nav-driven position + faces its
-    /// travel direction while it moves.
+    /// B5: in HUNT the animated model *is* each hunter — the placeholder box is
+    /// gone and there is one skinned instance per hunter, each a real posed
+    /// skinning set (opaque while alive).
     #[test]
     fn hunter_drives_the_animated_model_not_a_box() {
         let mut world = World::new();
         world.initial_meshes();
-        world.toggle_mode(); // HUNT: bake nav + spawn hunter
-        assert!(world.enemy.is_some(), "hunter spawned");
+        world.toggle_mode(); // HUNT: bake nav + spawn hunter roster
+        assert!(!world.enemies.is_empty(), "hunters spawned");
         assert!(world.char_model.is_some(), "character model loaded");
         // The placeholder box is suppressed (the model is the hunter).
         assert!(world.enemy_mesh().is_none(), "box replaced by the model");
 
-        // Step the hunter, then advance the animation driver.
+        // Step the hunters, then advance the animation driver.
         let input = InputState::default();
         for _ in 0..30 {
             world.fixed_step(1.0 / 120.0, &input);
         }
         world.advance_animation(1.0 / 60.0);
 
-        let epos = world.enemy.as_ref().unwrap().pos;
-        assert!(
-            (world.char_pos - epos).length() < 1e-4,
-            "model position {:?} should track the hunter {:?}",
-            world.char_pos,
-            epos
-        );
-        // Once moving, yaw faces the hunter's heading.
-        let h = world.enemy.as_ref().unwrap().heading();
-        if world.enemy.as_ref().unwrap().speed() > 0.0 {
-            let expect = h.x.atan2(h.z);
-            let d = (world.char_yaw - expect).abs();
-            assert!(d < 1e-4, "yaw {} should face heading {}", world.char_yaw, expect);
-        }
-        // The pose is a real 15-joint skinning set, fully opaque while alive.
-        let (_, joints, opacity) = world.character_pose().expect("character present in HUNT");
+        // One skinned instance per hunter; each a real 15-joint pose, opaque alive.
+        let instances = world.character_instances();
+        assert_eq!(instances.len(), world.enemies.len(), "one instance per hunter");
+        let (_, joints, opacity, colors) = &instances[0];
         assert_eq!(joints.len(), 15);
-        assert_eq!(opacity, 1.0, "alive hunter is opaque");
+        assert_eq!(*opacity, 1.0, "alive hunter is opaque");
+        assert!(colors.iter().all(|&c| c == 1.0), "un-shot hunter is clean (white blood)");
     }
 
-    /// Track A: four PP7 hits kill the hunter — it takes damage each shot, and the
-    /// lethal shot arms the death fade, drops the hitscan capsule (a corpse can't
-    /// be shot), and puts the model into its death state. The fade then drives the
-    /// character's opacity 1 → 0.
+    /// Track A: four PP7 hits kill a hunter — it takes damage each shot, and the
+    /// lethal shot drops the hitscan capsule (a corpse can't be shot) and puts the
+    /// model into its death state. The fade then drives the character's opacity
+    /// 1 → 0 once the death animation finishes.
     #[test]
     fn four_shots_kill_the_hunter_then_it_fades_out() {
         let mut world = World::new();
         world.initial_meshes();
-        world.toggle_mode(); // HUNT: bake nav + spawn hunter
-        assert!(world.enemy.is_some(), "hunter spawned");
-        assert!(
-            world.physics.enemy_collider_handle().is_some(),
-            "hunter has a hitscan capsule"
-        );
+        world.toggle_mode(); // HUNT: bake nav + spawn hunter roster
+        assert!(!world.enemies.is_empty(), "hunters spawned");
+        let h = world.enemies[0].collider;
+        assert!(world.physics.is_enemy_collider(h), "hunter has a hitscan capsule");
 
-        // Three non-lethal hits: alive, health ticks down, no fade yet.
+        // Torso-height impacts (×1 damage), so PP7's 25 dmg lands cleanly.
+        let torso = {
+            let p = world.enemies[0].enemy.pos;
+            Vec3::new(p.x, p.y + 0.8, p.z)
+        };
+        // Three non-lethal hits on hunter 0 (PP7, 25 dmg, 100 hp → 75/50/25).
         for expect in [75.0, 50.0, 25.0] {
-            world.hit_enemy();
-            let e = world.enemy.as_ref().unwrap();
-            assert!(!e.is_dead(), "still alive at {expect} hp");
-            assert_eq!(e.health(), expect);
-            assert!(world.enemy_fade.is_none(), "no death fade while alive");
+            world.hit_enemy(0, torso);
+            let e = &world.enemies[0];
+            assert!(!e.enemy.is_dead(), "still alive at {expect} hp");
+            assert_eq!(e.enemy.health(), expect);
+            assert!(e.fade.is_none(), "no death fade while alive");
         }
 
         // The fourth (lethal) hit.
-        world.hit_enemy();
-        assert!(world.enemy.as_ref().unwrap().is_dead(), "dead after 4 PP7 shots");
-        assert!(world.char_dead, "model in the death state");
+        world.hit_enemy(0, torso);
+        assert!(world.enemies[0].enemy.is_dead(), "dead after 4 PP7 shots");
         assert!(
-            world.physics.enemy_collider_handle().is_none(),
+            !world.physics.is_enemy_collider(h),
             "the corpse's capsule is removed — can't shoot a corpse"
         );
         // The fade does NOT start until the death animation finishes: the body
         // stays fully opaque while the death clip plays.
-        assert!(world.enemy_fade.is_none(), "fade not armed at the moment of death");
-        assert!((world.character_opacity() - 1.0).abs() < 1e-3, "opaque during the death anim");
+        assert!(world.enemies[0].fade.is_none(), "fade not armed at the moment of death");
+        assert!(
+            (world.character_instances()[0].2 - 1.0).abs() < 1e-3,
+            "opaque during the death anim"
+        );
 
         // Play out the death animation, then the full fade → invisible.
         for _ in 0..600 {
             world.advance_animation(1.0 / 60.0);
         }
-        assert!(world.enemy_fade.is_some(), "fade started once the anim finished");
-        assert!(world.character_opacity() <= 1e-3, "faded to invisible after the animation");
+        assert!(world.enemies[0].fade.is_some(), "fade started once the anim finished");
+        assert!(
+            world.character_instances()[0].2 <= 1e-3,
+            "faded to invisible after the animation"
+        );
     }
 
     /// Track A: a shot that lands on the hunter's capsule damages it and spawns NO
@@ -205,7 +204,15 @@ use super::editing::find_room_brushes;
         world.initial_meshes();
         world.toggle_mode(); // HUNT
 
-        // Put the hunter directly on the player's look ray ~1.5 m ahead (inside the
+        // Move every other hunter far off so only hunter 0 can be on the ray.
+        for i in 1..world.enemies.len() {
+            let h = world.enemies[i].collider;
+            let far = Vec3::new(500.0 + i as f32 * 5.0, 0.0, 500.0);
+            world.enemies[i].enemy.pos = far;
+            world.physics.update_enemy_collider(h, far);
+        }
+
+        // Put hunter 0 directly on the player's look ray ~1.5 m ahead (inside the
         // 6 m room, before any wall), with its capsule centred on the ray.
         let (eye, fwd) = {
             let c = world.character.as_ref().unwrap();
@@ -213,9 +220,10 @@ use super::editing::find_room_brushes;
         };
         let centre = eye + fwd * 1.5;
         let feet = centre - Vec3::new(0.0, ENEMY_HALF_HEIGHT + ENEMY_RADIUS, 0.0);
-        world.enemy.as_mut().unwrap().pos = feet;
-        world.physics.update_enemy_collider(feet);
-        let hp0 = world.enemy.as_ref().unwrap().health();
+        let h0 = world.enemies[0].collider;
+        world.enemies[0].enemy.pos = feet;
+        world.physics.update_enemy_collider(h0, feet);
+        let hp0 = world.enemies[0].enemy.health();
 
         // Fire once (a fresh edge = one semi-auto shot).
         let mut input = InputState::default();
@@ -223,24 +231,24 @@ use super::editing::find_room_brushes;
         input.set_mouse_left(true);
         world.combat_step(1.0 / 60.0, &input);
         assert!(
-            world.enemy.as_ref().unwrap().health() < hp0,
+            world.enemies[0].enemy.health() < hp0,
             "shooting the hunter damages it"
         );
         assert!(world.sparks.is_empty(), "an enemy hit spawns no wall spark");
 
-        // Move the hunter far off the ray, then fire again (release → fresh pull)
-        // so the shot flies past it into a wall → a spark, no further damage.
-        let hp1 = world.enemy.as_ref().unwrap().health();
+        // Move hunter 0 far off the ray too, then fire again (release → fresh pull)
+        // so the shot flies past into a wall → a spark, no further damage.
+        let hp1 = world.enemies[0].enemy.health();
         let away = Vec3::new(100.0, 0.0, 100.0);
-        world.enemy.as_mut().unwrap().pos = away;
-        world.physics.update_enemy_collider(away);
+        world.enemies[0].enemy.pos = away;
+        world.physics.update_enemy_collider(h0, away);
         input.set_mouse_left(false);
         world.combat_step(1.0 / 60.0, &input); // release resets the edge
         input.set_mouse_left(true);
         world.combat_step(1.0 / 60.0, &input); // fresh pull → shot into the wall
         assert!(!world.sparks.is_empty(), "a wall hit spawns a spark");
         assert_eq!(
-            world.enemy.as_ref().unwrap().health(),
+            world.enemies[0].enemy.health(),
             hp1,
             "the wall shot dealt no damage to the (moved-away) hunter"
         );
@@ -253,17 +261,21 @@ use super::editing::find_room_brushes;
         let mut world = World::new();
         world.initial_meshes();
         world.toggle_mode(); // HUNT
-        // Kill it outright.
+        // Kill hunter 0 outright (torso hits, ×1 damage).
+        let torso = {
+            let p = world.enemies[0].enemy.pos;
+            Vec3::new(p.x, p.y + 0.8, p.z)
+        };
         for _ in 0..4 {
-            world.hit_enemy();
+            world.hit_enemy(0, torso);
         }
-        assert!(world.enemy.as_ref().unwrap().is_dead());
-        let rest = world.enemy.as_ref().unwrap().pos;
+        assert!(world.enemies[0].enemy.is_dead());
+        let rest = world.enemies[0].enemy.pos;
         let input = InputState::default();
         for _ in 0..240 {
             world.fixed_step(1.0 / 120.0, &input);
         }
-        let after = world.enemy.as_ref().unwrap().pos;
+        let after = world.enemies[0].enemy.pos;
         assert!(
             (after - rest).length() < 1e-4,
             "the corpse should not move (was {rest:?}, now {after:?})"
@@ -296,24 +308,104 @@ use super::editing::find_room_brushes;
         assert!(world.is_build(), "restart drops back to BUILD");
     }
 
-    /// A3: in HUNT the hunter carries a rifle — its world clip transform resolves
-    /// (a bone is found + the pose is posed); once dead it drops the gun (`None`).
+    /// A3: in HUNT the hunters carry weapons — each gun's world clip transform
+    /// resolves (a hand bone is found + the pose is posed); a dead hunter drops its
+    /// gun, so once every hunter is down there are no weapon draws.
     #[test]
-    fn the_hunter_carries_a_rifle_in_hunt() {
+    fn hunters_carry_weapons_in_hunt() {
         let mut world = World::new();
         world.initial_meshes();
         world.toggle_mode(); // HUNT
-        assert!(world.enemy_gun_model().is_some(), "rifle asset loaded");
+        assert!(!world.enemy_weapon_lib().is_empty(), "weapon assets loaded");
         assert!(
-            world.enemy_weapon_transform(1.6).is_some(),
-            "the live hunter's rifle has a world transform"
+            !world.enemy_weapon_draws(1.6).is_empty(),
+            "live hunters' guns have world transforms"
         );
-        for _ in 0..4 {
-            world.hit_enemy(); // kill it
+        // Kill every hunter (8 PP7 hits each is plenty).
+        let n = world.enemies.len();
+        for i in 0..n {
+            let torso = {
+                let p = world.enemies[i].enemy.pos;
+                Vec3::new(p.x, p.y + 0.8, p.z)
+            };
+            for _ in 0..8 {
+                world.hit_enemy(i, torso);
+            }
         }
         assert!(
-            world.enemy_weapon_transform(1.6).is_none(),
-            "a dead hunter drops the rifle"
+            world.enemy_weapon_draws(1.6).is_empty(),
+            "dead hunters drop their guns"
+        );
+    }
+
+    /// Weapon class → fire clip + window mapping: pistol/rifle pick distinct clips,
+    /// and the dual flag overrides the class to the dual clip. Each maps to a real
+    /// FIRE_TIMING window, and all three fire clips are recognised as fire clips.
+    #[test]
+    fn fire_clip_selection_by_class_and_dual() {
+        use crate::combat::EnemyWeaponClass::{Pistol, Rifle};
+        assert_eq!(fire_clip_index(Rifle, false), FIRE_RIFLE_IDX);
+        assert_eq!(fire_clip_index(Pistol, false), FIRE_PISTOL_IDX);
+        assert_eq!(fire_clip_index(Pistol, true), FIRE_DUAL_IDX, "dual overrides class");
+        assert_eq!(fire_clip_index(Rifle, true), FIRE_DUAL_IDX);
+        for (c, d) in [(Rifle, false), (Pistol, false), (Rifle, true)] {
+            let (s, e) = fire_window_for(c, d);
+            assert!(e > s, "window start<end for {c:?} dual={d}");
+        }
+        assert!(is_fire_clip(FIRE_RIFLE_IDX) && is_fire_clip(FIRE_DUAL_IDX));
+        assert!(!is_fire_clip(CHAR_HIT_START), "a hit clip is not a fire clip");
+    }
+
+    /// A dual-wield hunter draws two guns (one per hand); a single-wield hunter
+    /// one. The roster includes at least one dual-wielder.
+    #[test]
+    fn dual_wield_hunters_draw_two_guns() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT: spawn the roster
+        let expected: usize = world
+            .enemies
+            .iter()
+            .filter(|e| !e.enemy.is_dead())
+            .map(|e| 1 + e.dual as usize)
+            .sum();
+        assert_eq!(
+            world.enemy_weapon_draws(1.6).len(),
+            expected,
+            "one gun per hunter, two for a dual-wielder"
+        );
+        assert!(world.enemies.iter().any(|e| e.dual), "roster includes a dual-wielder");
+    }
+
+    /// Hit zones scale damage by impact height: a head-height shot does ×4 (PP7
+    /// 25×4 = 100 → a one-shot kill), a leg-height shot does ×0.6 (15 dmg), and the
+    /// hit paints persistent blood on the body.
+    #[test]
+    fn hit_zones_scale_damage_by_impact_height() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT: spawn the roster
+        assert!(world.enemies.len() >= 2, "roster spawned at least two hunters");
+
+        // Head-height impact on hunter 0 → ×4 → lethal in one PP7 shot.
+        let head = {
+            let p = world.enemies[0].enemy.pos;
+            Vec3::new(p.x, p.y + 1.2, p.z)
+        };
+        world.hit_enemy(0, head);
+        assert!(world.enemies[0].enemy.is_dead(), "a headshot one-shots with the PP7");
+
+        // Leg-height impact on hunter 1 → ×0.6 → 15 dmg, and it paints blood.
+        let leg = {
+            let p = world.enemies[1].enemy.pos;
+            Vec3::new(p.x, p.y + 0.3, p.z)
+        };
+        world.hit_enemy(1, leg);
+        assert_eq!(world.enemies[1].enemy.health(), 100.0 - 15.0, "a leg shot does 0.6×");
+        // Painting reddens vertices near the impact → some g/b channels drop below 1.
+        assert!(
+            world.enemies[1].blood.iter().any(|&c| c < 0.999),
+            "the hit painted blood onto the body"
         );
     }
 

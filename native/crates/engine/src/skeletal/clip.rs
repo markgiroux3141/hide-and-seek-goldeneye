@@ -31,12 +31,14 @@ pub enum Interp {
 /// For `CubicSpline` each keyframe stores 3 values (in-tangent, value,
 /// out-tangent), so the vec length is `3 × times.len()`; otherwise it's
 /// `times.len()`.
+#[derive(Clone)]
 enum Track {
     Rotation(Vec<Quat>),
     Translation(Vec<Vec3>),
     Scale(Vec<Vec3>),
 }
 
+#[derive(Clone)]
 struct Channel {
     /// Skeleton joint index (name-matched at load).
     joint: usize,
@@ -46,6 +48,7 @@ struct Channel {
 }
 
 /// One animation clip bound to a specific [`Skeleton`].
+#[derive(Clone)]
 pub struct AnimationClip {
     pub name: String,
     /// Clip length in seconds (max keyframe time across all channels).

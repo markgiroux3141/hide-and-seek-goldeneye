@@ -139,38 +139,49 @@ impl World {
                 let Some(c) = self.character.as_mut() else { return };
                 c.apply_move(dt, input, &mut self.physics);
                 let feet = c.pos;
-                // Is a FIRE one-shot currently animating? (disambiguated from
-                // hit/death by the clip index) — the JS `enemyState === 'action'`
-                // proxy the FSM's attack→cooldown transition needs.
-                let fire_anim = self
-                    .char_anim
-                    .as_ref()
-                    .map(|a| a.is_playing_oneshot() && a.current_clip() == CHAR_FIRE_IDX)
-                    .unwrap_or(false);
-                // Advance the hunter's perception FSM. Take it out so `self.enemy`
-                // isn't borrowed while the FSM needs `&self.nav` + `&mut self.physics`
-                // (LOS raycast).
-                if let Some(mut enemy) = self.enemy.take() {
+                // Advance each hunter's perception FSM. Take the roster out so it
+                // isn't borrowed while each FSM needs `&self.nav` + `&mut self.physics`
+                // (the LOS raycast). Fire requests are collected + applied after the
+                // roster is restored (`start_enemy_fire` needs `&mut self`).
+                let mut enemies = std::mem::take(&mut self.enemies);
+                let mut fire_requests: Vec<usize> = Vec::new();
+                let mut any_caught = false;
+                for (i, inst) in enemies.iter_mut().enumerate() {
+                    // Is THIS hunter's fire one-shot animating? (disambiguated from
+                    // hit/death by the clip index) — the JS `enemyState === 'action'`
+                    // proxy the attack→cooldown transition needs.
+                    let fire_anim = inst.anim.is_playing_oneshot() && is_fire_clip(inst.anim.current_clip());
                     let step = match self.nav.as_ref() {
-                        Some(nav) => enemy.update(dt, feet, nav, &mut self.physics, fire_anim),
+                        Some(nav) => inst.enemy.update(
+                            dt,
+                            feet,
+                            nav,
+                            &mut self.physics,
+                            fire_anim,
+                            inst.collider,
+                        ),
                         None => crate::enemy::EnemyStep::default(),
                     };
-                    // Keep the hitscan capsule on the hunter each step (marks the
+                    // Keep this hunter's hitscan capsule on it each step (marks the
                     // query pipeline dirty so raycasts see the move). Skipped once
                     // dead — the collider is already gone.
-                    if !enemy.is_dead() {
-                        self.physics.update_enemy_collider(enemy.pos);
+                    if !inst.enemy.is_dead() {
+                        self.physics.update_enemy_collider(inst.collider, inst.enemy.pos);
                     }
-                    let (caught, want_fire) = (step.caught, step.want_fire);
-                    self.enemy = Some(enemy);
-                    // It entered attack → start a fire burst on the shared mixer.
-                    if want_fire {
-                        self.start_enemy_fire();
+                    if step.want_fire {
+                        fire_requests.push(i);
                     }
-                    if caught && !self.caught {
-                        self.caught = true;
-                        log::info!("CAUGHT by the hunter!");
+                    if step.caught {
+                        any_caught = true;
                     }
+                }
+                self.enemies = enemies;
+                for i in fire_requests {
+                    self.start_enemy_fire(i);
+                }
+                if any_caught && !self.caught {
+                    self.caught = true;
+                    log::info!("CAUGHT by a hunter!");
                 }
             }
         }
@@ -199,10 +210,10 @@ impl World {
         self.aim_x = 0.0;
         self.aim_y = 0.0;
         self.aiming = false;
-        // A mode switch always ends any death state: drop the hunter's capsule,
-        // clear the fade, and revive the model (BUILD demo / a fresh hunt).
-        self.physics.remove_enemy_collider();
-        self.enemy_fade = None;
+        // A mode switch always ends any hunt: drop every hunter + its capsule, and
+        // revive the BUILD demo model.
+        self.physics.clear_enemy_colliders();
+        self.enemies.clear();
         self.char_dead = false;
         // Fresh player-combat state each mode switch (full health, no flash/HUD).
         self.player_health = PLAYER_MAX_HEALTH;
@@ -210,8 +221,6 @@ impl World {
         self.player_dead = false;
         self.damage_flash = 0.0;
         self.hud_show_timer = 0.0;
-        self.enemy_shot_timer = 0.0;
-        self.enemy_muzzle_timer = 0.0;
         match self.mode {
             Mode::Build => {
                 let Some(feet) = self.floor_under(self.camera.pos) else {
@@ -226,8 +235,8 @@ impl World {
                 self.selected = None; // clear any authoring selection
                 self.caught = false;
 
-                // Bake the nav grid from the frozen geometry (once) and drop a
-                // hunter on the standable cell farthest from the player.
+                // Bake the nav grid from the frozen geometry (once) and drop the
+                // hunter roster on spread-out standable cells far from the player.
                 let t0 = Instant::now();
                 let structure_solids = self.structure_solid_boxes();
                 match nav::bake(&mut self.regions, &structure_solids) {
@@ -237,28 +246,8 @@ impl World {
                             "nav baked in {bake_ms:.2} ms ({} cells)",
                             nav.cell_count()
                         );
-                        if let Some(spawn) = nav
-                            .all_standable()
-                            .into_iter()
-                            .max_by(|a, b| {
-                                a.distance_squared(feet)
-                                    .total_cmp(&b.distance_squared(feet))
-                            })
-                        {
-                            // Spawn watching toward the player's start so the
-                            // perception FSM can engage (a guard on watch).
-                            self.enemy = Some(Enemy::new(spawn, feet));
-                            // Track A: the hunter's hitscan capsule (moved each
-                            // fixed step, removed on death / return to BUILD).
-                            self.physics.set_enemy_collider(
-                                spawn,
-                                ENEMY_RADIUS,
-                                ENEMY_HALF_HEIGHT,
-                            );
-                            log::info!("hunter spawned at {spawn:?}");
-                        } else {
-                            log::warn!("no standable cell for the hunter");
-                        }
+                        let spawns = pick_spread_spawns(&nav, feet, ENEMY_ROSTER.len());
+                        self.spawn_roster(&spawns, feet);
                         // Arm breakable doors as a live overlay on the frozen grid
                         // (panel colliders + nav cost). This is the only per-hunt
                         // dynamic layer; the grid itself never re-bakes.
@@ -278,7 +267,7 @@ impl World {
                     self.camera.pitch = c.pitch;
                 }
                 self.nav = None;
-                self.enemy = None;
+                self.enemies.clear();
                 self.caught = false;
                 self.sparks.clear();
                 self.physics.clear_door_colliders();
@@ -289,6 +278,46 @@ impl World {
         }
     }
 
+    /// Spawn one hunter per [`ENEMY_ROSTER`] entry (as far as `spawns` allows),
+    /// each watching toward the player's start (`feet`) so its perception FSM can
+    /// engage. Each gets its equipped weapon (via [`enemy_def_for`]), its own mixer
+    /// (a clone of the shared clip template), and its own hitscan capsule. Skips
+    /// entirely if the animation template failed to load (no clips → nothing to
+    /// animate).
+    fn spawn_roster(&mut self, spawns: &[Vec3], feet: Vec3) {
+        let Some(template) = self.char_anim_template.clone() else {
+            log::warn!("no animation template loaded — spawning no hunters");
+            return;
+        };
+        // Each hunter starts clean (all-white blood colors), sized to the model.
+        let vert_count = self.char_model.as_ref().map(|m| m.vertices.len()).unwrap_or(0);
+        for (spawn, &(wcfg, dual)) in spawns.iter().zip(ENEMY_ROSTER.iter()) {
+            let weapon = enemy_def_for(&wcfg);
+            let collider =
+                self.physics
+                    .add_enemy_collider(*spawn, ENEMY_RADIUS, ENEMY_HALF_HEIGHT);
+            self.enemies.push(EnemyInstance {
+                enemy: Enemy::new(*spawn, feet),
+                anim: template.clone(),
+                weapon,
+                dual,
+                collider,
+                fade: None,
+                shot_timer: 0.0,
+                muzzle_timer: 0.0,
+                blood: vec![1.0f32; vert_count * 3],
+            });
+            log::info!(
+                "hunter spawned at {spawn:?} with {}{}",
+                weapon.name,
+                if dual { " (dual-wield)" } else { "" }
+            );
+        }
+        if self.enemies.is_empty() {
+            log::warn!("no standable cells for the hunter roster");
+        }
+    }
+
     /// Raycast straight down from `from` to find the floor; returns feet position.
     pub(crate) fn floor_under(&mut self, from: Vec3) -> Option<Vec3> {
         // Start a little above the camera so we don't begin inside geometry.
@@ -296,4 +325,49 @@ impl World {
         let hit = self.physics.raycast(origin, Vec3::NEG_Y, 100.0)?;
         Some(hit.point)
     }
+}
+
+/// Choose up to `n` spread-out spawn cells via farthest-point sampling: seed with
+/// the cell farthest from the `player`, then repeatedly add the cell that maximises
+/// its minimum distance to the already-chosen set. Keeps the hunters spaced apart
+/// (not clustered on the single farthest cell) and away from the player's start.
+///
+/// **Interior bias:** prefers standable cells at least 2 WT from any wall (so the
+/// wider-than-a-cell character model doesn't spawn clipping a wall / hanging in a
+/// corner); falls back to all standable cells if too few interior ones exist.
+/// Returns fewer than `n` when there aren't enough cells.
+fn pick_spread_spawns(nav: &NavWorld, player: Vec3, n: usize) -> Vec<Vec3> {
+    let all = nav.all_standable();
+    let interior: Vec<Vec3> = all
+        .iter()
+        .copied()
+        .filter(|c| nav.wall_clearance_cells(*c, 2) >= 2)
+        .collect();
+    let cells = if interior.len() >= n { interior } else { all };
+
+    let mut chosen: Vec<Vec3> = Vec::new();
+    if cells.is_empty() || n == 0 {
+        return chosen;
+    }
+    // Seed: the standable cell farthest from the player.
+    let seed = *cells
+        .iter()
+        .max_by(|a, b| a.distance_squared(player).total_cmp(&b.distance_squared(player)))
+        .unwrap();
+    chosen.push(seed);
+    while chosen.len() < n && chosen.len() < cells.len() {
+        // Add the cell maximising the minimum distance to the chosen set.
+        let next = cells.iter().copied().max_by(|a, b| {
+            let da = chosen.iter().map(|c| c.distance_squared(*a)).fold(f32::INFINITY, f32::min);
+            let db = chosen.iter().map(|c| c.distance_squared(*b)).fold(f32::INFINITY, f32::min);
+            da.total_cmp(&db)
+        });
+        match next {
+            // Skip if the best remaining cell is one we already picked (all far
+            // cells exhausted) — avoids stacking two hunters on one cell.
+            Some(p) if !chosen.iter().any(|c| c.distance_squared(p) < 1e-6) => chosen.push(p),
+            _ => break,
+        }
+    }
+    chosen
 }

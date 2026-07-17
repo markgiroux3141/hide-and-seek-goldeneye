@@ -1,5 +1,6 @@
-//! HUNT-phase runtime on `World`: breakable-door build/breach and the
-//! per-frame enemy/door render meshes.
+//! HUNT-phase runtime on `World`: the hunter roster's per-frame animation +
+//! render data (skinned poses, hand-attached weapons, muzzle flashes),
+//! breakable-door build/breach, and the BUILD-phase animation-preview viewer.
 
 use super::*;
 
@@ -17,28 +18,115 @@ pub(crate) fn band_for_speed(speed: f32) -> usize {
     }
 }
 
-impl World {
-    /// A box mesh for the hunter at its current position (meters), for the
-    /// renderer's entity pass. `None` when no hunter is active.
-    pub fn enemy_mesh(&self) -> Option<CpuMesh> {
-        // B5: when the skinned character loaded, IT is the hunter (drawn via the
-        // skinned pipeline in `character_pose`), so no placeholder box. The box
-        // remains only as a fallback when the model failed to load.
-        if self.char_model.is_some() {
-            return None;
+/// The fire-clip index for a weapon class + dual flag (the `AnimPlayer` layout set
+/// in `World::new`): dual → the dual clip regardless of class, else the class clip.
+pub(crate) fn fire_clip_index(class: EnemyWeaponClass, dual: bool) -> usize {
+    if dual {
+        FIRE_DUAL_IDX
+    } else {
+        match class {
+            EnemyWeaponClass::Pistol => FIRE_PISTOL_IDX,
+            EnemyWeaponClass::Rifle => FIRE_RIFLE_IDX,
         }
-        let e = self.enemy.as_ref()?;
-        // Capsule-sized box: 0.5 × 1.5 × 0.5 m, centered above the feet.
-        let c = e.pos + Vec3::new(0.0, 0.75, 0.0);
-        let polys = csg::box_polygons([c.x, c.y, c.z], [0.25, 0.75, 0.25]);
-        let (p, n, i) = csg::polygons_to_mesh(&polys);
-        Some(CpuMesh::from_csg(&p, &n, &i))
+    }
+}
+
+/// The FIRE_TIMING shot window for a weapon class + dual flag (seconds into the
+/// fire clip). Falls back to the rifle window if a hex id is somehow missing.
+pub(crate) fn fire_window_for(class: EnemyWeaponClass, dual: bool) -> (f32, f32) {
+    let hex = if dual {
+        "7A"
+    } else {
+        match class {
+            EnemyWeaponClass::Pistol => "41",
+            EnemyWeaponClass::Rifle => "01",
+        }
+    };
+    anim_set::fire_window(hex).unwrap_or(anim_set::FIRE_WINDOW)
+}
+
+/// Whether a clip index is one of the (class-specific) fire clips — the
+/// `enemyState === 'action'` proxy the FSM's attack→cooldown transition needs,
+/// disambiguated from hit/death one-shots.
+pub(crate) fn is_fire_clip(idx: usize) -> bool {
+    (FIRE_RIFLE_IDX..=FIRE_DUAL_IDX).contains(&idx)
+}
+
+impl EnemyInstance {
+    /// Horizontal facing yaw (model faces +Z at yaw 0 → `atan2(x, z)`).
+    pub(crate) fn yaw(&self) -> f32 {
+        let h = self.enemy.heading();
+        h.x.atan2(h.z)
     }
 
-    /// The B1 skinned character's CPU model, for one-time GPU upload at startup.
+    /// Whole-body opacity this frame: 1 while alive / mid death-anim, ramping 1→0
+    /// over [`FADE_DURATION`] once the death animation has finished, then held at 0.
+    pub(crate) fn opacity(&self) -> f32 {
+        match self.fade {
+            Some(t) => (1.0 - t / FADE_DURATION).clamp(0.0, 1.0),
+            None => 1.0,
+        }
+    }
+}
+
+impl World {
+    /// A combined box mesh for the hunters at their current positions (meters), for
+    /// the renderer's entity pass — used ONLY as a fallback when the skinned model
+    /// failed to load (otherwise the hunters ARE the skinned characters). `None`
+    /// when the model loaded or no hunters are live.
+    pub fn enemy_mesh(&self) -> Option<CpuMesh> {
+        if self.char_model.is_some() || self.enemies.is_empty() {
+            return None;
+        }
+        let mut positions: Vec<f32> = Vec::new();
+        let mut normals: Vec<f32> = Vec::new();
+        let mut indices: Vec<u32> = Vec::new();
+        for inst in &self.enemies {
+            let c = inst.enemy.pos + Vec3::new(0.0, 0.6, 0.0);
+            let polys = csg::box_polygons([c.x, c.y, c.z], [0.2, 0.6, 0.2]);
+            let (p, n, i) = csg::polygons_to_mesh(&polys);
+            let base = (positions.len() / 3) as u32;
+            positions.extend_from_slice(&p);
+            normals.extend_from_slice(&n);
+            indices.extend(i.iter().map(|idx| idx + base));
+        }
+        Some(CpuMesh::from_csg(&positions, &normals, &indices))
+    }
+
+    /// The shared skinned-character CPU model, for one-time GPU upload at startup.
     /// `None` if the asset failed to load.
     pub fn character_model(&self) -> Option<&SkinnedModel> {
         self.char_model.as_ref()
+    }
+
+    /// The enemy weapon render library (gun + muzzle meshes for the arsenal), for
+    /// one-time GPU upload into the renderer's weapon library at startup.
+    pub(crate) fn enemy_weapon_lib(&self) -> &[EnemyWeaponAsset] {
+        &self.enemy_weapon_lib
+    }
+
+    // ─── BUILD demo viewer (animation preview) ──────────────────────────────────
+
+    /// The weapon class the BUILD demo previews (from the cycled arsenal index).
+    fn demo_weapon(&self) -> EnemyWeaponDef {
+        enemy_def_for(&crate::combat::config::WEAPONS[self.demo_weapon_idx])
+    }
+
+    /// BUILD demo: cycle the previewed weapon through the arsenal (bound to `K`), so
+    /// every gun + its class fire animation can be eyeballed without a hunt.
+    pub fn cycle_demo_weapon(&mut self) {
+        self.demo_weapon_idx = (self.demo_weapon_idx + 1) % crate::combat::config::WEAPONS.len();
+        log::info!(
+            "demo weapon → {} (dual={})",
+            self.demo_weapon().name,
+            self.demo_dual
+        );
+    }
+
+    /// BUILD demo: toggle whether the previewed weapon is shown dual-wielded (`J`).
+    pub fn toggle_demo_dual(&mut self) {
+        self.demo_dual = !self.demo_dual;
+        log::info!("demo dual-wield {}", if self.demo_dual { "ON" } else { "OFF" });
     }
 
     /// B3 demo: cycle the locomotion band idle → walk → jog → run → idle. Bound
@@ -57,16 +145,20 @@ impl World {
         );
     }
 
-    /// B4 demo: fire the standing rifle one-shot (with its FIRE_TIMING window),
-    /// returning to the current locomotion when done. Suppressed while dead.
+    /// B4 demo: fire the previewed weapon's class fire one-shot (with its
+    /// FIRE_TIMING window), returning to the current locomotion when done.
+    /// Suppressed while dead.
     pub fn char_fire(&mut self) {
         if self.char_dead {
             return;
         }
         let band = self.demo_band;
+        let def = self.demo_weapon();
+        let idx = fire_clip_index(def.class, self.demo_dual);
+        let win = fire_window_for(def.class, self.demo_dual);
         if let Some(anim) = &mut self.char_anim {
-            anim.play_once(CHAR_FIRE_IDX, 0.15, Some(band), Some(anim_set::FIRE_WINDOW));
-            log::info!("fire");
+            anim.play_once(idx, 0.15, Some(band), Some(win));
+            log::info!("fire ({}{})", def.name, if self.demo_dual { " ×2" } else { "" });
         }
     }
 
@@ -99,8 +191,8 @@ impl World {
         }
     }
 
-    /// xorshift64 → an index in `[0, n)`. A demo/random pick, not a statistical
-    /// roll (combat can bring `rand` if it ever needs a real distribution).
+    /// xorshift64 → an index in `[0, n)`. Shared by the demo picks and the Track A
+    /// hit/death/pain rolls.
     pub(crate) fn rand_below(&mut self, n: usize) -> usize {
         let mut x = self.char_rng;
         x ^= x << 13;
@@ -110,72 +202,48 @@ impl World {
         (x % n.max(1) as u64) as usize
     }
 
-    /// Advance the character each render frame (JS `mixer.update(delta)` cadence):
-    /// walk the demo circle at the current band's speed, face the direction of
-    /// travel, keep the clip selection in sync, and step the crossfade mixer.
+    /// Advance every hunter's mixer (HUNT) or the demo viewer (BUILD) once per
+    /// render frame (JS `mixer.update(delta)` cadence). Position/facing come from
+    /// each hunter's nav/AI-driven [`Enemy`] (the model is purely visual); the demo
+    /// paces a circle by the current band. Doesn't stomp a fire/hit/death one-shot.
     pub fn advance_animation(&mut self, dt: f32) {
-        if self.char_anim.is_none() {
+        if !self.is_build() {
+            // HUNT: each hunter animates independently from its own AI state.
+            for inst in &mut self.enemies {
+                // Death fade: hold the corpse opaque THROUGH the death animation,
+                // then ramp opacity 1→0 once the clip has clamped (`oneshot_finished`).
+                if inst.enemy.is_dead() {
+                    if inst.anim.oneshot_finished() {
+                        let t = inst.fade.get_or_insert(0.0);
+                        *t = (*t + dt).min(FADE_DURATION);
+                    }
+                } else if !inst.anim.is_playing_oneshot() {
+                    // Not mid fire/hit → keep the locomotion band in sync with speed.
+                    inst.anim.play(band_for_speed(inst.enemy.speed()), 0.15);
+                }
+                inst.anim.update(dt);
+            }
             return;
         }
 
-        // B5: in HUNT the model IS the hunter — position/facing/locomotion band
-        // come from the nav/AI-driven enemy (the model is purely visual, mirroring
-        // the JS separation of movement from the mixer). In BUILD it's the demo
-        // viewer paced around a circle by the `L`/`Z`/`N`/`M` keys.
-        let hunt = !self.is_build() && self.enemy.is_some();
-        if hunt {
-            let e = self.enemy.as_ref().unwrap();
-            let (pos, heading, speed) = (e.pos, e.heading(), e.speed());
-            self.char_pos = pos;
-            // `heading` is the hunter's facing (travel dir while chasing, toward
-            // the player while alert/attack/cooldown), so aim it always — the model
-            // faces the player while shooting even though it's stopped. Model faces
-            // +Z at yaw 0 → yaw = atan2(vx, vz).
-            self.char_yaw = heading.x.atan2(heading.z);
-            // Death fade: hold the corpse fully opaque THROUGH the death animation,
-            // then fade opacity 1→0 over FADE_DURATION once the clip has clamped on
-            // its last frame (`oneshot_finished`). Starting it at the moment of death
-            // faded the body out during the animation.
-            if self.char_dead {
-                let finished = self
-                    .char_anim
-                    .as_ref()
-                    .map(|a| a.oneshot_finished())
-                    .unwrap_or(true);
-                if finished {
-                    let t = self.enemy_fade.get_or_insert(0.0);
-                    *t = (*t + dt).min(FADE_DURATION);
-                }
-            }
-            // Drive locomotion — but DON'T stomp a hit/death one-shot (Track A).
-            // Dead → the death clamp holds (char_dead). Mid hit-reaction → let the
-            // one-shot play; it auto-returns to a loop, then locomotion resumes.
-            // Otherwise select the band from the hunter's speed (chase 2.8 → walk;
-            // stopped/stunned/breaching → idle).
-            let anim = self.char_anim.as_mut().unwrap();
-            if !self.char_dead && !anim.is_playing_oneshot() {
-                anim.play(band_for_speed(speed), 0.15);
-            }
-        } else {
-            // BUILD demo: stand still during a one-shot / death, else pace the
-            // circle at the current band's speed facing the travel tangent.
-            let oneshot = self.char_anim.as_ref().unwrap().is_playing_oneshot();
-            let speed = if !oneshot && !self.char_dead {
-                LOCO_SPEEDS[self.demo_band]
-            } else {
-                0.0
-            };
-            if speed > 0.0 {
-                self.demo_angle =
-                    (self.demo_angle + speed / DEMO_RADIUS * dt).rem_euclid(std::f32::consts::TAU);
-                let (s, c) = self.demo_angle.sin_cos();
-                self.char_pos = DEMO_CENTER + Vec3::new(DEMO_RADIUS * c, 0.0, DEMO_RADIUS * s);
-                self.char_yaw = (-s).atan2(c);
-            }
+        // BUILD demo: stand still during a one-shot / death, else pace the circle at
+        // the current band's speed facing the travel tangent.
+        if self.char_anim.is_none() {
+            return;
         }
-
-        // Advance the clocks + crossfade (clip selection happens above / on
-        // keypress — re-`play`ing here would be fine now but is unnecessary).
+        let oneshot = self.char_anim.as_ref().unwrap().is_playing_oneshot();
+        let speed = if !oneshot && !self.char_dead {
+            LOCO_SPEEDS[self.demo_band]
+        } else {
+            0.0
+        };
+        if speed > 0.0 {
+            self.demo_angle =
+                (self.demo_angle + speed / DEMO_RADIUS * dt).rem_euclid(std::f32::consts::TAU);
+            let (s, c) = self.demo_angle.sin_cos();
+            self.char_pos = DEMO_CENTER + Vec3::new(DEMO_RADIUS * c, 0.0, DEMO_RADIUS * s);
+            self.char_yaw = (-s).atan2(c);
+        }
         let anim = self.char_anim.as_mut().unwrap();
         anim.update(dt);
         let open = anim.fire_window_open();
@@ -185,95 +253,145 @@ impl World {
         }
     }
 
-    /// Whole-character opacity this frame: 1 while alive, ramping 1→0 over
-    /// [`FADE_DURATION`] once the hunter is killed (Track A death fade), then held
-    /// at 0. Fed to the skinned shader's opacity uniform.
-    pub fn character_opacity(&self) -> f32 {
-        match self.enemy_fade {
-            Some(t) => (1.0 - t / FADE_DURATION).clamp(0.0, 1.0),
-            None => 1.0,
-        }
+    /// World transform placing a character (feet at `feet`, facing `yaw`) with the
+    /// feet-seating offset + `CHAR_SCALE` — the model root the skinned pose + any
+    /// bone-attached weapon are expressed under.
+    fn char_transform(&self, feet: Vec3, yaw: f32) -> Mat4 {
+        let pos = Vec3::new(feet.x, feet.y + self.char_feet_offset, feet.z);
+        Mat4::from_translation(pos)
+            * Mat4::from_rotation_y(yaw)
+            * Mat4::from_scale(Vec3::splat(CHAR_SCALE))
     }
 
-    /// The character's world placement, joint (skinning) matrices, and opacity
-    /// this frame: the mixer's (possibly mid-crossfade) pose, positioned + faced
-    /// by the demo/enemy mover, faded on death. `None` if the character isn't loaded.
-    pub fn character_pose(&self) -> Option<(Mat4, Vec<Mat4>, f32)> {
-        let m = self.char_model.as_ref()?;
-        // `char_pos` is the feet position (floor y); `char_feet_offset` lifts the
-        // model origin so the feet sit on that floor. In BUILD the floor is y=0;
-        // in HUNT it's the hunter's nav-cell y.
-        let pos = Vec3::new(
-            self.char_pos.x,
-            self.char_pos.y + self.char_feet_offset,
-            self.char_pos.z,
-        );
-        let model = Mat4::from_translation(pos)
-            * Mat4::from_rotation_y(self.char_yaw)
-            * Mat4::from_scale(Vec3::splat(CHAR_SCALE));
-        let joints = match &self.char_anim {
-            Some(anim) => anim.skinning_matrices(&m.skeleton),
-            None => m.skeleton.bind_pose_matrices(),
+    /// Every skinned character to draw this frame as `(model, joint matrices,
+    /// opacity, blood_colors)`: in BUILD the single demo viewer (clean/white), in
+    /// HUNT one per live hunter (each its own mid-crossfade pose, positioned/faced by
+    /// its AI, faded on death, with its accumulated per-vertex blood).
+    pub fn character_instances(&self) -> Vec<(Mat4, Vec<Mat4>, f32, &[f32])> {
+        let Some(m) = self.char_model.as_ref() else {
+            return Vec::new();
         };
-        Some((model, joints, self.character_opacity()))
+        if self.is_build() {
+            let joints = match &self.char_anim {
+                Some(anim) => anim.skinning_matrices(&m.skeleton),
+                None => m.skeleton.bind_pose_matrices(),
+            };
+            vec![(
+                self.char_transform(self.char_pos, self.char_yaw),
+                joints,
+                1.0,
+                self.demo_blood.as_slice(),
+            )]
+        } else {
+            self.enemies
+                .iter()
+                .map(|inst| {
+                    let joints = inst.anim.skinning_matrices(&m.skeleton);
+                    let model = self.char_transform(inst.enemy.pos, inst.yaw());
+                    (model, joints, inst.opacity(), inst.blood.as_slice())
+                })
+                .collect()
+        }
     }
 
-    /// The hunter's rifle mesh (for one-time GPU upload). `None` if it failed to load.
-    pub fn enemy_gun_model(&self) -> Option<&TexturedModel> {
-        self.enemy_gun_model.as_ref()
-    }
-
-    /// The hunter's muzzle-flash mesh (for one-time GPU upload).
-    pub fn enemy_muzzle_model(&self) -> Option<&TexturedModel> {
-        self.enemy_muzzle_model.as_ref()
-    }
-
-    /// World transform of the rifle attached to the hunter's hand bone
-    /// (`char_model · Bone_9_global · local_offset`, the JS `bone.add(gun)`). The
-    /// offset is in GE bone-local units, converted to metres by the model's scale.
-    fn enemy_weapon_world(&self) -> Option<Mat4> {
+    /// World transform of a weapon attached to a character's hand bone
+    /// (`char_model · bone_global · local_offset`, the JS `bone.add(gun)`). `left`
+    /// selects the left-hand (dual) bone + offset. Offsets are GE bone-local units,
+    /// converted to metres by the model's scale.
+    fn weapon_world(
+        &self,
+        anim: &AnimPlayer,
+        feet: Vec3,
+        yaw: f32,
+        def: &EnemyWeaponDef,
+        left: bool,
+    ) -> Option<Mat4> {
         let m = self.char_model.as_ref()?;
-        let anim = self.char_anim.as_ref()?;
-        let bone = m.skeleton.index_of(ENEMY_HAND_BONE)?;
+        let bone_name = if left { LEFT_HAND_BONE } else { RIGHT_HAND_BONE };
+        let bone = m.skeleton.index_of(bone_name)?;
         let bone_global = *anim.joint_global_transforms(&m.skeleton).get(bone)?;
-        let pos = Vec3::new(
-            self.char_pos.x,
-            self.char_pos.y + self.char_feet_offset,
-            self.char_pos.z,
-        );
-        let char_model = Mat4::from_translation(pos)
-            * Mat4::from_rotation_y(self.char_yaw)
-            * Mat4::from_scale(Vec3::splat(CHAR_SCALE));
-        let offset = Mat4::from_translation(ENEMY_GUN_OFFSET)
-            * Mat4::from_euler(EulerRot::XYZ, ENEMY_GUN_ROT.x, ENEMY_GUN_ROT.y, ENEMY_GUN_ROT.z);
-        Some(char_model * bone_global * offset)
+        let (off, rot) = if left {
+            (def.left_offset, def.left_rot)
+        } else {
+            (def.right_offset, def.right_rot)
+        };
+        let offset = Mat4::from_translation(off)
+            * Mat4::from_euler(EulerRot::XYZ, rot.x, rot.y, rot.z);
+        Some(self.char_transform(feet, yaw) * bone_global * offset)
     }
 
-    /// The hunter rifle's clip transform this frame (`view_proj · weapon_world`), or
-    /// `None` when it shouldn't render — outside HUNT, no hunter, dead (drops the
-    /// gun), or the asset failed to load. Depth-tested in the forward pass.
-    pub fn enemy_weapon_transform(&self, aspect: f32) -> Option<Mat4> {
-        if self.mode != Mode::Hunt
-            || self.enemy.is_none()
-            || self.char_dead
-            || self.enemy_gun_model.is_none()
-        {
-            return None;
+    /// The enemy weapon draws this frame: `(weapon name, view_proj · world)` for
+    /// each gun to render. In HUNT, one per live hunter (two for a dual-wielder,
+    /// left + right hand); a dead hunter drops its gun. In BUILD, the demo preview
+    /// weapon on the demo character. Keyed by name so the renderer looks up the mesh.
+    pub fn enemy_weapon_draws(&self, aspect: f32) -> Vec<(&'static str, Mat4)> {
+        let vp = self.view_proj(aspect);
+        let mut out = Vec::new();
+        if self.is_build() {
+            let Some(anim) = self.char_anim.as_ref() else { return out };
+            let def = self.demo_weapon();
+            if let Some(w) = self.weapon_world(anim, self.char_pos, self.char_yaw, &def, false) {
+                out.push((def.name, vp * w));
+            }
+            if self.demo_dual {
+                if let Some(w) = self.weapon_world(anim, self.char_pos, self.char_yaw, &def, true) {
+                    out.push((def.name, vp * w));
+                }
+            }
+            return out;
         }
-        Some(self.view_proj(aspect) * self.enemy_weapon_world()?)
+        for inst in &self.enemies {
+            if inst.enemy.is_dead() {
+                continue; // drop the gun on death
+            }
+            if let Some(w) = self.weapon_world(&inst.anim, inst.enemy.pos, inst.yaw(), &inst.weapon, false) {
+                out.push((inst.weapon.name, vp * w));
+            }
+            if inst.dual {
+                if let Some(w) = self.weapon_world(&inst.anim, inst.enemy.pos, inst.yaw(), &inst.weapon, true) {
+                    out.push((inst.weapon.name, vp * w));
+                }
+            }
+        }
+        out
     }
 
-    /// The hunter's muzzle-flash clip transform (same bone frame as the rifle),
-    /// shown only while a shot's flash is active.
-    pub fn enemy_muzzle_transform(&self, aspect: f32) -> Option<Mat4> {
-        if self.mode != Mode::Hunt
-            || self.char_dead
-            || self.enemy_muzzle_model.is_none()
-            || self.enemy_muzzle_timer <= 0.0
-        {
-            return None;
+    /// The enemy muzzle-flash draws this frame (same bone frames as the guns),
+    /// shown only while a shot's flash is active: in HUNT per live firing hunter
+    /// (both hands when dual), in BUILD while the demo is inside its fire window.
+    pub fn enemy_muzzle_draws(&self, aspect: f32) -> Vec<(&'static str, Mat4)> {
+        let vp = self.view_proj(aspect);
+        let mut out = Vec::new();
+        if self.is_build() {
+            let Some(anim) = self.char_anim.as_ref() else { return out };
+            if !anim.fire_window_open() {
+                return out;
+            }
+            let def = self.demo_weapon();
+            if let Some(w) = self.weapon_world(anim, self.char_pos, self.char_yaw, &def, false) {
+                out.push((def.name, vp * w));
+            }
+            if self.demo_dual {
+                if let Some(w) = self.weapon_world(anim, self.char_pos, self.char_yaw, &def, true) {
+                    out.push((def.name, vp * w));
+                }
+            }
+            return out;
         }
-        Some(self.view_proj(aspect) * self.enemy_weapon_world()?)
+        for inst in &self.enemies {
+            if inst.enemy.is_dead() || inst.muzzle_timer <= 0.0 {
+                continue;
+            }
+            if let Some(w) = self.weapon_world(&inst.anim, inst.enemy.pos, inst.yaw(), &inst.weapon, false) {
+                out.push((inst.weapon.name, vp * w));
+            }
+            if inst.dual {
+                if let Some(w) = self.weapon_world(&inst.anim, inst.enemy.pos, inst.yaw(), &inst.weapon, true) {
+                    out.push((inst.weapon.name, vp * w));
+                }
+            }
+        }
+        out
     }
 
     /// Door breach/blocking is **disabled for now** (user call, 2026-07-16: "get

@@ -294,6 +294,39 @@ impl NavWorld {
         out
     }
 
+    /// Horizontal clearance around a standable meters position, in WT cells: the
+    /// largest ring radius `r` (capped at `cap`) such that every cell within
+    /// Chebyshev distance `r` at the same floor level is standable. `0` = the cell
+    /// touches a wall/edge. Used to spawn enemies away from walls so the (wider than
+    /// one cell) character model doesn't clip into them.
+    pub fn wall_clearance_cells(&self, m: Vec3, cap: i32) -> i32 {
+        let Some((ix, iy, iz)) = self.cell_at(m.x, m.y, m.z) else {
+            return 0;
+        };
+        let mut r = 0;
+        while r < cap {
+            let nr = r + 1;
+            let mut ring_ok = true;
+            'ring: for dz in -nr..=nr {
+                for dx in -nr..=nr {
+                    // Only the new outer ring (Chebyshev distance == nr).
+                    if dx.abs() != nr && dz.abs() != nr {
+                        continue;
+                    }
+                    if !self.is_standable(ix + dx, iy, iz + dz) {
+                        ring_ok = false;
+                        break 'ring;
+                    }
+                }
+            }
+            if !ring_ok {
+                break;
+            }
+            r = nr;
+        }
+        r
+    }
+
     /// A* over standable cells (4-connected in x/z, ±MAX_STEP in y for stairs).
     /// Returns meters waypoints (feet positions) from start to goal, or `None`.
     /// Costs are scaled ×2 to stay integer (the only fractional term is the

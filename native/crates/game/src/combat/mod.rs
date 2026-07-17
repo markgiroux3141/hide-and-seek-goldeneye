@@ -14,10 +14,12 @@
 //! - P5 — player health + the GoldenEye radial-arc HUD.
 
 pub mod config;
+pub mod enemy_weapons;
 pub mod shooting;
 pub mod viewmodel;
 
 pub use config::WeaponStats;
+pub use enemy_weapons::{enemy_def_for, EnemyWeaponClass, EnemyWeaponDef};
 pub use shooting::{cast, HitResult};
 pub use viewmodel::{load_flash, load_gun, ViewModel};
 

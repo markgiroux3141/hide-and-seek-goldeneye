@@ -14,6 +14,7 @@
 //! behavior types (patrol/search/etc.) are a future addition.
 
 use glam::Vec3;
+use rapier3d::prelude::ColliderHandle;
 
 use engine::geometry::csg_runtime::WORLD_SCALE;
 use engine::sim::nav::NavWorld;
@@ -210,6 +211,7 @@ impl Enemy {
         nav: &NavWorld,
         physics: &mut PhysicsWorld,
         fire_anim: bool,
+        self_collider: ColliderHandle,
     ) -> EnemyStep {
         self.moving = false;
         if self.dead {
@@ -227,7 +229,7 @@ impl Enemy {
                 let dist = self.dist_to(player_feet);
                 if dist < DETECTION_RANGE
                     && self.in_cone(player_feet)
-                    && line_of_sight(physics, self.pos, player_feet)
+                    && line_of_sight(physics, self.pos, player_feet, self_collider)
                 {
                     self.state = AiState::Alert;
                     self.alert_timer = 0.0;
@@ -243,7 +245,7 @@ impl Enemy {
             }
             AiState::Chase => {
                 let dist = self.dist_to(player_feet);
-                let los = line_of_sight(physics, self.pos, player_feet);
+                let los = line_of_sight(physics, self.pos, player_feet, self_collider);
                 if dist <= ATTACK_RANGE && !fire_anim && los {
                     self.face(player_feet);
                     self.state = AiState::Attack;
@@ -252,13 +254,20 @@ impl Enemy {
                 } else if dist > DETECTION_RANGE * 1.5 {
                     self.state = AiState::Idle;
                     self.path.clear();
+                } else if fire_anim {
+                    // A fire one-shot is still playing (it began in `attack`, then the
+                    // player slipped out of range): stay planted so the feet don't
+                    // "float" — just keep facing the target — and resume chasing when
+                    // the clip finishes. Movement is gated on the animation, matching
+                    // the JS `enemyState === 'action'` decision gate.
+                    self.face(player_feet);
                 } else {
                     self.chase_step(dt, player_feet, nav);
                 }
             }
             AiState::Attack => {
                 let dist = self.dist_to(player_feet);
-                let los = line_of_sight(physics, self.pos, player_feet);
+                let los = line_of_sight(physics, self.pos, player_feet, self_collider);
                 if dist > ATTACK_RANGE * 1.3 || !los {
                     self.state = AiState::Chase;
                     self.chase_timer = 0.0;
@@ -287,7 +296,7 @@ impl Enemy {
                 self.cooldown_timer += dt;
                 if self.cooldown_timer >= COOLDOWN_DURATION {
                     let dist = self.dist_to(player_feet);
-                    let los = line_of_sight(physics, self.pos, player_feet);
+                    let los = line_of_sight(physics, self.pos, player_feet, self_collider);
                     if dist <= ATTACK_RANGE && los {
                         self.state = AiState::Attack;
                         self.is_attacking = false;
@@ -308,9 +317,29 @@ impl Enemy {
         step
     }
 
-    /// Chase movement: periodically repath to the player, then follow the current
-    /// waypoints (ported from the original omniscient chaser's body).
+    /// Chase movement. When the straight line to the player is walkable (an open
+    /// room), **beeline** — move directly toward the player at any angle — so the
+    /// hunter doesn't zig-zag along the grid's cardinal-only A* waypoints. Only when
+    /// the straight line is blocked (a wall/corner between them) does it fall back to
+    /// A* pathfinding (the JS "LOS → beeline" shortcut).
     fn chase_step(&mut self, dt: f32, player_feet: Vec3, nav: &NavWorld) {
+        // Sample the walkability line at ~knee height so it clears the floor but
+        // catches walls/waist-high obstacles.
+        let up = Vec3::new(0.0, 0.5, 0.0);
+        if nav.los_clear(self.pos + up, player_feet + up) {
+            self.path.clear();
+            self.repath_timer = 0.0; // force a fresh A* path the instant LOS breaks
+            let to = Vec3::new(player_feet.x - self.pos.x, 0.0, player_feet.z - self.pos.z);
+            let dist = to.length();
+            if dist > 1e-4 {
+                let stepd = (SPEED_CHASE * dt).min(dist);
+                self.pos += to / dist * stepd;
+                self.heading = to / dist; // face the (flat) travel direction
+                self.moving = true;
+            }
+            return;
+        }
+
         self.repath_timer -= dt;
         if self.repath_timer <= 0.0 {
             self.repath_timer = REPATH_INTERVAL;
@@ -341,10 +370,17 @@ impl Enemy {
 }
 
 /// Rapier line-of-sight from `from_feet` to `to_feet`, cast between chest heights
-/// (JS `EnemyAI.hasLineOfSight`). The hunter's own capsule is excluded. Clear when
-/// nothing is hit (the native player has no collider), or when the only hit is at
-/// essentially the target distance. A wall in between blocks the shot.
-pub(crate) fn line_of_sight(physics: &mut PhysicsWorld, from_feet: Vec3, to_feet: Vec3) -> bool {
+/// (JS `EnemyAI.hasLineOfSight`). This hunter's own capsule (`self_collider`) is
+/// excluded so it doesn't block its own view; another hunter's capsule in the way
+/// legitimately does. Clear when nothing is hit (the native player has no
+/// collider), or when the only hit is at essentially the target distance. A wall
+/// in between blocks the shot.
+pub(crate) fn line_of_sight(
+    physics: &mut PhysicsWorld,
+    from_feet: Vec3,
+    to_feet: Vec3,
+    self_collider: ColliderHandle,
+) -> bool {
     let from = from_feet + Vec3::new(0.0, 1.0, 0.0);
     let to = to_feet + Vec3::new(0.0, 0.8, 0.0);
     let d = to - from;
@@ -353,8 +389,7 @@ pub(crate) fn line_of_sight(physics: &mut PhysicsWorld, from_feet: Vec3, to_feet
         return true;
     }
     let dir = d / dist;
-    let exclude = physics.enemy_collider_handle();
-    match physics.raycast_excluding(from, dir, dist, exclude) {
+    match physics.raycast_excluding(from, dir, dist, Some(self_collider)) {
         None => true,
         Some(hit) => (hit.point - from).length() >= dist - 0.1,
     }

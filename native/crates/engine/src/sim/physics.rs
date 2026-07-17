@@ -5,7 +5,7 @@
 //!
 //! Also retains the Phase 0 [`smoke_test`] as a link/step sanity check.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use glam::Vec3;
 use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterController};
@@ -33,13 +33,15 @@ pub struct PhysicsWorld {
     /// Door panel colliders, indexed to match the nav door overlay. `None` after
     /// a breach removes one. Cleared on return to BUILD.
     door_colliders: Vec<Option<ColliderHandle>>,
-    /// The hunter's capsule collider (Track A) — a single bare collider
-    /// repositioned each fixed step so hitscan can hit the enemy. `None` outside
-    /// HUNT or after the hunter dies. It's excluded from the player's move query
-    /// (the JS enemy doesn't physically block the player), so the two never jam.
-    enemy_collider: Option<ColliderHandle>,
-    /// Vertical offset (metres) from the hunter's feet to the capsule centre,
-    /// stored so `update_enemy_collider` can reposition from a feet position.
+    /// The hunters' capsule colliders (Track A) — bare colliders repositioned each
+    /// fixed step so hitscan can hit an enemy. One per live hunter, keyed by handle;
+    /// emptied outside HUNT and each entry removed as its hunter dies. All are
+    /// excluded from the player's move query (the JS enemy doesn't physically block
+    /// the player), so the player never jams on a hunter.
+    enemy_colliders: HashSet<ColliderHandle>,
+    /// Vertical offset (metres) from a hunter's feet to its capsule centre, stored
+    /// so `update_enemy_collider` can reposition from a feet position. Uniform — all
+    /// hunters share the same capsule size (same character scale).
     enemy_capsule_offset: f32,
     dirty: bool,
     /// Kinematic character controller (stateless config; we own the capsule).
@@ -73,7 +75,7 @@ impl PhysicsWorld {
             query_pipeline: QueryPipeline::new(),
             region_colliders: HashMap::new(),
             door_colliders: Vec::new(),
-            enemy_collider: None,
+            enemy_colliders: HashSet::new(),
             enemy_capsule_offset: 0.0,
             dirty: true,
             character,
@@ -123,35 +125,37 @@ impl PhysicsWorld {
         self.dirty = true;
     }
 
-    /// Spawn the hunter's capsule collider at `feet` (metres), sized `radius` ×
+    /// Spawn one hunter's capsule collider at `feet` (metres), sized `radius` ×
     /// `half_height` (the cylindrical part; the caps add `radius` each end). The
-    /// capsule is centred so its bottom cap sits at the feet. Added once at
-    /// G→HUNT; repositioned each fixed step by [`Self::update_enemy_collider`].
-    /// Returns the handle so the caller can match it against a hitscan hit.
-    pub fn set_enemy_collider(
+    /// capsule is centred so its bottom cap sits at the feet. Added at G→HUNT (once
+    /// per hunter); repositioned each fixed step by [`Self::update_enemy_collider`].
+    /// Returns the handle so the caller can move it, remove it on death, and match
+    /// it against a hitscan hit. All hunters share the same capsule offset.
+    pub fn add_enemy_collider(
         &mut self,
         feet: Vec3,
         radius: f32,
         half_height: f32,
     ) -> ColliderHandle {
-        self.remove_enemy_collider();
         self.enemy_capsule_offset = half_height + radius;
         let c = feet + Vec3::new(0.0, self.enemy_capsule_offset, 0.0);
         let collider = ColliderBuilder::capsule_y(half_height, radius)
             .translation(vector![c.x, c.y, c.z])
             .build();
         let handle = self.colliders.insert(collider);
-        self.enemy_collider = Some(handle);
+        self.enemy_colliders.insert(handle);
         self.dirty = true;
         handle
     }
 
-    /// Reposition the hunter's capsule to a new `feet` position (metres). Marks
-    /// the query pipeline dirty so the next raycast/character-move sees the moved
-    /// capsule — the per-frame-moving collider the static dirty-tracking would
-    /// otherwise miss. No-op if the hunter has no collider (dead / not in HUNT).
-    pub fn update_enemy_collider(&mut self, feet: Vec3) {
-        let Some(handle) = self.enemy_collider else { return };
+    /// Reposition one hunter's capsule to a new `feet` position (metres), by its
+    /// `handle`. Marks the query pipeline dirty so the next raycast/character-move
+    /// sees the moved capsule — the per-frame-moving collider the static
+    /// dirty-tracking would otherwise miss. No-op if the handle is gone (dead).
+    pub fn update_enemy_collider(&mut self, handle: ColliderHandle, feet: Vec3) {
+        if !self.enemy_colliders.contains(&handle) {
+            return;
+        }
         if let Some(collider) = self.colliders.get_mut(handle) {
             let c = feet + Vec3::new(0.0, self.enemy_capsule_offset, 0.0);
             collider.set_translation(vector![c.x, c.y, c.z]);
@@ -159,20 +163,29 @@ impl PhysicsWorld {
         }
     }
 
-    /// Remove the hunter's capsule collider (on death or return to BUILD). After
-    /// this a shot passes through where the corpse was.
-    pub fn remove_enemy_collider(&mut self) {
-        if let Some(handle) = self.enemy_collider.take() {
+    /// Remove one hunter's capsule collider (on its death), by `handle`. After this
+    /// a shot passes through where that corpse was.
+    pub fn remove_enemy_collider(&mut self, handle: ColliderHandle) {
+        if self.enemy_colliders.remove(&handle) {
             self.colliders
                 .remove(handle, &mut IslandManager::new(), &mut self.bodies, false);
             self.dirty = true;
         }
     }
 
-    /// The hunter's capsule collider handle, if one is live (for hitscan to tell
-    /// an enemy hit from a wall hit).
-    pub fn enemy_collider_handle(&self) -> Option<ColliderHandle> {
-        self.enemy_collider
+    /// Remove every hunter's capsule collider (on return to BUILD).
+    pub fn clear_enemy_colliders(&mut self) {
+        for handle in self.enemy_colliders.drain().collect::<Vec<_>>() {
+            self.colliders
+                .remove(handle, &mut IslandManager::new(), &mut self.bodies, false);
+        }
+        self.dirty = true;
+    }
+
+    /// Whether `handle` is a live hunter capsule (for hitscan to tell an enemy hit
+    /// from a wall hit, and to find which hunter a shot landed on).
+    pub fn is_enemy_collider(&self, handle: ColliderHandle) -> bool {
+        self.enemy_colliders.contains(&handle)
     }
 
     /// Insert or replace the static trimesh collider for a region. Called on
@@ -277,15 +290,15 @@ impl PhysicsWorld {
         self.ensure_current();
         let shape = Capsule::new_y(half_height, radius);
         let pos = Isometry::translation(capsule_center.x, capsule_center.y, capsule_center.z);
-        // Exclude the hunter's capsule: the JS enemy walks its own path and does
+        // Exclude every hunter's capsule: the JS enemy walks its own path and does
         // not physically block the player, and (crucially) with both capsule radii
         // summing to ~0.55 m the collision would stop the hunter well short of the
         // 0.3 m catch radius — it could never catch the player. Hitscan still hits
-        // the enemy (that query keeps the default filter).
-        let mut filter = QueryFilter::default();
-        if let Some(h) = self.enemy_collider {
-            filter = filter.exclude_collider(h);
-        }
+        // the enemies (that query keeps the default filter). A predicate filter
+        // rejects all enemy colliders at once (there can be several hunters).
+        let enemy_colliders = &self.enemy_colliders;
+        let predicate = |handle: ColliderHandle, _: &Collider| !enemy_colliders.contains(&handle);
+        let filter = QueryFilter::default().predicate(&predicate);
         let movement = self.character.move_shape(
             dt,
             &self.bodies,
@@ -363,8 +376,8 @@ mod tests {
     #[test]
     fn enemy_capsule_is_hittable_moves_and_is_removable() {
         let mut p = PhysicsWorld::new();
-        let h = p.set_enemy_collider(Vec3::ZERO, 0.3, 0.6);
-        assert_eq!(p.enemy_collider_handle(), Some(h));
+        let h = p.add_enemy_collider(Vec3::ZERO, 0.3, 0.6);
+        assert!(p.is_enemy_collider(h));
 
         // A ray at the capsule's centre height (feet 0 → centre 0.9) hits it, and
         // the hit reports the enemy's handle.
@@ -375,7 +388,7 @@ mod tests {
         assert_eq!(hit.collider, h, "hit reports the enemy collider");
 
         // Move it aside: the SAME ray now misses (the query pipeline saw the move).
-        p.update_enemy_collider(Vec3::new(10.0, 0.0, 0.0));
+        p.update_enemy_collider(h, Vec3::new(10.0, 0.0, 0.0));
         assert!(
             p.raycast(origin, Vec3::Z, 100.0).is_none(),
             "the moved capsule is no longer where it was"
@@ -387,11 +400,35 @@ mod tests {
         assert_eq!(hit2.collider, h);
 
         // Remove: gone from the query set entirely.
-        p.remove_enemy_collider();
-        assert_eq!(p.enemy_collider_handle(), None);
+        p.remove_enemy_collider(h);
+        assert!(!p.is_enemy_collider(h));
         assert!(
             p.raycast(Vec3::new(10.0, 0.9, -3.0), Vec3::Z, 100.0).is_none(),
             "the removed capsule is unhittable"
         );
+    }
+
+    /// Multiple hunters coexist: each capsule is independently hittable and
+    /// removable, and removing one leaves the other live.
+    #[test]
+    fn multiple_enemy_capsules_are_independent() {
+        let mut p = PhysicsWorld::new();
+        let a = p.add_enemy_collider(Vec3::ZERO, 0.3, 0.6);
+        let b = p.add_enemy_collider(Vec3::new(5.0, 0.0, 0.0), 0.3, 0.6);
+        assert!(p.is_enemy_collider(a) && p.is_enemy_collider(b));
+
+        let hit_b = p
+            .raycast(Vec3::new(5.0, 0.9, -3.0), Vec3::Z, 100.0)
+            .expect("ray should hit capsule b");
+        assert_eq!(hit_b.collider, b);
+
+        p.remove_enemy_collider(a);
+        assert!(!p.is_enemy_collider(a), "a removed");
+        assert!(p.is_enemy_collider(b), "b still live");
+        // b is still hittable after a's removal.
+        assert!(p.raycast(Vec3::new(5.0, 0.9, -3.0), Vec3::Z, 100.0).is_some());
+
+        p.clear_enemy_colliders();
+        assert!(!p.is_enemy_collider(b), "cleared");
     }
 }

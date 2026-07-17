@@ -120,6 +120,16 @@ impl SkinVertex {
             0 => Float32x3, 1 => Float32x2, 2 => Uint32x4, 3 => Float32x4
         ],
     };
+
+    /// Second, **per-instance** vertex buffer for damage/blood painting: one RGB
+    /// color per vertex (shader location 4), multiplied into the base color. Kept in
+    /// a separate buffer from [`Self::LAYOUT`] so all characters share one geometry
+    /// buffer while each carries its own accumulating blood colors. White = clean.
+    pub const BLOOD_LAYOUT: wgpu::VertexBufferLayout<'static> = wgpu::VertexBufferLayout {
+        array_stride: 12, // 3 × f32
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &wgpu::vertex_attr_array![4 => Float32x3],
+    };
 }
 
 /// One interleaved position + RGB color vertex — for the unlit gizmo overlay

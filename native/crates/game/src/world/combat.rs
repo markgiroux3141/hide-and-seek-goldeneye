@@ -35,6 +35,83 @@ pub(crate) fn resolve_aim(aim_x: f32, aim_y: f32, dx: f32, dy: f32) -> (f32, f32
     }
 }
 
+/// Paint blood onto a hunter's per-vertex colors at a world-space `hit` point (JS
+/// `EnemyCharacter.paintDamage`): every vertex whose CURRENT (posed) world position
+/// is within [`BLOOD_RADIUS`] reddens by `intensity · falloff` — `r` up toward 1,
+/// `g`/`b` down toward 0 — **accumulating** on the existing color so repeated shots
+/// build up persistent blood. `char_mat` is the character's world transform and
+/// `joints` its skinning matrices (so `char_mat · skin(v) · v` = the vertex's world
+/// position, matching the shader), which is why the blood lands where the shot
+/// visually hit even mid-animation.
+fn paint_blood(blood: &mut [f32], model: &SkinnedModel, char_mat: Mat4, joints: &[Mat4], hit: Vec3) {
+    let radius = BLOOD_RADIUS;
+    for (i, v) in model.vertices.iter().enumerate() {
+        let src = Vec3::from(v.pos);
+        // Linear-blend skin the vertex to its posed local position (CPU mirror of
+        // the shader's LBS), then to world.
+        let mut local = Vec3::ZERO;
+        for k in 0..4 {
+            let w = v.weights[k];
+            if w != 0.0 {
+                if let Some(m) = joints.get(v.joints[k] as usize) {
+                    local += w * m.transform_point3(src);
+                }
+            }
+        }
+        let world = char_mat.transform_point3(local);
+        let dist = world.distance(hit);
+        if dist < radius {
+            let blend = BLOOD_INTENSITY * (1.0 - dist / radius);
+            let base = i * 3;
+            blood[base] = (blood[base] + blend * 0.8).min(1.0); // r toward 1
+            blood[base + 1] = (blood[base + 1] - blend).max(0.0); // g toward 0
+            blood[base + 2] = (blood[base + 2] - blend).max(0.0); // b toward 0
+        }
+    }
+}
+
+/// Where a player shot landed on a hunter, classified by impact height above its
+/// feet (a height-only proxy for the JS `BONE_ZONE_MAP`). Drives both the damage
+/// multiplier and which hurt animation plays. Arms fold into `Torso` — a height
+/// classifier can't separate them.
+#[derive(Clone, Copy, Debug)]
+enum HitZone {
+    Head,
+    Torso,
+    Legs,
+}
+
+impl HitZone {
+    /// Classify by impact height (metres) above the hunter's feet.
+    fn classify(height: f32) -> Self {
+        if height >= ZONE_HEAD_MIN {
+            HitZone::Head
+        } else if height < ZONE_LEG_MAX {
+            HitZone::Legs
+        } else {
+            HitZone::Torso
+        }
+    }
+
+    /// Damage multiplier (JS `ZONE_DAMAGE_MULTIPLIER`).
+    fn damage_mult(self) -> f32 {
+        match self {
+            HitZone::Head => ZONE_HEAD_MULT,
+            HitZone::Torso => ZONE_TORSO_MULT,
+            HitZone::Legs => ZONE_LEG_MULT,
+        }
+    }
+
+    /// The hurt-animation set fitting this zone.
+    fn hurt_clips(self) -> &'static [&'static str] {
+        match self {
+            HitZone::Head => anim_set::HEAD_HIT_CLIPS,
+            HitZone::Torso => anim_set::TORSO_HIT_CLIPS,
+            HitZone::Legs => anim_set::LEG_HIT_CLIPS,
+        }
+    }
+}
+
 impl World {
     /// Attach the audio subsystem (called once at startup by the app, after the
     /// device is initialized). Preloads the weapon's fire/reload/empty sounds so
@@ -55,8 +132,8 @@ impl World {
         for n in 1..=PAIN_COUNT {
             audio.load(&format!("sounds/enemies/pain-{n}.wav"));
         }
-        // A3/P5: the hunter's rifle report + the player's own hit vocal.
-        audio.load(ENEMY_FIRE_SOUND);
+        // A3/P5: the player's own hit vocal. (Enemy gun reports reuse the player
+        // weapon fire sounds, already preloaded in the loop above.)
         audio.load(PLAYER_HIT_SOUND);
         audio.play_music(BG_MUSIC, true);
         self.audio = Some(audio);
@@ -271,10 +348,17 @@ impl World {
         // gun-only (the viewmodel kick, armed in `Weapon::update`) — no camera kick,
         // matching GoldenEye.
         match crate::combat::shooting::cast(&mut self.physics, eye, dir, range, None) {
-            Some(hit) if Some(hit.collider) == self.physics.enemy_collider_handle() => {
-                // Track A: the shot landed on the hunter's capsule — damage it (no
-                // wall spark; the hit reaction + pain SFX are the feedback).
-                self.hit_enemy();
+            Some(hit) if self.physics.is_enemy_collider(hit.collider) => {
+                // Track A: the shot landed on a hunter's capsule — find which one and
+                // damage it (no wall spark; the hit reaction + pain SFX are the
+                // feedback).
+                if let Some(i) = self
+                    .enemies
+                    .iter()
+                    .position(|e| e.collider == hit.collider && !e.enemy.is_dead())
+                {
+                    self.hit_enemy(i, hit.point);
+                }
             }
             Some(hit) => {
                 // World geometry: nudge the marker just off the surface (z-fighting).
@@ -294,16 +378,43 @@ impl World {
         }
     }
 
-    /// Apply a PP7 hit to the hunter (Track A). Damages it; on the lethal shot
-    /// plays a random death one-shot (clamps), starts the 2 s opacity fade, and
-    /// removes the capsule collider (a corpse can't be shot). Otherwise plays a
-    /// random hit reaction that auto-returns to locomotion and stuns the hunter
-    /// for the clip's length. Always plays the pain + bullet-hit SFX (JS `onHit`).
-    pub(crate) fn hit_enemy(&mut self) {
-        let dmg = self.weapon().config().damage;
-        // Apply damage — borrow the enemy alone; bail if already dead / gone.
-        let died = match self.enemy.as_mut() {
-            Some(e) if !e.is_dead() => e.take_damage(dmg),
+    /// Apply a player-weapon hit to hunter `idx` at world impact point `hit_point`
+    /// (Track A). The [`HitZone`] (head/torso/legs, from the impact height above the
+    /// hunter's feet) scales the damage (headshots hit ×4) and picks a fitting hurt
+    /// animation; the impact also **paints blood** onto the nearby vertices
+    /// (accumulating, persistent). On the lethal shot plays a random death one-shot
+    /// (clamps) and removes the capsule collider (a corpse can't be shot). Otherwise
+    /// plays the zone's hurt reaction, which auto-returns to locomotion, and stuns
+    /// the hunter for the clip's length. Always plays the pain + bullet-hit SFX (JS
+    /// `onHit`). The death fade begins later, once the death animation finishes.
+    pub(crate) fn hit_enemy(&mut self, idx: usize, hit_point: Vec3) {
+        let base = self.weapon().config().damage;
+        // Paint blood at the impact (before damage, so it shows even on the kill
+        // shot). Needs the shared model (immut) + this hunter's pose/blood (mut) —
+        // disjoint fields, split-borrowed. `char_feet_offset` read out first.
+        let feet_offset = self.char_feet_offset;
+        if let Some(model) = self.char_model.as_ref() {
+            if let Some(inst) = self.enemies.get_mut(idx) {
+                if !inst.enemy.is_dead() {
+                    let joints = inst.anim.skinning_matrices(&model.skeleton);
+                    let feet = inst.enemy.pos;
+                    let char_mat = Mat4::from_translation(Vec3::new(
+                        feet.x,
+                        feet.y + feet_offset,
+                        feet.z,
+                    )) * Mat4::from_rotation_y(inst.yaw())
+                        * Mat4::from_scale(Vec3::splat(CHAR_SCALE));
+                    paint_blood(&mut inst.blood, model, char_mat, &joints, hit_point);
+                }
+            }
+        }
+        // Classify the zone, scale the damage, apply — bail if already dead / gone.
+        let (died, collider, dmg, zone) = match self.enemies.get_mut(idx) {
+            Some(inst) if !inst.enemy.is_dead() => {
+                let zone = HitZone::classify(hit_point.y - inst.enemy.pos.y);
+                let dmg = base * zone.damage_mult();
+                (inst.enemy.take_damage(dmg), inst.collider, dmg, zone)
+            }
             _ => return,
         };
 
@@ -315,126 +426,126 @@ impl World {
         }
 
         if died {
-            self.char_dead = true;
-            // Fade is NOT started here — it begins only once the death animation
-            // finishes (see `advance_animation`), so the body stays visible while
-            // it plays out. `enemy_fade` stays `None` (opacity 1) until then.
-            self.physics.remove_enemy_collider();
+            // Remove the capsule now; the body stays visible (opacity 1) until the
+            // death animation finishes, then fades (see `advance_animation`).
+            self.physics.remove_enemy_collider(collider);
             let death_start = CHAR_HIT_START + anim_set::HIT_CLIPS.len();
             let pick = self.rand_below(anim_set::DEATH_CLIPS.len());
-            if let Some(anim) = self.char_anim.as_mut() {
+            if let Some(inst) = self.enemies.get_mut(idx) {
                 // No return target → the death pose clamps and holds while it fades.
-                anim.play_once(death_start + pick, 0.2, None, None);
+                inst.anim.play_once(death_start + pick, 0.2, None, None);
             }
-            log::info!("HUNTER DOWN ({})", anim_set::DEATH_CLIPS[pick]);
+            log::info!("HUNTER DOWN ({zone:?}, {dmg:.0} dmg — {})", anim_set::DEATH_CLIPS[pick]);
         } else {
-            let idx = CHAR_HIT_START + self.rand_below(anim_set::HIT_CLIPS.len());
+            // Pick a hurt clip fitting the zone, resolve it to an AnimPlayer index.
+            let clips = zone.hurt_clips();
+            let name = clips[self.rand_below(clips.len())];
+            let clip = CHAR_HIT_START + anim_set::hit_clip_pos(name).unwrap_or(0);
+            let Some(inst) = self.enemies.get_mut(idx) else { return };
             // Return to the current locomotion band so the one-shot flips
             // `is_playing_oneshot` back off, letting the HUNT driver resume.
-            let band = band_for_speed(self.enemy.as_ref().map(|e| e.speed()).unwrap_or(0.0));
-            let dur = self
-                .char_anim
-                .as_ref()
-                .and_then(|a| a.clip(idx))
-                .map(|c| c.duration)
-                .unwrap_or(0.4);
-            if let Some(anim) = self.char_anim.as_mut() {
-                anim.play_once(idx, 0.1, Some(band), None);
-            }
-            if let Some(e) = self.enemy.as_mut() {
-                e.stun(dur);
-            }
-            let hp = self.enemy.as_ref().map(|e| e.health()).unwrap_or(0.0);
-            log::info!(
-                "hunter hit — {dmg:.0} dmg, {hp:.0} hp left ({})",
-                anim_set::HIT_CLIPS[idx - CHAR_HIT_START]
-            );
+            let band = band_for_speed(inst.enemy.speed());
+            let dur = inst.anim.clip(clip).map(|c| c.duration).unwrap_or(0.4);
+            inst.anim.play_once(clip, 0.1, Some(band), None);
+            inst.enemy.stun(dur);
+            let hp = inst.enemy.health();
+            log::info!("hunter hit — {zone:?} {dmg:.0} dmg, {hp:.0} hp left ({name})");
         }
     }
 
-    /// Start a fire burst on the shared animation mixer — the hunter entered
-    /// `attack` (A3). Plays the rifle fire one-shot with its FIRE_TIMING window;
-    /// the per-shot cadence + damage roll run in [`Self::enemy_combat_step`]. Resets
-    /// the cadence so the first shot waits for the window's `fireStart`.
-    pub(crate) fn start_enemy_fire(&mut self) {
-        if let Some(anim) = self.char_anim.as_mut() {
-            // Return to idle when done; the HUNT driver re-selects a band after.
-            anim.play_once(CHAR_FIRE_IDX, 0.1, Some(0), Some(anim_set::FIRE_WINDOW));
-        }
-        self.enemy_shot_timer = 0.0;
-        log::info!("hunter firing");
+    /// Start a fire burst on hunter `idx`'s mixer — it entered `attack` (A3). Plays
+    /// its weapon-class fire one-shot (rifle / pistol / dual) with that clip's
+    /// FIRE_TIMING window; the per-shot cadence + damage roll run in
+    /// [`Self::enemy_combat_step`]. Resets the cadence so the first shot waits for
+    /// the window's `fireStart`.
+    pub(crate) fn start_enemy_fire(&mut self, idx: usize) {
+        let Some(inst) = self.enemies.get_mut(idx) else { return };
+        let clip = fire_clip_index(inst.weapon.class, inst.dual);
+        let win = fire_window_for(inst.weapon.class, inst.dual);
+        // Return to idle when done; the HUNT driver re-selects a band after.
+        inst.anim.play_once(clip, 0.1, Some(0), Some(win));
+        inst.shot_timer = 0.0;
+        log::info!("hunter firing ({})", inst.weapon.name);
     }
 
-    /// Per-frame enemy combat + player damage-feedback (HUNT only). Pumps the
-    /// hunter's rifle shots while its fire animation is inside the FIRE_TIMING
-    /// window — one shot per `1/ENEMY_FIRE_RATE` seconds, the JS
-    /// `EnemyCharacter.tick` pump — and decays the muzzle flash + the red damage
-    /// flash + the health-HUD pop timer. Called once per render frame after
-    /// [`Self::advance_animation`] (which advances the fire window).
+    /// Per-frame enemy combat + player damage-feedback (HUNT only). Pumps EACH
+    /// hunter's shots while its fire animation is inside the FIRE_TIMING window —
+    /// one shot per `1/fireRate` seconds, the JS `EnemyCharacter.tick` pump — and
+    /// decays the per-hunter muzzle flashes + the red damage flash + the health-HUD
+    /// pop timer. Called once per render frame after [`Self::advance_animation`]
+    /// (which advances the fire windows).
     pub fn enemy_combat_step(&mut self, dt: f32) {
         if self.mode != Mode::Hunt {
             return;
         }
-        // Decay feedback timers (these run even while dead so a final flash fades).
+        // Player feedback timers (once per frame, run even while dead so a final
+        // flash fades).
         if self.damage_flash > 0.0 {
             self.damage_flash = (self.damage_flash - dt * DAMAGE_FLASH_DECAY).max(0.0);
         }
         if self.hud_show_timer > 0.0 {
             self.hud_show_timer = (self.hud_show_timer - dt).max(0.0);
         }
-        if self.enemy_muzzle_timer > 0.0 {
-            self.enemy_muzzle_timer = (self.enemy_muzzle_timer - dt).max(0.0);
+        // Per-hunter muzzle decay (blood is persistent — no decay).
+        for inst in &mut self.enemies {
+            if inst.muzzle_timer > 0.0 {
+                inst.muzzle_timer = (inst.muzzle_timer - dt).max(0.0);
+            }
         }
         if self.player_dead {
             return;
         }
 
-        // The hunter fires only while its FIRE one-shot is inside its window
-        // (the hard-won FIRE_TIMING mapping), spaced by 1/fireRate.
-        let (firing, window_open) = self
-            .char_anim
-            .as_ref()
-            .map(|a| {
-                let f = a.is_playing_oneshot() && a.current_clip() == CHAR_FIRE_IDX;
-                (f, f && a.fire_window_open())
-            })
-            .unwrap_or((false, false));
-        if !firing {
-            self.enemy_shot_timer = 0.0;
-            return;
-        }
-        if window_open {
-            self.enemy_shot_timer -= dt;
-            if self.enemy_shot_timer <= 0.0 {
-                self.enemy_shot_timer = 1.0 / ENEMY_FIRE_RATE;
-                self.emit_enemy_shot();
+        // Each hunter fires only while its FIRE one-shot is inside its window
+        // (the FIRE_TIMING mapping), spaced by 1/fireRate. Collect the shot events
+        // first (emitting needs `&mut self`, which would clash with the iterator).
+        let mut shots: Vec<usize> = Vec::new();
+        for (i, inst) in self.enemies.iter_mut().enumerate() {
+            let firing =
+                inst.anim.is_playing_oneshot() && is_fire_clip(inst.anim.current_clip());
+            if !firing {
+                inst.shot_timer = 0.0;
+                continue;
             }
+            if inst.anim.fire_window_open() {
+                inst.shot_timer -= dt;
+                if inst.shot_timer <= 0.0 {
+                    inst.shot_timer = 1.0 / inst.weapon.fire_rate.max(0.001);
+                    shots.push(i);
+                }
+            }
+        }
+        for i in shots {
+            self.emit_enemy_shot(i);
         }
     }
 
-    /// One rifle shot from the hunter (JS `EnemyCharacter.onShotFired` + the AI
-    /// damage callback): muzzle flash + gun report always; then, when LOS is clear,
-    /// roll `accuracy·(1−dist/maxRange)` and apply damage to the player on a hit.
-    fn emit_enemy_shot(&mut self) {
-        let epos = match self.enemy.as_ref() {
-            Some(e) if !e.is_dead() => e.pos,
+    /// One shot from hunter `idx` (JS `EnemyCharacter.onShotFired` + the AI damage
+    /// callback): muzzle flash + the weapon's gun report always; then, when LOS is
+    /// clear, roll `accuracy·(1−dist/range)` and apply the weapon's damage to the
+    /// player on a hit. Uses the equipped weapon's stats.
+    fn emit_enemy_shot(&mut self, idx: usize) {
+        let (epos, collider, weapon) = match self.enemies.get(idx) {
+            Some(inst) if !inst.enemy.is_dead() => (inst.enemy.pos, inst.collider, inst.weapon),
             _ => return,
         };
         let Some(ppos) = self.player_pos() else { return };
         // Flash + report fire on every shot, hit or miss.
-        self.enemy_muzzle_timer = ENEMY_MUZZLE_TIME;
-        if let Some(audio) = self.audio.as_mut() {
-            audio.play(ENEMY_FIRE_SOUND, ENEMY_FIRE_VOL);
+        if let Some(inst) = self.enemies.get_mut(idx) {
+            inst.muzzle_timer = ENEMY_MUZZLE_TIME;
         }
-        // Walls block the shot (re-checked per shot, JS-faithful).
-        if !crate::enemy::line_of_sight(&mut self.physics, epos, ppos) {
+        if let Some(audio) = self.audio.as_mut() {
+            audio.play(weapon.fire_sound, ENEMY_FIRE_VOL);
+        }
+        // Walls (and other hunters) block the shot (re-checked per shot).
+        if !crate::enemy::line_of_sight(&mut self.physics, epos, ppos, collider) {
             return;
         }
         let dist = Vec3::new(ppos.x - epos.x, 0.0, ppos.z - epos.z).length();
-        let dist_factor = (1.0 - dist / ENEMY_MAX_RANGE).max(0.0);
-        let hit_chance = ENEMY_ACCURACY * dist_factor;
+        let dist_factor = (1.0 - dist / weapon.range).max(0.0);
+        let hit_chance = weapon.accuracy * dist_factor;
         if self.rand_float() < hit_chance {
-            self.take_player_damage(ENEMY_DAMAGE);
+            self.take_player_damage(weapon.damage);
         }
     }
 

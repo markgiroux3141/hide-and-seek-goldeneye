@@ -59,7 +59,27 @@ pub fn fire_window(hex: &str) -> Option<(f32, f32)> {
 pub const FIRE_CLIP: &str = "01-fire-standing.glb";
 pub const FIRE_WINDOW: (f32, f32) = (0.9, 2.67);
 
-/// Hit-reaction clips (`HIT_ANIMS`, 12) — random-picked on a hit.
+/// Hit-reaction clips grouped by body zone (a subset of [`HIT_CLIPS`], chosen by
+/// their descriptive filenames) so a shot to the head / torso / legs plays a
+/// fitting reaction. Head → the neck snap; torso → shoulder/arm recoils; legs →
+/// the leg buckles. Each name must also appear in [`HIT_CLIPS`] (the loaded set).
+pub const HEAD_HIT_CLIPS: &[&str] = &["17-hit-neck.glb"];
+pub const TORSO_HIT_CLIPS: &[&str] = &[
+    "0E-hit-left-shoulder.glb",
+    "0F-hit-right-shoulder.glb",
+    "10-hit-left-arm.glb",
+    "11-hit-right-arm.glb",
+];
+pub const LEG_HIT_CLIPS: &[&str] = &["14-hit-left-leg.glb", "15-hit-right-leg.glb"];
+
+/// Position of a hit clip within [`HIT_CLIPS`] (its offset from the first hit clip
+/// in the loaded `AnimPlayer` layout), or `None` if the name isn't a hit clip.
+pub fn hit_clip_pos(name: &str) -> Option<usize> {
+    HIT_CLIPS.iter().position(|&c| c == name)
+}
+
+/// Hit-reaction clips (`HIT_ANIMS`, 12) — the full loaded set; the zone groups
+/// above pick from it, and unzoned callers (the BUILD demo) random-pick any.
 pub const HIT_CLIPS: &[&str] = &[
     "0E-hit-left-shoulder.glb",
     "0F-hit-right-shoulder.glb",

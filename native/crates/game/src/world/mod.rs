@@ -18,11 +18,13 @@ use crate::character::CharacterController;
 // module fully-qualified (`crate::combat::…`) to avoid the shadow.
 use engine::assets::textured_model::TexturedModel;
 use engine::audio::AudioManager;
-use crate::combat::Weapon;
+use crate::combat::enemy_weapons::{LEFT_HAND_BONE, RIGHT_HAND_BONE};
+use crate::combat::{enemy_def_for, EnemyWeaponClass, EnemyWeaponDef, Weapon};
 use engine::geometry::csg_runtime::{
     Axis, Brush, Op, Region, Side, StairDesc, StairDir, WALL_THICKNESS, WORLD_SCALE,
 };
 use crate::enemy::Enemy;
+use rapier3d::prelude::ColliderHandle;
 use engine::platform::input::InputState;
 use engine::render::mesh::{ColorVertex, ColoredMesh, CpuMesh, TexturedMesh};
 use engine::sim::nav::{self, NavWorld};
@@ -50,7 +52,7 @@ mod tests;
 // through `use super::*` regardless of which file defines them. (`find_room_brushes`
 // / `brushes_touching` are used only within `editing`, so they aren't re-exported.)
 pub(crate) use geom::{boxes_mesh, make_stair_void, make_wall_brush, push_colored_box};
-pub(crate) use hunt::band_for_speed;
+pub(crate) use hunt::{band_for_speed, fire_clip_index, fire_window_for, is_fire_clip};
 pub(crate) use pick::{flip, same_face};
 
 /// Default push/pull increment, in WT (JS `PUSH_PULL_STEP`). Shift → 1 WT.
@@ -92,9 +94,11 @@ pub(crate) const PAD_C_LOOK_SPEED: f32 = 300.0;
 /// the aim reticle, the aim-mode camera pan, and C-Up/C-Down so they never fight.
 pub(crate) const PAD_PITCH_SIGN: f32 = -1.0;
 
-/// Skinned-character model scale: GoldenEye units → metres. 0.00104 = base
-/// 0.001 + ~4% (matches the 3DS FPS port, sized to level proportions).
-pub(crate) const CHAR_SCALE: f32 = 0.00104;
+/// Skinned-character model scale: GoldenEye units → metres. The 3DS FPS port used
+/// 0.00104 (base 0.001 + ~4%); shrunk to ~80% (user call 2026-07-17) so the hunter
+/// reads better against the level. The GE-unit weapon bone offsets and the computed
+/// `char_feet_offset` both flow through this scale, so they shrink with the model.
+pub(crate) const CHAR_SCALE: f32 = 0.000_832; // 0.00104 × 0.8
 
 /// B3 locomotion demo: linear speed (m/s) per band, indexed by `demo_band`
 /// (0=idle,1=walk,2=jog,3=run). Walk/jog/run match `SPEED_THRESHOLDS` so the
@@ -104,16 +108,22 @@ pub(crate) const LOCO_SPEEDS: [f32; 4] = [0.0, 1.5, 3.5, 5.0];
 pub(crate) const DEMO_CENTER: Vec3 = Vec3::new(3.0, 0.0, 3.0);
 pub(crate) const DEMO_RADIUS: f32 = 1.6;
 
-/// Clip indices within the character's [`AnimPlayer`], set by the fixed load
-/// order in `World::new`: 0–3 locomotion, 4 fire, then the hit set, then death.
-pub(crate) const CHAR_FIRE_IDX: usize = 4;
-pub(crate) const CHAR_HIT_START: usize = 5;
+/// Clip indices within the character's [`AnimPlayer`], set by the fixed load order
+/// in `World::new`: `0–3` locomotion, then one fire clip per weapon class
+/// (rifle/pistol/dual), then the hit set, then the death set. The class-specific
+/// fire clip + its FIRE_TIMING window are selected via [`hunt::fire_clip_index`] /
+/// [`hunt::fire_window_for`]; [`hunt::is_fire_clip`] recognises all three.
+pub(crate) const FIRE_RIFLE_IDX: usize = 4; // 01-fire-standing
+pub(crate) const FIRE_PISTOL_IDX: usize = 5; // 41-fire-standing-pistol
+pub(crate) const FIRE_DUAL_IDX: usize = 6; // 7A-fire-standing-dual-wield
+pub(crate) const CHAR_HIT_START: usize = 7;
 
 // ─── Track A — killable hunter ──────────────────────────────────────────────
-/// The hunter's capsule collider dimensions in metres (recon constants): the
-/// cylindrical half-height + the cap radius. Total height ≈ 1.8 m.
-pub(crate) const ENEMY_RADIUS: f32 = 0.3;
-pub(crate) const ENEMY_HALF_HEIGHT: f32 = 0.6;
+/// The hunter's capsule collider dimensions in metres — the recon constants
+/// (`0.3` / `0.6`) scaled to ~80% to match the shrunk model, so shots still land
+/// on the smaller body. Total height ≈ 1.44 m.
+pub(crate) const ENEMY_RADIUS: f32 = 0.24; // 0.3 × 0.8
+pub(crate) const ENEMY_HALF_HEIGHT: f32 = 0.48; // 0.6 × 0.8
 /// Death fade duration (s) — JS `EnemyCharacter.FADE_DURATION`. The body fades
 /// its opacity 1→0 over this window after the lethal shot, then vanishes.
 pub(crate) const FADE_DURATION: f32 = 2.0;
@@ -124,26 +134,50 @@ pub(crate) const PAIN_COUNT: usize = 26;
 pub(crate) const PAIN_VOL: f32 = 0.8;
 pub(crate) const BULLET_HIT_VOL: f32 = 0.5;
 
-// ─── Enemy fires back (A3) — the hunter's KF7 rifle + probabilistic hit ──────
-/// KF7 rifle stats (JS `EnemyWeaponConfig` + `EnemyManager` overrides): damage 8
-/// per hit, accuracy 0.75, effective range 12 m, 8 shots/sec, gun sound.
-pub(crate) const ENEMY_DAMAGE: f32 = 8.0;
-pub(crate) const ENEMY_ACCURACY: f32 = 0.75;
-pub(crate) const ENEMY_MAX_RANGE: f32 = 12.0;
-pub(crate) const ENEMY_FIRE_RATE: f32 = 8.0;
+/// Blood/damage painting (JS `EnemyCharacter.paintDamage`): vertices within
+/// `BLOOD_RADIUS` (world metres) of a shot's impact get reddened, accumulating so
+/// repeated hits build up persistent blood. The JS radius is 300 GE-units in the
+/// model's local space; here we compare in world space, so it's scaled by
+/// `CHAR_SCALE` (≈0.25 m). `BLOOD_INTENSITY` is the peak per-hit strength at the
+/// centre (JS `intensity`), falling off linearly to the rim.
+pub(crate) const BLOOD_RADIUS: f32 = 300.0 * CHAR_SCALE;
+pub(crate) const BLOOD_INTENSITY: f32 = 0.5;
+
+/// Zone hitscan (damage + hurt animation vary by where the shot lands). Boundaries
+/// are impact height above the hunter's feet, in metres, for the ~1.44 m capsule
+/// (feet 0 → head ~1.44). Multipliers mirror the JS `ZONE_DAMAGE_MULTIPLIER`
+/// (head 4.0, torso 1.0, legs 0.6; arms are folded into torso since a height-only
+/// classifier can't separate them).
+pub(crate) const ZONE_HEAD_MIN: f32 = 1.1; // ≥ this above the feet → head
+pub(crate) const ZONE_LEG_MAX: f32 = 0.55; // < this above the feet → legs
+pub(crate) const ZONE_HEAD_MULT: f32 = 4.0;
+pub(crate) const ZONE_TORSO_MULT: f32 = 1.0;
+pub(crate) const ZONE_LEG_MULT: f32 = 0.6;
+
+// ─── Enemies fire back (A3) — data-driven arsenal + probabilistic hit ────────
+// Per-weapon damage / accuracy / range / fire-rate now live on the equipped
+// [`EnemyWeaponDef`] (see `combat::enemy_weapons`); only the shared feedback
+// timings stay here.
+/// The muzzle-flash countdown (s) after each enemy shot; >0 → the enemy muzzle
+/// renders.
 pub(crate) const ENEMY_MUZZLE_TIME: f32 = 0.1;
-pub(crate) const ENEMY_FIRE_SOUND: &str = "sounds/weapons/k47-fire.wav";
+/// Enemy gun-report volume (linear amplitude).
 pub(crate) const ENEMY_FIRE_VOL: f32 = 0.7;
-/// The hunter's rifle GLB (attached to Bone_9) + its muzzle flash, and the
-/// GE-unit local offset/rotation from the hand bone (JS `EnemyWeaponConfig.kf7`
-/// `position`/`rotation`). Offsets are in GE bone-local units (~1000/m), applied
-/// before the character's `CHAR_SCALE`.
-pub(crate) const ENEMY_GUN_PATH: &str = "kf7/gun.glb";
-pub(crate) const ENEMY_MUZZLE_PATH: &str = "kf7/muzzle.glb";
-pub(crate) const ENEMY_GUN_OFFSET: Vec3 = Vec3::new(-90.0, 0.0, 145.0);
-pub(crate) const ENEMY_GUN_ROT: Vec3 = Vec3::new(0.0, -1.49, -1.69);
-/// The right-hand attach bone (JS matches `Bone_9` → right hand).
-pub(crate) const ENEMY_HAND_BONE: &str = "Bone_9";
+
+/// The hunter roster spawned at G→HUNT: `(weapon, dual-wield?)`, one hunter per
+/// entry (capped by available standable cells). Covers every animation class —
+/// two-handed rifle, one-handed pistol, dual rifle (the canonical akimbo weapon),
+/// and dual pistols — so all the fire animations are exercised in one hunt. Any of
+/// the 19 arsenal weapons can be listed here; each is classified + attached by
+/// [`crate::combat::enemy_def_for`].
+pub(crate) const ENEMY_ROSTER: &[(crate::combat::config::WeaponStats, bool)] = &[
+    (crate::combat::config::KF7, false),     // two-handed rifle
+    (crate::combat::config::PP7, false),     // one-handed pistol
+    (crate::combat::config::RCP90, true),    // dual-wield rifle (akimbo)
+    (crate::combat::config::PP7, true),      // dual-wield pistols
+    (crate::combat::config::AR33, false),    // two-handed rifle
+    (crate::combat::config::SHOTGUN, false), // two-handed
+];
 
 /// Load a weapon's `(gun, muzzle-flash)` CPU meshes from its config, resolving the
 /// asset-relative paths under `native/assets/weapons/`. Warn-not-panic: a failed
@@ -458,22 +492,75 @@ pub(crate) struct FaceInfo {
     position: f32,
 }
 
+/// One live hunter during the HUNT: its AI/movement [`Enemy`], its own animation
+/// mixer (cloned from the shared clip template so each hunter animates
+/// independently), the weapon it wields + whether it's dual-wielding, its hitscan
+/// capsule handle, and its per-hunter combat/feedback timers. All hunters share the
+/// single [`SkinnedModel`] geometry ([`World::char_model`]); only the pose differs.
+pub(crate) struct EnemyInstance {
+    pub enemy: Enemy,
+    /// This hunter's crossfade mixer (own clock/pose). Clip layout matches the
+    /// shared template: locomotion, per-class fire, hit set, death set.
+    pub anim: AnimPlayer,
+    /// The equipped weapon (asset paths + AI stats + bone-local attach offsets).
+    pub weapon: EnemyWeaponDef,
+    /// Dual-wielding — a second copy of `weapon` is held in the left hand and both
+    /// muzzles flash on a shot (JS `weaponOptions.dual`).
+    pub dual: bool,
+    /// This hunter's hitscan capsule (moved each fixed step, removed on death).
+    pub collider: ColliderHandle,
+    /// Death fade: seconds since the death animation finished, or `None` while alive
+    /// / mid death-animation. Drives opacity 1→0 over [`FADE_DURATION`].
+    pub fade: Option<f32>,
+    /// Enemy-fire cadence: seconds until the next shot may leave during the fire
+    /// window (spaced by `1/weapon.fire_rate`).
+    pub shot_timer: f32,
+    /// Muzzle-flash countdown (s); >0 → this hunter's muzzle(s) render.
+    pub muzzle_timer: f32,
+    /// Per-vertex RGB blood color (flat, len = 3×model vertex count), white =
+    /// clean. Each shot reddens the vertices near the impact (accumulating, so it
+    /// builds up as persistent blood); uploaded to this hunter's instance color
+    /// buffer each frame. JS `EnemyCharacter` per-instance vertex colors.
+    pub blood: Vec<f32>,
+}
+
+/// A loaded enemy weapon's render assets: the gun mesh + optional muzzle-flash
+/// mesh, keyed by the weapon name. Loaded once for the whole arsenal in
+/// [`World::new`] and handed to the renderer's weapon library so any hunter can
+/// draw any weapon (and the BUILD demo can preview every gun).
+pub(crate) struct EnemyWeaponAsset {
+    pub name: &'static str,
+    pub gun: TexturedModel,
+    pub muzzle: Option<TexturedModel>,
+}
+
 pub struct World {
     pub camera: FlyCamera,
     pub physics: PhysicsWorld,
     pub mode: Mode,
     /// The player capsule; `Some` only in HUNT mode.
     character: Option<CharacterController>,
-    /// Baked nav grid + hunter; `Some` only in HUNT mode.
+    /// Baked nav grid; `Some` only in HUNT mode.
     nav: Option<NavWorld>,
-    enemy: Option<Enemy>,
-    /// B1 skinned-character viewer: one loaded character rendered in bind pose so
-    /// the skinning pipeline can be verified live. Later milestones drive its pose
-    /// from clips and hand it to the enemy. `None` if the asset failed to load.
+    /// The live hunters (HUNT only) — one per [`ENEMY_ROSTER`] entry that found a
+    /// spawn cell. Each carries its own mixer/weapon/collider; all share
+    /// [`Self::char_model`] geometry. Empty in BUILD.
+    enemies: Vec<EnemyInstance>,
+    /// The shared skinned-character geometry (one GLB) rendered for every hunter
+    /// (and the BUILD demo viewer). `None` if the asset failed to load.
     char_model: Option<SkinnedModel>,
-    /// B2/B3: the crossfade mixer driving the character (idle + walk/jog/run),
-    /// or `None` → static bind pose. Clip indices: 0=idle,1=walk,2=jog,3=run.
+    /// Pristine animation mixer over the full clip set (locomotion + per-class fire
+    /// + hit + death), cloned once per spawned hunter so each animates on its own
+    /// clock. `None` if any clip failed to load.
+    char_anim_template: Option<AnimPlayer>,
+    /// The BUILD demo viewer's own live mixer (a clone of the template). Drives the
+    /// single previewed character paced around the demo circle; unused in HUNT.
     char_anim: Option<AnimPlayer>,
+    /// The weapon class the BUILD demo previews in-hand, and whether it's shown
+    /// dual-wielded — cycled by the `K` / `J` keys so every gun + fire animation can
+    /// be eyeballed without entering HUNT. Indexes [`crate::combat::config::WEAPONS`].
+    demo_weapon_idx: usize,
+    demo_dual: bool,
     /// B3 demo: locomotion band (0=idle,1=walk,2=jog,3=run) cycled by `L`, and
     /// the character's angle around the demo circle. Replaced by enemy/nav-driven
     /// movement in B5.
@@ -495,15 +582,11 @@ pub struct World {
     /// bind-pose AABB can't be used — the bind pose is a splayed star with the
     /// feet spread high, so seating by it leaves the standing pose sunk).
     char_feet_offset: f32,
-    /// Track A death fade: elapsed seconds since the lethal shot, or `None` while
-    /// the hunter is alive. Drives the character's opacity (1 → 0 over
-    /// [`FADE_DURATION`]); once complete the body holds at opacity 0.
-    enemy_fade: Option<f32>,
-    /// A3 enemy-fire cadence: seconds until the next shot may leave the hunter's
-    /// rifle during its fire-animation window (spaced by `1/ENEMY_FIRE_RATE`).
-    enemy_shot_timer: f32,
-    /// The hunter's muzzle-flash countdown (s); >0 → the enemy muzzle renders.
-    enemy_muzzle_timer: f32,
+    /// All-white per-vertex blood colors for the BUILD demo character (it's never
+    /// shot), sized to the model's vertex count. Borrowed by `character_instances`.
+    demo_blood: Vec<f32>,
+    // (Per-hunter death fade + fire cadence + muzzle timers now live on each
+    // [`EnemyInstance`]; see `enemies` above.)
 
     // ─── Player health + damage feedback (P5; see `world/combat.rs`) ──
     /// Player health / armor (JS `Actor`; armor-first damage). Death at health 0.
@@ -527,10 +610,10 @@ pub struct World {
     /// P2: the muzzle-flash mesh (separate GLB), uploaded once; drawn additively
     /// on top of the gun while a shot's flash is active. `None` if load failed.
     muzzle_model: Option<TexturedModel>,
-    /// A3: the hunter's rifle + its muzzle flash, attached to the hand bone and
-    /// drawn in world space each frame. `None` if the asset failed to load.
-    enemy_gun_model: Option<TexturedModel>,
-    enemy_muzzle_model: Option<TexturedModel>,
+    /// A3: the enemy weapon render library — the gun + muzzle meshes for the whole
+    /// arsenal, loaded once and handed to the renderer so any hunter can draw any
+    /// weapon (and the BUILD demo can preview each). Keyed by weapon name.
+    enemy_weapon_lib: Vec<EnemyWeaponAsset>,
     /// The player's weapon inventory (JS `WeaponSystem.slots`) — one [`Weapon`]
     /// per `config::WEAPONS` entry, each keeping its own ammo/reload state so a
     /// swap resumes where you left off. `Q` / N64 `A` cycles [`weapon_index`].
@@ -679,13 +762,17 @@ impl World {
             }
         };
 
-        // B2/B3/B4: load the clip set bound to the character's skeleton, in a
-        // FIXED index order (locomotion 0–3, fire 4, then the hit set, then the
-        // death set — see CHAR_*_IDX), into a crossfade mixer.
-        let char_anim = char_model.as_ref().and_then(|m| {
+        // Load the clip set bound to the character's skeleton in a FIXED index
+        // order — locomotion 0–3, then one fire clip per weapon CLASS
+        // (rifle/pistol/dual, indices FIRE_*_IDX), then the hit set, then the death
+        // set (see CHAR_*_IDX) — into a template mixer. Each spawned hunter clones
+        // this template so it animates on its own clock; the BUILD demo clones it too.
+        let char_anim_template = char_model.as_ref().and_then(|m| {
             let mut files: Vec<&str> =
                 vec!["00-idle.glb", "28-walking.glb", "2A-jogging.glb", "29-running.glb"];
-            files.push(anim_set::FIRE_CLIP);
+            files.push("01-fire-standing.glb"); // FIRE_RIFLE_IDX
+            files.push("41-fire-standing-pistol.glb"); // FIRE_PISTOL_IDX
+            files.push("7A-fire-standing-dual-wield.glb"); // FIRE_DUAL_IDX
             files.extend_from_slice(anim_set::HIT_CLIPS);
             files.extend_from_slice(anim_set::DEATH_CLIPS);
             let mut clips = Vec::new();
@@ -698,19 +785,28 @@ impl World {
                 }
             }
             if clips.len() == files.len() {
-                log::info!("loaded {} character clips (idle/walk/jog/run + fire + 12 hit + 17 death)", clips.len());
+                log::info!(
+                    "loaded {} character clips (idle/walk/jog/run + rifle/pistol/dual fire + 12 hit + 17 death)",
+                    clips.len()
+                );
                 Some(AnimPlayer::new(clips, 0))
             } else {
                 log::warn!("only {}/{} clips loaded; character animation disabled", clips.len(), files.len());
                 None
             }
         });
+        // The BUILD demo viewer's own live mixer (independent clock).
+        let char_anim = char_anim_template.clone();
+
+        // All-white blood colors for the BUILD demo character (never shot).
+        let demo_blood =
+            vec![1.0f32; char_model.as_ref().map(|m| m.vertices.len()).unwrap_or(0) * 3];
 
         // Seat the feet: sample the idle across its loop, skin each pose on the
         // CPU, and take the global lowest Y (the most-planted foot). Seating that
         // at the floor keeps the feet grounded while the animation's own vertical
         // motion still reads. Falls back to the bind-pose AABB with no clip.
-        let char_feet_offset = match (&char_model, char_anim.as_ref().and_then(|a| a.clip(0))) {
+        let char_feet_offset = match (&char_model, char_anim_template.as_ref().and_then(|a| a.clip(0))) {
             (Some(m), Some(idle)) => {
                 let samples = 24;
                 let mut min_y = f32::INFINITY;
@@ -753,27 +849,35 @@ impl World {
             }
         };
 
-        // A3: the hunter's rifle (KF7) + its muzzle flash, attached to Bone_9 and
-        // drawn in world space during the hunt. Same static-textured loaders as the
-        // player gun (the flash keeps only the additive `CullBoth` billboards).
+        // A3: the enemy weapon render library — load the gun + muzzle-flash meshes
+        // for the WHOLE arsenal once, so any hunter can wield any weapon (attached
+        // to a hand bone in world space) and the BUILD demo can preview each. Same
+        // static-textured loaders as the player gun (the flash keeps only the
+        // additive `CullBoth` billboards). Warn-not-panic per weapon.
         let asset = |rel: &str| format!("{}/../../assets/weapons/{}", env!("CARGO_MANIFEST_DIR"), rel);
-        let enemy_gun_model = match crate::combat::load_gun(&asset(ENEMY_GUN_PATH)) {
-            Ok(m) => {
-                log::info!("loaded enemy rifle: {} verts, {} primitives", m.vertices.len(), m.primitives.len());
-                Some(m)
-            }
-            Err(e) => {
-                log::warn!("enemy rifle load failed: {e}");
+        let mut enemy_weapon_lib: Vec<EnemyWeaponAsset> = Vec::new();
+        for cfg in crate::combat::config::WEAPONS {
+            let gun = match crate::combat::load_gun(&asset(cfg.gun_path)) {
+                Ok(m) => m,
+                Err(e) => {
+                    log::warn!("enemy weapon '{}' gun load failed: {e}", cfg.name);
+                    continue; // no gun mesh → this weapon can't be drawn on a hunter
+                }
+            };
+            let muzzle = if cfg.muzzle_path.is_empty() {
                 None
-            }
-        };
-        let enemy_muzzle_model = match crate::combat::load_flash(&asset(ENEMY_MUZZLE_PATH)) {
-            Ok(m) => Some(m),
-            Err(e) => {
-                log::warn!("enemy muzzle-flash load failed: {e}");
-                None
-            }
-        };
+            } else {
+                match crate::combat::load_flash(&asset(cfg.muzzle_path)) {
+                    Ok(m) => Some(m),
+                    Err(e) => {
+                        log::warn!("enemy weapon '{}' muzzle load failed: {e}", cfg.name);
+                        None
+                    }
+                }
+            };
+            enemy_weapon_lib.push(EnemyWeaponAsset { name: cfg.name, gun, muzzle });
+        }
+        log::info!("loaded {} enemy weapon meshes", enemy_weapon_lib.len());
 
         // Demo character starts on the circle at 270° — the nice centre-front
         // spot in front of the spawn camera — facing +Z (toward the camera).
@@ -787,9 +891,12 @@ impl World {
             mode: Mode::Build,
             character: None,
             nav: None,
-            enemy: None,
+            enemies: Vec::new(),
             char_model,
+            char_anim_template,
             char_anim,
+            demo_weapon_idx: 0,
+            demo_dual: false,
             demo_band: 0,
             demo_angle,
             char_pos,
@@ -798,9 +905,7 @@ impl World {
             char_fire_open: false,
             char_rng: 0x9E37_79B9_7F4A_7C15,
             char_feet_offset,
-            enemy_fade: None,
-            enemy_shot_timer: 0.0,
-            enemy_muzzle_timer: 0.0,
+            demo_blood,
             player_health: PLAYER_MAX_HEALTH,
             player_armor: 0.0,
             player_dead: false,
@@ -809,8 +914,7 @@ impl World {
             health_hud,
             gun_model,
             muzzle_model,
-            enemy_gun_model,
-            enemy_muzzle_model,
+            enemy_weapon_lib,
             weapons,
             weapon_index,
             switching: false,

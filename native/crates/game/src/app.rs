@@ -186,12 +186,14 @@ impl ApplicationHandler for App {
         if let Some(m) = world.muzzle_model() {
             renderer.upload_muzzle(m);
         }
-        // A3: upload the hunter's rifle + muzzle flash once (drawn world-space in HUNT).
-        if let Some(g) = world.enemy_gun_model() {
-            renderer.upload_enemy_weapon(g);
-        }
-        if let Some(m) = world.enemy_muzzle_model() {
-            renderer.upload_enemy_muzzle(m);
+        // A3: upload the enemy weapon render library once (gun + muzzle meshes for
+        // the whole arsenal), keyed by weapon name — any hunter can then draw any
+        // weapon world-space in HUNT (and the BUILD demo can preview each).
+        for w in world.enemy_weapon_lib() {
+            renderer.upload_enemy_weapon(w.name, &w.gun);
+            if let Some(muzzle) = &w.muzzle {
+                renderer.upload_enemy_muzzle(w.name, muzzle);
+            }
         }
         // Player Combat P3: upload the code-defined HUD glyph atlas once (the ammo
         // counter's bitmap font); the per-frame text quads are set below.
@@ -454,19 +456,19 @@ impl ApplicationHandler for App {
                     (self.world.as_ref(), self.renderer.as_mut())
                 {
                     renderer.set_entity_mesh(world.enemy_mesh().as_ref());
-                    // Drive the skinned character's pose + death-fade opacity.
-                    if let Some((model, joints, opacity)) = world.character_pose() {
-                        renderer.set_character_pose(model, &joints, opacity);
-                    }
+                    // Drive every skinned character (each hunter, or the BUILD demo)
+                    // — its pose + death-fade opacity.
+                    renderer.set_character_instances(&world.character_instances());
                     // Player Combat: drive the gun + muzzle-flash overlay
                     // transforms (shown only in HUNT; `None` hides them) and the
                     // live hit-spark markers.
                     let aspect = renderer.aspect();
                     renderer.set_viewmodel_transform(world.viewmodel_transform(aspect));
                     renderer.set_muzzle_transform(world.muzzle_transform(aspect));
-                    // A3: the hunter's rifle + muzzle flash (world-space, HUNT only).
-                    renderer.set_enemy_weapon_transform(world.enemy_weapon_transform(aspect));
-                    renderer.set_enemy_muzzle_transform(world.enemy_muzzle_transform(aspect));
+                    // A3: the hunters' guns + muzzle flashes (world-space; two draws
+                    // for a dual-wielder). Empty lists when nothing is shown.
+                    renderer.set_enemy_weapon_draws(&world.enemy_weapon_draws(aspect));
+                    renderer.set_enemy_muzzle_draws(&world.enemy_muzzle_draws(aspect));
                     // Crosshair: BUILD shows the small white editor cross (while
                     // grabbed, so it marks the face-pick centre); HUNT shows the
                     // GoldenEye reticle only while aiming, and nothing otherwise.
@@ -625,14 +627,25 @@ impl App {
             return;
         }
         // Character animation demo (BUILD only — in HUNT the model is the
-        // nav/AI-driven hunter). L cycles locomotion; Z/N/M fire/hit/death.
-        if matches!(code, KeyCode::KeyL | KeyCode::KeyZ | KeyCode::KeyN | KeyCode::KeyM) {
+        // nav/AI-driven hunter). L cycles locomotion; Z/N/M fire/hit/death;
+        // K cycles the previewed weapon through the arsenal; J toggles dual-wield.
+        if matches!(
+            code,
+            KeyCode::KeyL
+                | KeyCode::KeyZ
+                | KeyCode::KeyN
+                | KeyCode::KeyM
+                | KeyCode::KeyK
+                | KeyCode::KeyJ
+        ) {
             if let Some(world) = self.world.as_mut() {
                 if world.is_build() {
                     match code {
                         KeyCode::KeyL => world.cycle_char_speed(),
                         KeyCode::KeyZ => world.char_fire(),
                         KeyCode::KeyN => world.char_hit(),
+                        KeyCode::KeyK => world.cycle_demo_weapon(),
+                        KeyCode::KeyJ => world.toggle_demo_dual(),
                         _ => world.char_death(),
                     }
                 }
