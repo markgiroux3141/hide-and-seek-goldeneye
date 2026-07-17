@@ -62,24 +62,37 @@ impl CharacterController {
     /// One fixed sim step: horizontal wish-move + gravity/jump, resolved by the
     /// character controller against the static world.
     pub fn apply_move(&mut self, dt: f32, input: &InputState, physics: &mut PhysicsWorld) {
-        // Horizontal wish direction from yaw only (no pitch — feet stay level).
+        // Horizontal basis from yaw only (no pitch — feet stay level). `fwd` is the
+        // look direction flattened; `right` is its perpendicular (`cross(fwd, up)`).
         let (sy, cy) = self.yaw.sin_cos();
+        let fwd = Vec3::new(-sy, 0.0, -cy);
+        let right = Vec3::new(cy, 0.0, -sy);
         let mut wish = Vec3::ZERO;
         if input.pointer_locked {
             if input.key_down(KeyCode::KeyW) {
-                wish += Vec3::new(-sy, 0.0, -cy);
+                wish += fwd;
             }
             if input.key_down(KeyCode::KeyS) {
-                wish += Vec3::new(sy, 0.0, cy);
+                wish -= fwd;
             }
             if input.key_down(KeyCode::KeyA) {
-                wish += Vec3::new(-cy, 0.0, sy);
+                wish -= right;
             }
             if input.key_down(KeyCode::KeyD) {
-                wish += Vec3::new(cy, 0.0, sy);
+                wish += right;
             }
         }
-        if wish.length_squared() > 0.0 {
+        // Analog stick (gamepad) wish, added on top of the digital keys. Ported from
+        // `PlayerController.update`: analog preserves partial magnitude (clamp to the
+        // unit circle, don't normalize) so a half-pushed stick walks at half speed;
+        // a purely-digital wish normalizes to full speed as before.
+        let (ax, ay) = input.analog_move();
+        if input.pointer_locked && (ax != 0.0 || ay != 0.0) {
+            wish += right * ax + fwd * ay;
+            if wish.length_squared() > 1.0 {
+                wish = wish.normalize();
+            }
+        } else if wish.length_squared() > 0.0 {
             wish = wish.normalize();
         }
 

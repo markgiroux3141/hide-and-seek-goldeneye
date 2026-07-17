@@ -23,6 +23,10 @@ log = "0.4"
 # decodes wav (SFX) + mp3 (music) via symphonia. Default features already include
 # the cpal backend + wav + mp3, so no feature list is needed.
 kira = "0.12"
+# Gamepad input (gilrs): cross-platform pad enumeration + button/axis events, used
+# to wire the USB N64 controller (GoldenEye "solitaire" scheme). Windows backend is
+# XInput-based — see crates/engine/src/platform/gamepad.rs for the mapping caveat.
+gilrs = "0.11"
 
 # Local crates.
 csg = { path = "crates/csg" }

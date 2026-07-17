@@ -43,6 +43,90 @@ impl World {
         }
     }
 
+    /// Drive HUNT look / aim / move from the USB-N64 gamepad this frame (the
+    /// GoldenEye "solitaire" scheme), replacing [`Self::look`] while a pad is the
+    /// active input. Ported from `GamepadManager.poll`:
+    ///   * **Aim mode** (L or R held): the stick springs the crosshair toward a
+    ///     target offset (∝ stick position, clamped to the [`AIM_MAX_RANGE`] circle);
+    ///     pushing past [`PAD_AIM_TURN_THRESHOLD`] pans the camera at the rim.
+    ///   * **Normal mode**: stick Y = analog forward/back, stick X = camera yaw; the
+    ///     crosshair springs back to center.
+    /// C-Up/C-Down (`pitch_axis`, −1 = up … +1 = down) tilts the view either way.
+    /// `sx, sy` are the radially-deadzoned stick axes (screen convention: +y = down).
+    pub fn gamepad_look(
+        &mut self,
+        dt: f32,
+        sx: f32,
+        sy: f32,
+        aim_mode: bool,
+        pitch_axis: f32,
+        input: &mut InputState,
+    ) {
+        // Gamepad control is HUNT-only; BUILD fly authoring stays keyboard+mouse.
+        if self.mode != Mode::Hunt || !input.pointer_locked {
+            input.set_analog_move(0.0, 0.0);
+            self.aiming = false;
+            return;
+        }
+        self.aiming = aim_mode;
+        if aim_mode {
+            input.set_analog_move(0.0, 0.0);
+            // Spring the crosshair toward the stick's target offset, then clamp it
+            // to the circular aim boundary. `PAD_PITCH_SIGN` flips the vertical.
+            let tx = sx * AIM_MAX_RANGE;
+            let ty = PAD_PITCH_SIGN * -sy * AIM_MAX_RANGE;
+            let k = (PAD_AIM_SPRING * dt).min(1.0);
+            self.aim_x += (tx - self.aim_x) * k;
+            self.aim_y += (ty - self.aim_y) * k;
+            let mag = (self.aim_x * self.aim_x + self.aim_y * self.aim_y).sqrt();
+            if mag > AIM_MAX_RANGE && mag > 1e-6 {
+                self.aim_x *= AIM_MAX_RANGE / mag;
+                self.aim_y *= AIM_MAX_RANGE / mag;
+            }
+            // Past the threshold, the pinned crosshair pans the camera.
+            let sm = (sx * sx + sy * sy).sqrt();
+            if sm > PAD_AIM_TURN_THRESHOLD {
+                let overflow = (sm - PAD_AIM_TURN_THRESHOLD) / (1.0 - PAD_AIM_TURN_THRESHOLD);
+                let (nx, ny) = (sx / sm, sy / sm);
+                if let Some(c) = self.character.as_mut() {
+                    // The pan must pitch the SAME way the crosshair aims — both use
+                    // `PAD_PITCH_SIGN`, so they never fight. `apply_look_delta` does
+                    // `pitch -= dy`, so the base `+ny` makes stick-up pitch up.
+                    (c.yaw, c.pitch) = apply_look_delta(
+                        c.yaw,
+                        c.pitch,
+                        nx * overflow * PAD_AIM_TURN_SPEED * dt,
+                        PAD_PITCH_SIGN * ny * overflow * PAD_AIM_TURN_SPEED * dt,
+                    );
+                }
+            }
+        } else {
+            // Normal: analog forward from stick Y (−sy = push-up-is-forward), yaw
+            // from stick X; crosshair springs back to center.
+            input.set_analog_move(0.0, -sy);
+            if sx != 0.0 {
+                if let Some(c) = self.character.as_mut() {
+                    (c.yaw, c.pitch) =
+                        apply_look_delta(c.yaw, c.pitch, sx * PAD_TURN_SPEED * dt, 0.0);
+                }
+            }
+            let k = (AIM_RETURN_SPRING * dt).min(1.0);
+            self.aim_x += (0.0 - self.aim_x) * k;
+            self.aim_y += (0.0 - self.aim_y) * k;
+        }
+        // C-Up / C-Down pitch, either mode (same vertical sign as the stick aim).
+        if pitch_axis != 0.0 {
+            if let Some(c) = self.character.as_mut() {
+                (c.yaw, c.pitch) = apply_look_delta(
+                    c.yaw,
+                    c.pitch,
+                    0.0,
+                    PAD_PITCH_SIGN * pitch_axis * PAD_C_LOOK_SPEED * dt,
+                );
+            }
+        }
+    }
+
     /// Advance movement/physics by one fixed timestep.
     pub fn fixed_step(&mut self, dt: f32, input: &InputState) {
         match self.mode {

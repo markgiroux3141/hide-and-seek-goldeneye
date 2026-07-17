@@ -16,8 +16,13 @@ pub struct InputState {
     /// each frame for firing; edge detection (semi-auto) is done in the weapon.
     mouse_left: bool,
     /// Right mouse button held — the GoldenEye free-aim modifier (hold to float
-    /// the crosshair; the future N64-controller path will drive aim mode instead).
+    /// the crosshair; the N64-controller path drives this via the L/R triggers).
     mouse_right: bool,
+    /// Analog wish-move from a gamepad stick this frame: `(strafe, forward)`, each
+    /// roughly −1..1 (magnitude preserved for proportional speed). Written by the
+    /// gamepad driver, consumed + cleared each fixed step by the character
+    /// controller. Zero when no pad drives movement (keyboard uses the digital keys).
+    analog_move: (f32, f32),
 }
 
 impl InputState {
@@ -51,6 +56,19 @@ impl InputState {
     /// Whether the right mouse button is currently held (free-aim modifier).
     pub fn mouse_right_down(&self) -> bool {
         self.mouse_right
+    }
+
+    /// Set this frame's analog wish-move `(strafe, forward)` (from a gamepad stick).
+    /// The gamepad driver refreshes this every frame — including back to `(0, 0)`
+    /// when no pad drives movement — so it's read (not consumed) each fixed substep
+    /// like the held keys, and a removed pad can't strand a stale value.
+    pub fn set_analog_move(&mut self, strafe: f32, forward: f32) {
+        self.analog_move = (strafe, forward);
+    }
+
+    /// This frame's analog wish-move `(strafe, forward)`; `(0, 0)` if none.
+    pub fn analog_move(&self) -> (f32, f32) {
+        self.analog_move
     }
 
     pub fn add_mouse(&mut self, dx: f32, dy: f32) {

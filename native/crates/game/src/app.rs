@@ -21,6 +21,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 use engine::platform::frame::FrameClock;
 use engine::platform::input::InputState;
 use engine::render::renderer::Renderer;
+use crate::gamepad::N64Pad;
 use crate::world::{World, PUSH_PULL_STEP};
 
 /// Fixed simulation rate (120 Hz), sim-step cap per frame (8), and render FPS
@@ -36,6 +37,9 @@ struct App {
     renderer: Option<Renderer>,
     world: Option<World>,
     input: InputState,
+    /// USB-N64 gamepad driver (GoldenEye solitaire scheme), or `None` if no input
+    /// subsystem is available — keyboard/mouse still work either way.
+    gamepad: Option<N64Pad>,
     /// Fixed-timestep + frame-pacing clock (engine primitive).
     clock: FrameClock,
     // Throttled frame-time telemetry.
@@ -55,6 +59,7 @@ impl App {
             renderer: None,
             world: None,
             input: InputState::default(),
+            gamepad: N64Pad::new(),
             clock: FrameClock::new(SIM_HZ, MAX_SUBSTEPS, MAX_FPS),
             fps_frames: 0,
             fps_elapsed: 0.0,
@@ -316,6 +321,37 @@ impl ApplicationHandler for App {
                 let dt = self.clock.begin_frame(Instant::now());
                 let fixed_dt = self.clock.fixed_dt();
                 let steps = self.clock.take_fixed_steps();
+
+                // USB-N64 gamepad: poll + apply the solitaire scheme. This injects
+                // held buttons + analog move into `input` and drives HUNT look/aim
+                // directly, so it runs before mouse-look (which the pad supersedes
+                // in HUNT). Keyboard/mouse remain live in BUILD and when unplugged.
+                let mut pad_connected = false;
+                let mut pad_actions = crate::gamepad::PadActions::default();
+                if let (Some(pad), Some(world)) = (self.gamepad.as_mut(), self.world.as_mut()) {
+                    pad_actions = pad.update(dt, &mut self.input, world);
+                    pad_connected = pad.connected();
+                }
+                if pad_actions.just_connected {
+                    // Drop straight into gameplay — no mouse click needed to grab.
+                    self.set_pointer_lock(true);
+                }
+                if pad_actions.pause {
+                    let locked = self.input.pointer_locked;
+                    self.set_pointer_lock(!locked);
+                }
+                if pad_actions.reload {
+                    if let Some(world) = self.world.as_mut() {
+                        if !world.is_build() {
+                            if world.is_player_dead() {
+                                world.restart_after_death();
+                            } else {
+                                world.reload_weapon();
+                            }
+                        }
+                    }
+                }
+
                 // Apply mouse-look — unless a gizmo drag is active, in which case
                 // the mouse motion drives the drag (move/scale) instead of the cam.
                 let dragging = self
@@ -330,7 +366,11 @@ impl ApplicationHandler for App {
                         self.upload(&rm);
                     }
                 } else if let Some(world) = self.world.as_mut() {
-                    world.look(&mut self.input, dt);
+                    // The pad drives HUNT look/aim above; mouse-look still runs in
+                    // BUILD and whenever no pad is connected.
+                    if world.is_build() || !pad_connected {
+                        world.look(&mut self.input, dt);
+                    }
                 }
                 if let Some(world) = self.world.as_mut() {
                     for _ in 0..steps {

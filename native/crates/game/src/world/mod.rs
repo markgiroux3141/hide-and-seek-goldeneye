@@ -70,6 +70,28 @@ pub(crate) const AIM_RETURN_SPRING: f32 = 15.0;
 /// an angular offset for the gun tilt + the fire ray.
 pub(crate) const AIM_FOV_TAN: f32 = 0.577_350_3;
 
+// ─── USB-N64 gamepad (GoldenEye "solitaire" scheme) ────────────────────────
+// Ported verbatim from the 3DS FPS `GamepadManager.ts`. `AIM_MAX_RANGE` /
+// `AIM_RETURN_SPRING` above are shared with the mouse free-aim.
+/// Radial stick deadzone — below this magnitude the stick reads as centered.
+pub(crate) const STICK_DEADZONE: f32 = 0.15;
+/// Camera-yaw rate at full stick, in mouse-pixel-equivalents per second (fed to
+/// `apply_look_delta`, so the effective rad/s is this × the camera `LOOK_SPEED`).
+pub(crate) const PAD_TURN_SPEED: f32 = 1800.0;
+/// Aim-mode crosshair spring stiffness toward the stick target (higher = snappier).
+pub(crate) const PAD_AIM_SPRING: f32 = 10.0;
+/// Stick magnitude at which aim-mode begins rotating the camera (below it, the
+/// crosshair just floats).
+pub(crate) const PAD_AIM_TURN_THRESHOLD: f32 = 0.85;
+/// Camera-rotation rate (pixel-equivalents/s) once past the aim-turn threshold.
+pub(crate) const PAD_AIM_TURN_SPEED: f32 = 600.0;
+/// C-Up / C-Down look rate (pixel-equivalents/s).
+pub(crate) const PAD_C_LOOK_SPEED: f32 = 300.0;
+/// Vertical-look sign for the gamepad: `-1.0` = inverted (stick-up looks/aims
+/// down, GoldenEye's N64 default), `+1.0` = non-inverted. Applied consistently to
+/// the aim reticle, the aim-mode camera pan, and C-Up/C-Down so they never fight.
+pub(crate) const PAD_PITCH_SIGN: f32 = -1.0;
+
 /// Skinned-character model scale: GoldenEye units → metres. 0.00104 = base
 /// 0.001 + ~4% (matches the 3DS FPS port, sized to level proportions).
 pub(crate) const CHAR_SCALE: f32 = 0.00104;

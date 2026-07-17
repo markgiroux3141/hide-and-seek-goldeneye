@@ -6,4 +6,5 @@
 //! `game` crate (it maps input to game actions), consuming these.
 
 pub mod frame;
+pub mod gamepad;
 pub mod input;
