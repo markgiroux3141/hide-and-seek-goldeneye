@@ -138,10 +138,11 @@ impl World {
         // Explosives: preload the blast so the first detonation doesn't hitch (the
         // launcher/throw/detonator fire sounds ride the per-weapon loop above).
         audio.load(EXPLOSION_SOUND);
-        // Mines: the attach beep (on placement) + the timed-mine arm beep — neither
-        // is a weapon fire_sound, so preload them here.
+        // Mines: the attach beep (on stick), the timed-mine arm beep, and the remote
+        // detonation click — none is a weapon fire_sound, so preload them here.
         audio.load(MINE_PLACE_SOUND);
         audio.load(MINE_TIMER_SOUND);
+        audio.load(DETONATOR_SOUND);
         audio.play_music(BG_MUSIC, true);
         self.audio = Some(audio);
     }
@@ -373,54 +374,40 @@ impl World {
                 );
                 self.projectiles.push(proj);
             }
-            crate::combat::FireKind::Mine(spec) => self.place_mine(eye, dir, spec),
-            crate::combat::FireKind::Detonator => self.detonate_remote_mines(),
+            crate::combat::FireKind::Mine(spec) => self.throw_mine(eye, dir, spec),
         }
     }
 
-    /// Place a mine along the aim (a `FireKind::Mine` shot): raycast from the eye up
-    /// to [`MINE_PLACE_RANGE`] and stick the mine just off the first surface hit,
-    /// oriented to its normal. If nothing's in range, drop it on the ground a short
-    /// way ahead (fallback). The placed mine renders + arms + trips via
-    /// [`Self::mines_step`]. Plays the attach beep on the stick (the throw sound came
-    /// from the weapon's fire cue). Named by the weapon so the renderer finds its GLB.
-    fn place_mine(&mut self, eye: Vec3, dir: Vec3, spec: crate::combat::MineSpec) {
+    /// Throw a mine along the aim (a `FireKind::Mine` shot): spawn it just ahead of
+    /// the eye, flying, and let [`Self::mines_step`] carry it until it sticks to the
+    /// first surface it hits (wall/floor/ceiling) — where it then arms + trips. The
+    /// throw sound rode the weapon's fire cue; the attach beep plays on the stick.
+    /// Named by the weapon so the renderer finds its GLB.
+    fn throw_mine(&mut self, eye: Vec3, dir: Vec3, spec: crate::combat::MineSpec) {
         let name = self.weapon().config().name;
-        let (pos, normal) =
-            match crate::combat::shooting::cast(&mut self.physics, eye, dir, MINE_PLACE_RANGE, None) {
-                Some(hit) => (hit.point + hit.normal * MINE_SURFACE_OFFSET, hit.normal),
-                None => {
-                    // No surface in range — drop it on the ground ahead, at the
-                    // player's feet height (a short lob).
-                    let feet_y = self.player_pos().map(|p| p.y).unwrap_or(eye.y);
-                    let ahead = Vec3::new(
-                        eye.x + dir.x * MINE_FALLBACK_DIST,
-                        feet_y + MINE_SURFACE_OFFSET,
-                        eye.z + dir.z * MINE_FALLBACK_DIST,
-                    );
-                    (ahead, Vec3::Y)
-                }
-            };
-        self.mines.push(crate::combat::Mine::new(pos, normal, spec, name));
-        if let Some(audio) = self.audio.as_mut() {
-            audio.play(MINE_PLACE_SOUND, MINE_PLACE_VOL);
-        }
+        // Spawn a little ahead of the eye so it clears the player, along the aim.
+        let mine = crate::combat::Mine::throw(eye + dir * 0.4, dir, Vec3::Y, spec, name);
+        self.mines.push(mine);
         log::info!(
-            "placed {} at ({:.1}, {:.1}, {:.1}) — arms in {:.1}s, blast r={:.1} m",
+            "threw {} — arms {:.1}s after it sticks, blast r={:.1} m",
             name,
-            pos.x,
-            pos.y,
-            pos.z,
             spec.arm_time,
             spec.explosion.radius
         );
     }
 
-    /// Fire the Detonator: set off every live Remote mine at once (the mines carry
-    /// the blast; the detonator's own "click" is its weapon fire cue). Collect the
-    /// detonation points first, then apply them (with chain reaction) — the borrow
-    /// pattern used throughout the explosive step.
-    fn detonate_remote_mines(&mut self) {
+    /// Set off every live Remote mine at once (player-triggered — pad A+B together or
+    /// the keyboard detonate key; the mines carry the blast). Plays the detonation
+    /// "click" and applies the blasts with chain reaction. No-op outside HUNT or while
+    /// dead. Collect first, then apply — the borrow pattern used across the explosive
+    /// step.
+    pub fn detonate_remote_mines(&mut self) {
+        if self.mode != Mode::Hunt || self.player_dead {
+            return;
+        }
+        if let Some(audio) = self.audio.as_mut() {
+            audio.play(DETONATOR_SOUND, DETONATOR_VOL);
+        }
         let mut dets: Vec<(Vec3, crate::combat::Explosion)> = Vec::new();
         let mut i = 0;
         while i < self.mines.len() {
@@ -572,7 +559,13 @@ impl World {
     /// collect the ones that trip this frame — an armed proximity mine when any living
     /// hunter OR the player is within its trip radius, an armed timed mine at 0.
     /// Returns the detonation points (removing the tripped mines); the caller applies
-    /// them. Remote mines never self-trip (only the Detonator sets them off).
+    /// them. Remote mines never self-trip (only a player detonation sets them off).
+    ///
+    /// A mine still in flight is first swept from its old to its new position and
+    /// raycast against the world (same normalized-dir sweep the projectiles use, so a
+    /// fast toss can't tunnel a thin wall); the first surface contact **sticks** it
+    /// there (playing the attach beep), oriented to the surface normal. A toss that
+    /// hits nothing for [`MINE_MAX_FLIGHT`] seconds sticks in place as a fallback.
     fn mines_step(&mut self, dt: f32) -> Vec<(Vec3, crate::combat::Explosion)> {
         // Trip targets: living hunters + the player, measured at centre-mass so a
         // mine on the floor still notices a nearby actor. Read out first (the tick
@@ -590,6 +583,38 @@ impl World {
         let mut detonations: Vec<(Vec3, crate::combat::Explosion)> = Vec::new();
         let mut i = 0;
         while i < self.mines.len() {
+            // In flight: fly + sweep for a surface to stick to.
+            if !self.mines[i].stuck {
+                let (from, to) = self.mines[i].advance(dt);
+                let seg = to - from;
+                let dist = seg.length();
+                let mut stuck_now = false;
+                if dist > 1e-6 {
+                    let dir = seg / dist; // normalized — see the projectile sweep note
+                    if let Some(hit) =
+                        crate::combat::shooting::cast(&mut self.physics, from, dir, dist, None)
+                    {
+                        let pos = hit.point + hit.normal * MINE_SURFACE_OFFSET;
+                        self.mines[i].stick(pos, hit.normal);
+                        stuck_now = true;
+                    }
+                }
+                // Fallback: a toss that never contacts anything sticks where it is.
+                if !stuck_now && self.mines[i].flight_time > MINE_MAX_FLIGHT {
+                    let pos = self.mines[i].pos;
+                    self.mines[i].stick(pos, Vec3::Y);
+                    stuck_now = true;
+                }
+                if stuck_now {
+                    if let Some(audio) = self.audio.as_mut() {
+                        audio.play(MINE_PLACE_SOUND, MINE_PLACE_VOL);
+                    }
+                }
+                i += 1;
+                continue;
+            }
+
+            // Stuck: arm + trip.
             let just_armed = self.mines[i].tick(dt);
             // A timed mine chirps once when it goes live.
             if just_armed && matches!(self.mines[i].spec.trigger, crate::combat::MineTrigger::Timed(_)) {

@@ -372,13 +372,22 @@ impl World {
                 * Mat4::from_scale(Vec3::splat(PROJECTILE_MODEL_SCALE));
             out.push((p.spec.model, vp * world));
         }
-        // Placed mines ride the same world-space draw path, keyed by their weapon
-        // name, oriented flat to the surface they're stuck to (the model's +Y up is
-        // rotated onto the surface normal).
+        // Mines ride the same world-space draw path, keyed by their weapon name. In
+        // flight they tumble (like the grenade round); once stuck they orient flat to
+        // the surface (the model's +Y up rotated onto the surface normal).
         for m in &self.mines {
-            let orient = glam::Quat::from_rotation_arc(Vec3::Y, m.normal.normalize_or_zero());
+            let orient = if m.stuck {
+                Mat4::from_quat(glam::Quat::from_rotation_arc(Vec3::Y, m.normal.normalize_or_zero()))
+            } else {
+                Mat4::from_euler(
+                    EulerRot::XYZ,
+                    m.flight_time * PROJECTILE_SPIN_X,
+                    m.flight_time * PROJECTILE_SPIN_Y,
+                    0.0,
+                )
+            };
             let world = Mat4::from_translation(m.pos)
-                * Mat4::from_quat(orient)
+                * orient
                 * Mat4::from_scale(Vec3::splat(MINE_MODEL_SCALE));
             out.push((m.model, vp * world));
         }

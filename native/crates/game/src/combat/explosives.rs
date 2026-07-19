@@ -86,35 +86,55 @@ impl Projectile {
     }
 }
 
-/// A placed mine stuck to a surface. Spawned against the aimed surface, it arms
-/// after [`MineSpec::arm_time`] (can't be tripped while arming — the placer's window
-/// to walk clear), then waits for its [`MineTrigger`]: a proximity mine detonates
-/// when any living actor enters its trip radius, a timed mine after its countdown,
-/// a remote mine only when the player fires the Detonator. The trip/arm math that
-/// needs no world access lives here and is unit-tested; the placement raycast, the
+/// Thrown-mine launch tuning (no oracle — authored for feel). A brisk toss with light
+/// gravity gives a short, visible throw that sticks to the first surface it hits, so
+/// you plant on a wall/floor/ceiling by aiming at it. A touch of loft sells the throw
+/// without making level aim miss low.
+const THROW_SPEED: f32 = 18.0;
+const THROW_GRAVITY: f32 = 7.0;
+const THROW_LOFT: f32 = 1.0;
+
+/// A mine — first thrown along the aim (visible, tumbling), then **stuck** to the
+/// first surface it contacts (wall/floor/ceiling). Once stuck it arms after
+/// [`MineSpec::arm_time`] (can't be tripped while arming — your window to walk clear),
+/// then waits for its [`MineTrigger`]: a proximity mine detonates when any living
+/// actor enters its trip radius, a timed mine after its countdown, a remote mine only
+/// when the player triggers a detonation. The flight/trip/arm math that needs no
+/// world access lives here and is unit-tested; the flight collision sweep, the
 /// actor-distance scan, and the actual detonation stay in `world::combat`.
 #[derive(Clone, Copy, Debug)]
 pub struct Mine {
-    /// World position, sat just off the surface it's stuck to.
+    /// World position — in flight, the tumbling round; once stuck, sat just off its
+    /// surface.
     pub pos: Vec3,
-    /// Surface normal it's stuck to (drives the render orientation).
+    /// World velocity while in flight (zeroed once stuck).
+    pub vel: Vec3,
+    /// Surface normal it's stuck to (drives the stuck render orientation). `Y` until
+    /// it sticks.
     pub normal: Vec3,
-    /// The tuning it was placed with (trigger / arm time / explosion).
+    /// The tuning it was thrown with (trigger / arm time / explosion).
     pub spec: MineSpec,
-    /// Once true the mine is live and can be tripped (arm delay elapsed).
+    /// `false` while thrown/flying, `true` once attached to a surface. Arming +
+    /// tripping only happen while stuck.
+    pub stuck: bool,
+    /// Once true the mine is live and can be tripped (arm delay elapsed post-stick).
     pub armed: bool,
-    /// Counts down from `spec.arm_time` to 0; at 0 the mine arms.
+    /// Counts down from `spec.arm_time` to 0 (once stuck); at 0 the mine arms.
     pub arm_timer: f32,
     /// Timed-mine countdown (s), started once armed. Meaningless for the other
     /// triggers (left at its init value and never ticked).
     pub timer: f32,
+    /// Seconds spent in flight, accumulated for the tumble render + a max-flight
+    /// fallback stick.
+    pub flight_time: f32,
     /// Weapon-library name of the GLB to render in world (e.g. `"Proximity Mine"`).
     pub model: &'static str,
 }
 
 impl Mine {
-    /// Place a mine at `pos` against `normal`, disarmed, its arm timer primed. A
-    /// timed mine's countdown is seeded here but only ticks once armed.
+    /// A mine already stuck to a surface at `pos`/`normal`, disarmed with its arm
+    /// timer primed (used for the max-flight fallback + unit tests). A timed mine's
+    /// countdown is seeded here but only ticks once armed.
     pub fn new(pos: Vec3, normal: Vec3, spec: MineSpec, model: &'static str) -> Self {
         let timer = match spec.trigger {
             MineTrigger::Timed(secs) => secs,
@@ -122,19 +142,74 @@ impl Mine {
         };
         Mine {
             pos,
+            vel: Vec3::ZERO,
             normal,
             spec,
+            stuck: true,
             armed: false,
             arm_timer: spec.arm_time,
             timer,
+            flight_time: 0.0,
             model,
         }
     }
 
-    /// Advance the mine one frame. While disarming, burns the arm timer and arms at
-    /// 0 (returning `true` on the exact frame it goes live, so the caller can play
-    /// the arm beep). Once armed, a timed mine's countdown ticks down.
+    /// Throw a mine from `origin` along `dir` (need not be normalized), with the
+    /// launch speed + a little upward loft along `up`. It flies until it sticks (see
+    /// [`Self::advance`] / [`Self::stick`]).
+    pub fn throw(origin: Vec3, dir: Vec3, up: Vec3, spec: MineSpec, model: &'static str) -> Self {
+        let d = dir.normalize_or_zero();
+        let vel = d * THROW_SPEED + up.normalize_or_zero() * THROW_LOFT;
+        let timer = match spec.trigger {
+            MineTrigger::Timed(secs) => secs,
+            _ => 0.0,
+        };
+        Mine {
+            pos: origin,
+            vel,
+            normal: Vec3::Y,
+            spec,
+            stuck: false,
+            armed: false,
+            arm_timer: spec.arm_time,
+            timer,
+            flight_time: 0.0,
+            model,
+        }
+    }
+
+    /// Advance a thrown (not-yet-stuck) mine one frame: integrate gravity into the
+    /// velocity, then into the position, and age the flight clock. Returns the segment
+    /// traveled `(from, to)` so the caller can sweep it for a surface to stick to
+    /// (a point test would tunnel a fast toss through a thin wall). No-op once stuck.
+    pub fn advance(&mut self, dt: f32) -> (Vec3, Vec3) {
+        let from = self.pos;
+        if !self.stuck {
+            self.vel.y -= THROW_GRAVITY * dt;
+            self.pos += self.vel * dt;
+            self.flight_time += dt;
+        }
+        (from, self.pos)
+    }
+
+    /// Stick the mine to a surface at `pos` (already sat just off it) with `normal`:
+    /// zero the velocity and latch [`Self::stuck`] so it stops flying and its arm
+    /// timer begins counting on the next [`Self::tick`].
+    pub fn stick(&mut self, pos: Vec3, normal: Vec3) {
+        self.pos = pos;
+        self.normal = normal.normalize_or_zero();
+        self.vel = Vec3::ZERO;
+        self.stuck = true;
+    }
+
+    /// Advance a stuck mine one frame. While disarming, burns the arm timer and arms
+    /// at 0 (returning `true` on the exact frame it goes live, so the caller can play
+    /// the arm beep). Once armed, a timed mine's countdown ticks down. A mine still in
+    /// flight never arms.
     pub fn tick(&mut self, dt: f32) -> bool {
+        if !self.stuck {
+            return false;
+        }
         if !self.armed {
             self.arm_timer -= dt;
             if self.arm_timer <= 0.0 {
@@ -330,8 +405,34 @@ mod tests {
         assert!(m.timed_expired(), "expired ~4 s after arming");
     }
 
-    /// A remote mine never self-trips (no proximity, no timer) — only the Detonator
-    /// sets it off, which is the world layer's job.
+    /// A thrown mine flies (no arming mid-air) until it sticks; only then does its
+    /// arm timer start counting.
+    #[test]
+    fn thrown_mine_flies_then_arms_after_sticking() {
+        let spec = mine_spec("Proximity Mine");
+        let mut m = Mine::throw(Vec3::ZERO, -Vec3::Z, Vec3::Y, spec, "Proximity Mine");
+        assert!(!m.stuck, "starts in flight");
+        // Fly for a while — it moves, but never arms while airborne.
+        let mut moved = false;
+        for _ in 0..30 {
+            let (from, to) = m.advance(1.0 / 60.0);
+            moved |= (to - from).length() > 0.0;
+            assert!(!m.tick(1.0 / 60.0), "an airborne mine never arms");
+            assert!(!m.armed);
+        }
+        assert!(moved, "the thrown mine travels");
+        // Stick it to a wall; now the arm timer counts.
+        m.stick(Vec3::new(0.0, 1.0, -5.0), Vec3::Z);
+        assert!(m.stuck && !m.armed);
+        while !m.armed {
+            m.tick(0.01);
+        }
+        assert!(m.armed, "arms once stuck + arm delay elapsed");
+        assert!(m.proximity_trips(Vec3::new(0.0, 1.0, -4.0)), "then trips normally");
+    }
+
+    /// A remote mine never self-trips (no proximity, no timer) — only a player-
+    /// triggered detonation sets it off, which is the world layer's job.
     #[test]
     fn remote_mine_never_self_trips() {
         let spec = mine_spec("Remote Mine");

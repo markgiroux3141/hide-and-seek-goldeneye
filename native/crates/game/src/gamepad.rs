@@ -58,10 +58,15 @@ const C_STICK_THRESHOLD: f32 = 0.5;
 pub struct PadActions {
     /// A pad became connected this frame — grab pointer-lock / enter gameplay.
     pub just_connected: bool,
-    /// B pressed this frame — reload (or restart, when dead).
+    /// B pressed this frame — reload (or restart, when dead). Suppressed while the
+    /// A+B detonate combo is down.
     pub reload: bool,
-    /// A pressed this frame — cycle to the next weapon (HUNT).
+    /// A pressed this frame — cycle to the next weapon (HUNT). Suppressed while the
+    /// A+B detonate combo is down.
     pub cycle: bool,
+    /// A+B pressed together this frame — detonate all live remote mines (HUNT). Takes
+    /// the place of a separate Detonator weapon slot.
+    pub detonate: bool,
     /// Start pressed this frame — toggle pause (release/grab the cursor).
     pub pause: bool,
     /// The pad drove movement/look/aim/fire this frame (stick deflected or a
@@ -76,6 +81,8 @@ pub struct N64Pad {
     prev_start: bool,
     prev_reload: bool,
     prev_cycle: bool,
+    /// A+B-together state last frame, for the detonate edge.
+    prev_both: bool,
     /// Keys the pad is currently synthesizing (from the stick / C-buttons). Tracked
     /// so the pad only ever RELEASES a key it pressed itself — a centered stick
     /// never clobbers a key the player is holding on the keyboard.
@@ -94,6 +101,7 @@ impl N64Pad {
             prev_start: false,
             prev_reload: false,
             prev_cycle: false,
+            prev_both: false,
             held_keys: Vec::new(),
             held_fire: false,
         })
@@ -163,6 +171,7 @@ impl N64Pad {
             self.prev_start = false;
             self.prev_reload = false;
             self.prev_cycle = false;
+            self.prev_both = false;
             return actions;
         }
 
@@ -240,13 +249,19 @@ impl N64Pad {
             }
         }
 
-        // Edges.
-        actions.reload = reload && !self.prev_reload;
-        actions.cycle = cycle && !self.prev_cycle;
+        // Edges. A+B together detonates remote mines; while both are held it
+        // suppresses the individual reload (B) / cycle (A) so the combo doesn't also
+        // reload + switch weapons. (A brief single-button press before the second
+        // lands may still cycle/reload once — acceptable for a two-button combo.)
+        let both = reload && cycle;
+        actions.detonate = both && !self.prev_both;
+        actions.reload = reload && !self.prev_reload && !both;
+        actions.cycle = cycle && !self.prev_cycle && !both;
         actions.pause = start && !self.prev_start;
         self.prev_reload = reload;
         self.prev_cycle = cycle;
         self.prev_start = start;
+        self.prev_both = both;
         actions
     }
 }

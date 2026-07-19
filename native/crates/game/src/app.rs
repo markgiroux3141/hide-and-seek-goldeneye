@@ -214,7 +214,7 @@ impl ApplicationHandler for App {
             world.attach_audio(audio);
         }
         log::info!(
-            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  L=char walk/jog/run  Z=fire N=hit M=death  G=HUNT  [HUNT: click=fire  RMB=aim  R=reload  Q=weapon]"
+            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  L=char walk/jog/run  Z=fire N=hit M=death  G=HUNT  [HUNT: click=fire  RMB=aim  R=reload  Q=weapon  F=detonate mines]"
         );
 
         window.request_redraw();
@@ -384,6 +384,11 @@ impl ApplicationHandler for App {
                 }
                 if pad_actions.cycle {
                     self.begin_weapon_switch();
+                }
+                if pad_actions.detonate {
+                    if let Some(world) = self.world.as_mut() {
+                        world.detonate_remote_mines(); // HUNT-gated inside
+                    }
                 }
 
                 // Apply mouse-look — unless a gizmo drag is active, in which case
@@ -673,6 +678,18 @@ impl App {
             // frame's preview to repopulate the highlight.
             if self.world.as_ref().map(|w| !w.is_opening_arming()).unwrap_or(true) {
                 self.refresh_highlight();
+            }
+            return;
+        }
+        // F in HUNT: detonate all live remote mines (the keyboard counterpart of the
+        // pad's A+B combo — there's no separate Detonator weapon slot). In BUILD, F
+        // stays the "toggle grounded" editor key (handled below), so only claim it here
+        // when hunting.
+        if code == KeyCode::KeyF
+            && self.world.as_ref().map(|w| !w.is_build()).unwrap_or(false)
+        {
+            if let Some(world) = self.world.as_mut() {
+                world.detonate_remote_mines();
             }
             return;
         }

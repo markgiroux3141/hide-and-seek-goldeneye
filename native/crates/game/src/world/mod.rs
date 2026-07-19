@@ -394,17 +394,13 @@ const PROJECTILE_SPIN_X: f32 = 9.0;
 const PROJECTILE_SPIN_Y: f32 = 6.0;
 
 // ─── Mines (see `world::combat`) ──────────────────────────────────────────────
-/// How far a mine can be placed: the aim is raycast this far and the mine sticks to
-/// the first surface hit. Kept short so mines are a plant-at-your-feet tool, not a
-/// thrown weapon.
-const MINE_PLACE_RANGE: f32 = 4.0;
 /// How far off the struck surface the mine sits (m), so it doesn't z-fight or clip.
 const MINE_SURFACE_OFFSET: f32 = 0.05;
-/// Fallback drop distance ahead of the player (m) when the aim hits no surface
-/// within [`MINE_PLACE_RANGE`] — the mine lands on the ground a short way ahead.
-const MINE_FALLBACK_DIST: f32 = 2.0;
-/// World scale for a placed mine GLB. The mine meshes are gun-sized in the weapon
-/// library, so [`CHAR_SCALE`] lands them at a believable stuck-charge size in world
+/// Max seconds a thrown mine flies before it's stuck in place where it is (fallback
+/// so a toss into open space / the void can't fly forever without attaching).
+const MINE_MAX_FLIGHT: f32 = 5.0;
+/// World scale for a thrown/stuck mine GLB. The mine meshes are gun-sized in the
+/// weapon library, so [`CHAR_SCALE`] lands them at a believable charge size in world
 /// space (retune by eye if they read too big/small).
 const MINE_MODEL_SCALE: f32 = CHAR_SCALE;
 /// The mine's "attach" sound, played when a mine sticks to a surface (soundpack
@@ -415,6 +411,12 @@ const MINE_PLACE_VOL: f32 = 0.7;
 /// `bomb_timer`, converted to WAV). Plus its volume.
 pub(crate) const MINE_TIMER_SOUND: &str = "sounds/weapons/mine-timer.wav";
 const MINE_TIMER_VOL: f32 = 0.6;
+/// The remote-detonation "click" (soundpack `trigger_mine`, converted to WAV),
+/// played when the player triggers a detonation (pad A+B / keyboard). Plus its
+/// volume. No longer a weapon fire_sound (the Detonator slot was removed), so it's
+/// preloaded explicitly in `attach_audio`.
+pub(crate) const DETONATOR_SOUND: &str = "sounds/weapons/detonator-fire.wav";
+const DETONATOR_VOL: f32 = 0.8;
 
 /// Which opening the crosshair tool cuts. A `Door` is a fixed 3×7 wall opening
 /// that becomes breakable at HUNT (frame marked `door`); a `Hole` is an
