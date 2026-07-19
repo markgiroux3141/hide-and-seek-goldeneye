@@ -37,7 +37,10 @@ fn vs_main(
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let t = textureSample(tex, samp, in.uv);
-    // Pre-coloured atlas × fade. Additive blend (SrcAlpha, One) uses the alpha, so
-    // transparent cloud edges add ~nothing and the bright core glows.
-    return vec4<f32>(t.rgb * in.color.rgb, t.a * in.color.a);
+    // Pre-coloured atlas × fade. Alpha-OVER blend, so the alpha is coverage: boost it
+    // with a <1 power curve (keeps 0→0 and 1→1 but lifts the mid-tones) so the
+    // fireball body reads solid/opaque like the real GoldenEye explosion, while the
+    // wispy cloud edges still feather out. `in.color.a` carries the blast fade.
+    let a = pow(clamp(t.a, 0.0, 1.0), 0.55) * in.color.a;
+    return vec4<f32>(t.rgb * in.color.rgb, a);
 }

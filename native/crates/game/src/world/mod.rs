@@ -336,24 +336,44 @@ pub(crate) struct Spark {
 const SPARK_TTL: f32 = 0.12;
 const SPARK_HALF: f32 = 0.02;
 
-/// A live explosion visual (Phase 1 explosives): a short-lived expanding shell of
-/// bright orange embers at a detonation point. Purely cosmetic — the blast damage is
-/// applied once, at detonation, in `world::combat::detonate`. Meant to be replaced
-/// by a ripped GoldenEye fireball sprite later; this procedural burst is the stand-in.
+/// One puff of a layered explosion. GoldenEye builds its big fireball from several
+/// overlapping fireball sprites at slight offsets with staggered start times, so a
+/// detonation spawns a cluster of these: a central core plus satellites. Each puff
+/// plays the fireball atlas once over its own `life` (after its `delay`), additively
+/// — many overlapping puffs read as one big, dense, roiling fireball that blooms and
+/// lingers. Purely cosmetic; the blast DAMAGE is applied once at detonation (see
+/// `world::combat::detonate`).
 #[derive(Clone, Copy)]
 pub(crate) struct Blast {
+    /// This puff's centre (detonation centre + a small random offset).
     pos: Vec3,
-    /// Remaining life (s); the ember shell expands outward + fades as this drains.
-    ttl: f32,
-    /// The blast's damage radius (m) — the shell expands toward it.
-    radius: f32,
+    /// Seconds since the puff was spawned (counts up).
+    age: f32,
+    /// Seconds before this puff starts animating (staggered starts).
+    delay: f32,
+    /// This puff's animation duration (s).
+    life: f32,
+    /// World half-extent at animation scale 1 (already radius-scaled).
+    half: f32,
+    /// Line-of-sight visibility (0 or 1) from the camera, refreshed each frame: a
+    /// puff occluded by a wall is hidden (so explosions don't glow through walls),
+    /// while visible puffs still composite on top with no billboard slicing. The
+    /// cluster of puffs gives a soft occlusion edge for free (some drop, some stay).
+    vis: f32,
 }
 
-/// Explosion-VFX lifetime (s) — the fireball animation plays once over this window.
-/// The blast is a camera-facing additive billboard playing the baked GoldenEye
-/// fireball atlas ([`BLAST_FRAMES`] frames): it steps through the frames while the
-/// quad scales up and fades out (matching the signed-off preview).
-const BLAST_TTL: f32 = 0.5;
+/// Per-puff fireball animation duration (s). With staggered starts up to
+/// [`BLAST_STAGGER`], the whole explosion lasts ~`BLAST_TTL + BLAST_STAGGER` —
+/// longer + denser than a single sprite (user call 2026-07-19).
+const BLAST_TTL: f32 = 0.6;
+/// Max start-delay spread across a blast's puffs (s) — staggered so the fireball
+/// blooms and lingers instead of popping all at once.
+const BLAST_STAGGER: f32 = 0.28;
+/// Puff-centre offset spread, as a fraction of the blast radius.
+const BLAST_SPREAD_FRAC: f32 = 0.3;
+/// Puff-count bounds for a blast (scaled by radius between them).
+const BLAST_PUFFS_MIN: usize = 3;
+const BLAST_PUFFS_MAX: usize = 6;
 /// Number of frames in the fireball atlas (horizontal strip).
 const BLAST_FRAMES: usize = 8;
 /// Billboard quad half-extent as a fraction of the blast radius, at animation

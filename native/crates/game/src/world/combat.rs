@@ -35,6 +35,21 @@ pub(crate) fn resolve_aim(aim_x: f32, aim_y: f32, dx: f32, dy: f32) -> (f32, f32
     }
 }
 
+/// Whether the straight path from `eye` to `target` is unobstructed by world
+/// geometry — the line-of-sight test that gates explosion puffs so a fireball behind
+/// a wall doesn't glow through it. A small end margin keeps the surface the puff is
+/// stuck to (blast sits ~just off it) from counting as its own occluder.
+fn los_clear(physics: &mut PhysicsWorld, eye: Vec3, target: Vec3) -> bool {
+    let d = target - eye;
+    let dist = d.length();
+    if dist < 0.15 {
+        return true;
+    }
+    physics
+        .raycast_excluding(eye, d / dist, dist - 0.15, None)
+        .is_none()
+}
+
 /// Paint blood onto a hunter's per-vertex colors at a world-space `hit` point (JS
 /// `EnemyCharacter.paintDamage`): every vertex whose CURRENT (posed) world position
 /// is within [`BLOOD_RADIUS`] reddens by `intensity · falloff` — `r` up toward 1,
@@ -470,11 +485,22 @@ impl World {
     /// dropped silently so it can't leak. Detonations are collected first (they need
     /// `&mut self` for the blast) then applied.
     fn explosives_step(&mut self, dt: f32) {
-        // Decay explosion VFX.
-        for b in &mut self.blasts {
-            b.ttl -= dt;
+        // Age the explosion puffs + refresh their line-of-sight visibility (so a
+        // fireball behind a wall doesn't glow through it), then drop the finished.
+        // Split-borrow blasts + physics (disjoint fields) so the raycast can run
+        // while mutating each puff.
+        let eye = self.character.as_ref().map(|c| c.eye());
+        {
+            let (blasts, physics) = (&mut self.blasts, &mut self.physics);
+            for b in blasts.iter_mut() {
+                b.age += dt;
+                b.vis = match eye {
+                    Some(e) if !los_clear(physics, e, b.pos) => 0.0,
+                    _ => 1.0,
+                };
+            }
         }
-        self.blasts.retain(|b| b.ttl > 0.0);
+        self.blasts.retain(|b| b.age < b.delay + b.life);
 
         // Advance + resolve each projectile; collect the detonation points.
         let mut detonations: Vec<(Vec3, crate::combat::Explosion)> = Vec::new();
@@ -662,12 +688,34 @@ impl World {
     /// Distance is measured to centre-mass (not feet), so an overhead or point-blank
     /// burst still bites.
     fn detonate(&mut self, center: Vec3, explosion: crate::combat::Explosion) {
-        // VFX + sound (a random blast variant — computed before the audio borrow).
-        self.blasts.push(Blast {
-            pos: center,
-            ttl: BLAST_TTL,
-            radius: explosion.radius,
-        });
+        // Layered fireball VFX: a central core puff plus satellites at small random
+        // offsets with staggered starts + varied sizes — GoldenEye builds its big
+        // fireball from several overlapping sprites, which reads as one dense,
+        // roiling, lingering explosion. (Damage below is applied once, here.)
+        let r = explosion.radius;
+        let puffs = (BLAST_PUFFS_MIN + (r * 0.5) as usize).clamp(BLAST_PUFFS_MIN, BLAST_PUFFS_MAX);
+        for k in 0..puffs {
+            let (offset, delay, size) = if k == 0 {
+                (Vec3::ZERO, 0.0, 1.0) // anchored core: full size, immediate
+            } else {
+                let s = r * BLAST_SPREAD_FRAC;
+                let off = Vec3::new(
+                    (self.rand_float() * 2.0 - 1.0) * s,
+                    (self.rand_float() * 2.0 - 1.0) * s * 0.6, // less vertical scatter
+                    (self.rand_float() * 2.0 - 1.0) * s,
+                );
+                (off, self.rand_float() * BLAST_STAGGER, 0.55 + self.rand_float() * 0.4)
+            };
+            let life = BLAST_TTL * (0.85 + self.rand_float() * 0.3);
+            self.blasts.push(Blast {
+                pos: center + offset,
+                age: 0.0,
+                delay,
+                life,
+                half: r * BLAST_QUAD_HALF_FRAC * size,
+                vis: 1.0,
+            });
+        }
         if let Some(audio) = self.audio.as_mut() {
             audio.play(EXPLOSION_SOUND, EXPLOSION_VOL);
         }
@@ -1072,11 +1120,18 @@ impl World {
         let ease_out = |x: f32| 1.0 - (1.0 - x) * (1.0 - x);
         let mut m = TexturedMesh::default();
         for b in &self.blasts {
-            let frac = ((BLAST_TTL - b.ttl) / BLAST_TTL).clamp(0.0, 1.0);
-            let fi = ((frac * BLAST_FRAMES as f32) as usize).min(BLAST_FRAMES - 1);
-            let scale_anim = 0.55 + 0.9 * ease_out(frac);
-            let half = b.radius * BLAST_QUAD_HALF_FRAC * scale_anim;
-            let alpha = if frac < 0.7 { 1.0 } else { (1.0 - (frac - 0.7) / 0.3).max(0.0) };
+            if b.vis <= 0.0 {
+                continue; // occluded by a wall this frame
+            }
+            // Per-puff local time (0→1) over its own life, after its start delay.
+            let local = (b.age - b.delay) / b.life;
+            if !(0.0..1.0).contains(&local) {
+                continue; // not started yet, or finished
+            }
+            let fi = ((local * BLAST_FRAMES as f32) as usize).min(BLAST_FRAMES - 1);
+            let scale_anim = 0.55 + 0.9 * ease_out(local);
+            let half = b.half * scale_anim;
+            let alpha = if local < 0.7 { 1.0 } else { (1.0 - (local - 0.7) / 0.3).max(0.0) };
 
             // Atlas frame sub-rect (half-texel inset to avoid neighbour-frame bleed).
             let u0 = fi as f32 / BLAST_FRAMES as f32 + BLAST_UV_INSET_U;
