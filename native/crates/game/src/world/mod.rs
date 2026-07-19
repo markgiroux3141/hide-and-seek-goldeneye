@@ -920,12 +920,12 @@ impl World {
             .iter()
             .map(|&cfg| Weapon::new(cfg))
             .collect();
-        // Start on the Proximity Mine (dev convenience while building explosives —
-        // saves cycling the whole arsenal to reach the mines; set back to 0 for PP7
-        // when done). Cycle (Q / N64 A) reaches the other mines + the Detonator.
+        // Start on the Rocket Launcher (dev convenience while building explosives —
+        // saves cycling the whole arsenal; set back to 0 for PP7 when done). Cycle
+        // (Q / N64 A) reaches the grenades + the mines + the Detonator.
         let weapon_index = crate::combat::config::WEAPONS
             .iter()
-            .position(|w| w.name == "Proximity Mine")
+            .position(|w| w.name == "Rocket Launcher")
             .unwrap_or(0);
         let (gun_model, muzzle_model) = load_weapon_models(weapons[weapon_index].config());
 
