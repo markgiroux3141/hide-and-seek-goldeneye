@@ -136,8 +136,12 @@ impl World {
         // weapon fire sounds, already preloaded in the loop above.)
         audio.load(PLAYER_HIT_SOUND);
         // Explosives: preload the blast so the first detonation doesn't hitch (the
-        // launcher fire sounds ride the per-weapon loop above).
+        // launcher/throw/detonator fire sounds ride the per-weapon loop above).
         audio.load(EXPLOSION_SOUND);
+        // Mines: the attach beep (on placement) + the timed-mine arm beep — neither
+        // is a weapon fire_sound, so preload them here.
+        audio.load(MINE_PLACE_SOUND);
+        audio.load(MINE_TIMER_SOUND);
         audio.play_music(BG_MUSIC, true);
         self.audio = Some(audio);
     }
@@ -369,11 +373,70 @@ impl World {
                 );
                 self.projectiles.push(proj);
             }
-            crate::combat::FireKind::Mine(_) => {
-                // Phase 2 — placement/arming/triggers not built yet.
-                log::info!("mine placement not yet implemented ({})", self.weapon().config().name);
+            crate::combat::FireKind::Mine(spec) => self.place_mine(eye, dir, spec),
+            crate::combat::FireKind::Detonator => self.detonate_remote_mines(),
+        }
+    }
+
+    /// Place a mine along the aim (a `FireKind::Mine` shot): raycast from the eye up
+    /// to [`MINE_PLACE_RANGE`] and stick the mine just off the first surface hit,
+    /// oriented to its normal. If nothing's in range, drop it on the ground a short
+    /// way ahead (fallback). The placed mine renders + arms + trips via
+    /// [`Self::mines_step`]. Plays the attach beep on the stick (the throw sound came
+    /// from the weapon's fire cue). Named by the weapon so the renderer finds its GLB.
+    fn place_mine(&mut self, eye: Vec3, dir: Vec3, spec: crate::combat::MineSpec) {
+        let name = self.weapon().config().name;
+        let (pos, normal) =
+            match crate::combat::shooting::cast(&mut self.physics, eye, dir, MINE_PLACE_RANGE, None) {
+                Some(hit) => (hit.point + hit.normal * MINE_SURFACE_OFFSET, hit.normal),
+                None => {
+                    // No surface in range — drop it on the ground ahead, at the
+                    // player's feet height (a short lob).
+                    let feet_y = self.player_pos().map(|p| p.y).unwrap_or(eye.y);
+                    let ahead = Vec3::new(
+                        eye.x + dir.x * MINE_FALLBACK_DIST,
+                        feet_y + MINE_SURFACE_OFFSET,
+                        eye.z + dir.z * MINE_FALLBACK_DIST,
+                    );
+                    (ahead, Vec3::Y)
+                }
+            };
+        self.mines.push(crate::combat::Mine::new(pos, normal, spec, name));
+        if let Some(audio) = self.audio.as_mut() {
+            audio.play(MINE_PLACE_SOUND, MINE_PLACE_VOL);
+        }
+        log::info!(
+            "placed {} at ({:.1}, {:.1}, {:.1}) — arms in {:.1}s, blast r={:.1} m",
+            name,
+            pos.x,
+            pos.y,
+            pos.z,
+            spec.arm_time,
+            spec.explosion.radius
+        );
+    }
+
+    /// Fire the Detonator: set off every live Remote mine at once (the mines carry
+    /// the blast; the detonator's own "click" is its weapon fire cue). Collect the
+    /// detonation points first, then apply them (with chain reaction) — the borrow
+    /// pattern used throughout the explosive step.
+    fn detonate_remote_mines(&mut self) {
+        let mut dets: Vec<(Vec3, crate::combat::Explosion)> = Vec::new();
+        let mut i = 0;
+        while i < self.mines.len() {
+            if self.mines[i].is_remote() {
+                let m = self.mines.remove(i);
+                dets.push((m.pos, m.spec.explosion));
+            } else {
+                i += 1;
             }
         }
+        if dets.is_empty() {
+            log::info!("detonator fired — no remote mines placed");
+        } else {
+            log::info!("detonator fired — {} remote mine(s) detonated", dets.len());
+        }
+        self.apply_detonations(dets);
     }
 
     /// The original instant-ray shot (the 19 base guns): cast from the eye along the
@@ -497,7 +560,73 @@ impl World {
             }
         }
 
-        for (center, ex) in detonations {
+        // Advance placed mines (arm timers + trip checks) and fold their detonations
+        // in with the projectiles', then apply the whole batch — cascading through
+        // any mines caught in a blast (sympathetic detonation).
+        detonations.extend(self.mines_step(dt));
+        self.apply_detonations(detonations);
+    }
+
+    /// Advance every placed mine one frame (HUNT, called from [`Self::explosives_step`]):
+    /// tick each mine's arm timer (beeping once when a timed mine goes live), then
+    /// collect the ones that trip this frame — an armed proximity mine when any living
+    /// hunter OR the player is within its trip radius, an armed timed mine at 0.
+    /// Returns the detonation points (removing the tripped mines); the caller applies
+    /// them. Remote mines never self-trip (only the Detonator sets them off).
+    fn mines_step(&mut self, dt: f32) -> Vec<(Vec3, crate::combat::Explosion)> {
+        // Trip targets: living hunters + the player, measured at centre-mass so a
+        // mine on the floor still notices a nearby actor. Read out first (the tick
+        // + removal below borrows `self.mines`/`self.audio` mutably).
+        let mut targets: Vec<Vec3> = self
+            .enemies
+            .iter()
+            .filter(|e| !e.enemy.is_dead())
+            .map(|e| e.enemy.pos + Vec3::Y * ENEMY_CENTER_Y)
+            .collect();
+        if let Some(ppos) = self.player_pos() {
+            targets.push(ppos + Vec3::Y * PLAYER_CENTER_Y);
+        }
+
+        let mut detonations: Vec<(Vec3, crate::combat::Explosion)> = Vec::new();
+        let mut i = 0;
+        while i < self.mines.len() {
+            let just_armed = self.mines[i].tick(dt);
+            // A timed mine chirps once when it goes live.
+            if just_armed && matches!(self.mines[i].spec.trigger, crate::combat::MineTrigger::Timed(_)) {
+                if let Some(audio) = self.audio.as_mut() {
+                    audio.play(MINE_TIMER_SOUND, MINE_TIMER_VOL);
+                }
+            }
+            let trips = self.mines[i].timed_expired()
+                || targets.iter().any(|&t| self.mines[i].proximity_trips(t));
+            if trips {
+                let m = self.mines.remove(i);
+                detonations.push((m.pos, m.spec.explosion));
+            } else {
+                i += 1;
+            }
+        }
+        detonations
+    }
+
+    /// Apply a batch of detonations, cascading through any placed mines caught in a
+    /// blast (chain reaction / sympathetic detonation): each blast trips every mine
+    /// within its radius, whose own blast is queued in turn, so a cluster goes up
+    /// together. Collect-then-apply keeps the `&mut self` borrow simple. Shared by
+    /// [`Self::explosives_step`] and [`Self::detonate_remote_mines`].
+    fn apply_detonations(&mut self, initial: Vec<(Vec3, crate::combat::Explosion)>) {
+        let mut queue = initial;
+        while let Some((center, ex)) = queue.pop() {
+            // Sympathetic detonation: any mine within this blast goes up too.
+            let mut i = 0;
+            while i < self.mines.len() {
+                if self.mines[i].pos.distance(center) <= ex.radius {
+                    let m = self.mines.remove(i);
+                    queue.push((m.pos, m.spec.explosion));
+                } else {
+                    i += 1;
+                }
+            }
             self.detonate(center, ex);
         }
     }

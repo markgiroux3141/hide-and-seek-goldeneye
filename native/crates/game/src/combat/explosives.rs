@@ -14,7 +14,7 @@
 
 use glam::Vec3;
 
-use super::config::{Explosion, ProjectileSpec};
+use super::config::{Explosion, MineSpec, MineTrigger, ProjectileSpec};
 
 /// A live explosive round in flight. Spawned along the aim (with any launch loft),
 /// integrated each frame under its spec's gravity, and detonated by `world::combat`
@@ -83,6 +83,94 @@ impl Projectile {
         self.pos = surface + normal.normalize_or_zero() * 0.02;
         self.vel = Vec3::ZERO;
         self.at_rest = true;
+    }
+}
+
+/// A placed mine stuck to a surface. Spawned against the aimed surface, it arms
+/// after [`MineSpec::arm_time`] (can't be tripped while arming — the placer's window
+/// to walk clear), then waits for its [`MineTrigger`]: a proximity mine detonates
+/// when any living actor enters its trip radius, a timed mine after its countdown,
+/// a remote mine only when the player fires the Detonator. The trip/arm math that
+/// needs no world access lives here and is unit-tested; the placement raycast, the
+/// actor-distance scan, and the actual detonation stay in `world::combat`.
+#[derive(Clone, Copy, Debug)]
+pub struct Mine {
+    /// World position, sat just off the surface it's stuck to.
+    pub pos: Vec3,
+    /// Surface normal it's stuck to (drives the render orientation).
+    pub normal: Vec3,
+    /// The tuning it was placed with (trigger / arm time / explosion).
+    pub spec: MineSpec,
+    /// Once true the mine is live and can be tripped (arm delay elapsed).
+    pub armed: bool,
+    /// Counts down from `spec.arm_time` to 0; at 0 the mine arms.
+    pub arm_timer: f32,
+    /// Timed-mine countdown (s), started once armed. Meaningless for the other
+    /// triggers (left at its init value and never ticked).
+    pub timer: f32,
+    /// Weapon-library name of the GLB to render in world (e.g. `"Proximity Mine"`).
+    pub model: &'static str,
+}
+
+impl Mine {
+    /// Place a mine at `pos` against `normal`, disarmed, its arm timer primed. A
+    /// timed mine's countdown is seeded here but only ticks once armed.
+    pub fn new(pos: Vec3, normal: Vec3, spec: MineSpec, model: &'static str) -> Self {
+        let timer = match spec.trigger {
+            MineTrigger::Timed(secs) => secs,
+            _ => 0.0,
+        };
+        Mine {
+            pos,
+            normal,
+            spec,
+            armed: false,
+            arm_timer: spec.arm_time,
+            timer,
+            model,
+        }
+    }
+
+    /// Advance the mine one frame. While disarming, burns the arm timer and arms at
+    /// 0 (returning `true` on the exact frame it goes live, so the caller can play
+    /// the arm beep). Once armed, a timed mine's countdown ticks down.
+    pub fn tick(&mut self, dt: f32) -> bool {
+        if !self.armed {
+            self.arm_timer -= dt;
+            if self.arm_timer <= 0.0 {
+                self.armed = true;
+                return true; // just armed this frame
+            }
+            return false;
+        }
+        if matches!(self.spec.trigger, MineTrigger::Timed(_)) {
+            self.timer -= dt;
+        }
+        false
+    }
+
+    /// Whether an armed **proximity** mine should trip on an actor at `actor`: true
+    /// when the actor is within the trigger's trip radius. Other triggers never trip
+    /// on proximity.
+    pub fn proximity_trips(&self, actor: Vec3) -> bool {
+        if !self.armed {
+            return false;
+        }
+        match self.spec.trigger {
+            MineTrigger::Proximity(r) => self.pos.distance(actor) <= r,
+            _ => false,
+        }
+    }
+
+    /// Whether an armed **timed** mine's countdown has run out. Other triggers never
+    /// expire on time.
+    pub fn timed_expired(&self) -> bool {
+        self.armed && matches!(self.spec.trigger, MineTrigger::Timed(_)) && self.timer <= 0.0
+    }
+
+    /// Whether this is a remote-triggered mine (set off by the Detonator).
+    pub fn is_remote(&self) -> bool {
+        matches!(self.spec.trigger, MineTrigger::Remote)
     }
 }
 
@@ -172,6 +260,89 @@ mod tests {
         assert!((falloff_damage(&e, 2.5) - 100.0).abs() < 1e-3, "half at half-radius");
         assert_eq!(falloff_damage(&e, 5.0), 0.0, "zero at the rim");
         assert_eq!(falloff_damage(&e, 9.0), 0.0, "zero beyond the rim");
+    }
+
+    // ── Mines ──────────────────────────────────────────────────────────────────
+
+    fn mine_spec(name: &str) -> super::MineSpec {
+        let cfg = config::WEAPONS.iter().find(|w| w.name == name).unwrap();
+        match cfg.fire_kind {
+            config::FireKind::Mine(m) => m,
+            _ => unreachable!("{name} is a mine"),
+        }
+    }
+
+    /// A mine is inert while arming and can't be tripped; it goes live exactly once
+    /// the arm delay elapses (and `tick` reports that transition once).
+    #[test]
+    fn mine_arms_after_delay() {
+        let spec = mine_spec("Proximity Mine"); // arm 1.5 s, trip 2.5 m
+        let mut m = Mine::new(Vec3::ZERO, Vec3::Y, spec, "Proximity Mine");
+        // An actor sitting right on top of it can't trip it while it arms.
+        assert!(!m.armed);
+        assert!(!m.proximity_trips(Vec3::ZERO), "disarmed mine never trips");
+        let mut armed_reports = 0;
+        for _ in 0..149 {
+            if m.tick(0.01) {
+                armed_reports += 1;
+            }
+        }
+        assert!(!m.armed, "not armed just before 1.5 s");
+        for _ in 0..2 {
+            if m.tick(0.01) {
+                armed_reports += 1;
+            }
+        }
+        assert!(m.armed, "armed past 1.5 s");
+        assert_eq!(armed_reports, 1, "the arm transition is reported exactly once");
+    }
+
+    /// Once armed, a proximity mine trips on an actor inside its trip radius and
+    /// ignores one outside it.
+    #[test]
+    fn proximity_mine_trips_inside_radius() {
+        let spec = mine_spec("Proximity Mine"); // trip 2.5 m
+        let mut m = Mine::new(Vec3::ZERO, Vec3::Y, spec, "Proximity Mine");
+        while !m.armed {
+            m.tick(0.01);
+        }
+        assert!(m.proximity_trips(Vec3::new(2.0, 0.0, 0.0)), "actor inside 2.5 m trips it");
+        assert!(!m.proximity_trips(Vec3::new(3.0, 0.0, 0.0)), "actor outside 2.5 m does not");
+    }
+
+    /// A timed mine only starts its countdown once armed, then expires after the
+    /// countdown — and never trips on proximity.
+    #[test]
+    fn timed_mine_expires_after_countdown() {
+        let spec = mine_spec("Timed Mine"); // arm 1.5 s, then 4 s countdown
+        let mut m = Mine::new(Vec3::ZERO, Vec3::Y, spec, "Timed Mine");
+        // Arm it (1.5 s).
+        for _ in 0..151 {
+            m.tick(0.01);
+        }
+        assert!(m.armed);
+        assert!(!m.timed_expired(), "countdown only just started");
+        assert!(!m.proximity_trips(Vec3::ZERO), "a timed mine ignores proximity");
+        // Burn ~4 s of countdown.
+        for _ in 0..401 {
+            m.tick(0.01);
+        }
+        assert!(m.timed_expired(), "expired ~4 s after arming");
+    }
+
+    /// A remote mine never self-trips (no proximity, no timer) — only the Detonator
+    /// sets it off, which is the world layer's job.
+    #[test]
+    fn remote_mine_never_self_trips() {
+        let spec = mine_spec("Remote Mine");
+        let mut m = Mine::new(Vec3::ZERO, Vec3::Y, spec, "Remote Mine");
+        assert!(m.is_remote());
+        for _ in 0..1000 {
+            m.tick(0.01);
+        }
+        assert!(m.armed, "it still arms");
+        assert!(!m.proximity_trips(Vec3::ZERO), "but never trips on proximity");
+        assert!(!m.timed_expired(), "nor on a timer");
     }
 
     /// A bounce reflects the velocity off the surface normal and sheds energy per

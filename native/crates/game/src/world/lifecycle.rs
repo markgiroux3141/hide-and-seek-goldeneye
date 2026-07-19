@@ -270,6 +270,11 @@ impl World {
                 self.enemies.clear();
                 self.caught = false;
                 self.sparks.clear();
+                // Explosives don't survive the hunt: drop any in-flight rounds,
+                // placed mines, and fading blast VFX so none leak into the next HUNT.
+                self.projectiles.clear();
+                self.mines.clear();
+                self.blasts.clear();
                 self.physics.clear_door_colliders();
                 self.doors.clear();
                 self.mode = Mode::Build;

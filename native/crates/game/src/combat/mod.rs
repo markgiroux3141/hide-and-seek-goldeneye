@@ -21,7 +21,7 @@ pub mod viewmodel;
 
 pub use config::{Explosion, FireKind, MineSpec, MineTrigger, ProjectileSpec, WeaponStats};
 pub use enemy_weapons::{enemy_def_for, EnemyWeaponClass, EnemyWeaponDef};
-pub use explosives::{falloff_damage, Projectile};
+pub use explosives::{falloff_damage, Mine, Projectile};
 pub use shooting::{cast, HitResult};
 pub use viewmodel::{load_flash, load_gun, ViewModel};
 

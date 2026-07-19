@@ -393,6 +393,29 @@ const PROJECTILE_MODEL_SCALE: f32 = CHAR_SCALE / 3.0;
 const PROJECTILE_SPIN_X: f32 = 9.0;
 const PROJECTILE_SPIN_Y: f32 = 6.0;
 
+// ─── Mines (see `world::combat`) ──────────────────────────────────────────────
+/// How far a mine can be placed: the aim is raycast this far and the mine sticks to
+/// the first surface hit. Kept short so mines are a plant-at-your-feet tool, not a
+/// thrown weapon.
+const MINE_PLACE_RANGE: f32 = 4.0;
+/// How far off the struck surface the mine sits (m), so it doesn't z-fight or clip.
+const MINE_SURFACE_OFFSET: f32 = 0.05;
+/// Fallback drop distance ahead of the player (m) when the aim hits no surface
+/// within [`MINE_PLACE_RANGE`] — the mine lands on the ground a short way ahead.
+const MINE_FALLBACK_DIST: f32 = 2.0;
+/// World scale for a placed mine GLB. The mine meshes are gun-sized in the weapon
+/// library, so [`CHAR_SCALE`] lands them at a believable stuck-charge size in world
+/// space (retune by eye if they read too big/small).
+const MINE_MODEL_SCALE: f32 = CHAR_SCALE;
+/// The mine's "attach" sound, played when a mine sticks to a surface (soundpack
+/// `attach_mine`, converted to WAV). Plus its volume.
+pub(crate) const MINE_PLACE_SOUND: &str = "sounds/weapons/mine-place.wav";
+const MINE_PLACE_VOL: f32 = 0.7;
+/// The timed-mine arm beep, played once when a timed mine goes live (soundpack
+/// `bomb_timer`, converted to WAV). Plus its volume.
+pub(crate) const MINE_TIMER_SOUND: &str = "sounds/weapons/mine-timer.wav";
+const MINE_TIMER_VOL: f32 = 0.6;
+
 /// Which opening the crosshair tool cuts. A `Door` is a fixed 3×7 wall opening
 /// that becomes breakable at HUNT (frame marked `door`); a `Hole` is an
 /// arbitrary-size opening in any face (walls, floor, or ceiling), not breakable.
@@ -696,6 +719,10 @@ pub struct World {
     /// grenade). Advanced + collision-swept each frame in `explosives_step`; a
     /// contact or fuse expiry detonates them. Empty in BUILD.
     projectiles: Vec<crate::combat::Projectile>,
+    /// Explosives: live placed mines (proximity / timed / remote). Armed + trip-
+    /// checked each frame in `mines_step`; a trip, timeout, or the Detonator sets
+    /// them off. Empty in BUILD.
+    mines: Vec<crate::combat::Mine>,
     /// Explosives: live explosion VFX bursts, decayed each frame.
     blasts: Vec<Blast>,
     /// GoldenEye free-aim crosshair offset in aim space (see `AIM_MAX_RANGE`).
@@ -893,11 +920,12 @@ impl World {
             .iter()
             .map(|&cfg| Weapon::new(cfg))
             .collect();
-        // Start on the Rocket Launcher (dev convenience while building explosives —
-        // saves cycling the whole arsenal; set back to 0 for PP7 when done).
+        // Start on the Proximity Mine (dev convenience while building explosives —
+        // saves cycling the whole arsenal to reach the mines; set back to 0 for PP7
+        // when done). Cycle (Q / N64 A) reaches the other mines + the Detonator.
         let weapon_index = crate::combat::config::WEAPONS
             .iter()
-            .position(|w| w.name == "Rocket Launcher")
+            .position(|w| w.name == "Proximity Mine")
             .unwrap_or(0);
         let (gun_model, muzzle_model) = load_weapon_models(weapons[weapon_index].config());
 
@@ -992,6 +1020,7 @@ impl World {
             models_dirty: false,
             sparks: Vec::new(),
             projectiles: Vec::new(),
+            mines: Vec::new(),
             blasts: Vec::new(),
             aim_x: 0.0,
             aim_y: 0.0,

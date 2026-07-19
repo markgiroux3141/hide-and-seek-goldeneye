@@ -65,11 +65,13 @@ pub struct ProjectileSpec {
     pub model: &'static str,
 }
 
-/// How a placed [`MineSpec`] is set off (Phase 3).
+/// How a placed [`MineSpec`] is set off.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum MineTrigger {
-    /// Detonates when any actor comes within the explosion radius (after arming).
-    Proximity,
+    /// Detonates when any living actor (a hunter OR the player) comes within this
+    /// trip radius in metres, once armed. Separate from the blast radius — the
+    /// mine notices you before it can hurt you, but the arm delay lets you back off.
+    Proximity(f32),
     /// Detonates `secs` after arming completes.
     Timed(f32),
     /// Detonates only when the player fires the Detonator.
@@ -97,8 +99,12 @@ pub enum FireKind {
     Hitscan,
     /// Spawns a traveling [`ProjectileSpec`] that detonates.
     Projectile(ProjectileSpec),
-    /// Places a [`MineSpec`] against the aimed surface (Phase 3).
+    /// Places a [`MineSpec`] against the aimed surface.
     Mine(MineSpec),
+    /// The remote-mine trigger: firing it detonates every live Remote mine at once
+    /// (it places nothing itself). Its "shot" carries no damage — the placed
+    /// [`MineTrigger::Remote`] mines carry the blast.
+    Detonator,
 }
 
 /// Static per-weapon configuration (JS `WeaponStats`).
@@ -715,7 +721,7 @@ pub const GRENADE: WeaponStats = WeaponStats {
     reload_time: 0.9,
     damage: 150.0,
     range: 100.0,
-    fire_sound: "sounds/weapons/empty.wav", // placeholder throw grunt; near-silent
+    fire_sound: "sounds/weapons/throw.wav", // GE knife_throw3 (soundpack) — the toss
     reload_sound: RELOAD_SND,
     empty_sound: EMPTY_SND,
     gun_path: "grenade/gun.glb",
@@ -743,6 +749,139 @@ pub const GRENADE: WeaponStats = WeaponStats {
     }),
 };
 
+// ─── Explosives (mines) ───────────────────────────────────────────────────────
+// The placeable charges + their remote trigger. Like the projectiles, there's no
+// oracle — placement/arm/trip is authored fresh for the GoldenEye feel. All three
+// mines share the placement path (raycast → stick to the aimed surface, arm after a
+// delay); they differ only in `MineTrigger`. The Detonator places nothing — firing
+// it sets off every live Remote mine.
+//
+// Held-viewmodel note: the mine GLBs come from the same asset pack as the (oversized)
+// grenade, and GoldenEye never shows a big charge filling your hand — you see the
+// mine only once it's stuck to a wall. So, like GRENADE, the three mines shrink the
+// held model and drop it below the view (model_offset.y) to keep it off-screen while
+// equipped; the placed mine renders in world space at MINE_MODEL_SCALE. The Detonator
+// is a hand-held box, so it keeps a (shrunk) visible placement — retune by eye later.
+
+const MINE_ARM_TIME: f32 = 1.5; // seconds after placement before it goes live
+const MINE_RADIUS: f32 = 3.5; // blast radius (m)
+const MINE_DAMAGE: f32 = 150.0; // peak blast damage
+/// The three mines share the grenade's off-screen held placement.
+const MINE_HELD_SCALE: f32 = DEFAULT_SCALE / 3.0;
+const MINE_HELD_OFFSET: Vec3 = Vec3::new(0.1, -1.2, -0.06);
+
+/// Proximity Mine — trips when any actor (hunter or player) comes within the trip
+/// radius after the arm delay. The arm delay is your window to back away.
+pub const PROXIMITY_MINE: WeaponStats = WeaponStats {
+    name: "Proximity Mine",
+    fire_cooldown: 0.8,
+    magazine_size: 1,
+    reload_time: 0.9,
+    damage: MINE_DAMAGE,
+    range: 100.0,
+    fire_sound: "sounds/weapons/throw.wav", // the toss; the attach beep plays on stick
+    reload_sound: RELOAD_SND,
+    empty_sound: EMPTY_SND,
+    gun_path: "proximity-mine/gun.glb",
+    muzzle_path: "",
+    model_scale: MINE_HELD_SCALE,
+    model_offset: MINE_HELD_OFFSET,
+    pivot_offset: Vec3::new(0.0, 0.0, -0.1),
+    muzzle_offset: DEFAULT_MUZZLE,
+    model_rotation: Vec3::new(0.0, PI, 0.0),
+    recoil_z: 0.02,
+    recoil_rot: 0.03,
+    automatic: false,
+    fire_kind: FireKind::Mine(MineSpec {
+        trigger: MineTrigger::Proximity(2.5),
+        arm_time: MINE_ARM_TIME,
+        explosion: Explosion { radius: MINE_RADIUS, max_damage: MINE_DAMAGE },
+    }),
+};
+
+/// Timed Mine — detonates a fixed delay after it arms, no matter what's nearby.
+pub const TIMED_MINE: WeaponStats = WeaponStats {
+    name: "Timed Mine",
+    fire_cooldown: 0.8,
+    magazine_size: 1,
+    reload_time: 0.9,
+    damage: MINE_DAMAGE,
+    range: 100.0,
+    fire_sound: "sounds/weapons/throw.wav",
+    reload_sound: RELOAD_SND,
+    empty_sound: EMPTY_SND,
+    gun_path: "timed-mine/gun.glb",
+    muzzle_path: "",
+    model_scale: MINE_HELD_SCALE,
+    model_offset: MINE_HELD_OFFSET,
+    pivot_offset: Vec3::new(0.0, 0.0, -0.1),
+    muzzle_offset: DEFAULT_MUZZLE,
+    model_rotation: Vec3::new(0.0, PI, 0.0),
+    recoil_z: 0.02,
+    recoil_rot: 0.03,
+    automatic: false,
+    fire_kind: FireKind::Mine(MineSpec {
+        trigger: MineTrigger::Timed(4.0), // counts down once armed
+        arm_time: MINE_ARM_TIME,
+        explosion: Explosion { radius: MINE_RADIUS, max_damage: MINE_DAMAGE },
+    }),
+};
+
+/// Remote Mine — inert until the player fires the Detonator, which sets off all of
+/// them at once. Stick a wall of these, then push the button.
+pub const REMOTE_MINE: WeaponStats = WeaponStats {
+    name: "Remote Mine",
+    fire_cooldown: 0.8,
+    magazine_size: 1,
+    reload_time: 0.9,
+    damage: MINE_DAMAGE,
+    range: 100.0,
+    fire_sound: "sounds/weapons/throw.wav",
+    reload_sound: RELOAD_SND,
+    empty_sound: EMPTY_SND,
+    gun_path: "remote-mine/gun.glb",
+    muzzle_path: "",
+    model_scale: MINE_HELD_SCALE,
+    model_offset: MINE_HELD_OFFSET,
+    pivot_offset: Vec3::new(0.0, 0.0, -0.1),
+    muzzle_offset: DEFAULT_MUZZLE,
+    model_rotation: Vec3::new(0.0, PI, 0.0),
+    recoil_z: 0.02,
+    recoil_rot: 0.03,
+    automatic: false,
+    fire_kind: FireKind::Mine(MineSpec {
+        trigger: MineTrigger::Remote,
+        arm_time: MINE_ARM_TIME,
+        explosion: Explosion { radius: MINE_RADIUS, max_damage: MINE_DAMAGE },
+    }),
+};
+
+/// Detonator — the remote-mine trigger. Places nothing; each pull detonates every
+/// live Remote mine. Given a large magazine so it effectively never runs dry (the
+/// shared fire model consumes a round per shot, but a detonator has unlimited uses).
+pub const DETONATOR: WeaponStats = WeaponStats {
+    name: "Detonator",
+    fire_cooldown: 0.3,
+    magazine_size: 999, // effectively unlimited (see doc above)
+    reload_time: 1.0,
+    damage: 0.0, // the placed mines carry the blast, not this
+    range: 0.0,
+    fire_sound: "sounds/weapons/detonator-fire.wav", // GE trigger_mine (soundpack)
+    reload_sound: RELOAD_SND,
+    empty_sound: EMPTY_SND,
+    gun_path: "detonator/gun.glb",
+    muzzle_path: "", // a detonator doesn't muzzle-flash (GLB ships one; unused)
+    model_scale: DEFAULT_SCALE / 2.0,
+    model_offset: Vec3::new(0.11, -0.16, -0.08),
+    pivot_offset: Vec3::new(0.0, 0.0, -0.1),
+    muzzle_offset: DEFAULT_MUZZLE,
+    model_rotation: Vec3::new(0.0, PI, 0.0),
+    recoil_z: 0.01,
+    recoil_rot: 0.02,
+    automatic: false,
+    fire_kind: FireKind::Detonator,
+};
+
 /// The player's cycle-order inventory (JS `ALL_WEAPONS`): pistols → PP7 variants →
 /// SMGs → rifles → shotguns → special. Index 0 (PP7) is the weapon spawned first.
 /// `Q` (keyboard) / `A` (N64 pad) steps through this list.
@@ -754,6 +893,7 @@ pub const WEAPONS: &[WeaponStats] = &[
     SHOTGUN, AUTO_SHOTGUN, // shotguns
     SNIPER, LASER, // special
     ROCKET_LAUNCHER, GRENADE_LAUNCHER, GRENADE, // explosives (projectile)
+    PROXIMITY_MINE, TIMED_MINE, REMOTE_MINE, DETONATOR, // explosives (mines)
 ];
 
 // NB: the JS `zoomFOV` (ADS/zoom) is deliberately not ported — the native camera
