@@ -353,6 +353,25 @@ impl World {
                 }
             }
         }
+        // In-flight explosive projectiles that carry a GLB (the grenade rounds) ride
+        // the same world-space weapon-draw path, keyed by their model name. Tumbling
+        // while airborne, frozen once settled. The rocket (`model == ""`) is skipped
+        // here — it shows as the procedural streak in `spark_mesh`.
+        for p in &self.projectiles {
+            if p.spec.model.is_empty() {
+                continue;
+            }
+            let spin = if p.at_rest { 0.0 } else { p.age };
+            let world = Mat4::from_translation(p.pos)
+                * Mat4::from_euler(
+                    EulerRot::XYZ,
+                    spin * PROJECTILE_SPIN_X,
+                    spin * PROJECTILE_SPIN_Y,
+                    0.0,
+                )
+                * Mat4::from_scale(Vec3::splat(PROJECTILE_MODEL_SCALE));
+            out.push((p.spec.model, vp * world));
+        }
         out
     }
 

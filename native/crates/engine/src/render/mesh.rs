@@ -201,6 +201,22 @@ impl GpuMesh {
         }
     }
 
+    /// Upload interleaved [`TexVertex`] geometry (pos+normal+uv+color) — for the
+    /// explosion-fireball billboards (CPU-built camera-facing quads).
+    pub fn upload_tex(device: &wgpu::Device, verts: &[TexVertex], indices: &[u32]) -> GpuMesh {
+        let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("billboard-vertices"),
+            contents: bytemuck::cast_slice(verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("billboard-indices"),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        GpuMesh { vertex_buf, index_buf, index_count: indices.len() as u32 }
+    }
+
     /// Upload a colored mesh (position + per-vertex color) — for the gizmo.
     pub fn upload_colored(device: &wgpu::Device, mesh: &ColoredMesh) -> GpuMesh {
         let vertex_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {

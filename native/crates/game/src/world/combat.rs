@@ -135,6 +135,9 @@ impl World {
         // A3/P5: the player's own hit vocal. (Enemy gun reports reuse the player
         // weapon fire sounds, already preloaded in the loop above.)
         audio.load(PLAYER_HIT_SOUND);
+        // Explosives: preload the blast so the first detonation doesn't hitch (the
+        // launcher fire sounds ride the per-weapon loop above).
+        audio.load(EXPLOSION_SOUND);
         audio.play_music(BG_MUSIC, true);
         self.audio = Some(audio);
     }
@@ -327,14 +330,18 @@ impl World {
             }
         }
 
+        // Advance explosives every frame (projectiles fly + detonate, VFX decays),
+        // regardless of whether a shot fired this frame.
+        self.explosives_step(dt);
+
         if !fired {
             return;
         }
 
-        // A shot left the barrel — cast through the crosshair (which may be
-        // offset by free-aim). Copy eye + look out so the character borrow ends
-        // before the mutable physics borrow, then bend the ray toward the
-        // crosshair's aim-space offset (same offset the gun tilts to).
+        // A shot left the barrel — resolve the aim direction through the crosshair
+        // (which may be offset by free-aim). Copy eye + look out so the character
+        // borrow ends before the mutable physics borrow, then bend the ray toward
+        // the crosshair's aim-space offset (same offset the gun tilts to).
         let Some((eye, fwd)) = self.character.as_ref().map(|c| (c.eye(), c.forward())) else {
             return;
         };
@@ -342,16 +349,42 @@ impl World {
         let up = right.cross(fwd).normalize_or_zero();
         let dir = (fwd + AIM_FOV_TAN * (self.aim_x * right + self.aim_y * up)).normalize_or_zero();
         let dir = if dir == Vec3::ZERO { fwd } else { dir };
+
+        // Delivery branches on the weapon's fire kind. Recoil is gun-only (the
+        // viewmodel kick, armed in `Weapon::update`) — no camera kick, matching
+        // GoldenEye — for every kind.
+        match self.weapon().config().fire_kind {
+            crate::combat::FireKind::Hitscan => self.fire_hitscan(eye, dir),
+            crate::combat::FireKind::Projectile(spec) => {
+                // Spawn a bit ahead of the eye so it clears the player, along the
+                // aim; loft is added along world-up so grenades arc even when aimed
+                // level. Grenades are "thrown" from the same origin — the arc + low
+                // launch speed sell the throw.
+                let proj = crate::combat::Projectile::spawn(eye + dir * 0.5, dir, Vec3::Y, spec);
+                log::info!(
+                    "launched {} projectile ({} m/s, blast r={} m)",
+                    self.weapon().config().name,
+                    spec.speed,
+                    spec.explosion.radius
+                );
+                self.projectiles.push(proj);
+            }
+            crate::combat::FireKind::Mine(_) => {
+                // Phase 2 — placement/arming/triggers not built yet.
+                log::info!("mine placement not yet implemented ({})", self.weapon().config().name);
+            }
+        }
+    }
+
+    /// The original instant-ray shot (the 19 base guns): cast from the eye along the
+    /// aimed `dir`, damage a hit hunter or drop a wall spark. Split out of
+    /// [`Self::combat_step`] so the fire path can branch cleanly on [`FireKind`].
+    fn fire_hitscan(&mut self, eye: Vec3, dir: Vec3) {
         let range = self.weapon().config().range;
         // Player collider excluded — `None` today (the native player is a transient
-        // shape-cast, not a registered collider), threaded for Track A. Recoil is
-        // gun-only (the viewmodel kick, armed in `Weapon::update`) — no camera kick,
-        // matching GoldenEye.
+        // shape-cast, not a registered collider), threaded for Track A.
         match crate::combat::shooting::cast(&mut self.physics, eye, dir, range, None) {
             Some(hit) if self.physics.is_enemy_collider(hit.collider) => {
-                // Track A: the shot landed on a hunter's capsule — find which one and
-                // damage it (no wall spark; the hit reaction + pain SFX are the
-                // feedback).
                 if let Some(i) = self
                     .enemies
                     .iter()
@@ -375,6 +408,185 @@ impl World {
                 );
             }
             None => log::info!("shot — no hit within {range:.0} m"),
+        }
+    }
+
+    /// Advance every live projectile one frame and decay the explosion VFX (HUNT
+    /// only). Each projectile is swept from its old to its new position and raycast
+    /// against the world: a contact either **bounces** it (grenades, while their
+    /// fuse still burns) or **detonates** it (rockets, launched grenades on impact,
+    /// or any grenade whose fuse is already spent); a spent fuse detonates it in the
+    /// air; and a projectile that contacts nothing for [`PROJECTILE_MAX_LIFE`] is
+    /// dropped silently so it can't leak. Detonations are collected first (they need
+    /// `&mut self` for the blast) then applied.
+    fn explosives_step(&mut self, dt: f32) {
+        // Decay explosion VFX.
+        for b in &mut self.blasts {
+            b.ttl -= dt;
+        }
+        self.blasts.retain(|b| b.ttl > 0.0);
+
+        // Advance + resolve each projectile; collect the detonation points.
+        let mut detonations: Vec<(Vec3, crate::combat::Explosion)> = Vec::new();
+        let mut i = 0;
+        while i < self.projectiles.len() {
+            // A settled bouncer just waits out its fuse in place — no integration.
+            if self.projectiles[i].at_rest {
+                self.projectiles[i].age += dt;
+                if self.projectiles[i].fuse_expired() {
+                    let p = &self.projectiles[i];
+                    detonations.push((p.pos, p.spec.explosion));
+                    self.projectiles.remove(i);
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+
+            let (from, to) = self.projectiles[i].advance(dt);
+            let seg = to - from;
+            let dist = seg.length();
+            let mut resolved = false; // detonated OR dropped → remove this projectile
+
+            if dist > 1e-6 {
+                // Sweep the segment for a contact. The direction MUST be normalized:
+                // rapier's time-of-impact is measured in multiples of the ray-dir
+                // length, so a raw (length-`dist`) direction with `max_toi = dist`
+                // would only test the first `dist²` metres — a fast/small per-frame
+                // move then tunnels straight through walls and floors. Normalized,
+                // `max_toi = dist` tests the whole segment in real metres.
+                let dir = seg / dist;
+                if let Some(hit) = crate::combat::shooting::cast(&mut self.physics, from, dir, dist, None) {
+                    let p = &mut self.projectiles[i];
+                    if p.spec.bounce > 0.0 && !p.fuse_expired() {
+                        // Bounce off the surface, then decide whether it should keep
+                        // going or settle: a gentle post-bounce speed means it's done
+                        // moving, so rest it in place (stops the resting jitter);
+                        // otherwise reseat just off the surface and keep riding the fuse.
+                        p.bounce_off(hit.normal);
+                        if p.vel.length() < PROJECTILE_REST_SPEED {
+                            p.come_to_rest(hit.point, hit.normal);
+                        } else {
+                            p.pos = hit.point + hit.normal * 0.02;
+                        }
+                    } else {
+                        detonations.push((hit.point, p.spec.explosion));
+                        resolved = true;
+                    }
+                }
+            }
+
+            // Fuse burnout detonates in the air (only if it didn't already contact).
+            if !resolved && self.projectiles[i].fuse_expired() {
+                let p = &self.projectiles[i];
+                detonations.push((p.pos, p.spec.explosion));
+                resolved = true;
+            }
+
+            // A projectile that never hits anything (fuseless rocket into the void)
+            // is dropped without a boom once it's lived too long.
+            if !resolved && self.projectiles[i].age > PROJECTILE_MAX_LIFE {
+                log::info!("projectile expired without contact — dropped");
+                resolved = true;
+            }
+
+            if resolved {
+                self.projectiles.remove(i);
+            } else {
+                i += 1;
+            }
+        }
+
+        for (center, ex) in detonations {
+            self.detonate(center, ex);
+        }
+    }
+
+    /// Detonate a blast of `explosion` at `center`: spawn the VFX burst + play the
+    /// explosion SFX, then apply radius-falloff damage to every actor whose
+    /// centre-mass lies inside the blast sphere — each living hunter AND the player.
+    /// Distance is measured to centre-mass (not feet), so an overhead or point-blank
+    /// burst still bites.
+    fn detonate(&mut self, center: Vec3, explosion: crate::combat::Explosion) {
+        // VFX + sound (a random blast variant — computed before the audio borrow).
+        self.blasts.push(Blast {
+            pos: center,
+            ttl: BLAST_TTL,
+            radius: explosion.radius,
+        });
+        if let Some(audio) = self.audio.as_mut() {
+            audio.play(EXPLOSION_SOUND, EXPLOSION_VOL);
+        }
+        log::info!(
+            "BOOM at ({:.1}, {:.1}, {:.1}) — r={:.1} m, max {:.0} dmg",
+            center.x,
+            center.y,
+            center.z,
+            explosion.radius,
+            explosion.max_damage
+        );
+
+        // Hunters in range (centre-mass distance → falloff damage).
+        for idx in 0..self.enemies.len() {
+            let alive_pos = match self.enemies.get(idx) {
+                Some(inst) if !inst.enemy.is_dead() => inst.enemy.pos,
+                _ => continue,
+            };
+            let center_mass = alive_pos + Vec3::Y * ENEMY_CENTER_Y;
+            let dmg = crate::combat::falloff_damage(&explosion, center_mass.distance(center));
+            if dmg > 0.0 {
+                self.blast_hit_enemy(idx, dmg, center_mass);
+            }
+        }
+
+        // The player, if inside the blast (splash hurts you too — mind your feet).
+        if let Some(ppos) = self.player_pos() {
+            let center_mass = ppos + Vec3::Y * PLAYER_CENTER_Y;
+            let dmg = crate::combat::falloff_damage(&explosion, center_mass.distance(center));
+            if dmg > 0.0 {
+                self.take_player_damage(dmg);
+            }
+        }
+    }
+
+    /// Apply `dmg` blast damage to hunter `idx` (already verified in range). Plays
+    /// the pain + flesh-hit SFX, and on the lethal blast removes the capsule collider
+    /// and plays a death animation; otherwise a torso stagger. A whole-body blast has
+    /// no hit zone, so it uses the torso hurt set. Mirrors the death/hurt tail of
+    /// [`Self::hit_enemy`] without the per-vertex blood paint (the fireball is the
+    /// feedback).
+    fn blast_hit_enemy(&mut self, idx: usize, dmg: f32, at: Vec3) {
+        let _ = at; // reserved for a future directional knockback/blood
+        let (died, collider) = match self.enemies.get_mut(idx) {
+            Some(inst) if !inst.enemy.is_dead() => (inst.enemy.take_damage(dmg), inst.collider),
+            _ => return,
+        };
+
+        let pain = self.rand_below(PAIN_COUNT) + 1;
+        if let Some(audio) = self.audio.as_mut() {
+            audio.play(&format!("sounds/enemies/pain-{pain}.wav"), PAIN_VOL);
+            audio.play("sounds/enemies/bullet-hit.wav", BULLET_HIT_VOL);
+        }
+
+        if died {
+            self.physics.remove_enemy_collider(collider);
+            let death_start = CHAR_HIT_START + anim_set::HIT_CLIPS.len();
+            let pick = self.rand_below(anim_set::DEATH_CLIPS.len());
+            if let Some(inst) = self.enemies.get_mut(idx) {
+                inst.anim.play_once(death_start + pick, 0.2, None, None);
+            }
+            log::info!("HUNTER DOWN (blast, {dmg:.0} dmg)");
+        } else {
+            let clips = anim_set::TORSO_HIT_CLIPS;
+            let name = clips[self.rand_below(clips.len())];
+            let clip = CHAR_HIT_START + anim_set::hit_clip_pos(name).unwrap_or(0);
+            let Some(inst) = self.enemies.get_mut(idx) else { return };
+            let band = band_for_speed(inst.enemy.speed());
+            let dur = inst.anim.clip(clip).map(|c| c.duration).unwrap_or(0.4);
+            inst.anim.play_once(clip, 0.1, Some(band), None);
+            inst.enemy.stun(dur);
+            let hp = inst.enemy.health();
+            log::info!("hunter caught in blast — {dmg:.0} dmg, {hp:.0} hp left");
         }
     }
 
@@ -635,10 +847,13 @@ impl World {
         }
     }
 
-    /// A combined colored mesh of the live hit sparks (bright markers at impact
-    /// points), for the renderer's spark pass. `None` when no sparks are active.
+    /// A combined colored mesh of the live hit sparks (bright impact markers) and the
+    /// in-flight model-less projectiles (the rocket's bright box + trail), for the
+    /// renderer's spark pass. `None` when nothing is active. Explosion fireballs are
+    /// textured billboards (see [`Self::blast_mesh`]); grenade rounds draw their GLB
+    /// (see `enemy_weapon_draws`), so neither appears here.
     pub fn spark_mesh(&self) -> Option<ColoredMesh> {
-        if self.sparks.is_empty() {
+        if self.sparks.is_empty() && self.projectiles.iter().all(|p| !p.spec.model.is_empty()) {
             return None;
         }
         let mut verts: Vec<ColorVertex> = Vec::new();
@@ -648,9 +863,95 @@ impl World {
             let max = s.pos + Vec3::splat(SPARK_HALF);
             push_colored_box(&mut verts, &mut idx, min, max, [1.0, 0.92, 0.35]);
         }
+        // In-flight projectiles WITHOUT a GLB (the rocket): a bright box at the
+        // round's current position plus a short motion trail stepping back along its
+        // travel, so it reads as a streak crossing the room. Model-carrying rounds
+        // (the grenades) draw their GLB via `enemy_weapon_draws` instead.
+        for p in self.projectiles.iter().filter(|p| p.spec.model.is_empty()) {
+            push_colored_box(
+                &mut verts,
+                &mut idx,
+                p.pos - Vec3::splat(PROJECTILE_HALF),
+                p.pos + Vec3::splat(PROJECTILE_HALF),
+                [1.0, 0.9, 0.55], // hot near-white core
+            );
+            let step = -p.vel.normalize_or_zero() * (PROJECTILE_HALF * 1.6);
+            for t in 1..=PROJECTILE_TRAIL {
+                let tf = t as f32 / (PROJECTILE_TRAIL as f32 + 1.0);
+                let c = p.pos + step * t as f32;
+                let h = PROJECTILE_HALF * (1.0 - tf * 0.6); // taper toward the tail
+                push_colored_box(
+                    &mut verts,
+                    &mut idx,
+                    c - Vec3::splat(h),
+                    c + Vec3::splat(h),
+                    [1.0, 0.5 + 0.35 * (1.0 - tf), (0.5 - 0.45 * tf).max(0.05)], // → orange/red
+                );
+            }
+        }
+
+        // (Blasts now render as textured billboards — see `blast_mesh` — not here.)
         Some(ColoredMesh {
             vertices: verts,
             indices: idx,
         })
+    }
+
+    /// The explosion-fireball billboards this frame: one camera-facing quad per live
+    /// blast, playing the baked GoldenEye fireball atlas. Each quad steps through the
+    /// [`BLAST_FRAMES`] atlas frames by the blast's age, scales up, and fades out —
+    /// the signed-off preview pipeline, now drawn additively in world space by the
+    /// renderer's billboard pass. `None` outside HUNT or when no blasts are live.
+    /// Quads face the player using the camera's right/up basis (spherical billboard).
+    pub fn blast_mesh(&self) -> Option<TexturedMesh> {
+        if self.blasts.is_empty() {
+            return None;
+        }
+        // Camera basis from the player's eye/look (same as the fire-ray derivation).
+        let (_eye, fwd) = self.character.as_ref().map(|c| (c.eye(), c.forward()))?;
+        let right = fwd.cross(Vec3::Y).normalize_or_zero();
+        let up = right.cross(fwd).normalize_or_zero();
+        if right == Vec3::ZERO || up == Vec3::ZERO {
+            return None; // looking straight up/down — skip this frame
+        }
+
+        let ease_out = |x: f32| 1.0 - (1.0 - x) * (1.0 - x);
+        let mut m = TexturedMesh::default();
+        for b in &self.blasts {
+            let frac = ((BLAST_TTL - b.ttl) / BLAST_TTL).clamp(0.0, 1.0);
+            let fi = ((frac * BLAST_FRAMES as f32) as usize).min(BLAST_FRAMES - 1);
+            let scale_anim = 0.55 + 0.9 * ease_out(frac);
+            let half = b.radius * BLAST_QUAD_HALF_FRAC * scale_anim;
+            let alpha = if frac < 0.7 { 1.0 } else { (1.0 - (frac - 0.7) / 0.3).max(0.0) };
+
+            // Atlas frame sub-rect (half-texel inset to avoid neighbour-frame bleed).
+            let u0 = fi as f32 / BLAST_FRAMES as f32 + BLAST_UV_INSET_U;
+            let u1 = (fi + 1) as f32 / BLAST_FRAMES as f32 - BLAST_UV_INSET_U;
+            let v0 = BLAST_UV_INSET_V;
+            let v1 = 1.0 - BLAST_UV_INSET_V;
+
+            let c = b.pos;
+            let color = [1.0, 1.0, 1.0, alpha]; // atlas is pre-coloured; alpha = fade
+            let n = [0.0, 0.0, 1.0]; // unused by the billboard shader
+            let base = m.vertices.len() as u32;
+            // TL, TR, BR, BL
+            let corners = [
+                c - right * half + up * half,
+                c + right * half + up * half,
+                c + right * half - up * half,
+                c - right * half - up * half,
+            ];
+            let uvs = [[u0, v0], [u1, v0], [u1, v1], [u0, v1]];
+            for k in 0..4 {
+                m.vertices.push(TexVertex {
+                    pos: corners[k].to_array(),
+                    normal: n,
+                    uv: uvs[k],
+                    color,
+                });
+            }
+            m.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        Some(m)
     }
 }

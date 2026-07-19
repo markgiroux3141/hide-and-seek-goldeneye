@@ -15,11 +15,13 @@
 
 pub mod config;
 pub mod enemy_weapons;
+pub mod explosives;
 pub mod shooting;
 pub mod viewmodel;
 
-pub use config::WeaponStats;
+pub use config::{Explosion, FireKind, MineSpec, MineTrigger, ProjectileSpec, WeaponStats};
 pub use enemy_weapons::{enemy_def_for, EnemyWeaponClass, EnemyWeaponDef};
+pub use explosives::{falloff_damage, Projectile};
 pub use shooting::{cast, HitResult};
 pub use viewmodel::{load_flash, load_gun, ViewModel};
 

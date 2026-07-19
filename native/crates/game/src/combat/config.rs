@@ -19,6 +19,88 @@
 
 use glam::Vec3;
 
+/// A radius-falloff detonation (the shared explosive payload). Damage scales
+/// linearly from `max_damage` at the centre to 0 at `radius` metres (GoldenEye's
+/// blast falls off with distance). Applied to every actor — hunters AND the player
+/// — inside the sphere. There is no source counterpart in the 3DS FPS oracle (its
+/// only "explosion" was a cosmetic prop flash), so these values are authored fresh
+/// for the GoldenEye feel, not ported.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Explosion {
+    /// Blast radius in metres (0 damage at/after this distance).
+    pub radius: f32,
+    /// Peak damage at the blast centre.
+    pub max_damage: f32,
+}
+
+/// A traveling explosive round (rocket / launched grenade / thrown grenade). Spawned
+/// along the aim, integrated each frame, and detonated on contact and/or a fuse. The
+/// three weapon flavours differ ONLY in these numbers — one generic simulation drives
+/// them all.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProjectileSpec {
+    /// Launch speed in m/s along the aim direction.
+    pub speed: f32,
+    /// Downward acceleration in m/s² (0 = flies dead straight, like a rocket;
+    /// >0 = arcs, like a lobbed/thrown grenade).
+    pub gravity: f32,
+    /// Extra upward launch component (m/s) added to the aim direction, so a thrown
+    /// grenade lofts even when aimed level. 0 for the flat-firing rocket.
+    pub loft: f32,
+    /// Seconds until self-detonation. `None` = only detonates on contact (rocket);
+    /// `Some(t)` = detonates on contact OR after `t` seconds, whichever first
+    /// (grenades — so they still blow if they never hit anything).
+    pub fuse: Option<f32>,
+    /// Bounce restitution 0–1. `0` = detonate on the first surface contact (rocket,
+    /// launched grenade on impact); `>0` = bounce off surfaces keeping this fraction
+    /// of speed and ride the fuse out (thrown grenade). Contact still detonates a
+    /// `0`-fuse... n/a; bounce only matters with a fuse.
+    pub bounce: f32,
+    /// The detonation this projectile produces.
+    pub explosion: Explosion,
+    /// Weapon-library name of a GLB to render in flight (e.g. `"Grenade"`), drawn
+    /// tumbling in world space. `""` = no model, so the round shows as the
+    /// procedural bright-box streak instead (the rocket, which has no projectile
+    /// mesh). Any name here must exist in the loaded weapon library.
+    pub model: &'static str,
+}
+
+/// How a placed [`MineSpec`] is set off (Phase 3).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MineTrigger {
+    /// Detonates when any actor comes within the explosion radius (after arming).
+    Proximity,
+    /// Detonates `secs` after arming completes.
+    Timed(f32),
+    /// Detonates only when the player fires the Detonator.
+    Remote,
+}
+
+/// A placeable charge stuck to a surface, armed after a delay, then set off by its
+/// [`MineTrigger`] (Phase 3).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MineSpec {
+    pub trigger: MineTrigger,
+    /// Seconds after placement before the mine becomes live (can't be tripped while
+    /// arming — lets the placer walk clear of a proximity mine).
+    pub arm_time: f32,
+    pub explosion: Explosion,
+}
+
+/// How a weapon delivers damage. `Hitscan` is the instant-ray behaviour of all 19
+/// base guns; the two explosive variants carry their own tuning. Kept on
+/// [`WeaponStats`] so the shared ammo/reload/fire-timing state machine ([`Weapon`])
+/// drives every weapon identically — only the "what happens on the shot" branches.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FireKind {
+    /// Instant ray from the crosshair up to `range` (the original path).
+    Hitscan,
+    /// Spawns a traveling [`ProjectileSpec`] that detonates.
+    Projectile(ProjectileSpec),
+    /// Places a [`MineSpec`] against the aimed surface (Phase 3).
+    Mine(MineSpec),
+}
+
 /// Static per-weapon configuration (JS `WeaponStats`).
 #[derive(Clone, Copy, Debug)]
 pub struct WeaponStats {
@@ -66,6 +148,9 @@ pub struct WeaponStats {
     /// additionally require an edge (a fresh click) — the native port makes that
     /// explicit here.
     pub automatic: bool,
+    /// How the shot is delivered: hitscan (the 19 base guns) or an explosive
+    /// projectile / mine. See [`FireKind`].
+    pub fire_kind: FireKind,
 }
 
 // ─── Shared viewmodel placement ───────────────────────────────────────────────
@@ -108,6 +193,7 @@ pub const PP7: WeaponStats = WeaponStats {
     recoil_z: 0.03,
     recoil_rot: 0.26,
     automatic: false,
+    fire_kind: FireKind::Hitscan,
 };
 
 pub const DD44: WeaponStats = WeaponStats {
@@ -130,6 +216,7 @@ pub const DD44: WeaponStats = WeaponStats {
     recoil_z: 0.03,
     recoil_rot: 0.26,
     automatic: false,
+    fire_kind: FireKind::Hitscan,
 };
 
 pub const MAGNUM: WeaponStats = WeaponStats {
@@ -152,6 +239,7 @@ pub const MAGNUM: WeaponStats = WeaponStats {
     recoil_z: 0.03,
     recoil_rot: 0.26,
     automatic: false,
+    fire_kind: FireKind::Hitscan,
 };
 
 pub const GOLDEN_GUN: WeaponStats = WeaponStats {
@@ -174,6 +262,7 @@ pub const GOLDEN_GUN: WeaponStats = WeaponStats {
     recoil_z: 0.03,
     recoil_rot: 0.26,
     automatic: false,
+    fire_kind: FireKind::Hitscan,
 };
 
 pub const GOLD_PP7: WeaponStats = WeaponStats {
@@ -196,6 +285,7 @@ pub const GOLD_PP7: WeaponStats = WeaponStats {
     recoil_z: 0.03,
     recoil_rot: 0.26,
     automatic: false,
+    fire_kind: FireKind::Hitscan,
 };
 
 pub const SILVER_PP7: WeaponStats = WeaponStats {
@@ -218,6 +308,7 @@ pub const SILVER_PP7: WeaponStats = WeaponStats {
     recoil_z: 0.03,
     recoil_rot: 0.26,
     automatic: false,
+    fire_kind: FireKind::Hitscan,
 };
 
 pub const PP7_SILENCER: WeaponStats = WeaponStats {
@@ -240,6 +331,7 @@ pub const PP7_SILENCER: WeaponStats = WeaponStats {
     recoil_z: 0.03,
     recoil_rot: 0.26,
     automatic: false,
+    fire_kind: FireKind::Hitscan,
 };
 
 // ─── SMGs (automatic) ─────────────────────────────────────────────────────────
@@ -264,6 +356,7 @@ pub const KLOBB: WeaponStats = WeaponStats {
     recoil_z: 0.02,
     recoil_rot: 0.03,
     automatic: true,
+    fire_kind: FireKind::Hitscan,
 };
 
 pub const DK5: WeaponStats = WeaponStats {
@@ -286,6 +379,7 @@ pub const DK5: WeaponStats = WeaponStats {
     recoil_z: 0.02,
     recoil_rot: 0.03,
     automatic: true,
+    fire_kind: FireKind::Hitscan,
 };
 
 pub const DK5_SILENCER: WeaponStats = WeaponStats {
@@ -308,6 +402,7 @@ pub const DK5_SILENCER: WeaponStats = WeaponStats {
     recoil_z: 0.02,
     recoil_rot: 0.03,
     automatic: true,
+    fire_kind: FireKind::Hitscan,
 };
 
 pub const PHANTOM: WeaponStats = WeaponStats {
@@ -330,6 +425,7 @@ pub const PHANTOM: WeaponStats = WeaponStats {
     recoil_z: 0.02,
     recoil_rot: 0.03,
     automatic: true,
+    fire_kind: FireKind::Hitscan,
 };
 
 pub const ZMG: WeaponStats = WeaponStats {
@@ -352,6 +448,7 @@ pub const ZMG: WeaponStats = WeaponStats {
     recoil_z: 0.02,
     recoil_rot: 0.03,
     automatic: true,
+    fire_kind: FireKind::Hitscan,
 };
 
 // ─── Rifles (automatic) ───────────────────────────────────────────────────────
@@ -376,6 +473,7 @@ pub const RCP90: WeaponStats = WeaponStats {
     recoil_z: 0.02,
     recoil_rot: 0.03,
     automatic: true,
+    fire_kind: FireKind::Hitscan,
 };
 
 pub const AR33: WeaponStats = WeaponStats {
@@ -398,6 +496,7 @@ pub const AR33: WeaponStats = WeaponStats {
     recoil_z: 0.02,
     recoil_rot: 0.03,
     automatic: true,
+    fire_kind: FireKind::Hitscan,
 };
 
 /// KF7 Soviet — also the hunter's rifle (see `world`'s `ENEMY_*` overrides, which
@@ -424,6 +523,7 @@ pub const KF7: WeaponStats = WeaponStats {
     recoil_z: 0.02,
     recoil_rot: 0.03,
     automatic: true,
+    fire_kind: FireKind::Hitscan,
 };
 
 // ─── Shotguns ─────────────────────────────────────────────────────────────────
@@ -449,6 +549,7 @@ pub const SHOTGUN: WeaponStats = WeaponStats {
     recoil_z: 0.04,
     recoil_rot: 0.06,
     automatic: false,
+    fire_kind: FireKind::Hitscan,
 };
 
 /// Automatic shotgun — full-auto (JS `AUTO_SHOTGUN`).
@@ -472,6 +573,7 @@ pub const AUTO_SHOTGUN: WeaponStats = WeaponStats {
     recoil_z: 0.04,
     recoil_rot: 0.06,
     automatic: true,
+    fire_kind: FireKind::Hitscan,
 };
 
 // ─── Special ──────────────────────────────────────────────────────────────────
@@ -498,6 +600,7 @@ pub const SNIPER: WeaponStats = WeaponStats {
     recoil_z: 0.02,
     recoil_rot: 0.03,
     automatic: false,
+    fire_kind: FireKind::Hitscan,
 };
 
 /// Moonraker Laser — full-auto, huge mag (JS `LASER`).
@@ -521,6 +624,123 @@ pub const LASER: WeaponStats = WeaponStats {
     recoil_z: 0.02,
     recoil_rot: 0.03,
     automatic: true,
+    fire_kind: FireKind::Hitscan,
+};
+
+// ─── Explosives (projectile) ────────────────────────────────────────────────
+// NEW native weapons: the 3DS FPS oracle shipped these GLBs but never wired them
+// as weapons (no stats, no projectile sim), so the tuning + fire behaviour below
+// are authored fresh for the GoldenEye feel. All three are one generic projectile
+// differing only in `ProjectileSpec` data. Viewmodel placement reuses the shared
+// rifle-class defaults (no tuned `weapon-config.json` entry ever existed) — eyeball
+// + retune later like the base guns were. `damage`/`range` on the stat block are
+// vestigial for projectiles (the `Explosion` carries the real damage); they're set
+// to sane values for the HUD/consistency.
+
+/// Rocket Launcher — the flat, fast, big-blast one. Single-shot, slow reload; the
+/// rocket flies dead straight (no gravity) and detonates on the first contact.
+pub const ROCKET_LAUNCHER: WeaponStats = WeaponStats {
+    name: "Rocket Launcher",
+    fire_cooldown: 1.0,
+    magazine_size: 1,
+    reload_time: 1.5,
+    damage: 200.0,
+    range: 200.0,
+    fire_sound: "sounds/weapons/rocket-launcher-fire.wav", // GE rocket_launcher1 (soundpack)
+    reload_sound: RELOAD_SND,
+    empty_sound: EMPTY_SND,
+    gun_path: "rocket-launcher/gun.glb",
+    muzzle_path: "", // rocket-launcher ships no muzzle.glb
+    model_scale: DEFAULT_SCALE,
+    model_offset: Vec3::new(0.11, -0.13, -0.03),
+    // Big weapon — pushed forward (−z) so it doesn't crowd the view.
+    pivot_offset: Vec3::new(0.0, 0.0, -0.28),
+    muzzle_offset: DEFAULT_MUZZLE,
+    model_rotation: Vec3::new(0.0, PI, 0.0),
+    recoil_z: 0.05,
+    recoil_rot: 0.08,
+    automatic: false,
+    fire_kind: FireKind::Projectile(ProjectileSpec {
+        speed: 40.0,
+        gravity: 0.0,
+        loft: 0.0,
+        fuse: None,
+        bounce: 0.0,
+        explosion: Explosion { radius: 5.0, max_damage: 200.0 },
+        model: "", // no rocket projectile mesh → procedural streak
+    }),
+};
+
+/// Grenade Launcher — lobs a grenade in an arc that detonates on impact (like the
+/// rocket, but arcing), with a short fuse as the fallback if it never lands.
+/// Six-round magazine.
+pub const GRENADE_LAUNCHER: WeaponStats = WeaponStats {
+    name: "Grenade Launcher",
+    fire_cooldown: 0.6,
+    magazine_size: 6,
+    reload_time: 2.0,
+    damage: 150.0,
+    range: 100.0,
+    fire_sound: "sounds/weapons/grenade-launcher-fire.wav", // GE launch1 (soundpack)
+    reload_sound: RELOAD_SND,
+    empty_sound: EMPTY_SND,
+    gun_path: "grenade-launcher/gun.glb",
+    muzzle_path: "grenade-launcher/muzzle.glb",
+    model_scale: DEFAULT_SCALE,
+    model_offset: Vec3::new(0.11, -0.13, -0.05),
+    // Big weapon — pushed forward (−z) so it doesn't crowd the view.
+    pivot_offset: Vec3::new(0.0, 0.0, -0.25),
+    muzzle_offset: DEFAULT_MUZZLE,
+    model_rotation: Vec3::new(0.0, PI, 0.0),
+    recoil_z: 0.04,
+    recoil_rot: 0.06,
+    automatic: false,
+    fire_kind: FireKind::Projectile(ProjectileSpec {
+        speed: 22.0,
+        gravity: 16.0,
+        loft: 2.0,
+        fuse: Some(2.5),
+        bounce: 0.0, // detonate on impact (user call) — the arc still comes from gravity/loft
+        explosion: Explosion { radius: 4.0, max_damage: 150.0 },
+        model: "Grenade", // the launched round is a grenade
+    }),
+};
+
+/// Hand Grenade — thrown by hand in a high arc, bounces, detonates on a longer
+/// fuse. No muzzle flash; each throw pulls the next from reserve.
+pub const GRENADE: WeaponStats = WeaponStats {
+    name: "Grenade",
+    fire_cooldown: 0.8,
+    magazine_size: 1,
+    reload_time: 0.9,
+    damage: 150.0,
+    range: 100.0,
+    fire_sound: "sounds/weapons/empty.wav", // placeholder throw grunt; near-silent
+    reload_sound: RELOAD_SND,
+    empty_sound: EMPTY_SND,
+    gun_path: "grenade/gun.glb",
+    muzzle_path: "",
+    // The grenade GLB is ~3× the gun models, and GoldenEye never shows a held
+    // grenade viewmodel — you only see it once thrown. So shrink it and drop it far
+    // below the view (model_offset.y) to keep it off-screen while equipped; the
+    // thrown round renders separately in world space (see PROJECTILE_MODEL_SCALE).
+    model_scale: DEFAULT_SCALE / 3.0,
+    model_offset: Vec3::new(0.1, -1.2, -0.06),
+    pivot_offset: Vec3::new(0.0, 0.0, -0.1),
+    muzzle_offset: DEFAULT_MUZZLE,
+    model_rotation: Vec3::new(0.0, PI, 0.0),
+    recoil_z: 0.02,
+    recoil_rot: 0.03,
+    automatic: false,
+    fire_kind: FireKind::Projectile(ProjectileSpec {
+        speed: 14.0,
+        gravity: 16.0,
+        loft: 4.0,
+        fuse: Some(3.5),
+        bounce: 0.4,
+        explosion: Explosion { radius: 4.0, max_damage: 150.0 },
+        model: "Grenade", // reuse the equipped grenade GLB as the thrown round
+    }),
 };
 
 /// The player's cycle-order inventory (JS `ALL_WEAPONS`): pistols → PP7 variants →
@@ -533,6 +753,7 @@ pub const WEAPONS: &[WeaponStats] = &[
     RCP90, AR33, KF7, // rifles
     SHOTGUN, AUTO_SHOTGUN, // shotguns
     SNIPER, LASER, // special
+    ROCKET_LAUNCHER, GRENADE_LAUNCHER, GRENADE, // explosives (projectile)
 ];
 
 // NB: the JS `zoomFOV` (ADS/zoom) is deliberately not ported — the native camera

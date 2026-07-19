@@ -485,6 +485,8 @@ impl ApplicationHandler for App {
                         renderer.set_crosshair_offset(crosshair);
                     }
                     renderer.set_spark_mesh(world.spark_mesh().as_ref());
+                    // Explosion fireballs (additive textured billboards, world-space).
+                    renderer.set_blast_mesh(world.blast_mesh().as_ref());
                     // Player Combat P3: the ammo-counter HUD, or the YOU DIED text
                     // when dead (HUNT only; `None` in BUILD).
                     renderer.set_hud_mesh(world.hud_mesh(aspect).as_deref());

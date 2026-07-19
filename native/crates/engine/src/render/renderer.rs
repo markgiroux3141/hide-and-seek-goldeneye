@@ -242,6 +242,13 @@ pub struct Renderer {
     spark_pipeline: wgpu::RenderPipeline,
     spark_mesh: Option<GpuMesh>,
 
+    // Explosion fireballs (explosives): additive camera-facing textured billboards
+    // sampling the baked GoldenEye fireball atlas. Depth-tested (occluded by walls)
+    // but not depth-writing. Mesh rebuilt each frame from the live blasts.
+    blast_pipeline: wgpu::RenderPipeline,
+    blast_atlas_bind: wgpu::BindGroup,
+    blast_mesh: Option<GpuMesh>,
+
     // Breakable door panels — opaque brown; combined mesh, cleared on breach.
     door_pipeline: wgpu::RenderPipeline,
     door_mesh: Option<GpuMesh>,
@@ -1029,6 +1036,92 @@ impl Renderer {
             cache: None,
         });
 
+        // ── Explosion fireball pipeline (explosives): additive camera-facing textured
+        // billboards. group(0)=camera view_proj (quads are built in world space, so no
+        // per-instance basis needed); group(1)=the baked fireball atlas (reuses
+        // char_tex_layout: texture + sampler). Additive + depth-test/no-write mirrors
+        // the muzzle-flash pipeline, so the glow layers correctly over the scene.
+        let billboard_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("billboard-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shader_billboard.wgsl").into()),
+        });
+        let (atlas_w, atlas_h, atlas_rgba) = load_explosion_atlas_rgba();
+        let atlas_tex = upload_rgba_srgb(&device, &queue, atlas_w, atlas_h, &atlas_rgba, "explosion-atlas");
+        let atlas_view = atlas_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("explosion-atlas-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let blast_atlas_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("explosion-atlas-bg"),
+            layout: &char_tex_layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&atlas_view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&atlas_sampler) },
+            ],
+        });
+        let billboard_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("billboard-layout"),
+            bind_group_layouts: &[&camera_layout, &char_tex_layout],
+            push_constant_ranges: &[],
+        });
+        let blast_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("blast-pipeline"),
+            layout: Some(&billboard_layout),
+            vertex: wgpu::VertexState {
+                module: &billboard_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[TexVertex::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &billboard_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                // Depth compare ALWAYS (no occlusion) — the GoldenEye approach for
+                // effect sprites: composite the fireball ON TOP of the scene instead
+                // of occlusion-clipping the flat billboard against adjacent walls/
+                // floors (which slices it). Additive + no depth-write keeps it a glow.
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         // ── Crosshair pipeline: screen-space `+`, no camera, no depth test.
         let overlay_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("overlay-uniform"),
@@ -1338,6 +1431,9 @@ impl Renderer {
             muzzle_visible: false,
             spark_pipeline,
             spark_mesh: None,
+            blast_pipeline,
+            blast_atlas_bind,
+            blast_mesh: None,
             door_pipeline,
             door_mesh: None,
             gizmo_pipeline,
@@ -1759,6 +1855,17 @@ impl Renderer {
         };
     }
 
+    /// Set (or clear) the explosion-fireball billboard mesh (CPU-built camera-facing
+    /// quads for the live blasts). `None`/empty clears it. Rebuilt each frame.
+    pub fn set_blast_mesh(&mut self, mesh: Option<&TexturedMesh>) {
+        self.blast_mesh = match mesh {
+            Some(m) if !m.indices.is_empty() => {
+                Some(GpuMesh::upload_tex(&self.device, &m.vertices, &m.indices))
+            }
+            _ => None,
+        };
+    }
+
     /// Remove the current weapon viewmodel + muzzle (e.g. leaving HUNT).
     pub fn clear_viewmodel(&mut self) {
         self.viewmodel = None;
@@ -2175,6 +2282,18 @@ impl Renderer {
                 }
             }
 
+            // 2.45) Explosion fireballs (additive camera-facing billboards). After the
+            // opaque scene so depth-test occludes them behind nearer walls; additive +
+            // no depth-write so overlapping quads glow. One mesh for all live blasts.
+            if let Some(b) = &self.blast_mesh {
+                rp.set_pipeline(&self.blast_pipeline);
+                rp.set_bind_group(0, &self.camera_bind_group, &[]);
+                rp.set_bind_group(1, &self.blast_atlas_bind, &[]);
+                rp.set_vertex_buffer(0, b.vertex_buf.slice(..));
+                rp.set_index_buffer(b.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..b.index_count, 0, 0..1);
+            }
+
             // 2.5) Breakable door panels (opaque brown).
             if let Some(dm) = &self.door_mesh {
                 rp.set_pipeline(&self.door_pipeline);
@@ -2440,6 +2559,24 @@ fn build_materials(
 /// Load the crosshair reticle PNG (`assets/hud/crosshairs.png`) as RGBA8 from the
 /// runtime asset dir. On any failure, warn + return a magenta 2×2 so the miss is
 /// obvious on screen rather than an invisible crosshair.
+/// Load the baked GoldenEye explosion fireball atlas (8 pre-coloured frames laid
+/// out horizontally, 448×56 RGBA). A magenta fallback makes a missing file obvious.
+fn load_explosion_atlas_rgba() -> (u32, u32, Vec<u8>) {
+    let path = format!("{}/../../assets/vfx/explosion_atlas.png", env!("CARGO_MANIFEST_DIR"));
+    match image::open(&path) {
+        Ok(img) => {
+            let rgba = img.to_rgba8();
+            let (w, h) = rgba.dimensions();
+            log::info!("loaded explosion atlas {w}×{h}");
+            (w, h, rgba.into_raw())
+        }
+        Err(e) => {
+            log::warn!("explosion atlas load failed ({path}): {e}");
+            (2, 2, vec![255, 0, 255, 255].repeat(4))
+        }
+    }
+}
+
 fn load_crosshair_rgba() -> (u32, u32, Vec<u8>) {
     let path = format!("{}/../../assets/hud/crosshairs.png", env!("CARGO_MANIFEST_DIR"));
     match image::open(&path) {

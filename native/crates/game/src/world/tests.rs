@@ -149,6 +149,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn four_shots_kill_the_hunter_then_it_fades_out() {
         let mut world = World::new();
+        world.weapon_index = 0; // pin PP7 (25 dmg hitscan); the default start weapon is dev-set elsewhere
         world.initial_meshes();
         world.toggle_mode(); // HUNT: bake nav + spawn hunter roster
         assert!(!world.enemies.is_empty(), "hunters spawned");
@@ -201,6 +202,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn shooting_the_hunter_damages_it_a_wall_hit_sparks() {
         let mut world = World::new();
+        world.weapon_index = 0; // pin PP7 (hitscan) — the default start weapon is dev-set to the launcher
         world.initial_meshes();
         world.toggle_mode(); // HUNT
 
@@ -383,6 +385,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn hit_zones_scale_damage_by_impact_height() {
         let mut world = World::new();
+        world.weapon_index = 0; // pin PP7 (25 dmg hitscan) — zone multipliers are relative to it
         world.initial_meshes();
         world.toggle_mode(); // HUNT: spawn the roster
         assert!(world.enemies.len() >= 2, "roster spawned at least two hunters");

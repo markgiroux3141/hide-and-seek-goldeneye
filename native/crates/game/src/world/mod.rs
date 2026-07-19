@@ -26,7 +26,7 @@ use engine::geometry::csg_runtime::{
 use crate::enemy::Enemy;
 use rapier3d::prelude::ColliderHandle;
 use engine::platform::input::InputState;
-use engine::render::mesh::{ColorVertex, ColoredMesh, CpuMesh, TexturedMesh};
+use engine::render::mesh::{ColorVertex, ColoredMesh, CpuMesh, TexVertex, TexturedMesh};
 use engine::sim::nav::{self, NavWorld};
 use engine::sim::physics::PhysicsWorld;
 use engine::skeletal::anim::AnimPlayer;
@@ -336,6 +336,63 @@ pub(crate) struct Spark {
 const SPARK_TTL: f32 = 0.12;
 const SPARK_HALF: f32 = 0.02;
 
+/// A live explosion visual (Phase 1 explosives): a short-lived expanding shell of
+/// bright orange embers at a detonation point. Purely cosmetic — the blast damage is
+/// applied once, at detonation, in `world::combat::detonate`. Meant to be replaced
+/// by a ripped GoldenEye fireball sprite later; this procedural burst is the stand-in.
+#[derive(Clone, Copy)]
+pub(crate) struct Blast {
+    pos: Vec3,
+    /// Remaining life (s); the ember shell expands outward + fades as this drains.
+    ttl: f32,
+    /// The blast's damage radius (m) — the shell expands toward it.
+    radius: f32,
+}
+
+/// Explosion-VFX lifetime (s) — the fireball animation plays once over this window.
+/// The blast is a camera-facing additive billboard playing the baked GoldenEye
+/// fireball atlas ([`BLAST_FRAMES`] frames): it steps through the frames while the
+/// quad scales up and fades out (matching the signed-off preview).
+const BLAST_TTL: f32 = 0.5;
+/// Number of frames in the fireball atlas (horizontal strip).
+const BLAST_FRAMES: usize = 8;
+/// Billboard quad half-extent as a fraction of the blast radius, at animation
+/// scale 1. The on-screen fireball peaks a bit under the full damage radius so it
+/// reads as a punchy fireball, not a room-filling wall.
+const BLAST_QUAD_HALF_FRAC: f32 = 0.42;
+/// Half-texel UV inset so linear filtering never samples the neighbouring atlas
+/// frame (atlas is `BLAST_FRAMES`×56 wide, 56 tall).
+const BLAST_UV_INSET_U: f32 = 0.5 / (BLAST_FRAMES as f32 * 56.0);
+const BLAST_UV_INSET_V: f32 = 0.5 / 56.0;
+/// In-flight projectile marker: the bright box half-extent (m) drawn at the round's
+/// current position, plus its short motion trail length (segments behind it).
+const PROJECTILE_HALF: f32 = 0.1;
+const PROJECTILE_TRAIL: usize = 4;
+/// The detonation sound — the authentic GoldenEye blast SFX used for every
+/// explosive (soundpack `blast14`, converted to WAV). Preloaded in `attach_audio`
+/// so the first blast never hitches. Plus the shared blast volume.
+pub(crate) const EXPLOSION_SOUND: &str = "sounds/weapons/explosion.wav";
+pub(crate) const EXPLOSION_VOL: f32 = 0.9;
+/// Approx centre-mass height above the feet (m) for the blast distance test — the
+/// blast measures to the actor's middle, not its feet, so an overhead burst still
+/// bites. One each for the ~1.44 m hunter and the player capsule.
+const ENEMY_CENTER_Y: f32 = 0.7;
+const PLAYER_CENTER_Y: f32 = 0.9;
+/// A projectile that never contacts anything is dropped (no detonation) after this
+/// long (s), so a fuseless rocket fired into open sky can't leak forever.
+const PROJECTILE_MAX_LIFE: f32 = 6.0;
+/// A bouncing projectile whose post-bounce speed drops below this (m/s) settles onto
+/// the surface and waits out its fuse (stops the perpetual resting jitter).
+const PROJECTILE_REST_SPEED: f32 = 1.5;
+/// World scale for an in-flight projectile GLB (e.g. the thrown grenade). The
+/// grenade GLB is authored ~3× the gun models, so a third of [`CHAR_SCALE`] lands it
+/// at a believable hand-thrown grenade size (user call 2026-07-17).
+const PROJECTILE_MODEL_SCALE: f32 = CHAR_SCALE / 3.0;
+/// Tumble rates (rad/s) about X and Y for a flying projectile GLB, so it spins as it
+/// travels. Frozen once the projectile comes to rest.
+const PROJECTILE_SPIN_X: f32 = 9.0;
+const PROJECTILE_SPIN_Y: f32 = 6.0;
+
 /// Which opening the crosshair tool cuts. A `Door` is a fixed 3×7 wall opening
 /// that becomes breakable at HUNT (frame marked `door`); a `Hole` is an
 /// arbitrary-size opening in any face (walls, floor, or ceiling), not breakable.
@@ -635,6 +692,12 @@ pub struct World {
     /// P2: live hit sparks — a short-lived bright marker at each impact point, so
     /// wall hits read at the right spot. Decayed each frame in HUNT.
     sparks: Vec<Spark>,
+    /// Explosives: live projectiles in flight (rocket / launched grenade / thrown
+    /// grenade). Advanced + collision-swept each frame in `explosives_step`; a
+    /// contact or fuse expiry detonates them. Empty in BUILD.
+    projectiles: Vec<crate::combat::Projectile>,
+    /// Explosives: live explosion VFX bursts, decayed each frame.
+    blasts: Vec<Blast>,
     /// GoldenEye free-aim crosshair offset in aim space (see `AIM_MAX_RANGE`).
     /// Moves while RMB is held (HUNT), springs back to center on release. Drives
     /// the crosshair position, the gun tilt, and the fire-ray direction. 0 = center.
@@ -830,7 +893,12 @@ impl World {
             .iter()
             .map(|&cfg| Weapon::new(cfg))
             .collect();
-        let weapon_index = 0;
+        // Start on the Rocket Launcher (dev convenience while building explosives —
+        // saves cycling the whole arsenal; set back to 0 for PP7 when done).
+        let weapon_index = crate::combat::config::WEAPONS
+            .iter()
+            .position(|w| w.name == "Rocket Launcher")
+            .unwrap_or(0);
         let (gun_model, muzzle_model) = load_weapon_models(weapons[weapon_index].config());
 
         // P5: the GoldenEye radial health HUD graphic (processed once into angle/
@@ -923,6 +991,8 @@ impl World {
             switch_swapped: false,
             models_dirty: false,
             sparks: Vec::new(),
+            projectiles: Vec::new(),
+            blasts: Vec::new(),
             aim_x: 0.0,
             aim_y: 0.0,
             aiming: false,
