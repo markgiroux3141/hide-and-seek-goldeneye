@@ -246,8 +246,10 @@ impl World {
                             "nav baked in {bake_ms:.2} ms ({} cells)",
                             nav.cell_count()
                         );
-                        let spawns = pick_spread_spawns(&nav, feet, ENEMY_ROSTER.len());
-                        self.spawn_roster(&spawns, feet);
+                        if self.spawn_enemies {
+                            let spawns = pick_spread_spawns(&nav, feet, ENEMY_ROSTER.len());
+                            self.spawn_roster(&spawns, feet);
+                        }
                         // Arm breakable doors as a live overlay on the frozen grid
                         // (panel colliders + nav cost). This is the only per-hunt
                         // dynamic layer; the grid itself never re-bakes.

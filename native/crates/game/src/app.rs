@@ -169,6 +169,10 @@ impl ApplicationHandler for App {
 
         // Build the world, upload its initial region meshes.
         let mut world = World::new();
+        // Dev: don't spawn hunters on HUNT while iterating on explosives — the full
+        // roster guns the player down before anything can be tested. Re-enable
+        // (delete this line) to bring the hunters back.
+        world.set_spawn_enemies(false);
         for rm in world.initial_meshes() {
             renderer.set_region_textured(rm.id, &rm.mesh);
         }

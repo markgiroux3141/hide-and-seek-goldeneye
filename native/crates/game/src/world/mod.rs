@@ -626,6 +626,11 @@ pub struct World {
     /// spawn cell. Each carries its own mixer/weapon/collider; all share
     /// [`Self::char_model`] geometry. Empty in BUILD.
     enemies: Vec<EnemyInstance>,
+    /// Whether a G→HUNT transition spawns the [`ENEMY_ROSTER`]. Defaults to `true`
+    /// (so tests and the normal game get hunters); the app flips it off as a dev
+    /// convenience while iterating on explosives (see `set_spawn_enemies`), so a
+    /// hunt starts empty and you aren't gunned down before you can test.
+    spawn_enemies: bool,
     /// The shared skinned-character geometry (one GLB) rendered for every hunter
     /// (and the BUILD demo viewer). `None` if the asset failed to load.
     char_model: Option<SkinnedModel>,
@@ -988,6 +993,7 @@ impl World {
             character: None,
             nav: None,
             enemies: Vec::new(),
+            spawn_enemies: true,
             char_model,
             char_anim_template,
             char_anim,
@@ -1060,6 +1066,13 @@ impl World {
             next_run_id: 1,
             gizmo_drag: None,
         }
+    }
+
+    /// Enable/disable spawning the [`ENEMY_ROSTER`] on G→HUNT (dev convenience). Off
+    /// = hunts start with no hunters, so you can test explosives without being shot.
+    /// On by default; the app turns it off while iterating on explosives.
+    pub fn set_spawn_enemies(&mut self, on: bool) {
+        self.spawn_enemies = on;
     }
 
     /// Evaluate every region once, set colliders, and return the meshes so the
