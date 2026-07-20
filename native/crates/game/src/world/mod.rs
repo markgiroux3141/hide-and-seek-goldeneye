@@ -122,6 +122,11 @@ pub(crate) const AIM_RAMP: f32 = 9.0;
 /// selection off the RAW value thrashes idle↔jog, restarting the crossfade every
 /// few frames (visible leg stutter). Easing it kills the flip.
 pub(crate) const LOCO_SMOOTH: f32 = 6.0;
+/// Idle deadzone (m/s): a smoothed locomotion speed below this snaps to 0 so the
+/// hunter settles to the IDLE band instead of the WALK band. Without it the
+/// exponential decay lingers as a tiny positive value for ~15 s and
+/// [`band_for_speed`] (walk when speed > 0) keeps the legs walking in place.
+pub(crate) const LOCO_IDLE_EPS: f32 = 0.35;
 /// Aim reaches to this fraction of full arm length. Near 1.0 the elbow's
 /// law-of-cosines interior angle approaches 180° → the arm holds nearly straight
 /// out (how a guard sights a pistol); lower values leave a bent elbow. Kept just

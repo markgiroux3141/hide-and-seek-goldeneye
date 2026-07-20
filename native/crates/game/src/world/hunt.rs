@@ -136,6 +136,11 @@ impl World {
             // a leg stutter. Band selection uses the eased value.
             inst.anim_speed +=
                 (inst.enemy.speed() - inst.anim_speed) * (1.0 - (-dt * LOCO_SMOOTH).exp());
+            // Snap the decay tail to a hard stop so `band_for_speed` (walk on any
+            // speed > 0) settles to IDLE instead of walking in place for seconds.
+            if inst.anim_speed < LOCO_IDLE_EPS {
+                inst.anim_speed = 0.0;
+            }
 
             // Death fade: hold the corpse opaque THROUGH the death animation, then
             // ramp opacity 1→0 once the clip has clamped (`oneshot_finished`).
@@ -218,7 +223,9 @@ impl World {
         let Some((i, d)) = best else { return };
         let inst = &self.enemies[i];
         let spd = inst.enemy.speed();
-        let band = band_for_speed(spd);
+        // Band as ACTUALLY selected (from the smoothed speed), not the raw speed —
+        // the raw-speed band masked the walk-in-place decay tail last time.
+        let band = band_for_speed(inst.anim_speed);
         let h = inst.enemy.heading();
         let yaw = h.x.atan2(h.z);
         let fire = inst
@@ -228,7 +235,10 @@ impl World {
         // Measure the actual arm the IK produced: how far the hand reaches from
         // the shoulder (as a fraction of full arm length) and the elbow interior
         // angle. reach≈0.97 / elbow≈150°+ = straight; reach≈0.7 / elbow≈90° = bent.
-        let (reach_frac, elbow_deg) = match (self.enemy_arm, inst.final_pose.as_ref(), self.char_model.as_ref()) {
+        // Also measure the rendered right foot so we can see if the LEGS actually
+        // move while "stopped" (foot pos changing frame-to-frame = walking legs),
+        // and log the clip the mixer is really playing vs the band we requested.
+        let (reach_frac, elbow_deg, foot) = match (self.enemy_arm, inst.final_pose.as_ref(), self.char_model.as_ref()) {
             (Some(arm), Some(fp), Some(m)) => {
                 let g = fp.joint_global_transforms(&m.skeleton);
                 let sa = g[arm.root].to_scale_rotation_translation().2;
@@ -242,16 +252,25 @@ impl World {
                     .clamp(-1.0, 1.0)
                     .acos()
                     .to_degrees();
-                (frac, elbow)
+                let foot = m
+                    .skeleton
+                    .index_of("Bone_14")
+                    .map(|f| g[f].to_scale_rotation_translation().2)
+                    .unwrap_or(Vec3::ZERO);
+                (frac, elbow, foot)
             }
-            _ => (0.0, 0.0),
+            _ => (0.0, 0.0, Vec3::ZERO),
         };
         self.anim_dbg_frame = self.anim_dbg_frame.wrapping_add(1);
         log::info!(
-            "[anim {:>4}] e{i} {:?} d={d:.2} spd={spd:.1} band={band} yaw={yaw:+.3} aimw={:.2} fire={fire} reach={reach_frac:.2} elbow={elbow_deg:.0} pos=({:.2},{:.2})",
+            "[anim {:>4}] e{i} {:?} d={d:.2} spd={spd:.1} band={band} clip={} yaw={yaw:+.3} aimw={:.2} fire={fire} reach={reach_frac:.2} elbow={elbow_deg:.0} foot=({:.0},{:.0},{:.0}) pos=({:.2},{:.2})",
             self.anim_dbg_frame,
             inst.enemy.state(),
+            inst.anim.current_clip(),
             inst.aim_weight,
+            foot.x,
+            foot.y,
+            foot.z,
             inst.enemy.pos.x,
             inst.enemy.pos.z,
         );
