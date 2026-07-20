@@ -436,14 +436,16 @@ const PROJECTILE_SPIN_Y: f32 = 6.0;
 
 // ─── Mines (see `world::combat`) ──────────────────────────────────────────────
 /// How far off the struck surface the mine sits (m), so it doesn't z-fight or clip.
-const MINE_SURFACE_OFFSET: f32 = 0.05;
+/// Kept generous so the (now larger) mine's back face clears the surface it's on —
+/// too small and the mesh dips into the wall/floor and z-fights or vanishes.
+const MINE_SURFACE_OFFSET: f32 = 0.15;
 /// Max seconds a thrown mine flies before it's stuck in place where it is (fallback
 /// so a toss into open space / the void can't fly forever without attaching).
 const MINE_MAX_FLIGHT: f32 = 5.0;
 /// World scale for a thrown/stuck mine GLB. The mine meshes are gun-sized in the
-/// weapon library, so [`CHAR_SCALE`] lands them at a believable charge size in world
-/// space (retune by eye if they read too big/small).
-const MINE_MODEL_SCALE: f32 = CHAR_SCALE;
+/// weapon library; [`CHAR_SCALE`] read too small in world, so bump 2.5× to land them
+/// at a believable charge size (retune by eye if they read too big/small).
+const MINE_MODEL_SCALE: f32 = CHAR_SCALE * 2.5;
 /// The mine's "attach" sound, played when a mine sticks to a surface (soundpack
 /// `attach_mine`, converted to WAV). Plus its volume.
 pub(crate) const MINE_PLACE_SOUND: &str = "sounds/weapons/mine-place.wav";
