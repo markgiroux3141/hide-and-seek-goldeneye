@@ -88,6 +88,10 @@ const ATTACK_RANGE: f32 = 6.0; // m
 /// then holds — so it fires *while moving* (run-and-gun) instead of freezing at
 /// first sight of the player. Firing is a timer now, so movement + shooting mix.
 const ATTACK_STANDOFF: f32 = 3.0; // m
+/// Hysteresis around the standoff: once holding, the hunter only resumes closing
+/// if the player pulls beyond `standoff + this`. Prevents the micro-step-in-and-out
+/// at the exact boundary that kept the legs walking in place.
+const STANDOFF_HYST: f32 = 1.2; // m
 const ALERT_DURATION: f32 = 0.5; // s reaction delay
 const COOLDOWN_DURATION: f32 = 1.5; // s between fire bursts
 
@@ -134,6 +138,9 @@ pub struct Enemy {
     cooldown_timer: f32,
     /// A fire burst has been requested this attack entry (JS `isAttacking`).
     is_attacking: bool,
+    /// In `Attack`, whether the hunter has reached its standoff and is holding
+    /// position (feet planted). Hysteresis flag — see [`STANDOFF_HYST`].
+    holding: bool,
     /// The fire animation has actually started playing (JS `fireAnimStarted`) —
     /// so we detect its *completion* (not just its not-yet-started frames).
     fire_started: bool,
@@ -179,6 +186,7 @@ impl Enemy {
             chase_timer: 0.0,
             cooldown_timer: 0.0,
             is_attacking: false,
+            holding: false,
             fire_started: false,
             search_target: None,
             last_known: None,
@@ -394,6 +402,7 @@ impl Enemy {
                     self.face(player_feet);
                     self.state = AiState::Attack;
                     self.is_attacking = false;
+                    self.holding = false;
                     self.path.clear();
                 } else {
                     // Path to where we last saw the player (updated to the live
@@ -415,12 +424,21 @@ impl Enemy {
                     self.state = AiState::Chase;
                     self.chase_timer = 0.0;
                     self.is_attacking = false;
+                    self.holding = false;
                 } else {
-                    // Advance-fire: close on the player down to the standoff, then hold.
-                    // Either way we face the player so the procedural aim points the gun
-                    // at them; `move_toward` marks `moving` so the legs run.
-                    if dist > ATTACK_STANDOFF {
-                        self.move_toward(dt, player_feet, nav);
+                    // Advance-fire with a hold dead-band: close to the standoff, then
+                    // plant the feet and HOLD until the player pulls beyond
+                    // standoff+hyst. This stops the micro-step-in-and-out at the exact
+                    // boundary that left the legs walking in place. Always face the
+                    // player so the procedural aim points the gun at them.
+                    if self.holding {
+                        if dist > ATTACK_STANDOFF + STANDOFF_HYST {
+                            self.holding = false;
+                        }
+                    } else if dist > ATTACK_STANDOFF {
+                        self.move_toward(dt, player_feet, nav); // marks `moving` → legs run
+                    } else {
+                        self.holding = true;
                     }
                     self.face(player_feet);
                     // Request a fire burst once per attack entry.
@@ -449,6 +467,7 @@ impl Enemy {
                     if dist <= ATTACK_RANGE && los {
                         self.state = AiState::Attack;
                         self.is_attacking = false;
+                        self.holding = false;
                     } else if dist <= DETECTION_RANGE {
                         self.state = AiState::Chase;
                         self.chase_timer = 0.0;
