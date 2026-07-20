@@ -18,6 +18,7 @@
 
 use csg::{csg_subtract, csg_union, polygons_to_mesh, Polygon};
 use glam::Vec3;
+use serde::{Deserialize, Serialize};
 
 use crate::geometry::geom;
 use crate::render::mesh::{CpuMesh, TexturedMesh};
@@ -32,14 +33,14 @@ pub const WORLD_SCALE: f32 = 0.25;
 pub const WALL_THICKNESS: f32 = 1.0;
 
 /// A brush is either additive (contributes solid) or subtractive (carves).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Op {
     Add,
     Subtract,
 }
 
 /// The three axes a brush face can face along.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Axis {
     X,
     Y,
@@ -108,7 +109,7 @@ impl Axis {
 
 /// Which end of an axis a face sits on: `Min` (the `x`/`y`/`z` corner) or `Max`
 /// (corner + dimension).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Side {
     Min,
     Max,
@@ -124,7 +125,7 @@ pub enum Side {
 /// bake, `World::build_doors` scans for these to place a breakable panel + a nav
 /// overlay over the opening they cut. It carries no CSG meaning (a doorframe is a
 /// plain subtract).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Brush {
     pub id: u32,
     pub op: Op,
@@ -134,20 +135,29 @@ pub struct Brush {
     pub w: f32,
     pub h: f32,
     pub d: f32,
+    #[serde(default)]
     pub door: bool,
     /// Marks a door/hole **opening frame** carve (JS `isDoorframe`/`isHoleFrame`):
     /// its interior reveals texture as the tunnel zones (5/6) instead of room
     /// walls. Set on both door and hole frames in `World::cut_opening`; `door`
     /// distinguishes the two (doorframe floor → 6, hole-frame floor → 5).
+    #[serde(default)]
     pub frame: bool,
     /// WT-space floor anchor for this brush's wall texture (JS `BrushDef.floorY`,
     /// recovered per-triangle via `uv_zones` face-map). Defaults to `y`; a room's
     /// walls anchor to its floor, a stair pit's walls to the pit floor, so a
     /// down-stair no longer shifts the whole level's wall texture.
+    #[serde(default)]
     pub floor_y: f32,
     /// Texture scheme index (JS `BrushDef.schemeKey`), set per room by the
     /// number-key flood-fill retexture. Defaults to [`crate::render::textures::DEFAULT_SCHEME`].
+    #[serde(default = "default_scheme")]
     pub scheme: usize,
+}
+
+/// serde default for [`Brush::scheme`] on a file that predates the field.
+fn default_scheme() -> usize {
+    crate::render::textures::DEFAULT_SCHEME
 }
 
 impl Brush {
@@ -267,7 +277,7 @@ impl Brush {
 //      membership) — the `collectExtraSolids` port.
 
 /// Which way a staircase runs from the selected wall face.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StairDir {
     /// Steps descend below the floor into a lower corridor (JS `'down'`).
     Down,
@@ -280,7 +290,7 @@ pub enum StairDir {
 /// the horizontal span along the in-plane `u_axis`, `floor`/`ceil` the vertical
 /// extent, and `direction`/`step_count` the run. Enough to rebuild both the tread
 /// mesh and the nav solid boxes deterministically (matches the JS oracles).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct StairDesc {
     pub direction: StairDir,
     pub step_count: u32,

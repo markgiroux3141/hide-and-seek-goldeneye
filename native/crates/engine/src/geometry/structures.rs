@@ -19,6 +19,8 @@
 //! Coordinate spaces match the rest of the engine: fields are **world tiles
 //! (WT)**; geometry is emitted in **meters** (WT × [`WORLD_SCALE`]).
 
+use serde::{Deserialize, Serialize};
+
 use crate::geometry::csg_runtime::{Brush, Op};
 use crate::render::uv_zones::ZonedBuilder;
 
@@ -31,7 +33,7 @@ const RAILING_INSET: f32 = 0.05;
 
 /// The four horizontal edges of a platform (JS edge keys). The outward normal
 /// of `XMin` is −X, `XMax` is +X, etc.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Edge {
     XMin,
     XMax,
@@ -57,7 +59,7 @@ impl Edge {
 /// One end of a stair-run. A platform end is pinned to an edge at a 0..1
 /// `offset` along it; a ground end is a free WT point (JS `anchorFrom`/`anchorTo`
 /// — `{edge, offset}` vs `{x, y, z}`).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub enum Anchor {
     Edge { edge: Edge, offset: f32 },
     Ground { x: f32, y: f32, z: f32 },
@@ -67,7 +69,7 @@ pub enum Anchor {
 /// min-corner, `y` the **top** surface, `size_x`/`size_z` the footprint,
 /// `thickness` the slab depth. `grounded` extends the underside down to the
 /// floor beneath it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Platform {
     pub id: u32,
     pub x: f32,
@@ -149,7 +151,7 @@ impl Platform {
 /// A flight of stairs connecting two platforms, or a platform to the ground, or
 /// two ground points (JS `StairRun`). Anchors are auto-centered on platform
 /// edges (offset 0.5) when placed via the connect tool.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct StairRun {
     pub id: u32,
     pub from_platform: Option<u32>,

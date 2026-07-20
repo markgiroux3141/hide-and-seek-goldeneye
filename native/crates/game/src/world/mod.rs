@@ -43,6 +43,7 @@ mod editing;
 mod geom;
 mod hunt;
 mod lifecycle;
+mod persist;
 mod pick;
 mod tools;
 #[cfg(test)]

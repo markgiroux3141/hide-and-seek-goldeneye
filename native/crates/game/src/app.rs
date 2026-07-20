@@ -105,6 +105,37 @@ impl App {
         }
     }
 
+    /// Save the current editable level to numbered quick-slot `slot`.
+    fn save_slot(&mut self, slot: u8) {
+        let Some(world) = self.world.as_ref() else {
+            return;
+        };
+        match world.save_slot(slot) {
+            Ok(path) => log::info!("saved level → slot {slot} ({})", path.display()),
+            Err(e) => log::warn!("save to slot {slot} failed: {e}"),
+        }
+    }
+
+    /// Load numbered quick-slot `slot`, replacing the editable geometry and
+    /// re-uploading every region + structures mesh (stale ones cleared).
+    fn load_slot(&mut self, slot: u8) {
+        let meshes = match self.world.as_mut() {
+            Some(world) => match world.load_slot(slot) {
+                Ok(meshes) => meshes,
+                Err(e) => {
+                    log::warn!("load slot {slot} failed: {e}");
+                    return;
+                }
+            },
+            None => return,
+        };
+        for rm in &meshes {
+            self.upload(rm);
+        }
+        // Selection was cleared by the load — drop any lingering highlight.
+        self.refresh_highlight();
+    }
+
     /// Push the current selection's highlight quad to the renderer.
     fn refresh_highlight(&mut self) {
         if let (Some(world), Some(renderer)) = (self.world.as_ref(), self.renderer.as_mut()) {
@@ -152,6 +183,21 @@ fn digit_char(code: KeyCode) -> Option<char> {
         KeyCode::Digit7 | KeyCode::Numpad7 => '7',
         KeyCode::Digit8 | KeyCode::Numpad8 => '8',
         KeyCode::Digit9 | KeyCode::Numpad9 => '9',
+        _ => return None,
+    })
+}
+
+/// Map a function key F1–F8 to a level quick-slot number 1–8.
+fn slot_for_fkey(code: KeyCode) -> Option<u8> {
+    Some(match code {
+        KeyCode::F1 => 1,
+        KeyCode::F2 => 2,
+        KeyCode::F3 => 3,
+        KeyCode::F4 => 4,
+        KeyCode::F5 => 5,
+        KeyCode::F6 => 6,
+        KeyCode::F7 => 7,
+        KeyCode::F8 => 8,
         _ => return None,
     })
 }
@@ -210,7 +256,7 @@ impl ApplicationHandler for App {
             world.attach_audio(audio);
         }
         log::info!(
-            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  L=char walk/jog/run  Z=fire N=hit M=death  G=HUNT  [HUNT: click=fire  RMB=aim  R=reload  Q=weapon  F=detonate mines]"
+            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  F1-F8=load level slot  Ctrl+F1-F8=save level slot  L=char walk/jog/run  Z=fire N=hit M=death  G=HUNT  [HUNT: click=fire  RMB=aim  R=reload  Q=weapon  F=detonate mines]"
         );
 
         window.request_redraw();
@@ -603,6 +649,19 @@ impl App {
                 let grid = !r.is_grid_mode();
                 r.set_grid_mode(grid);
                 log::info!("view: {}", if grid { "grid" } else { "textured" });
+            }
+            return;
+        }
+        // Level save/load quick-slots (works grabbed or not, like the grid
+        // toggle): F1–F8 LOAD slot 1–8; Ctrl+F1–F8 SAVE slot 1–8. Saving keeps
+        // the current editable geometry; loading replaces it (BUILD only).
+        if let Some(slot) = slot_for_fkey(code) {
+            let ctrl = self.input.key_down(KeyCode::ControlLeft)
+                || self.input.key_down(KeyCode::ControlRight);
+            if ctrl {
+                self.save_slot(slot);
+            } else {
+                self.load_slot(slot);
             }
             return;
         }
