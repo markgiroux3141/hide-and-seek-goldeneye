@@ -116,6 +116,12 @@ pub(crate) const ENEMY_RECOIL_LAYER: usize = 1;
 /// How fast (1/s) a hunter's aim weight eases toward its target (0 ↔ 1), so the
 /// arm raises/lowers into aim smoothly instead of snapping.
 pub(crate) const AIM_RAMP: f32 = 9.0;
+/// Low-pass rate (1/s) for the locomotion speed that drives band selection. The
+/// AI's `speed()` is binary (0 or chase-speed) and toggles frame-to-frame when a
+/// hunter micro-steps near a distance boundary (e.g. the attack standoff); band
+/// selection off the RAW value thrashes idle↔jog, restarting the crossfade every
+/// few frames (visible leg stutter). Easing it kills the flip.
+pub(crate) const LOCO_SMOOTH: f32 = 6.0;
 /// Aim reaches to this fraction of full arm length (kept < 1 so the IK never
 /// slams the arm dead-straight while tracking).
 pub(crate) const AIM_REACH_FRAC: f32 = 0.9;
@@ -749,6 +755,10 @@ pub(crate) struct EnemyInstance {
     pub stack: LayeredAnimator,
     /// Eased aim weight (0 = arm follows the clip, 1 = full IK aim at player).
     pub aim_weight: f32,
+    /// Low-passed locomotion speed (m/s) for band selection — smooths the AI's
+    /// binary `speed()` so the walk/jog/run band doesn't flip on frame-to-frame
+    /// jitter. See [`LOCO_SMOOTH`].
+    pub anim_speed: f32,
     /// Cached final pose after the stack this frame — the source for both the
     /// skinning matrices and the hand-bone weapon transform (so the gun follows
     /// the aimed arm). `None` until the first `advance_animation`.

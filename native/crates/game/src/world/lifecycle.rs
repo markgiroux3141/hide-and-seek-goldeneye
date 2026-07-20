@@ -350,6 +350,7 @@ impl World {
                 blood: vec![1.0f32; vert_count * 3],
                 stack: arm.map(|a| a.build_stack()).unwrap_or_default(),
                 aim_weight: 0.0,
+                anim_speed: 0.0,
                 final_pose: None,
             });
             log::info!(

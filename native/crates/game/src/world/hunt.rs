@@ -131,6 +131,13 @@ impl World {
         let skeleton = self.char_model.as_ref().map(|m| &m.skeleton);
 
         for inst in &mut self.enemies {
+            // Low-pass the locomotion speed so a hunter micro-stepping near a
+            // distance boundary (e.g. the attack standoff) doesn't flip the band
+            // idle↔jog every few frames — that restarts the crossfade and reads as
+            // a leg stutter. Band selection uses the eased value.
+            inst.anim_speed +=
+                (inst.enemy.speed() - inst.anim_speed) * (1.0 - (-dt * LOCO_SMOOTH).exp());
+
             // Death fade: hold the corpse opaque THROUGH the death animation, then
             // ramp opacity 1→0 once the clip has clamped (`oneshot_finished`).
             if inst.enemy.is_dead() {
@@ -140,7 +147,7 @@ impl World {
                 }
             } else if !inst.anim.is_playing_oneshot() {
                 // Not mid fire/hit → keep the locomotion band in sync with speed.
-                inst.anim.play(band_for_speed(inst.enemy.speed()), 0.15);
+                inst.anim.play(band_for_speed(inst.anim_speed), 0.15);
             }
             inst.anim.update(dt);
 
