@@ -146,19 +146,14 @@ pub(crate) struct EnemyArm {
     root: usize,
     mid: usize,
     end: usize,
-    /// Shoulder (root) origin in model space at the idle pose — the aim ray's
-    /// origin and the orbit center.
-    shoulder: Vec3,
-    /// Total arm reach (model units): |mid-root| + |end-mid|.
-    reach: f32,
     /// Elbow pole hint (model space), used only when the chain goes straight.
     pole: Vec3,
 }
 
 impl EnemyArm {
-    /// Resolve the `root→mid→end` chain from the hand bone and measure the rest
-    /// geometry off a standing (idle) pose. `None` if the chain or idle clip is
-    /// missing.
+    /// Resolve the `root→mid→end` chain from the hand bone off a standing (idle)
+    /// pose. `None` if the chain or idle clip is missing. (Reach/extension are
+    /// computed live from the current pose by the IK layer's reach-fraction mode.)
     fn resolve(model: &SkinnedModel, idle: &clip::AnimationClip) -> Option<Self> {
         let sk = &model.skeleton;
         let end = sk.index_of(RIGHT_HAND_BONE)?;
@@ -167,15 +162,10 @@ impl EnemyArm {
         let (t, r, s) = idle.pose_trs(0.0, sk);
         let g = Pose::from_trs(t, r, s).joint_global_transforms(sk);
         let a = g[root].to_scale_rotation_translation().2;
-        let b = g[mid].to_scale_rotation_translation().2;
-        let c = g[end].to_scale_rotation_translation().2;
-        let reach = (b - a).length() + (c - b).length();
         Some(EnemyArm {
             root,
             mid,
             end,
-            shoulder: a,
-            reach,
             pole: a + Vec3::new(0.0, -1.0, 0.5),
         })
     }
@@ -188,6 +178,7 @@ impl EnemyArm {
             mid: self.mid,
             end: self.end,
             target: Vec3::ZERO,
+            reach_frac: AIM_REACH_FRAC,
             pole: self.pole,
             weight: 0.0,
             enabled: true,

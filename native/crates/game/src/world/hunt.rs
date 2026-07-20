@@ -126,7 +126,6 @@ impl World {
         // it doesn't clash with the per-hunter `&mut` borrow.
         let aim_point = self.player_pos().map(|p| p + Vec3::Y * PLAYER_AIM_Y);
         let feet_off = self.char_feet_offset;
-        let arm = self.enemy_arm; // Copy — shared arm geometry for every hunter
         // Skeleton borrow is a DISJOINT field from `enemies`, so both can be held.
         let skeleton = self.char_model.as_ref().map(|m| &m.skeleton);
 
@@ -168,16 +167,16 @@ impl World {
             // Exponential ease toward the target weight (frame-rate independent).
             inst.aim_weight += (target_w - inst.aim_weight) * (1.0 - (-dt * AIM_RAMP).exp());
 
-            // Aim target in model space: point the arm from the shoulder toward the
-            // player, at a fraction of full reach (the muzzle rides the hand, so the
-            // gun ends up pointing at the player).
-            if let (Some(ap), Some(a)) = (aim_point, arm) {
+            // Aim at the player in model space. The IK layer (reach-fraction mode)
+            // takes this as a far aim point and reaches `AIM_REACH_FRAC` of its own
+            // current arm length toward it, so the elbow extends the same amount
+            // wherever the shoulder currently sits (anchoring to a stored shoulder
+            // under-reached and left the arm bent).
+            if let Some(ap) = aim_point {
                 let ct = char_transform_raw(inst.enemy.pos, inst.yaw(), feet_off);
                 let model_p = ct.inverse().transform_point3(ap);
-                let dir = (model_p - a.shoulder).normalize_or_zero();
-                let target = a.shoulder + dir * (a.reach * AIM_REACH_FRAC);
                 if let Some(ik) = inst.stack.layer_as::<TwoBoneIkLayer>(ENEMY_IK_LAYER) {
-                    ik.target = target;
+                    ik.target = model_p;
                     ik.weight = inst.aim_weight;
                 }
             } else if let Some(ik) = inst.stack.layer_as::<TwoBoneIkLayer>(ENEMY_IK_LAYER) {
@@ -226,9 +225,30 @@ impl World {
             .fire_elapsed
             .map(|t| format!("{t:.2}"))
             .unwrap_or_else(|| "-".into());
+        // Measure the actual arm the IK produced: how far the hand reaches from
+        // the shoulder (as a fraction of full arm length) and the elbow interior
+        // angle. reach≈0.97 / elbow≈150°+ = straight; reach≈0.7 / elbow≈90° = bent.
+        let (reach_frac, elbow_deg) = match (self.enemy_arm, inst.final_pose.as_ref(), self.char_model.as_ref()) {
+            (Some(arm), Some(fp), Some(m)) => {
+                let g = fp.joint_global_transforms(&m.skeleton);
+                let sa = g[arm.root].to_scale_rotation_translation().2;
+                let el = g[arm.mid].to_scale_rotation_translation().2;
+                let ha = g[arm.end].to_scale_rotation_translation().2;
+                let arm_len = (el - sa).length() + (ha - el).length();
+                let frac = if arm_len > 1e-5 { (ha - sa).length() / arm_len } else { 0.0 };
+                let elbow = (sa - el)
+                    .normalize_or_zero()
+                    .dot((ha - el).normalize_or_zero())
+                    .clamp(-1.0, 1.0)
+                    .acos()
+                    .to_degrees();
+                (frac, elbow)
+            }
+            _ => (0.0, 0.0),
+        };
         self.anim_dbg_frame = self.anim_dbg_frame.wrapping_add(1);
         log::info!(
-            "[anim {:>4}] e{i} {:?} d={d:.2} spd={spd:.1} band={band} yaw={yaw:+.3} aimw={:.2} fire={fire} pos=({:.2},{:.2})",
+            "[anim {:>4}] e{i} {:?} d={d:.2} spd={spd:.1} band={band} yaw={yaw:+.3} aimw={:.2} fire={fire} reach={reach_frac:.2} elbow={elbow_deg:.0} pos=({:.2},{:.2})",
             self.anim_dbg_frame,
             inst.enemy.state(),
             inst.aim_weight,

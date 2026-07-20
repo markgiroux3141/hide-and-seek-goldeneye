@@ -178,8 +178,17 @@ pub struct TwoBoneIkLayer {
     pub root: usize,
     pub mid: usize,
     pub end: usize,
-    /// Model-space point the `end` joint should reach.
+    /// The target the `end` joint aims at. Interpretation depends on `reach_frac`:
+    /// - `reach_frac <= 0` (default): `target` is the **absolute** point to reach.
+    /// - `reach_frac > 0`: `target` is a far **aim point**; the effective hand
+    ///   target is `shoulder + dir(target) × reach_frac × arm_length`, so the hand
+    ///   reaches a fixed fraction of the *current* arm length toward `target` and
+    ///   the elbow extension is exact regardless of where the shoulder currently
+    ///   is (anchoring the point to a stale shoulder under-reaches otherwise).
     pub target: Vec3,
+    /// See [`Self::target`]. `> 0` selects "aim at a far point, reach this fraction
+    /// of arm length" mode (≈1 → nearly straight); `0` → absolute-target mode.
+    pub reach_frac: f32,
     /// Model-space hint for which way the elbow bends when the chain is straight
     /// (only consulted when the current bend plane is degenerate).
     pub pole: Vec3,
@@ -200,6 +209,7 @@ impl TwoBoneIkLayer {
             mid,
             end,
             target: Vec3::ZERO,
+            reach_frac: 0.0,
             pole: Vec3::ZERO,
             weight: 0.0,
             enabled: false,
@@ -231,10 +241,24 @@ impl PoseLayer for TwoBoneIkLayer {
         if l_ab < 1e-5 || l_bc < 1e-5 {
             return; // degenerate chain
         }
+        let arm_len = l_ab + l_bc;
+        // Effective hand target. In reach-fraction mode, aim from the CURRENT
+        // shoulder toward `target` at a fixed fraction of the CURRENT arm length —
+        // this makes the elbow extension exact (anchoring an absolute point to a
+        // stale shoulder position under-reaches and leaves the elbow bent).
+        let eff_target = if self.reach_frac > 1e-4 {
+            let d = (self.target - a).normalize_or_zero();
+            if d == Vec3::ZERO {
+                return;
+            }
+            a + d * (self.reach_frac.min(0.999) * arm_len)
+        } else {
+            self.target
+        };
         // Clamp the reach so the target is always achievable (arm never over-
         // extends past straight or folds through itself).
-        let reach = (self.target - a).length().clamp(1e-3, l_ab + l_bc - 1e-3);
-        let dir_at = (self.target - a).normalize_or_zero();
+        let reach = (eff_target - a).length().clamp(1e-3, arm_len - 1e-3);
+        let dir_at = (eff_target - a).normalize_or_zero();
         if dir_at == Vec3::ZERO {
             return;
         }
@@ -286,6 +310,62 @@ impl PoseLayer for TwoBoneIkLayer {
 
     fn name(&self) -> &str {
         "two-bone-ik"
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Look-at layer — aim one joint's axis at a target (single-joint global aim).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Orients ONE joint so a chosen **joint-local** axis ends up pointing at a
+/// model-space `target`. Used to point a hand's weapon barrel exactly at the aim
+/// target *after* two-bone IK has placed the arm — IK controls where the hand is,
+/// this controls where it points. Minimal-rotation (no roll control); blended
+/// with the incoming pose by `weight`.
+///
+/// Only the joint's rotation changes, so its origin is unmoved — at `weight` 1
+/// the local axis points exactly along `target − origin` (the test oracle).
+pub struct LookAtLayer {
+    pub joint: usize,
+    /// The joint-local axis to aim (e.g. the barrel direction in the hand frame).
+    pub aim_axis: Vec3,
+    /// Model-space point to aim at.
+    pub target: Vec3,
+    pub weight: f32,
+    pub enabled: bool,
+}
+
+impl PoseLayer for LookAtLayer {
+    fn apply(&mut self, pose: &mut Pose, ctx: &LayerCtx) {
+        if !self.enabled || self.weight <= 1e-4 {
+            return;
+        }
+        let sk = ctx.skeleton;
+        let globals = sk.global_transforms(&pose.locals());
+        let (_, g_rot, origin) = globals[self.joint].to_scale_rotation_translation();
+        let to_target = (self.target - origin).normalize_or_zero();
+        let axis_world = (g_rot * self.aim_axis).normalize_or_zero();
+        if to_target == Vec3::ZERO || axis_world == Vec3::ZERO {
+            return;
+        }
+        // Rotate the current world aim axis onto the direction to the target.
+        let delta = Quat::from_rotation_arc(axis_world, to_target);
+        let g_new = delta * g_rot;
+        let p_rot = match sk.parents[self.joint] {
+            Some(p) => globals[p].to_scale_rotation_translation().1,
+            None => Quat::IDENTITY,
+        };
+        let local_new = p_rot.inverse() * g_new;
+        let w = self.weight.clamp(0.0, 1.0);
+        pose.r[self.joint] = pose.r[self.joint].slerp(local_new, w);
+    }
+
+    fn name(&self) -> &str {
+        "look-at"
     }
 
     fn as_any_mut(&mut self) -> &mut dyn Any {
