@@ -121,6 +121,8 @@ impl World {
     /// isn't stomped. No-op in BUILD (nothing animated there).
     pub fn advance_animation(&mut self, dt: f32) {
         if self.is_build() {
+            // Spike: the BUILD-phase procedural-anim preview (if toggled on).
+            self.advance_procedural_preview(dt);
             return;
         }
         for inst in &mut self.enemies {
@@ -157,6 +159,18 @@ impl World {
         let Some(m) = self.char_model.as_ref() else {
             return Vec::new();
         };
+        // Spike: in BUILD the only character is the optional procedural preview.
+        if self.is_build() {
+            return match self.procedural_preview.as_ref() {
+                Some(p) => vec![(
+                    self.char_transform(p.feet, p.yaw),
+                    p.joints.clone(),
+                    1.0,
+                    p.blood.as_slice(),
+                )],
+                None => Vec::new(),
+            };
+        }
         self.enemies
             .iter()
             .map(|inst| {

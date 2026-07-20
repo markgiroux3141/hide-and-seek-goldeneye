@@ -256,7 +256,7 @@ impl ApplicationHandler for App {
             world.attach_audio(audio);
         }
         log::info!(
-            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  F1-F8=load level slot  Ctrl+F1-F8=save level slot  L=char walk/jog/run  Z=fire N=hit M=death  G=HUNT  [HUNT: click=fire  RMB=aim  R=reload  Q=weapon  F=detonate mines]"
+            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  F1-F8=load level slot  Ctrl+F1-F8=save level slot  Y=proc-anim preview(Z=fire)  G=HUNT  [HUNT: click=fire  RMB=aim  R=reload  Q=weapon  F=detonate mines]"
         );
 
         window.request_redraw();
@@ -686,6 +686,23 @@ impl App {
             }
             self.refresh_highlight(); // cleared when entering HUNT
             return;
+        }
+        // Spike: procedural-anim preview (BUILD only). Y toggles a preview character
+        // in front of the camera; Z fires a manual recoil kick on top of its auto
+        // cadence. See `world::spike_preview`.
+        if code == KeyCode::KeyY {
+            if let Some(world) = self.world.as_mut() {
+                world.toggle_procedural_preview();
+            }
+            return;
+        }
+        if code == KeyCode::KeyZ {
+            if self.world.as_ref().map(|w| w.is_build()).unwrap_or(false) {
+                if let Some(world) = self.world.as_mut() {
+                    world.fire_procedural_preview();
+                }
+                return;
+            }
         }
         // Q cycles the player's weapon (HUNT only; the JS `KeyQ` bind). BUILD leaves
         // Q free for future editor use.

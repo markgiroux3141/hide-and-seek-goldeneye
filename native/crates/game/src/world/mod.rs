@@ -45,6 +45,7 @@ mod hunt;
 mod lifecycle;
 mod persist;
 mod pick;
+mod spike_preview;
 mod tools;
 #[cfg(test)]
 mod tests;
@@ -693,6 +694,9 @@ pub struct World {
     /// bind-pose AABB can't be used — the bind pose is a splayed star with the
     /// feet spread high, so seating by it leaves the standing pose sunk).
     char_feet_offset: f32,
+    /// Spike: the optional BUILD-phase procedural-anim preview character (`Y`).
+    /// `None` unless the preview is toggled on. See [`world::spike_preview`].
+    procedural_preview: Option<spike_preview::ProceduralPreview>,
     // (Per-hunter death fade + fire cadence + muzzle timers now live on each
     // [`EnemyInstance`]; see `enemies` above.)
 
@@ -1016,6 +1020,7 @@ impl World {
             char_anim_template,
             char_rng: 0x9E37_79B9_7F4A_7C15,
             char_feet_offset,
+            procedural_preview: None,
             player_health: PLAYER_MAX_HEALTH,
             player_armor: 0.0,
             player_dead: false,
