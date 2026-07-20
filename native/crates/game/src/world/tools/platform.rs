@@ -619,14 +619,24 @@ impl World {
     /// the cosmetic railings — thin planes that never enter the collider.
     pub(crate) fn rebuild_structures(&mut self) -> RegionMesh {
         let boxes = self.structure_solid_boxes();
-        self.physics
-            .set_region_collider(STRUCT_ID, &boxes_mesh(&boxes));
-
         let brushes = self.all_region_brushes();
+
+        // Collider = the solid slab/tread boxes PLUS the railings. Railings are
+        // thin cosmetic planes (never solid boxes), so they'd otherwise let the
+        // player walk straight off a platform/stair edge; folding the exact same
+        // railing geometry into the collision trimesh gives them real collision.
+        // (Enemies don't use this collider — they're kept on-surface by the
+        // grid-nav edge check in `Enemy::move_toward`.)
+        let mut collider = boxes_mesh(&boxes);
+        let mut rail = ZonedBuilder::new();
+        self.append_railings(&brushes, &mut rail);
+        append_textured_collision(&mut collider, &rail.finish());
+        self.physics.set_region_collider(STRUCT_ID, &collider);
+
         // Structures always wear the "simple" (blue) scheme regardless of the
         // room's scheme — matching JS `PLATFORM_STYLES.simple.schemeName`. The
         // slabs/treads emit with the JS per-face zones + UVs (top → floor,
-        // verticals → wall); railings carry their own railing zone (below).
+        // verticals → wall); railings carry their own railing zone.
         let mut b = ZonedBuilder::new();
         for p in &self.platforms {
             structures::append_platform_mesh(p, &brushes, &mut b, SIMPLE_SCHEME);
@@ -635,16 +645,26 @@ impl World {
             let (fp, tp) = self.run_platforms(r);
             structures::append_stair_mesh(r, fp.as_ref(), tp.as_ref(), &brushes, &mut b, SIMPLE_SCHEME);
         }
-        // Railings emit into the builder with the railing zone (→ the transparent
-        // `railing` texture) and their own tile-fitted UVs.
+        self.append_railings(&brushes, &mut b);
+        RegionMesh {
+            id: STRUCT_ID,
+            mesh: b.finish(),
+        }
+    }
+
+    /// Emit every enabled railing (platforms + connected stair-runs) into `b`,
+    /// tagged with the railing zone (→ the transparent `railing` texture) and its
+    /// tile-fitted UVs. Shared by the render mesh and the collider so the railing
+    /// the player sees is the exact surface they collide with.
+    fn append_railings(&self, brushes: &[Brush], b: &mut ZonedBuilder) {
         for p in &self.platforms {
             if p.railings {
                 structures::append_platform_railings(
                     p,
                     &self.stair_runs,
                     &self.platforms,
-                    &brushes,
-                    &mut b,
+                    brushes,
+                    b,
                     SIMPLE_SCHEME,
                     RAILING_ZONE,
                 );
@@ -657,16 +677,12 @@ impl World {
                     r,
                     fp.as_ref(),
                     tp.as_ref(),
-                    &brushes,
-                    &mut b,
+                    brushes,
+                    b,
                     SIMPLE_SCHEME,
                     RAILING_ZONE,
                 );
             }
-        }
-        RegionMesh {
-            id: STRUCT_ID,
-            mesh: b.finish(),
         }
     }
 

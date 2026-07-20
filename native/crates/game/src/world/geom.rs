@@ -99,6 +99,18 @@ pub(crate) fn boxes_mesh(boxes: &[[f32; 6]]) -> CpuMesh {
     CpuMesh::from_csg(&positions, &normals, &indices)
 }
 
+/// Fold a textured mesh's raw triangles (position + normal; UV/zone/colour
+/// dropped) onto a collider [`CpuMesh`]. Lets the render-side railing geometry
+/// double as player collision without re-deriving the segment/slope math.
+pub(crate) fn append_textured_collision(dst: &mut CpuMesh, src: &TexturedMesh) {
+    let base = dst.vertices.len() as u32;
+    dst.vertices.extend(src.vertices.iter().map(|v| engine::render::mesh::Vertex {
+        pos: v.pos,
+        normal: v.normal,
+    }));
+    dst.indices.extend(src.indices.iter().map(|i| i + base));
+}
+
 /// Append a solid colored box (meters AABB `min`..`max`, flat `rgb`) to a gizmo
 /// mesh buffer. Uses the CSG box helper for winding-consistent faces.
 pub(crate) fn push_colored_box(verts: &mut Vec<ColorVertex>, idx: &mut Vec<u32>, min: Vec3, max: Vec3, rgb: [f32; 3]) {

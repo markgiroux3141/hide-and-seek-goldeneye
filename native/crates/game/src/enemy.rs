@@ -73,6 +73,12 @@ const REPATH_INTERVAL: f32 = 0.4; // s between path recomputes (CHASE_UPDATE_INT
 const CATCH_DIST: f32 = 1.2 * WT; // 0.3 m — horizontal catch radius
 const WAYPOINT_EPS: f32 = 0.4 * WT; // 0.1 m — advance to next waypoint within this
 const CATCH_VERT: f32 = 3.0 * WT; // must be within ~1 floor vertically to catch
+/// The straight-line beeline shortcut is only taken when the target is within this
+/// height of the hunter (< half a 0.25 m stair step). Any real vertical traversal —
+/// stairs, platforms, switchback landings — must go through A*, which walks cardinal
+/// cell-to-cell and so can't cut a diagonal corner across an open stairwell (the
+/// switchback "turns 180°, cuts through the railing gap, and falls" bug).
+const COPLANAR_BEELINE_EPS: f32 = 0.5 * WT; // 0.125 m
 
 /// Perception + FSM constants (JS `AIConfig` defaults + `EnemyManager` overrides).
 const DETECTION_RANGE: f32 = 12.0; // m
@@ -485,6 +491,19 @@ impl Enemy {
     /// cardinal-only A* waypoints. Only when the line is blocked (a wall/corner) does
     /// it fall back to A* (the JS "LOS → beeline" shortcut). Shared by Chase, Search,
     /// and Investigate.
+    /// Drop the hunter's feet to the standable floor beneath it (bounded, so a
+    /// transient bad step can't teleport it across a full drop). Enemies have no
+    /// gravity or collide-and-slide of their own — their Y comes only from the
+    /// path they follow — so the flat beeline branch needs this to stay on the
+    /// surface rather than floating over a rise.
+    fn snap_to_floor(&mut self, nav: &NavWorld) {
+        if let Some(fy) = nav.floor_height_at(self.pos.x, self.pos.z, self.pos.y + 0.25) {
+            if (fy - self.pos.y).abs() <= 1.0 {
+                self.pos.y = fy;
+            }
+        }
+    }
+
     fn move_toward(&mut self, dt: f32, target: Vec3, nav: &NavWorld) -> bool {
         let flat = Vec3::new(target.x - self.pos.x, 0.0, target.z - self.pos.z);
         if flat.length() < ARRIVE_DIST {
@@ -493,13 +512,28 @@ impl Enemy {
         // Sample the walkability line at ~knee height so it clears the floor but
         // catches walls/waist-high obstacles.
         let up = Vec3::new(0.0, 0.5, 0.0);
-        if nav.los_clear(self.pos + up, target + up) {
+        // Beeline (straight-line shortcut) ONLY on the same level, clear of walls,
+        // and over continuous ground. The height gate is the key one: a switchback
+        // landing gives clear line-of-sight up to the next flight (railings are
+        // cosmetic and don't block LOS), and the flat beeline would cut a diagonal
+        // straight across the open well — through the railing gap — instead of
+        // walking the landing to the offset second flight. Forcing every vertical
+        // traversal through A* fixes that: A* is 4-connected, so it steps cardinal
+        // cell-to-cell along the landing and physically cannot cut the corner.
+        let coplanar = (target.y - self.pos.y).abs() <= COPLANAR_BEELINE_EPS;
+        if coplanar
+            && nav.los_clear(self.pos + up, target + up)
+            && nav.ground_path_clear(self.pos, target)
+        {
             self.path.clear();
             self.repath_timer = 0.0; // force a fresh A* path the instant LOS breaks
             let dist = flat.length();
             let stepd = (SPEED_CHASE * dt).min(dist);
             self.pos += flat / dist * stepd;
             self.heading = flat / dist; // face the (flat) travel direction
+            // The beeline moves in XZ only; glue the feet back to the surface so
+            // the hunter rides gentle rises instead of leaving its Y frozen.
+            self.snap_to_floor(nav);
             self.moving = true;
             return false;
         }
@@ -539,6 +573,11 @@ impl Enemy {
                 self.path_idx += 1;
             }
         }
+        // Keep the feet on the real tread/slab surface while following the path —
+        // A* waypoints are quantized to integer-WT cell floors, so raw
+        // interpolation can leave the hunter slightly above/below the surface it's
+        // crossing. Snapping smooths that and guarantees it never floats over a step.
+        self.snap_to_floor(nav);
         false
     }
 }

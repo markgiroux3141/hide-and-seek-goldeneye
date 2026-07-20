@@ -51,7 +51,9 @@ mod tests;
 // Module-internal free helpers, re-exported so every submodule reaches them
 // through `use super::*` regardless of which file defines them. (`find_room_brushes`
 // / `brushes_touching` are used only within `editing`, so they aren't re-exported.)
-pub(crate) use geom::{boxes_mesh, make_stair_void, make_wall_brush, push_colored_box};
+pub(crate) use geom::{
+    append_textured_collision, boxes_mesh, make_stair_void, make_wall_brush, push_colored_box,
+};
 pub(crate) use hunt::{band_for_speed, fire_clip_index, fire_window_for, is_fire_clip};
 pub(crate) use lifecycle::pick_spread_spawns;
 pub(crate) use pick::{flip, same_face};

@@ -231,6 +231,50 @@ impl NavWorld {
         true
     }
 
+    /// Feet-height (meters) of the standable floor beneath a horizontal
+    /// position, searching downward from `near_y` like [`Self::cell_at`].
+    /// `None` if no standable ground sits in that column. Lets a hunter stay
+    /// glued to the walking surface instead of leaving its Y frozen mid-air
+    /// after a flat (XZ-only) beeline step.
+    pub fn floor_height_at(&self, mx: f32, mz: f32, near_y: f32) -> Option<f32> {
+        self.cell_at(mx, near_y, mz)
+            .map(|(ix, iy, iz)| self.cell_floor_meters(ix, iy, iz).y)
+    }
+
+    /// Whether the straight XZ path `from`→`to` stays on continuous, climbable
+    /// ground: every sampled column has a standable floor and no two adjacent
+    /// samples differ in floor height by more than one step ([`MAX_STEP`]). This
+    /// gates the hunter's beeline so it only shortcuts across ground it could
+    /// actually walk — never diagonally across an open stairwell or off a
+    /// platform edge (where it would clip the cosmetic railing and drop). When
+    /// this is false the caller falls back to A*, which steps up tread-by-tread.
+    pub fn ground_path_clear(&self, from: Vec3, to: Vec3) -> bool {
+        let flat = Vec3::new(to.x - from.x, 0.0, to.z - from.z);
+        let dist = flat.length();
+        if dist < 1e-4 {
+            return true;
+        }
+        // ~2 samples per WT cell so a one-cell gap can't be stepped over.
+        let n = (m_to_wt(dist) * 2.0).ceil().max(1.0) as i32;
+        let tol = wt_to_m(MAX_STEP as f32) + 1e-3;
+        let margin = wt_to_m(1.0);
+        // Search each column from a bit above the straight-line height so the
+        // local tread is the first standable cell found (cell_at scans down).
+        let mut prev = self.floor_height_at(from.x, from.z, from.y + margin);
+        for i in 1..=n {
+            let t = i as f32 / n as f32;
+            let p = from + flat * t;
+            let lerp_y = from.y + (to.y - from.y) * t;
+            let cur = self.floor_height_at(p.x, p.z, lerp_y + margin);
+            match (prev, cur) {
+                (Some(a), Some(b)) if (a - b).abs() <= tol => {}
+                _ => return false,
+            }
+            prev = cur;
+        }
+        true
+    }
+
     /// World meters at the center of a cell's floor (feet position).
     fn cell_floor_meters(&self, ix: i32, iy: i32, iz: i32) -> Vec3 {
         Vec3::new(
@@ -578,6 +622,30 @@ mod tests {
         assert!(nav.door_broken(0));
         assert_eq!(nav.door_blocking(from, to), None, "broken door no longer blocks");
         assert!(nav.find_path(from, to).is_some(), "path still exists after breach");
+    }
+
+    #[test]
+    fn ground_path_clear_gates_the_beeline() {
+        // Room floor at y≈0, plus a raised platform slab (top at 8 WT) in the
+        // middle, solid down to the floor.
+        let mut regions = room();
+        let slab = [8.0, 0.0, 8.0, 8.0, 8.0, 8.0]; // WT [x,y,z,w,h,d]
+        let nav = bake(&mut regions, &[slab]).expect("bake");
+
+        // Flat floor → continuous, climbable ground (beeline allowed).
+        let a = Vec3::new(2.0 * WORLD_SCALE, 0.1, 2.0 * WORLD_SCALE);
+        let b = Vec3::new(5.0 * WORLD_SCALE, 0.1, 2.0 * WORLD_SCALE);
+        assert!(nav.ground_path_clear(a, b), "flat floor is continuous ground");
+
+        // Floor → top of the ledge: the floor height jumps a full storey, far
+        // more than one step, so the straight line is NOT walkable — the hunter
+        // must take A* (stairs) instead of beelining off/into the ledge.
+        let low = Vec3::new(2.0 * WORLD_SCALE, 0.1, 12.0 * WORLD_SCALE);
+        let high = Vec3::new(12.0 * WORLD_SCALE, 8.0 * WORLD_SCALE + 0.1, 12.0 * WORLD_SCALE);
+        assert!(
+            !nav.ground_path_clear(low, high),
+            "a line across a cliff edge is not continuous ground"
+        );
     }
 
     #[test]
