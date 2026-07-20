@@ -122,9 +122,11 @@ pub(crate) const AIM_RAMP: f32 = 9.0;
 /// selection off the RAW value thrashes idle↔jog, restarting the crossfade every
 /// few frames (visible leg stutter). Easing it kills the flip.
 pub(crate) const LOCO_SMOOTH: f32 = 6.0;
-/// Aim reaches to this fraction of full arm length (kept < 1 so the IK never
-/// slams the arm dead-straight while tracking).
-pub(crate) const AIM_REACH_FRAC: f32 = 0.9;
+/// Aim reaches to this fraction of full arm length. Near 1.0 the elbow's
+/// law-of-cosines interior angle approaches 180° → the arm holds nearly straight
+/// out (how a guard sights a pistol); lower values leave a bent elbow. Kept just
+/// under 1 so the IK isn't sitting exactly at the singular fully-extended pose.
+pub(crate) const AIM_REACH_FRAC: f32 = 0.97;
 /// Aim at the player this far (m) above their feet — roughly chest height.
 pub(crate) const PLAYER_AIM_Y: f32 = 1.0;
 /// Recoil kick (rad) per shot + its decay rate (1/s) and amplitude ceiling.
