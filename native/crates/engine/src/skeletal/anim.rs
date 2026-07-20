@@ -11,6 +11,7 @@
 use glam::{Mat4, Quat, Vec3};
 
 use crate::skeletal::clip::AnimationClip;
+use crate::skeletal::layers::Pose;
 use crate::skeletal::Skeleton;
 
 /// One playing clip: index into the player's clip list, its local clock, and
@@ -195,6 +196,15 @@ impl AnimPlayer {
     /// local_offset` places it in the bone's frame (the JS `bone.add(mesh)`).
     pub fn joint_global_transforms(&self, skeleton: &Skeleton) -> Vec<Mat4> {
         skeleton.global_transforms(&self.pose_locals(skeleton))
+    }
+
+    /// The current (possibly mid-crossfade) blended base pose, as per-joint local
+    /// TRS. This is the hand-off point to a procedural [`Pose`] layer stack
+    /// ([`crate::skeletal::layers`]): take this base, fold aim-IK / recoil / lean
+    /// on top, then turn the result into skinning matrices.
+    pub fn pose(&self, skeleton: &Skeleton) -> Pose {
+        let (t, r, s) = self.pose_trs(skeleton);
+        Pose::from_trs(t, r, s)
     }
 
     /// Per-joint local matrices of the current (possibly blended) pose.

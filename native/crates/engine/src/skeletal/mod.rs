@@ -17,6 +17,7 @@ pub mod anim;
 pub mod anim_set;
 pub mod clip;
 pub mod gltf_skin;
+pub mod layers;
 
 use glam::{Mat4, Quat, Vec3};
 
