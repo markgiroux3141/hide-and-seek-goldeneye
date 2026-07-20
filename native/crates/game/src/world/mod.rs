@@ -803,6 +803,10 @@ pub struct World {
     /// Spike: the optional BUILD-phase procedural-anim preview character (`Y`).
     /// `None` unless the preview is toggled on. See [`world::spike_preview`].
     procedural_preview: Option<spike_preview::ProceduralPreview>,
+    /// `ANIM_DEBUG=1` in the env → log the nearest engaged hunter's per-frame
+    /// locomotion/aim/fire state, to diagnose run-and-gun jank without eyes on it.
+    anim_debug: bool,
+    anim_dbg_frame: u64,
     // (Per-hunter death fade + fire cadence + muzzle timers now live on each
     // [`EnemyInstance`]; see `enemies` above.)
 
@@ -1137,6 +1141,8 @@ impl World {
             char_feet_offset,
             enemy_arm,
             procedural_preview: None,
+            anim_debug: std::env::var("ANIM_DEBUG").is_ok(),
+            anim_dbg_frame: 0,
             player_health: PLAYER_MAX_HEALTH,
             player_armor: 0.0,
             player_dead: false,

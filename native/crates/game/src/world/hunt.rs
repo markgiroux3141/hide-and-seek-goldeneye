@@ -181,6 +181,53 @@ impl World {
             let ctx = LayerCtx { skeleton: sk, dt };
             inst.final_pose = Some(inst.stack.evaluate(base, &ctx));
         }
+
+        self.log_anim_debug();
+    }
+
+    /// `ANIM_DEBUG=1`: dump the nearest engaged hunter's per-frame state so
+    /// run-and-gun jank can be diagnosed from a pasted log. One line/frame; watch
+    /// for `band` flip-flopping, `yaw` jumping (spin), `pos` moving in chunks
+    /// (fixed-step stutter), or `aimw`/recoil churn.
+    fn log_anim_debug(&mut self) {
+        if !self.anim_debug {
+            return;
+        }
+        let Some(p) = self.player_pos() else { return };
+        let mut best: Option<(usize, f32)> = None;
+        for (i, inst) in self.enemies.iter().enumerate() {
+            if inst.enemy.is_dead()
+                || !matches!(
+                    inst.enemy.state(),
+                    AiState::Alert | AiState::Chase | AiState::Attack | AiState::Cooldown
+                )
+            {
+                continue;
+            }
+            let d = (inst.enemy.pos - p).length();
+            if best.map_or(true, |(_, bd)| d < bd) {
+                best = Some((i, d));
+            }
+        }
+        let Some((i, d)) = best else { return };
+        let inst = &self.enemies[i];
+        let spd = inst.enemy.speed();
+        let band = band_for_speed(spd);
+        let h = inst.enemy.heading();
+        let yaw = h.x.atan2(h.z);
+        let fire = inst
+            .fire_elapsed
+            .map(|t| format!("{t:.2}"))
+            .unwrap_or_else(|| "-".into());
+        self.anim_dbg_frame = self.anim_dbg_frame.wrapping_add(1);
+        log::info!(
+            "[anim {:>4}] e{i} {:?} d={d:.2} spd={spd:.1} band={band} yaw={yaw:+.3} aimw={:.2} fire={fire} pos=({:.2},{:.2})",
+            self.anim_dbg_frame,
+            inst.enemy.state(),
+            inst.aim_weight,
+            inst.enemy.pos.x,
+            inst.enemy.pos.z,
+        );
     }
 
     /// World transform placing a character (feet at `feet`, facing `yaw`) with the
