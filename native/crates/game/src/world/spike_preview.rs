@@ -13,12 +13,14 @@ use super::*;
 
 use engine::render::camera::forward_from;
 use engine::skeletal::layers::{
-    AdditiveDecayLayer, LayerCtx, LayeredAnimator, Pose, TwoBoneIkLayer,
+    AdditiveDecayLayer, LayerCtx, LayeredAnimator, LocomotionBlendLayer, Pose, TwoBoneIkLayer,
 };
 
-/// Stack indices (push order in [`ProceduralPreview::new`]).
-const IK_IDX: usize = 0;
-const RECOIL_IDX: usize = 1;
+/// Stack indices (push order in [`ProceduralPreview::new`]):
+/// locomotion base → IK aim override → additive recoil.
+const LOCO_IDX: usize = 0;
+const IK_IDX: usize = 1;
+const RECOIL_IDX: usize = 2;
 
 /// Auto-circle sweep rate (rad/s) of the aim target around the shoulder.
 const ORBIT_SPEED: f32 = 1.1;
@@ -33,11 +35,13 @@ const RECOIL_KICK: f32 = 0.45;
 const RECOIL_DECAY: f32 = 9.0;
 const RECOIL_MAX: f32 = 0.7;
 
+/// Speed auto-ramp: a slow cosine 0 ↔ run so the gait blend is visible hands-free.
+const RAMP_RATE: f32 = 0.55; // rad/s of the ramp cosine (~11 s full cycle)
+
 /// A standalone character posed by the procedural layer stack.
 pub(crate) struct ProceduralPreview {
-    /// Idle base-pose source (a clone of the shared anim template).
-    base: AnimPlayer,
-    /// base pose → [IK aim] → [recoil] → final pose.
+    /// locomotion base → [IK aim] → [recoil] → final pose. The locomotion base
+    /// layer owns clones of the idle/walk/jog/run clips.
     stack: LayeredAnimator,
     /// Feet position + facing yaw (fed through `World::char_transform`).
     pub(crate) feet: Vec3,
@@ -65,13 +69,28 @@ impl ProceduralPreview {
         yaw: f32,
     ) -> Option<Self> {
         let sk = &model.skeleton;
+
+        // Locomotion clips from the shared template (fixed load order: 0 idle,
+        // 1 walk, 2 jog, 3 run — see `World::new`).
+        let idle = template.clip(0)?.clone();
+        let walk = template.clip(1)?.clone();
+        let jog = template.clip(2)?.clone();
+        let run = template.clip(3)?.clone();
+        let loco = LocomotionBlendLayer::new(vec![
+            (0.0, idle.clone()),
+            (anim_set::SPEED_WALK, walk),
+            (anim_set::SPEED_JOG, jog),
+            (anim_set::SPEED_RUN, run),
+        ]);
+
         let mut ik = TwoBoneIkLayer::from_end_bone(sk, RIGHT_HAND_BONE)?;
         ik.enabled = true;
         ik.weight = 1.0;
 
-        let base = template.clone();
-        // Shoulder origin + total arm reach from the idle base pose (model space).
-        let g = base.pose(sk).joint_global_transforms(sk);
+        // Shoulder origin + total arm reach from a standing (idle) pose — the bind
+        // pose is a splayed star, so sample the idle clip at t=0 instead.
+        let (t, r, s) = idle.pose_trs(0.0, sk);
+        let g = Pose::from_trs(t, r, s).joint_global_transforms(sk);
         let a = g[ik.root].to_scale_rotation_translation().2;
         let b = g[ik.mid].to_scale_rotation_translation().2;
         let c = g[ik.end].to_scale_rotation_translation().2;
@@ -81,10 +100,13 @@ impl ProceduralPreview {
         let shoulder_joint = ik.root;
 
         let mut stack = LayeredAnimator::new();
+        // Base: continuous locomotion blend (writes the whole pose).
+        stack.push(Box::new(loco));
+        // Override: IK aims the arm at the orbiting target.
         stack.push(Box::new(ik));
-        // Recoil kicks the whole arm at the shoulder: IK re-solves onto the target
-        // every frame while the decaying kick rides on top, so a shot reads as an
-        // arm jerk that settles back on aim — a clean demo of layer ordering.
+        // Additive: recoil kicks the whole arm at the shoulder while IK re-solves
+        // onto the target every frame, so a shot reads as an arm jerk that settles
+        // back on aim — a clean demo of layer ordering.
         stack.push(Box::new(AdditiveDecayLayer::new(
             shoulder_joint,
             Vec3::X,
@@ -93,7 +115,6 @@ impl ProceduralPreview {
         )));
 
         Some(ProceduralPreview {
-            base,
             stack,
             feet,
             yaw,
@@ -119,6 +140,13 @@ impl ProceduralPreview {
     pub(crate) fn advance(&mut self, dt: f32, model: &SkinnedModel) {
         self.clock += dt;
 
+        // Locomotion speed auto-ramp: a smooth cosine 0 ↔ run so the gait blend is
+        // visible without input.
+        let ramp = 0.5 * (1.0 - (self.clock * RAMP_RATE).cos()); // 0..1..0
+        if let Some(loco) = self.stack.layer_as::<LocomotionBlendLayer>(LOCO_IDX) {
+            loco.speed = ramp * anim_set::SPEED_RUN;
+        }
+
         // Auto-circling aim target (model space): a circle in front of the shoulder.
         let theta = self.clock * ORBIT_SPEED;
         let center = self.shoulder + Vec3::Z * (self.reach * FWD_FRAC);
@@ -135,11 +163,9 @@ impl ProceduralPreview {
             self.fire_cooldown = FIRE_INTERVAL;
         }
 
-        // Idle base clock, then evaluate the full stack.
-        self.base.update(dt);
-        let base_pose: Pose = self.base.pose(&model.skeleton);
+        // Fold the stack over a bind-pose seed (the locomotion base overwrites it).
         let final_pose = self.stack.evaluate(
-            base_pose,
+            Pose::bind(&model.skeleton),
             &LayerCtx {
                 skeleton: &model.skeleton,
                 dt,

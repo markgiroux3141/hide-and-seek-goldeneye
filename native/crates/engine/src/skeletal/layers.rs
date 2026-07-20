@@ -34,6 +34,7 @@ use std::any::Any;
 
 use glam::{Mat4, Quat, Vec3};
 
+use crate::skeletal::clip::AnimationClip;
 use crate::skeletal::Skeleton;
 
 /// A whole-skeleton pose as per-joint **local** `T/R/S` (joint-indexed, same
@@ -355,6 +356,108 @@ impl PoseLayer for AdditiveDecayLayer {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Locomotion blend space — the base-layer kind (writes the whole pose).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A **1D locomotion blend space**: a continuous function of `speed` over a set
+/// of gait clips (idle / walk / jog / run) sorted by their speed anchor. Where
+/// the clip mixer *switches* between discrete bands and crossfades over a fixed
+/// time, this **blends the two bracketing clips by where `speed` falls between
+/// their anchors** — so accelerating morphs the gait smoothly with no band pops.
+///
+/// **Foot-phase sync:** both clips are sampled at the *same* normalized gait
+/// phase `[0,1)`, and the shared phase advances by the *blended* clip period, so
+/// the two gaits stay in step through the blend (the classic fix for the
+/// foot-skate you'd get sampling each clip on its own clock). Full foot-plant IK
+/// — locking a contact foot to the ground — is a deliberately separate, later
+/// concern; this removes cross-clip desync but not ground slide.
+///
+/// This is a **base layer**: it ignores the incoming pose and writes every joint,
+/// so it belongs first in the stack (aim/recoil layer on top of it).
+pub struct LocomotionBlendLayer {
+    /// `(speed_anchor, clip)` sorted ascending by anchor; `[0]` is idle at 0 m/s.
+    anchors: Vec<(f32, AnimationClip)>,
+    /// Target locomotion speed (m/s); clamped into the anchor range.
+    pub speed: f32,
+    /// Shared normalized gait phase `[0,1)`.
+    phase: f32,
+}
+
+impl LocomotionBlendLayer {
+    /// Build from `(speed, clip)` anchors. They're sorted by speed here, so the
+    /// caller needn't pre-order them. Needs at least one anchor.
+    pub fn new(mut anchors: Vec<(f32, AnimationClip)>) -> Self {
+        anchors.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        LocomotionBlendLayer {
+            anchors,
+            speed: 0.0,
+            phase: 0.0,
+        }
+    }
+
+    /// The two bracketing anchor indices for the current (clamped) speed, plus the
+    /// blend weight `w` from the low anchor (0) to the high one (1).
+    fn bracket(&self) -> (usize, usize, f32) {
+        let n = self.anchors.len();
+        if n == 1 {
+            return (0, 0, 0.0);
+        }
+        let lo = self.anchors[0].0;
+        let hi = self.anchors[n - 1].0;
+        let s = self.speed.clamp(lo, hi);
+        for i in 0..n - 1 {
+            let (s0, _) = &self.anchors[i];
+            let (s1, _) = &self.anchors[i + 1];
+            if s <= *s1 {
+                let w = if s1 > s0 { (s - s0) / (s1 - s0) } else { 0.0 };
+                return (i, i + 1, w);
+            }
+        }
+        (n - 1, n - 1, 0.0)
+    }
+}
+
+impl PoseLayer for LocomotionBlendLayer {
+    fn apply(&mut self, pose: &mut Pose, ctx: &LayerCtx) {
+        if self.anchors.is_empty() {
+            return;
+        }
+        let (i, j, w) = self.bracket();
+        let (_, c0) = &self.anchors[i];
+        let (_, c1) = &self.anchors[j];
+        let (d0, d1) = (c0.duration.max(1e-3), c1.duration.max(1e-3));
+
+        // Sample both clips at the SAME normalized phase (foot-sync), then blend.
+        let (t0, r0, s0) = c0.pose_trs(self.phase * d0, ctx.skeleton);
+        if w <= 1e-5 {
+            pose.t = t0;
+            pose.r = r0;
+            pose.s = s0;
+        } else {
+            let (t1, r1, s1) = c1.pose_trs(self.phase * d1, ctx.skeleton);
+            for k in 0..pose.joint_count() {
+                pose.t[k] = t0[k].lerp(t1[k], w);
+                pose.r[k] = r0[k].slerp(r1[k], w);
+                pose.s[k] = s0[k].lerp(s1[k], w);
+            }
+        }
+
+        // Advance the shared phase by the BLENDED cadence, so a faster gait cycles
+        // faster and the two clips stay in step.
+        let period = d0 + (d1 - d0) * w;
+        self.phase = (self.phase + ctx.dt / period.max(1e-3)).rem_euclid(1.0);
+    }
+
+    fn name(&self) -> &str {
+        "locomotion-blend"
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
 /// `acos` guarded against out-of-domain inputs from float error.
 fn clamp_acos(x: f32) -> f32 {
     x.clamp(-1.0, 1.0).acos()
@@ -449,6 +552,96 @@ mod tests {
         }
         let settled_delta = rest.angle_between(pose.r[joint]);
         assert!(settled_delta < 1e-2, "recoil should decay back to rest (got {settled_delta})");
+    }
+
+    fn clip(name: &str, sk: &Skeleton) -> AnimationClip {
+        let p = format!(
+            "{}/../../assets/enemies/animations/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        crate::skeletal::clip::load(&p, sk).expect(name)
+    }
+
+    fn loco_layer(sk: &Skeleton) -> LocomotionBlendLayer {
+        LocomotionBlendLayer::new(vec![
+            (0.0, clip("00-idle.glb", sk)),
+            (1.5, clip("28-walking.glb", sk)),
+            (3.5, clip("2A-jogging.glb", sk)),
+            (5.0, clip("29-running.glb", sk)),
+        ])
+    }
+
+    fn pose_diff(a: &Pose, b: &Pose) -> f32 {
+        a.r.iter()
+            .zip(&b.r)
+            .map(|(x, y)| x.angle_between(*y))
+            .sum::<f32>()
+    }
+
+    /// At a speed exactly on an anchor, the blended pose equals that anchor's clip
+    /// sampled at the shared phase (weight collapses to the low bracket).
+    #[test]
+    fn blend_at_anchor_matches_the_clip() {
+        let m = karl();
+        let sk = &m.skeleton;
+        let walk = clip("28-walking.glb", sk);
+        let mut loco = loco_layer(sk);
+        loco.speed = 1.5; // exactly the walk anchor
+        loco.phase = 0.3;
+
+        let mut pose = Pose::bind(sk);
+        // apply() advances phase, so capture the phase it samples at first.
+        let sampled_phase = loco.phase;
+        loco.apply(&mut pose, &LayerCtx { skeleton: sk, dt: 0.0 });
+
+        let (t, r, s) = walk.pose_trs(sampled_phase * walk.duration, sk);
+        let want = Pose::from_trs(t, r, s);
+        assert!(pose_diff(&pose, &want) < 1e-4, "anchor pose should equal the walk clip");
+    }
+
+    /// Continuity: a tiny speed step produces a tiny pose change — no band pop
+    /// (the whole point vs. discrete walk/jog/run switching).
+    #[test]
+    fn blend_is_continuous_across_speed() {
+        let m = karl();
+        let sk = &m.skeleton;
+        let ctx = LayerCtx { skeleton: sk, dt: 0.0 };
+
+        // Two layers at the same phase, speeds a hair apart across the walk→run gap.
+        let mut a = loco_layer(sk);
+        let mut b = loco_layer(sk);
+        a.phase = 0.5;
+        b.phase = 0.5;
+        a.speed = 3.0;
+        b.speed = 3.05;
+        let mut pa = Pose::bind(sk);
+        let mut pb = Pose::bind(sk);
+        a.apply(&mut pa, &ctx);
+        b.apply(&mut pb, &ctx);
+
+        // And a large step, to show the small step really is proportionally small.
+        let mut c = loco_layer(sk);
+        c.phase = 0.5;
+        c.speed = 5.0;
+        let mut pc = Pose::bind(sk);
+        c.apply(&mut pc, &ctx);
+
+        let small = pose_diff(&pa, &pb);
+        let large = pose_diff(&pa, &pc);
+        assert!(small < large * 0.2, "small speed step ({small}) not small vs large ({large})");
+    }
+
+    /// The shared phase advances with dt and wraps in [0,1).
+    #[test]
+    fn blend_phase_advances_and_wraps() {
+        let m = karl();
+        let sk = &m.skeleton;
+        let mut loco = loco_layer(sk);
+        loco.speed = 5.0;
+        loco.phase = 0.0;
+        let mut pose = Pose::bind(sk);
+        loco.apply(&mut pose, &LayerCtx { skeleton: sk, dt: 1.0 / 60.0 });
+        assert!(loco.phase > 0.0 && loco.phase < 1.0, "phase advanced into range");
     }
 
     /// The stack composes: IK aims the arm, recoil rides on top, and the final
