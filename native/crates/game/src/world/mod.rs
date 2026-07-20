@@ -59,7 +59,7 @@ mod tests;
 pub(crate) use geom::{
     append_textured_collision, boxes_mesh, make_stair_void, make_wall_brush, push_colored_box,
 };
-pub(crate) use hunt::{band_for_speed, fire_clip_index, fire_window_for, is_fire_clip};
+pub(crate) use hunt::{band_for_speed, fire_window_for};
 pub(crate) use lifecycle::pick_spread_spawns;
 pub(crate) use pick::{flip, same_face};
 
@@ -122,9 +122,13 @@ pub(crate) const AIM_REACH_FRAC: f32 = 0.9;
 /// Aim at the player this far (m) above their feet — roughly chest height.
 pub(crate) const PLAYER_AIM_Y: f32 = 1.0;
 /// Recoil kick (rad) per shot + its decay rate (1/s) and amplitude ceiling.
+/// Applied to PISTOLS only — automatic weapons kick too fast to read well.
 pub(crate) const ENEMY_RECOIL_KICK: f32 = 0.32;
 pub(crate) const ENEMY_RECOIL_DECAY: f32 = 12.0;
 pub(crate) const ENEMY_RECOIL_MAX: f32 = 0.5;
+/// Tail (s) added after a fire burst's shot window before the burst ends — the
+/// burst length now that firing is a timer, not a full-body animation clip.
+pub(crate) const ENEMY_FIRE_TAIL: f32 = 0.25;
 
 /// The resolved two-bone arm chain + rest geometry for the shared character
 /// skeleton, computed once at load. Each hunter builds its own (stateful) aim +
@@ -729,6 +733,10 @@ pub(crate) struct EnemyInstance {
     /// Enemy-fire cadence: seconds until the next shot may leave during the fire
     /// window (spaced by `1/weapon.fire_rate`).
     pub shot_timer: f32,
+    /// Active fire burst: `Some(elapsed_seconds)` while a burst is running, `None`
+    /// otherwise. Firing is now a **timer** (not a full-body clip), so the hunter
+    /// keeps running its locomotion + procedural aim while shooting.
+    pub fire_elapsed: Option<f32>,
     /// Muzzle-flash countdown (s); >0 → this hunter's muzzle(s) render.
     pub muzzle_timer: f32,
     /// Per-vertex RGB blood color (flat, len = 3×model vertex count), white =

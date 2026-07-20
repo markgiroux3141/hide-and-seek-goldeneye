@@ -84,6 +84,10 @@ const COPLANAR_BEELINE_EPS: f32 = 0.5 * WT; // 0.125 m
 const DETECTION_RANGE: f32 = 12.0; // m
 const DETECTION_HALF_CONE: f32 = 60.0 * std::f32::consts::PI / 180.0; // 120° cone → ±60°
 const ATTACK_RANGE: f32 = 6.0; // m
+/// While attacking, the hunter advances on the player down to this standoff (m)
+/// then holds — so it fires *while moving* (run-and-gun) instead of freezing at
+/// first sight of the player. Firing is a timer now, so movement + shooting mix.
+const ATTACK_STANDOFF: f32 = 3.0; // m
 const ALERT_DURATION: f32 = 0.5; // s reaction delay
 const COOLDOWN_DURATION: f32 = 1.5; // s between fire bursts
 
@@ -391,17 +395,12 @@ impl Enemy {
                     self.state = AiState::Attack;
                     self.is_attacking = false;
                     self.path.clear();
-                } else if fire_anim {
-                    // A fire one-shot is still playing (it began in `attack`, then the
-                    // player slipped out of range): stay planted so the feet don't
-                    // "float" — just keep facing the target — and resume chasing when
-                    // the clip finishes. Movement is gated on the animation, matching
-                    // the JS `enemyState === 'action'` decision gate.
-                    self.face(player_feet);
                 } else {
                     // Path to where we last saw the player (updated to the live
                     // position every perceived step above). Reaching that spot without
-                    // seeing them = they got away → investigate it.
+                    // seeing them = they got away → investigate it. A burst in flight
+                    // no longer freezes movement — firing is a timer, and the legs run
+                    // on locomotion while the arm keeps its procedural aim.
                     let target = self.last_known.unwrap_or(player_feet);
                     if self.move_toward(dt, target, nav) && !perceived {
                         self.state = AiState::Investigate;
@@ -417,6 +416,12 @@ impl Enemy {
                     self.chase_timer = 0.0;
                     self.is_attacking = false;
                 } else {
+                    // Advance-fire: close on the player down to the standoff, then hold.
+                    // Either way we face the player so the procedural aim points the gun
+                    // at them; `move_toward` marks `moving` so the legs run.
+                    if dist > ATTACK_STANDOFF {
+                        self.move_toward(dt, player_feet, nav);
+                    }
                     self.face(player_feet);
                     // Request a fire burst once per attack entry.
                     if !fire_anim && !self.is_attacking {

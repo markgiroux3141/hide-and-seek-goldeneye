@@ -895,10 +895,10 @@ impl World {
     /// the window's `fireStart`.
     pub(crate) fn start_enemy_fire(&mut self, idx: usize) {
         let Some(inst) = self.enemies.get_mut(idx) else { return };
-        let clip = fire_clip_index(inst.weapon.class, inst.dual);
-        let win = fire_window_for(inst.weapon.class, inst.dual);
-        // Return to idle when done; the HUNT driver re-selects a band after.
-        inst.anim.play_once(clip, 0.1, Some(0), Some(win));
+        // Firing is a timer, not a full-body clip: the hunter keeps its locomotion
+        // (legs running) while the procedural stack aims the arm + kicks recoil. The
+        // shot window / cadence run off `fire_elapsed` in `enemy_combat_step`.
+        inst.fire_elapsed = Some(0.0);
         inst.shot_timer = 0.0;
         log::info!("hunter firing ({})", inst.weapon.name);
     }
@@ -936,19 +936,22 @@ impl World {
         // first (emitting needs `&mut self`, which would clash with the iterator).
         let mut shots: Vec<usize> = Vec::new();
         for (i, inst) in self.enemies.iter_mut().enumerate() {
-            let firing =
-                inst.anim.is_playing_oneshot() && is_fire_clip(inst.anim.current_clip());
-            if !firing {
+            let Some(t) = inst.fire_elapsed else {
                 inst.shot_timer = 0.0;
                 continue;
-            }
-            if inst.anim.fire_window_open() {
+            };
+            let win = fire_window_for(inst.weapon.class, inst.dual);
+            let t = t + dt;
+            // Pump shots while inside the FIRE_TIMING window, spaced by 1/fireRate.
+            if t >= win.0 && t <= win.1 {
                 inst.shot_timer -= dt;
                 if inst.shot_timer <= 0.0 {
                     inst.shot_timer = 1.0 / inst.weapon.fire_rate.max(0.001);
                     shots.push(i);
                 }
             }
+            // End the burst once past the window (+ a short tail).
+            inst.fire_elapsed = if t >= win.1 + ENEMY_FIRE_TAIL { None } else { Some(t) };
         }
         for i in shots {
             self.emit_enemy_shot(i);
@@ -965,11 +968,14 @@ impl World {
             _ => return,
         };
         let Some(ppos) = self.player_pos() else { return };
-        // Flash + report fire on every shot, hit or miss; kick the procedural recoil.
+        // Flash + report fire on every shot, hit or miss; kick the procedural recoil
+        // for PISTOLS only (autos fire too fast for the kick to read — user call).
         if let Some(inst) = self.enemies.get_mut(idx) {
             inst.muzzle_timer = ENEMY_MUZZLE_TIME;
-            if let Some(r) = inst.stack.layer_as::<AdditiveDecayLayer>(ENEMY_RECOIL_LAYER) {
-                r.kick(ENEMY_RECOIL_KICK);
+            if inst.weapon.class == EnemyWeaponClass::Pistol {
+                if let Some(r) = inst.stack.layer_as::<AdditiveDecayLayer>(ENEMY_RECOIL_LAYER) {
+                    r.kick(ENEMY_RECOIL_KICK);
+                }
             }
         }
         if let Some(audio) = self.audio.as_mut() {

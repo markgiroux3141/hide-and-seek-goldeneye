@@ -28,19 +28,6 @@ pub(crate) fn band_for_speed(speed: f32) -> usize {
     }
 }
 
-/// The fire-clip index for a weapon class + dual flag (the `AnimPlayer` layout set
-/// in `World::new`): dual → the dual clip regardless of class, else the class clip.
-pub(crate) fn fire_clip_index(class: EnemyWeaponClass, dual: bool) -> usize {
-    if dual {
-        FIRE_DUAL_IDX
-    } else {
-        match class {
-            EnemyWeaponClass::Pistol => FIRE_PISTOL_IDX,
-            EnemyWeaponClass::Rifle => FIRE_RIFLE_IDX,
-        }
-    }
-}
-
 /// The FIRE_TIMING shot window for a weapon class + dual flag (seconds into the
 /// fire clip). Falls back to the rifle window if a hex id is somehow missing.
 pub(crate) fn fire_window_for(class: EnemyWeaponClass, dual: bool) -> (f32, f32) {
@@ -59,7 +46,7 @@ pub(crate) fn fire_window_for(class: EnemyWeaponClass, dual: bool) -> (f32, f32)
 /// `enemyState === 'action'` proxy the FSM's attack→cooldown transition needs,
 /// disambiguated from hit/death one-shots.
 pub(crate) fn is_fire_clip(idx: usize) -> bool {
-    (FIRE_RIFLE_IDX..=FIRE_DUAL_IDX).contains(&idx)
+    idx == FIRE_RIFLE_IDX || idx == FIRE_PISTOL_IDX || idx == FIRE_DUAL_IDX
 }
 
 impl EnemyInstance {

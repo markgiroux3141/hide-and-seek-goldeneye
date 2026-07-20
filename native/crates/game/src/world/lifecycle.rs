@@ -148,10 +148,10 @@ impl World {
                 let mut needs_target: Vec<usize> = Vec::new();
                 let mut any_caught = false;
                 for (i, inst) in enemies.iter_mut().enumerate() {
-                    // Is THIS hunter's fire one-shot animating? (disambiguated from
-                    // hit/death by the clip index) — the JS `enemyState === 'action'`
-                    // proxy the attack→cooldown transition needs.
-                    let fire_anim = inst.anim.is_playing_oneshot() && is_fire_clip(inst.anim.current_clip());
+                    // Is THIS hunter mid fire burst? (the JS `enemyState === 'action'`
+                    // proxy the attack→cooldown transition needs). Firing is a timer
+                    // now, so the hunter can move + aim through it.
+                    let fire_anim = inst.fire_elapsed.is_some();
                     let step = match self.nav.as_ref() {
                         Some(nav) => inst.enemy.update(
                             dt,
@@ -338,6 +338,7 @@ impl World {
                 collider,
                 fade: None,
                 shot_timer: 0.0,
+                fire_elapsed: None,
                 muzzle_timer: 0.0,
                 blood: vec![1.0f32; vert_count * 3],
                 stack: arm.map(|a| a.build_stack()).unwrap_or_default(),

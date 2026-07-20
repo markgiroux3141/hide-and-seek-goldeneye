@@ -375,21 +375,17 @@ use super::editing::find_room_brushes;
         );
     }
 
-    /// Weapon class → fire clip + window mapping: pistol/rifle pick distinct clips,
-    /// and the dual flag overrides the class to the dual clip. Each maps to a real
-    /// FIRE_TIMING window, and all three fire clips are recognised as fire clips.
+    /// Weapon class → FIRE_TIMING window mapping, and all three fire clips are
+    /// recognised as fire clips (used to gate the aim/hit-reaction post-pass).
     #[test]
-    fn fire_clip_selection_by_class_and_dual() {
+    fn fire_windows_and_clip_recognition() {
         use crate::combat::EnemyWeaponClass::{Pistol, Rifle};
-        assert_eq!(fire_clip_index(Rifle, false), FIRE_RIFLE_IDX);
-        assert_eq!(fire_clip_index(Pistol, false), FIRE_PISTOL_IDX);
-        assert_eq!(fire_clip_index(Pistol, true), FIRE_DUAL_IDX, "dual overrides class");
-        assert_eq!(fire_clip_index(Rifle, true), FIRE_DUAL_IDX);
         for (c, d) in [(Rifle, false), (Pistol, false), (Rifle, true)] {
             let (s, e) = fire_window_for(c, d);
             assert!(e > s, "window start<end for {c:?} dual={d}");
         }
-        assert!(is_fire_clip(FIRE_RIFLE_IDX) && is_fire_clip(FIRE_DUAL_IDX));
+        use super::hunt::is_fire_clip;
+        assert!(is_fire_clip(FIRE_RIFLE_IDX) && is_fire_clip(FIRE_PISTOL_IDX) && is_fire_clip(FIRE_DUAL_IDX));
         assert!(!is_fire_clip(CHAR_HIT_START), "a hit clip is not a fire clip");
     }
 
