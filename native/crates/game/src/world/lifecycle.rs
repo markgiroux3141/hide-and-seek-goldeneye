@@ -317,10 +317,17 @@ impl World {
         let watch = self.player_pos().unwrap_or(self.spawn_point);
         // Resolved gun-arm (shared); each hunter clones its own aim/recoil stack.
         let arm = self.enemy_arm;
-        for i in 0..ENEMY_COUNT {
-            let (wcfg, dual) = ENEMY_ROSTER[i % ENEMY_ROSTER.len()];
+        // ANIM_DEBUG → spawn a single PP7-pistol hunter (one-handed aim + recoil,
+        // and easy to watch) so run-and-gun jank can be observed in isolation.
+        let count = if self.anim_debug { 1 } else { ENEMY_COUNT };
+        for i in 0..count {
+            let (wcfg, dual) = if self.anim_debug {
+                (crate::combat::config::PP7, false)
+            } else {
+                ENEMY_ROSTER[i % ENEMY_ROSTER.len()]
+            };
             // Ring the cluster around the spawn point.
-            let ang = i as f32 / ENEMY_COUNT as f32 * std::f32::consts::TAU;
+            let ang = i as f32 / count as f32 * std::f32::consts::TAU;
             let raw = self.spawn_point
                 + Vec3::new(ang.cos(), 0.0, ang.sin()) * SPAWN_CLUSTER_RADIUS;
             let spawn = nav
