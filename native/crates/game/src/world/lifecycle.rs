@@ -145,6 +145,7 @@ impl World {
                 // roster is restored (`start_enemy_fire` needs `&mut self`).
                 let mut enemies = std::mem::take(&mut self.enemies);
                 let mut fire_requests: Vec<usize> = Vec::new();
+                let mut needs_target: Vec<usize> = Vec::new();
                 let mut any_caught = false;
                 for (i, inst) in enemies.iter_mut().enumerate() {
                     // Is THIS hunter's fire one-shot animating? (disambiguated from
@@ -171,6 +172,9 @@ impl World {
                     if step.want_fire {
                         fire_requests.push(i);
                     }
+                    if step.needs_search_target {
+                        needs_target.push(i);
+                    }
                     if step.caught {
                         any_caught = true;
                     }
@@ -178,6 +182,15 @@ impl World {
                 self.enemies = enemies;
                 for i in fire_requests {
                     self.start_enemy_fire(i);
+                }
+                // Hand fresh fan-out points to the hunters that arrived / are stuck.
+                // Done after the roster is restored so `pick_search_point` can see
+                // where every other hunter is currently headed (the coordination).
+                for i in needs_target {
+                    let target = self.pick_search_point(i);
+                    if let Some(inst) = self.enemies.get_mut(i) {
+                        inst.enemy.assign_search_target(target);
+                    }
                 }
                 if any_caught && !self.caught {
                     self.caught = true;
@@ -214,7 +227,6 @@ impl World {
         // revive the BUILD demo model.
         self.physics.clear_enemy_colliders();
         self.enemies.clear();
-        self.char_dead = false;
         // Fresh player-combat state each mode switch (full health, no flash/HUD).
         self.player_health = PLAYER_MAX_HEALTH;
         self.player_armor = 0.0;
@@ -235,25 +247,25 @@ impl World {
                 self.selected = None; // clear any authoring selection
                 self.caught = false;
 
-                // Bake the nav grid from the frozen geometry (once) and drop the
-                // hunter roster on spread-out standable cells far from the player.
+                // Bake the nav grid from the frozen geometry (once), seal the spawn
+                // door, and flood the hunter wave in through it.
                 let t0 = Instant::now();
                 let structure_solids = self.structure_solid_boxes();
                 match nav::bake(&mut self.regions, &structure_solids) {
-                    Some(mut nav) => {
+                    Some(nav) => {
                         let bake_ms = t0.elapsed().as_secs_f32() * 1000.0;
                         log::info!(
                             "nav baked in {bake_ms:.2} ms ({} cells)",
                             nav.cell_count()
                         );
+                        // Resolve the fixed enemy spawn point (marker → standable
+                        // cell) and the fan-out search-point pool.
+                        self.prepare_spawn(&nav);
+                        // Flood in the wave: ENEMY_COUNT hunters clustered at the fixed
+                        // spawn point, each in Search, fanning out to hunt the player.
                         if self.spawn_enemies {
-                            let spawns = pick_spread_spawns(&nav, feet, ENEMY_ROSTER.len());
-                            self.spawn_roster(&spawns, feet);
+                            self.spawn_wave(&nav);
                         }
-                        // Arm breakable doors as a live overlay on the frozen grid
-                        // (panel colliders + nav cost). This is the only per-hunt
-                        // dynamic layer; the grid itself never re-bakes.
-                        self.build_doors(&mut nav);
                         self.nav = Some(nav);
                     }
                     None => log::warn!("nav bake produced no grid"),
@@ -270,6 +282,7 @@ impl World {
                 }
                 self.nav = None;
                 self.enemies.clear();
+                self.search_points.clear();
                 self.caught = false;
                 self.sparks.clear();
                 // Explosives don't survive the hunt: drop any in-flight rounds,
@@ -285,26 +298,38 @@ impl World {
         }
     }
 
-    /// Spawn one hunter per [`ENEMY_ROSTER`] entry (as far as `spawns` allows),
-    /// each watching toward the player's start (`feet`) so its perception FSM can
-    /// engage. Each gets its equipped weapon (via [`enemy_def_for`]), its own mixer
-    /// (a clone of the shared clip template), and its own hitscan capsule. Skips
-    /// entirely if the animation template failed to load (no clips → nothing to
-    /// animate).
-    fn spawn_roster(&mut self, spawns: &[Vec3], feet: Vec3) {
+    /// Flood the wave in at the fixed spawn point: [`ENEMY_COUNT`] hunters clustered
+    /// in a small ring around [`Self::spawn_point`] (so they don't all stack on one
+    /// cell), each watching toward the player so their perception cones face where the
+    /// action is, and each drawing a weapon from [`ENEMY_ROSTER`] (cycling if the count
+    /// exceeds the roster). Every hunter starts in `Search` and gets a fan-out point on
+    /// its first step. Skips entirely if the animation template failed to load (no
+    /// clips → nothing to animate).
+    fn spawn_wave(&mut self, nav: &NavWorld) {
         let Some(template) = self.char_anim_template.clone() else {
             log::warn!("no animation template loaded — spawning no hunters");
             return;
         };
         // Each hunter starts clean (all-white blood colors), sized to the model.
         let vert_count = self.char_model.as_ref().map(|m| m.vertices.len()).unwrap_or(0);
-        for (spawn, &(wcfg, dual)) in spawns.iter().zip(ENEMY_ROSTER.iter()) {
+        // Face the player initially (harmless: if the player's out of sight/range the
+        // search FSM takes over immediately; if in view they engage, which is right).
+        let watch = self.player_pos().unwrap_or(self.spawn_point);
+        for i in 0..ENEMY_COUNT {
+            let (wcfg, dual) = ENEMY_ROSTER[i % ENEMY_ROSTER.len()];
+            // Ring the cluster around the spawn point.
+            let ang = i as f32 / ENEMY_COUNT as f32 * std::f32::consts::TAU;
+            let raw = self.spawn_point
+                + Vec3::new(ang.cos(), 0.0, ang.sin()) * SPAWN_CLUSTER_RADIUS;
+            let spawn = nav
+                .nearest_standable(raw.x, raw.y.max(0.1), raw.z, 6)
+                .unwrap_or(self.spawn_point);
             let weapon = enemy_def_for(&wcfg);
             let collider =
                 self.physics
-                    .add_enemy_collider(*spawn, ENEMY_RADIUS, ENEMY_HALF_HEIGHT);
+                    .add_enemy_collider(spawn, ENEMY_RADIUS, ENEMY_HALF_HEIGHT);
             self.enemies.push(EnemyInstance {
-                enemy: Enemy::new(*spawn, feet),
+                enemy: Enemy::new(spawn, watch),
                 anim: template.clone(),
                 weapon,
                 dual,
@@ -315,14 +340,55 @@ impl World {
                 blood: vec![1.0f32; vert_count * 3],
             });
             log::info!(
-                "hunter spawned at {spawn:?} with {}{}",
+                "hunter {i} flooded in at {spawn:?} with {}{}",
                 weapon.name,
                 if dual { " (dual-wield)" } else { "" }
             );
         }
-        if self.enemies.is_empty() {
-            log::warn!("no standable cells for the hunter roster");
+    }
+
+    /// Pick a fan-out search point for hunter `for_idx` (it's searching and needs a
+    /// target). Chooses the pooled search point **farthest from where the other
+    /// hunters are already headed** — so the pack spreads out to cover different
+    /// regions rather than clumping — while skipping points essentially under this
+    /// hunter's feet (so it actually travels somewhere new). Falls back to the player
+    /// vicinity / spawn point if the pool is empty.
+    pub(crate) fn pick_search_point(&self, for_idx: usize) -> Vec3 {
+        if self.search_points.is_empty() {
+            return self.player_pos().unwrap_or(self.spawn_point);
         }
+        let self_pos = self
+            .enemies
+            .get(for_idx)
+            .map(|e| e.enemy.pos)
+            .unwrap_or(self.spawn_point);
+        // Where every *other* hunter is currently headed (its search target, or, if
+        // none, its position) — we want to get away from these.
+        let claimed: Vec<Vec3> = self
+            .enemies
+            .iter()
+            .enumerate()
+            .filter(|(j, _)| *j != for_idx)
+            .map(|(_, e)| e.enemy.search_target().unwrap_or(e.enemy.pos))
+            .collect();
+
+        let mut best = self.search_points[0];
+        let mut best_score = f32::NEG_INFINITY;
+        for &p in &self.search_points {
+            if p.distance(self_pos) < 2.0 {
+                continue; // don't re-pick a point we're already on top of
+            }
+            // Maximise the distance to the nearest already-claimed point (fan out).
+            let score = claimed
+                .iter()
+                .map(|c| c.distance_squared(p))
+                .fold(f32::INFINITY, f32::min);
+            if score > best_score {
+                best_score = score;
+                best = p;
+            }
+        }
+        best
     }
 
     /// Raycast straight down from `from` to find the floor; returns feet position.
@@ -343,7 +409,7 @@ impl World {
 /// wider-than-a-cell character model doesn't spawn clipping a wall / hanging in a
 /// corner); falls back to all standable cells if too few interior ones exist.
 /// Returns fewer than `n` when there aren't enough cells.
-fn pick_spread_spawns(nav: &NavWorld, player: Vec3, n: usize) -> Vec<Vec3> {
+pub(crate) fn pick_spread_spawns(nav: &NavWorld, player: Vec3, n: usize) -> Vec<Vec3> {
     let all = nav.all_standable();
     let interior: Vec<Vec3> = all
         .iter()

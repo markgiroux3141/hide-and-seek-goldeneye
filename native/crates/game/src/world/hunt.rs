@@ -105,94 +105,7 @@ impl World {
         &self.enemy_weapon_lib
     }
 
-    // ─── BUILD demo viewer (animation preview) ──────────────────────────────────
-
-    /// The weapon class the BUILD demo previews (from the cycled arsenal index).
-    fn demo_weapon(&self) -> EnemyWeaponDef {
-        enemy_def_for(&crate::combat::config::WEAPONS[self.demo_weapon_idx])
-    }
-
-    /// BUILD demo: cycle the previewed weapon through the arsenal (bound to `K`), so
-    /// every gun + its class fire animation can be eyeballed without a hunt.
-    pub fn cycle_demo_weapon(&mut self) {
-        self.demo_weapon_idx = (self.demo_weapon_idx + 1) % crate::combat::config::WEAPONS.len();
-        log::info!(
-            "demo weapon → {} (dual={})",
-            self.demo_weapon().name,
-            self.demo_dual
-        );
-    }
-
-    /// BUILD demo: toggle whether the previewed weapon is shown dual-wielded (`J`).
-    pub fn toggle_demo_dual(&mut self) {
-        self.demo_dual = !self.demo_dual;
-        log::info!("demo dual-wield {}", if self.demo_dual { "ON" } else { "OFF" });
-    }
-
-    /// B3 demo: cycle the locomotion band idle → walk → jog → run → idle. Bound
-    /// to `L`. Crossfades to the band's clip over 0.15 s (JS `crossFadeFrom`).
-    /// Also revives the character if it was in a death pose.
-    pub fn cycle_char_speed(&mut self) {
-        self.char_dead = false;
-        self.demo_band = (self.demo_band + 1) % LOCO_SPEEDS.len();
-        if let Some(anim) = &mut self.char_anim {
-            anim.play(self.demo_band, 0.15);
-        }
-        log::info!(
-            "locomotion band {} ({:.1} m/s)",
-            self.demo_band,
-            LOCO_SPEEDS[self.demo_band]
-        );
-    }
-
-    /// B4 demo: fire the previewed weapon's class fire one-shot (with its
-    /// FIRE_TIMING window), returning to the current locomotion when done.
-    /// Suppressed while dead.
-    pub fn char_fire(&mut self) {
-        if self.char_dead {
-            return;
-        }
-        let band = self.demo_band;
-        let def = self.demo_weapon();
-        let idx = fire_clip_index(def.class, self.demo_dual);
-        let win = fire_window_for(def.class, self.demo_dual);
-        if let Some(anim) = &mut self.char_anim {
-            anim.play_once(idx, 0.15, Some(band), Some(win));
-            log::info!("fire ({}{})", def.name, if self.demo_dual { " ×2" } else { "" });
-        }
-    }
-
-    /// B4 demo: play a random hit reaction, returning to locomotion when done.
-    pub fn char_hit(&mut self) {
-        if self.char_dead {
-            return;
-        }
-        let idx = CHAR_HIT_START + self.rand_below(anim_set::HIT_CLIPS.len());
-        let band = self.demo_band;
-        if let Some(anim) = &mut self.char_anim {
-            anim.play_once(idx, 0.1, Some(band), None);
-            log::info!("hit ({})", anim_set::HIT_CLIPS[idx - CHAR_HIT_START]);
-        }
-    }
-
-    /// B4 demo: play a random death (clamps on the last frame — body stays down;
-    /// press `L` to revive).
-    pub fn char_death(&mut self) {
-        if self.char_dead {
-            return;
-        }
-        let death_start = CHAR_HIT_START + anim_set::HIT_CLIPS.len();
-        let pick = self.rand_below(anim_set::DEATH_CLIPS.len());
-        let idx = death_start + pick;
-        self.char_dead = true;
-        if let Some(anim) = &mut self.char_anim {
-            anim.play_once(idx, 0.15, None, None);
-            log::info!("death ({}) — press L to reset", anim_set::DEATH_CLIPS[pick]);
-        }
-    }
-
-    /// xorshift64 → an index in `[0, n)`. Shared by the demo picks and the Track A
-    /// hit/death/pain rolls.
+    /// xorshift64 → an index in `[0, n)`. Drives the Track A hit/death/pain rolls.
     pub(crate) fn rand_below(&mut self, n: usize) -> usize {
         let mut x = self.char_rng;
         x ^= x << 13;
@@ -202,54 +115,27 @@ impl World {
         (x % n.max(1) as u64) as usize
     }
 
-    /// Advance every hunter's mixer (HUNT) or the demo viewer (BUILD) once per
-    /// render frame (JS `mixer.update(delta)` cadence). Position/facing come from
-    /// each hunter's nav/AI-driven [`Enemy`] (the model is purely visual); the demo
-    /// paces a circle by the current band. Doesn't stomp a fire/hit/death one-shot.
+    /// Advance every hunter's animation mixer once per render frame (HUNT only; JS
+    /// `mixer.update(delta)` cadence). Position/facing come from each hunter's
+    /// nav/AI-driven [`Enemy`] (the model is purely visual); a fire/hit/death one-shot
+    /// isn't stomped. No-op in BUILD (nothing animated there).
     pub fn advance_animation(&mut self, dt: f32) {
-        if !self.is_build() {
-            // HUNT: each hunter animates independently from its own AI state.
-            for inst in &mut self.enemies {
-                // Death fade: hold the corpse opaque THROUGH the death animation,
-                // then ramp opacity 1→0 once the clip has clamped (`oneshot_finished`).
-                if inst.enemy.is_dead() {
-                    if inst.anim.oneshot_finished() {
-                        let t = inst.fade.get_or_insert(0.0);
-                        *t = (*t + dt).min(FADE_DURATION);
-                    }
-                } else if !inst.anim.is_playing_oneshot() {
-                    // Not mid fire/hit → keep the locomotion band in sync with speed.
-                    inst.anim.play(band_for_speed(inst.enemy.speed()), 0.15);
+        if self.is_build() {
+            return;
+        }
+        for inst in &mut self.enemies {
+            // Death fade: hold the corpse opaque THROUGH the death animation, then
+            // ramp opacity 1→0 once the clip has clamped (`oneshot_finished`).
+            if inst.enemy.is_dead() {
+                if inst.anim.oneshot_finished() {
+                    let t = inst.fade.get_or_insert(0.0);
+                    *t = (*t + dt).min(FADE_DURATION);
                 }
-                inst.anim.update(dt);
+            } else if !inst.anim.is_playing_oneshot() {
+                // Not mid fire/hit → keep the locomotion band in sync with speed.
+                inst.anim.play(band_for_speed(inst.enemy.speed()), 0.15);
             }
-            return;
-        }
-
-        // BUILD demo: stand still during a one-shot / death, else pace the circle at
-        // the current band's speed facing the travel tangent.
-        if self.char_anim.is_none() {
-            return;
-        }
-        let oneshot = self.char_anim.as_ref().unwrap().is_playing_oneshot();
-        let speed = if !oneshot && !self.char_dead {
-            LOCO_SPEEDS[self.demo_band]
-        } else {
-            0.0
-        };
-        if speed > 0.0 {
-            self.demo_angle =
-                (self.demo_angle + speed / DEMO_RADIUS * dt).rem_euclid(std::f32::consts::TAU);
-            let (s, c) = self.demo_angle.sin_cos();
-            self.char_pos = DEMO_CENTER + Vec3::new(DEMO_RADIUS * c, 0.0, DEMO_RADIUS * s);
-            self.char_yaw = (-s).atan2(c);
-        }
-        let anim = self.char_anim.as_mut().unwrap();
-        anim.update(dt);
-        let open = anim.fire_window_open();
-        if open != self.char_fire_open {
-            self.char_fire_open = open;
-            log::info!("{}", if open { "  fire window OPEN — shot" } else { "  fire window closed" });
+            inst.anim.update(dt);
         }
     }
 
@@ -264,34 +150,21 @@ impl World {
     }
 
     /// Every skinned character to draw this frame as `(model, joint matrices,
-    /// opacity, blood_colors)`: in BUILD the single demo viewer (clean/white), in
-    /// HUNT one per live hunter (each its own mid-crossfade pose, positioned/faced by
-    /// its AI, faded on death, with its accumulated per-vertex blood).
+    /// opacity, blood_colors)` — one per live hunter (each its own mid-crossfade pose,
+    /// positioned/faced by its AI, faded on death, with its accumulated per-vertex
+    /// blood). Empty in BUILD (no character is drawn while authoring).
     pub fn character_instances(&self) -> Vec<(Mat4, Vec<Mat4>, f32, &[f32])> {
         let Some(m) = self.char_model.as_ref() else {
             return Vec::new();
         };
-        if self.is_build() {
-            let joints = match &self.char_anim {
-                Some(anim) => anim.skinning_matrices(&m.skeleton),
-                None => m.skeleton.bind_pose_matrices(),
-            };
-            vec![(
-                self.char_transform(self.char_pos, self.char_yaw),
-                joints,
-                1.0,
-                self.demo_blood.as_slice(),
-            )]
-        } else {
-            self.enemies
-                .iter()
-                .map(|inst| {
-                    let joints = inst.anim.skinning_matrices(&m.skeleton);
-                    let model = self.char_transform(inst.enemy.pos, inst.yaw());
-                    (model, joints, inst.opacity(), inst.blood.as_slice())
-                })
-                .collect()
-        }
+        self.enemies
+            .iter()
+            .map(|inst| {
+                let joints = inst.anim.skinning_matrices(&m.skeleton);
+                let model = self.char_transform(inst.enemy.pos, inst.yaw());
+                (model, joints, inst.opacity(), inst.blood.as_slice())
+            })
+            .collect()
     }
 
     /// World transform of a weapon attached to a character's hand bone
@@ -321,25 +194,13 @@ impl World {
     }
 
     /// The enemy weapon draws this frame: `(weapon name, view_proj · world)` for
-    /// each gun to render. In HUNT, one per live hunter (two for a dual-wielder,
-    /// left + right hand); a dead hunter drops its gun. In BUILD, the demo preview
-    /// weapon on the demo character. Keyed by name so the renderer looks up the mesh.
+    /// each gun to render — one per live hunter (two for a dual-wielder, left + right
+    /// hand); a dead hunter drops its gun. Plus any in-flight explosive round / placed
+    /// mine that carries a GLB. Empty in BUILD. Keyed by name so the renderer looks up
+    /// the mesh.
     pub fn enemy_weapon_draws(&self, aspect: f32) -> Vec<(&'static str, Mat4)> {
         let vp = self.view_proj(aspect);
         let mut out = Vec::new();
-        if self.is_build() {
-            let Some(anim) = self.char_anim.as_ref() else { return out };
-            let def = self.demo_weapon();
-            if let Some(w) = self.weapon_world(anim, self.char_pos, self.char_yaw, &def, false) {
-                out.push((def.name, vp * w));
-            }
-            if self.demo_dual {
-                if let Some(w) = self.weapon_world(anim, self.char_pos, self.char_yaw, &def, true) {
-                    out.push((def.name, vp * w));
-                }
-            }
-            return out;
-        }
         for inst in &self.enemies {
             if inst.enemy.is_dead() {
                 continue; // drop the gun on death
@@ -395,27 +256,11 @@ impl World {
     }
 
     /// The enemy muzzle-flash draws this frame (same bone frames as the guns),
-    /// shown only while a shot's flash is active: in HUNT per live firing hunter
-    /// (both hands when dual), in BUILD while the demo is inside its fire window.
+    /// shown only while a shot's flash is active — one per live firing hunter (both
+    /// hands when dual). Empty in BUILD.
     pub fn enemy_muzzle_draws(&self, aspect: f32) -> Vec<(&'static str, Mat4)> {
         let vp = self.view_proj(aspect);
         let mut out = Vec::new();
-        if self.is_build() {
-            let Some(anim) = self.char_anim.as_ref() else { return out };
-            if !anim.fire_window_open() {
-                return out;
-            }
-            let def = self.demo_weapon();
-            if let Some(w) = self.weapon_world(anim, self.char_pos, self.char_yaw, &def, false) {
-                out.push((def.name, vp * w));
-            }
-            if self.demo_dual {
-                if let Some(w) = self.weapon_world(anim, self.char_pos, self.char_yaw, &def, true) {
-                    out.push((def.name, vp * w));
-                }
-            }
-            return out;
-        }
         for inst in &self.enemies {
             if inst.enemy.is_dead() || inst.muzzle_timer <= 0.0 {
                 continue;
@@ -432,21 +277,37 @@ impl World {
         out
     }
 
-    /// Door breach/blocking is **disabled for now** (user call, 2026-07-16: "get
-    /// rid of the door breach thing … no things blocking the doors on gameplay")
-    /// so the enemy-combat work can be tested without doors interfering. Doors are
-    /// therefore open passages during the hunt: no panel colliders (the player
-    /// walks through), no nav door cost (the hunter walks through), and no panels
-    /// rendered ([`World::door_mesh`] reads the empty `doors` vec). The breach
-    /// system (`Door`, `breach_tick`, the nav overlay) is left intact for a future
-    /// re-enable. Called once at G→HUNT; `nav` is untouched.
-    pub(crate) fn build_doors(&mut self, _nav: &mut NavWorld) {
+    /// Prepare the enemy spawn at G→HUNT from the **fixed** [`SPAWN_MARKER_POS`] (a
+    /// consistent world point the level is built around — **not** derived from where
+    /// the player is standing): snap it to a standable cell for [`Self::spawn_point`],
+    /// and build the fan-out search-point pool ([`Self::search_points`], spread
+    /// standable cells handed to searching hunters). No door is built — the ingress is
+    /// just the marked floor point (see [`World::spawn_marker_mesh`]).
+    ///
+    /// (Breakable-door breach/blocking stays disabled — user call 2026-07-16 — so
+    /// `self.doors` stays empty; the `Door` / `breach_tick` machinery is left intact
+    /// for a re-enable.)
+    pub(crate) fn prepare_spawn(&mut self, nav: &NavWorld) {
         self.doors.clear();
+        // Snap the fixed marker to a standable cell (in case it sits a hair off the
+        // floor, or the builder walled it into a tight spot).
+        let m = SPAWN_MARKER_POS;
+        self.spawn_point = nav.nearest_standable(m.x, m.y + 0.1, m.z, 16).unwrap_or(m);
+        // Fan-out search pool: spread standable cells across the whole level, seeded
+        // from the spawn point (reuses the farthest-point sampler).
+        self.search_points = super::pick_spread_spawns(nav, self.spawn_point, SEARCH_POINT_COUNT);
+        log::info!(
+            "wave spawns at {:?} (marker {:?}); {} search points",
+            self.spawn_point,
+            m,
+            self.search_points.len()
+        );
     }
 
     /// Drain a breaching door's hp; on break, remove its panel collider and flip
-    /// the live nav flag. Currently unused ([`Self::build_doors`] is a no-op while
-    /// breach is disabled) but retained for the re-enable. **The thesis in code:**
+    /// the live nav flag. Currently unused (breakable doors stay disabled; the spawn
+    /// is a marked floor point, not a door) but retained for the re-enable. **The
+    /// thesis in code:**
     /// a built element is destroyed and both collision and nav react instantly —
     /// one collider gone, one bool flipped — with **no re-voxel/CSG re-eval**.
     #[allow(dead_code)]

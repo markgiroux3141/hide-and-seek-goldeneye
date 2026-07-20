@@ -358,6 +358,11 @@ impl World {
             return;
         }
 
+        // A shot is a loud noise: nearby searching/investigating hunters converge on
+        // it (firing while hidden gives you away). Engaged hunters keep their better
+        // info; the seeking ones swing toward the sound.
+        self.alert_enemies_to_noise();
+
         // A shot left the barrel — resolve the aim direction through the crosshair
         // (which may be offset by free-aim). Copy eye + look out so the character
         // borrow ends before the mutable physics borrow, then bend the ray toward
@@ -390,6 +395,22 @@ impl World {
                 self.projectiles.push(proj);
             }
             crate::combat::FireKind::Mine(spec) => self.throw_mine(eye, dir, spec),
+        }
+    }
+
+    /// Emit a gunfire noise ping at the player's position: every living hunter within
+    /// [`GUNSHOT_HEARING_RANGE`] that's still hunting blind (searching / investigating)
+    /// is pulled toward the sound to investigate. A hunter already engaged keeps its
+    /// own (better) information — [`crate::enemy::Enemy::hear_noise`] gates that.
+    fn alert_enemies_to_noise(&mut self) {
+        let Some(ppos) = self.player_pos() else { return };
+        for inst in &mut self.enemies {
+            if inst.enemy.is_dead() {
+                continue;
+            }
+            if inst.enemy.pos.distance(ppos) <= GUNSHOT_HEARING_RANGE {
+                inst.enemy.hear_noise(ppos);
+            }
         }
     }
 

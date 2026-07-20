@@ -241,6 +241,10 @@ pub struct Renderer {
     // each frame from the live spark set.
     spark_pipeline: wgpu::RenderPipeline,
     spark_mesh: Option<GpuMesh>,
+    /// The fixed enemy spawn-point marker (a colored floor square). Reuses the
+    /// depth-tested spark pipeline; drawn in BOTH modes so the builder can see where
+    /// the wave comes in while authoring. Static — rebuilt each frame from the mark.
+    marker_mesh: Option<GpuMesh>,
 
     // Explosion fireballs (explosives): additive camera-facing textured billboards
     // sampling the baked GoldenEye fireball atlas. Depth-tested (occluded by walls)
@@ -1425,6 +1429,7 @@ impl Renderer {
             muzzle_visible: false,
             spark_pipeline,
             spark_mesh: None,
+            marker_mesh: None,
             blast_pipeline,
             blast_atlas_bind,
             blast_mesh: None,
@@ -1842,6 +1847,13 @@ impl Renderer {
 
     /// Set (or clear) the hit-spark marker mesh (P2). Rebuilt each frame from the
     /// live spark set; `None` (or an empty mesh) clears it.
+    pub fn set_marker_mesh(&mut self, mesh: Option<&ColoredMesh>) {
+        self.marker_mesh = match mesh {
+            Some(m) if !m.indices.is_empty() => Some(GpuMesh::upload_colored(&self.device, m)),
+            _ => None,
+        };
+    }
+
     pub fn set_spark_mesh(&mut self, mesh: Option<&ColoredMesh>) {
         self.spark_mesh = match mesh {
             Some(m) if !m.indices.is_empty() => Some(GpuMesh::upload_colored(&self.device, m)),
@@ -2208,6 +2220,16 @@ impl Renderer {
                 rp.set_vertex_buffer(0, e.vertex_buf.slice(..));
                 rp.set_index_buffer(e.index_buf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..e.index_count, 0, 0..1);
+            }
+
+            // 2.05) The enemy spawn-point marker (colored floor square), same
+            // depth-tested unlit pipeline as sparks; drawn in both BUILD and HUNT.
+            if let Some(mk) = &self.marker_mesh {
+                rp.set_pipeline(&self.spark_pipeline);
+                rp.set_bind_group(0, &self.camera_bind_group, &[]);
+                rp.set_vertex_buffer(0, mk.vertex_buf.slice(..));
+                rp.set_index_buffer(mk.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..mk.index_count, 0, 0..1);
             }
 
             // 2.1) Hit sparks (opaque, depth-tested, bright unlit markers).

@@ -113,6 +113,41 @@ use super::editing::find_room_brushes;
         );
     }
 
+    /// The fixed spawn point: the floor marker renders in BOTH modes, and entering
+    /// HUNT floods exactly [`ENEMY_COUNT`] hunters in clustered at the marker (snapped
+    /// to a standable cell) — independent of where the player is standing.
+    #[test]
+    fn wave_floods_in_at_the_fixed_marker() {
+        let mut world = World::new();
+        world.initial_meshes();
+
+        // The marker is visible while authoring (BUILD), before any hunt.
+        assert!(world.is_build());
+        assert!(world.spawn_marker_mesh().is_some(), "marker shows in BUILD");
+
+        world.toggle_mode(); // BUILD → HUNT
+        assert!(world.spawn_marker_mesh().is_some(), "marker still shows in HUNT");
+
+        // The whole wave floods in, clustered at the fixed marker (not the player).
+        assert_eq!(world.enemies.len(), ENEMY_COUNT, "ENEMY_COUNT hunters flood in");
+        assert!(
+            world.spawn_point.distance(SPAWN_MARKER_POS) < 1.0,
+            "spawn snaps to the fixed marker, got {:?}",
+            world.spawn_point
+        );
+        for e in &world.enemies {
+            let d = (e.enemy.pos - world.spawn_point).length();
+            assert!(d < 2.0, "hunter enters near the marker (was {d:.1} m away)");
+        }
+
+        // No door is built for the spawn (it's just a marked floor point).
+        assert!(world.doors.is_empty(), "no spawn door built");
+
+        // Returning to BUILD tears the wave down.
+        world.toggle_mode();
+        assert!(world.enemies.is_empty(), "wave cleared on BUILD");
+    }
+
     /// B5: in HUNT the animated model *is* each hunter — the placeholder box is
     /// gone and there is one skinned instance per hunter, each a real posed
     /// skinning set (opaque while alive).

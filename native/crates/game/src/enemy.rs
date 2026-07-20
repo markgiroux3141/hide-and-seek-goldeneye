@@ -1,17 +1,27 @@
-//! A single hunter grunt with the A1 perception FSM ported from
-//! `3DS FPS/src/ai/EnemyAI.ts`: `idle → alert → chase → attack ↔ cooldown`.
-//! The hunter stands idle until it **sees** the player (detection cone + range +
-//! a line-of-sight ray), reacts after a short delay, chases over the baked nav
-//! grid, and once in attack range with LOS it stops and fires. Losing the target
-//! (too far) drops it back to idle.
+//! A single hunter grunt. Extends the A1 perception FSM (ported from
+//! `3DS FPS/src/ai/EnemyAI.ts`, `idle → alert → chase → attack ↔ cooldown`) with a
+//! **search layer** so a hunter that floods in through the spawn door and does *not*
+//! yet know where the player is will hunt for them rather than stand idle:
 //!
-//! Movement constants + the FSM are ported from `EnemyAI.ts`; the probabilistic
+//! * **Search** — no known target: walk to an assigned search point (the `World`
+//!   hands out spread-out points so the pack fans out and sweeps the base), running
+//!   the perception cone the whole time. Seeing the player promotes to `Alert`.
+//! * **Alert → Chase → Attack ↔ Cooldown** — the original engagement chain, but
+//!   the chase now paths to the player's **last-known position** (updated every step
+//!   the player is perceived), so breaking line-of-sight makes the hunter go to where
+//!   it last saw you rather than tracking you omnisciently.
+//! * **Investigate** — lost the player (LOS broke / a heard gunshot): go to the
+//!   last-known / noise position, scan around for a moment, then fall back to Search.
+//!
+//! Movement/perception constants are ported from `EnemyAI.ts`; the probabilistic
 //! shot roll + the fire-animation cadence live in the `World` combat layer (which
-//! owns the animation mixer + the player), driven by [`EnemyStep::want_fire`].
+//! owns the animation mixer + the player), driven by [`EnemyStep::want_fire`]. Search
+//! coordination (which point each hunter gets) lives in `World` too — this file just
+//! walks to whatever [`Self::assign_search_target`] set and reports when it needs a
+//! fresh one via [`EnemyStep::needs_search_target`].
 //!
 //! Scope note (2026-07-16): door **breach/blocking is disabled** — doors are open
-//! passages during the hunt — so the FSM has no door-blocking branch. Varied
-//! behavior types (patrol/search/etc.) are a future addition.
+//! passages during the hunt — so the FSM has no door-blocking branch.
 
 use glam::Vec3;
 use rapier3d::prelude::ColliderHandle;
@@ -30,12 +40,26 @@ pub struct EnemyStep {
     /// isn't already firing). The `World` plays the fire one-shot on the shared
     /// animation mixer; the shot cadence + damage roll run there.
     pub want_fire: bool,
+    /// The hunter is searching and has no (reachable) search point to head for —
+    /// the `World` should hand it a fresh one via [`Enemy::assign_search_target`]
+    /// (this is where the fan-out coordination lives, since one hunter can't see
+    /// where the others are going).
+    pub needs_search_target: bool,
 }
 
-/// The A1 decision FSM (`EnemyAI.AIState`).
+/// The decision FSM: the A1 engagement chain (`EnemyAI.AIState`) plus the two
+/// search-layer states that drive a hunter which doesn't yet know where the player
+/// is (see the module docs).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AiState {
+    /// Standing still, unaware (the spawn-in state before a search point arrives,
+    /// and the fallback if there's nowhere left to search).
     Idle,
+    /// Sweeping the base toward an assigned search point, perception cone live.
+    Search,
+    /// Walking to a last-known / heard position, then scanning it, before giving up
+    /// to Search.
+    Investigate,
     Alert,
     Chase,
     Attack,
@@ -56,6 +80,16 @@ const DETECTION_HALF_CONE: f32 = 60.0 * std::f32::consts::PI / 180.0; // 120° c
 const ATTACK_RANGE: f32 = 6.0; // m
 const ALERT_DURATION: f32 = 0.5; // s reaction delay
 const COOLDOWN_DURATION: f32 = 1.5; // s between fire bursts
+
+// ─── Search layer ────────────────────────────────────────────────────────────
+/// Within this XZ distance (m) of a search / investigate target, the hunter counts
+/// as "arrived" (and Search asks for the next point).
+const ARRIVE_DIST: f32 = 0.6;
+/// How long (s) a hunter scans a spot in `Investigate` before giving up to `Search`.
+const INVESTIGATE_SCAN_DURATION: f32 = 2.5;
+/// How fast (rad/s) the hunter's facing sweeps while scanning in `Investigate`, so
+/// its perception cone actually pans across the room to re-acquire the player.
+const SCAN_TURN_RATE: f32 = 1.6;
 
 /// Starting health (JS `EnemyCharacter` default + facility karl/joe). With PP7
 /// damage 25 → 4 shots to kill.
@@ -93,11 +127,24 @@ pub struct Enemy {
     /// The fire animation has actually started playing (JS `fireAnimStarted`) —
     /// so we detect its *completion* (not just its not-yet-started frames).
     fire_started: bool,
+
+    // ─── Search layer ──
+    /// The point this hunter is sweeping toward while in `Search`. Assigned by the
+    /// `World` (fan-out coordination); cleared on arrival, when the hunter reports
+    /// [`EnemyStep::needs_search_target`].
+    search_target: Option<Vec3>,
+    /// Where the player was last perceived (or a heard gunshot) — the chase paths
+    /// here, and `Investigate` walks here then scans it.
+    last_known: Option<Vec3>,
+    /// Seconds spent scanning the current spot in `Investigate`.
+    scan_timer: f32,
 }
 
 impl Enemy {
-    /// Spawn at `feet`, initially watching toward `watch` (the player's start), so
-    /// the encounter can trigger — a guard on watch rather than facing a wall.
+    /// Spawn at `feet`, initially watching toward `watch` (into the room, so the
+    /// perception cone faces where the player is likely to be), and starting in
+    /// [`AiState::Search`] — a hunter that just flooded in through the door and is
+    /// hunting for the player. The `World` hands it a search point on the first step.
     pub fn new(feet: Vec3, watch: Vec3) -> Self {
         let heading = {
             let flat = Vec3::new(watch.x - feet.x, 0.0, watch.z - feet.z);
@@ -117,12 +164,49 @@ impl Enemy {
             health: ENEMY_HEALTH,
             dead: false,
             stun_timer: 0.0,
-            state: AiState::Idle,
+            state: AiState::Search,
             alert_timer: 0.0,
             chase_timer: 0.0,
             cooldown_timer: 0.0,
             is_attacking: false,
             fire_started: false,
+            search_target: None,
+            last_known: None,
+            scan_timer: 0.0,
+        }
+    }
+
+    /// The point this hunter is currently sweeping toward in `Search` (so the
+    /// `World` can fan the pack out — avoid handing two hunters the same point).
+    pub fn search_target(&self) -> Option<Vec3> {
+        self.search_target
+    }
+
+    /// Hand this hunter a fresh search point (the `World`'s fan-out coordinator).
+    /// A no-op once dead. Keeps the hunter in / returns it to `Search`.
+    pub fn assign_search_target(&mut self, target: Vec3) {
+        if self.dead {
+            return;
+        }
+        self.search_target = Some(target);
+        if matches!(self.state, AiState::Idle) {
+            self.state = AiState::Search;
+        }
+    }
+
+    /// React to a heard noise (e.g. the player's gunfire) at `pos`: if the hunter is
+    /// still hunting blind (searching / investigating / idle), converge on the sound
+    /// to investigate it. A hunter already engaged (alerted / chasing / attacking)
+    /// keeps its better information. No-op once dead.
+    pub fn hear_noise(&mut self, pos: Vec3) {
+        if self.dead {
+            return;
+        }
+        if matches!(self.state, AiState::Search | AiState::Investigate | AiState::Idle) {
+            self.last_known = Some(pos);
+            self.search_target = None;
+            self.scan_timer = 0.0;
+            self.state = AiState::Investigate;
         }
     }
 
@@ -203,7 +287,8 @@ impl Enemy {
     /// Advance the FSM one step. `fire_anim` = a fire one-shot is currently playing
     /// on the shared mixer (the JS `enemyState === 'action'` proxy, disambiguated
     /// from hit/death by the caller). Returns `want_fire` when it wants the caller
-    /// to start a fire burst this step.
+    /// to start a fire burst this step, and `needs_search_target` when it's searching
+    /// and needs the `World` to hand it a fresh point.
     pub fn update(
         &mut self,
         dt: f32,
@@ -223,16 +308,65 @@ impl Enemy {
             return EnemyStep::default();
         }
 
+        // Perception is checked every step, in every state: seeing the player is what
+        // promotes a searcher to the engagement chain, and keeps the last-known
+        // position fresh while chasing/attacking.
+        let perceived = self.dist_to(player_feet) < DETECTION_RANGE
+            && self.in_cone(player_feet)
+            && line_of_sight(physics, self.pos, player_feet, self_collider);
+        if perceived {
+            self.last_known = Some(player_feet);
+        }
+
         let mut step = EnemyStep::default();
         match self.state {
             AiState::Idle => {
-                let dist = self.dist_to(player_feet);
-                if dist < DETECTION_RANGE
-                    && self.in_cone(player_feet)
-                    && line_of_sight(physics, self.pos, player_feet, self_collider)
-                {
-                    self.state = AiState::Alert;
-                    self.alert_timer = 0.0;
+                // Unaware and with nowhere assigned to search — the `World` will give
+                // it a point (spawn-in / stuck fallback). Acquire on sight meanwhile.
+                if perceived {
+                    self.enter_alert();
+                } else {
+                    step.needs_search_target = true;
+                }
+            }
+            AiState::Search => {
+                if perceived {
+                    self.enter_alert();
+                } else {
+                    match self.search_target {
+                        Some(t) => {
+                            if self.move_toward(dt, t, nav) {
+                                // Reached it (or it's unreachable) — ask for the next.
+                                self.search_target = None;
+                                step.needs_search_target = true;
+                            }
+                        }
+                        None => step.needs_search_target = true,
+                    }
+                }
+            }
+            AiState::Investigate => {
+                if perceived {
+                    self.enter_alert();
+                } else {
+                    match self.last_known {
+                        // Still walking to the spot we're curious about.
+                        Some(t) if self.dist_to(t) > ARRIVE_DIST => {
+                            self.move_toward(dt, t, nav);
+                        }
+                        // Arrived (or nothing to walk to): scan around, sweeping the
+                        // cone, then give up to a fresh search.
+                        _ => {
+                            self.scan_timer += dt;
+                            self.sweep_heading(dt);
+                            if self.scan_timer >= INVESTIGATE_SCAN_DURATION {
+                                self.state = AiState::Search;
+                                self.last_known = None;
+                                self.search_target = None;
+                                step.needs_search_target = true;
+                            }
+                        }
+                    }
                 }
             }
             AiState::Alert => {
@@ -251,9 +385,6 @@ impl Enemy {
                     self.state = AiState::Attack;
                     self.is_attacking = false;
                     self.path.clear();
-                } else if dist > DETECTION_RANGE * 1.5 {
-                    self.state = AiState::Idle;
-                    self.path.clear();
                 } else if fire_anim {
                     // A fire one-shot is still playing (it began in `attack`, then the
                     // player slipped out of range): stay planted so the feet don't
@@ -262,7 +393,14 @@ impl Enemy {
                     // the JS `enemyState === 'action'` decision gate.
                     self.face(player_feet);
                 } else {
-                    self.chase_step(dt, player_feet, nav);
+                    // Path to where we last saw the player (updated to the live
+                    // position every perceived step above). Reaching that spot without
+                    // seeing them = they got away → investigate it.
+                    let target = self.last_known.unwrap_or(player_feet);
+                    if self.move_toward(dt, target, nav) && !perceived {
+                        self.state = AiState::Investigate;
+                        self.scan_timer = 0.0;
+                    }
                 }
             }
             AiState::Attack => {
@@ -304,7 +442,9 @@ impl Enemy {
                         self.state = AiState::Chase;
                         self.chase_timer = 0.0;
                     } else {
-                        self.state = AiState::Idle;
+                        // Lost them — go poke at where they last were.
+                        self.state = AiState::Investigate;
+                        self.scan_timer = 0.0;
                     }
                 }
             }
@@ -317,55 +457,89 @@ impl Enemy {
         step
     }
 
-    /// Chase movement. When the straight line to the player is walkable (an open
-    /// room), **beeline** — move directly toward the player at any angle — so the
-    /// hunter doesn't zig-zag along the grid's cardinal-only A* waypoints. Only when
-    /// the straight line is blocked (a wall/corner between them) does it fall back to
-    /// A* pathfinding (the JS "LOS → beeline" shortcut).
-    fn chase_step(&mut self, dt: f32, player_feet: Vec3, nav: &NavWorld) {
+    /// Begin the reaction delay after acquiring the player.
+    fn enter_alert(&mut self) {
+        self.state = AiState::Alert;
+        self.alert_timer = 0.0;
+        self.path.clear();
+    }
+
+    /// Rotate the facing in place (used to scan a spot in `Investigate`), so the
+    /// perception cone sweeps and can re-acquire the player.
+    fn sweep_heading(&mut self, dt: f32) {
+        let ang = SCAN_TURN_RATE * dt;
+        let (s, c) = ang.sin_cos();
+        let (x, z) = (self.heading.x, self.heading.z);
+        let h = Vec3::new(x * c - z * s, 0.0, x * s + z * c);
+        if h.length_squared() > 1e-6 {
+            self.heading = h.normalize();
+        }
+    }
+
+    /// Move toward a flat `target` this step; returns `true` when the hunter has
+    /// arrived (within [`ARRIVE_DIST`]) or the target is **unreachable** (no A* path
+    /// and no clear line) so the caller can pick a new one instead of getting stuck.
+    ///
+    /// When the straight line to the target is walkable (an open room), **beeline** —
+    /// move directly at any angle — so the hunter doesn't zig-zag along the grid's
+    /// cardinal-only A* waypoints. Only when the line is blocked (a wall/corner) does
+    /// it fall back to A* (the JS "LOS → beeline" shortcut). Shared by Chase, Search,
+    /// and Investigate.
+    fn move_toward(&mut self, dt: f32, target: Vec3, nav: &NavWorld) -> bool {
+        let flat = Vec3::new(target.x - self.pos.x, 0.0, target.z - self.pos.z);
+        if flat.length() < ARRIVE_DIST {
+            return true;
+        }
         // Sample the walkability line at ~knee height so it clears the floor but
         // catches walls/waist-high obstacles.
         let up = Vec3::new(0.0, 0.5, 0.0);
-        if nav.los_clear(self.pos + up, player_feet + up) {
+        if nav.los_clear(self.pos + up, target + up) {
             self.path.clear();
             self.repath_timer = 0.0; // force a fresh A* path the instant LOS breaks
-            let to = Vec3::new(player_feet.x - self.pos.x, 0.0, player_feet.z - self.pos.z);
-            let dist = to.length();
-            if dist > 1e-4 {
-                let stepd = (SPEED_CHASE * dt).min(dist);
-                self.pos += to / dist * stepd;
-                self.heading = to / dist; // face the (flat) travel direction
-                self.moving = true;
-            }
-            return;
+            let dist = flat.length();
+            let stepd = (SPEED_CHASE * dt).min(dist);
+            self.pos += flat / dist * stepd;
+            self.heading = flat / dist; // face the (flat) travel direction
+            self.moving = true;
+            return false;
         }
 
         self.repath_timer -= dt;
         if self.repath_timer <= 0.0 {
             self.repath_timer = REPATH_INTERVAL;
-            if let Some(path) = nav.find_path(self.pos, player_feet) {
-                self.path = path;
-                self.path_idx = 1.min(self.path.len().saturating_sub(1)); // skip the start cell
+            match nav.find_path(self.pos, target) {
+                Some(path) => {
+                    let last = path.len().saturating_sub(1);
+                    self.path = path;
+                    self.path_idx = 1.min(last); // skip the start cell
+                }
+                None => {
+                    // Nowhere to walk and no clear line → treat as arrived so the
+                    // caller reassigns rather than freezing here forever.
+                    self.path.clear();
+                    return true;
+                }
             }
         }
 
         if self.path_idx < self.path.len() {
-            let target = self.path[self.path_idx];
-            let to = target - self.pos;
+            let waypoint = self.path[self.path_idx];
+            let to = waypoint - self.pos;
             let dist = to.length();
             if dist > 1e-4 {
                 let stepd = (SPEED_CHASE * dt).min(dist);
                 self.pos += to / dist * stepd;
-                let flat = Vec3::new(to.x, 0.0, to.z);
-                if flat.length_squared() > 1e-6 {
-                    self.heading = flat.normalize();
+                let f = Vec3::new(to.x, 0.0, to.z);
+                if f.length_squared() > 1e-6 {
+                    self.heading = f.normalize();
                 }
                 self.moving = true;
             }
-            if self.pos.distance(target) < WAYPOINT_EPS && self.path_idx < self.path.len() - 1 {
+            if self.pos.distance(waypoint) < WAYPOINT_EPS && self.path_idx < self.path.len() - 1 {
                 self.path_idx += 1;
             }
         }
+        false
     }
 }
 
@@ -433,5 +607,45 @@ mod tests {
         // Watching toward the player seeds the heading toward it.
         e = Enemy::new(Vec3::ZERO, Vec3::new(0.0, 0.0, 5.0));
         assert!(e.in_cone(Vec3::new(0.0, 0.0, 5.0)));
+    }
+
+    /// A freshly-spawned hunter starts hunting (Search), not standing idle — it
+    /// flooded in through the door without knowing where the player is.
+    #[test]
+    fn new_hunter_starts_searching() {
+        let e = Enemy::new(Vec3::ZERO, Vec3::NEG_Z);
+        assert_eq!(e.state(), AiState::Search);
+        assert!(e.search_target().is_none(), "no point assigned yet");
+    }
+
+    /// Assigning a search point stores it (and the `World` reads it back to fan the
+    /// pack out); a dead hunter ignores the assignment.
+    #[test]
+    fn assign_search_target_stores_and_reads_back() {
+        let mut e = Enemy::new(Vec3::ZERO, Vec3::NEG_Z);
+        let t = Vec3::new(4.0, 0.0, 2.0);
+        e.assign_search_target(t);
+        assert_eq!(e.search_target(), Some(t));
+        e.take_damage(ENEMY_HEALTH); // kill
+        e.assign_search_target(Vec3::new(9.0, 0.0, 9.0));
+        assert_eq!(e.search_target(), Some(t), "a corpse ignores new orders");
+    }
+
+    /// A gunshot pulls a *searching* hunter to investigate the sound (last-known set
+    /// to the noise, state → Investigate), but a hunter already *engaged* keeps its
+    /// own better information.
+    #[test]
+    fn hear_noise_diverts_only_a_seeker() {
+        let noise = Vec3::new(3.0, 0.0, 5.0);
+
+        let mut seeker = Enemy::new(Vec3::ZERO, Vec3::NEG_Z); // starts in Search
+        seeker.hear_noise(noise);
+        assert_eq!(seeker.state(), AiState::Investigate);
+        assert_eq!(seeker.last_known, Some(noise));
+
+        let mut engaged = Enemy::new(Vec3::ZERO, Vec3::NEG_Z);
+        engaged.state = AiState::Attack; // mid-fight — has eyes on the player
+        engaged.hear_noise(noise);
+        assert_eq!(engaged.state(), AiState::Attack, "an engaged hunter isn't distracted");
     }
 }

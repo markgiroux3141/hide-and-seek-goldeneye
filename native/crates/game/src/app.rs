@@ -169,10 +169,6 @@ impl ApplicationHandler for App {
 
         // Build the world, upload its initial region meshes.
         let mut world = World::new();
-        // Dev: don't spawn hunters on HUNT while iterating on explosives — the full
-        // roster guns the player down before anything can be tested. Re-enable
-        // (delete this line) to bring the hunters back.
-        world.set_spawn_enemies(false);
         for rm in world.initial_meshes() {
             renderer.set_region_textured(rm.id, &rm.mesh);
         }
@@ -493,6 +489,9 @@ impl ApplicationHandler for App {
                             .then(|| world.aim_offset(aspect));
                         renderer.set_crosshair_offset(crosshair);
                     }
+                    // The fixed enemy spawn-point marker (colored floor square) —
+                    // drawn in both modes so the builder can author around it.
+                    renderer.set_marker_mesh(world.spawn_marker_mesh().as_ref());
                     renderer.set_spark_mesh(world.spark_mesh().as_ref());
                     // Explosion fireballs (additive textured billboards, world-space).
                     renderer.set_blast_mesh(world.blast_mesh().as_ref());
@@ -634,32 +633,6 @@ impl App {
         if code == KeyCode::KeyQ {
             if self.world.as_ref().map(|w| !w.is_build()).unwrap_or(false) {
                 self.begin_weapon_switch();
-            }
-            return;
-        }
-        // Character animation demo (BUILD only — in HUNT the model is the
-        // nav/AI-driven hunter). L cycles locomotion; Z/N/M fire/hit/death;
-        // K cycles the previewed weapon through the arsenal; J toggles dual-wield.
-        if matches!(
-            code,
-            KeyCode::KeyL
-                | KeyCode::KeyZ
-                | KeyCode::KeyN
-                | KeyCode::KeyM
-                | KeyCode::KeyK
-                | KeyCode::KeyJ
-        ) {
-            if let Some(world) = self.world.as_mut() {
-                if world.is_build() {
-                    match code {
-                        KeyCode::KeyL => world.cycle_char_speed(),
-                        KeyCode::KeyZ => world.char_fire(),
-                        KeyCode::KeyN => world.char_hit(),
-                        KeyCode::KeyK => world.cycle_demo_weapon(),
-                        KeyCode::KeyJ => world.toggle_demo_dual(),
-                        _ => world.char_death(),
-                    }
-                }
             }
             return;
         }

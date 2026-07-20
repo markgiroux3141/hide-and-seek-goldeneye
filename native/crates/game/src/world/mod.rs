@@ -53,6 +53,7 @@ mod tests;
 // / `brushes_touching` are used only within `editing`, so they aren't re-exported.)
 pub(crate) use geom::{boxes_mesh, make_stair_void, make_wall_brush, push_colored_box};
 pub(crate) use hunt::{band_for_speed, fire_clip_index, fire_window_for, is_fire_clip};
+pub(crate) use lifecycle::pick_spread_spawns;
 pub(crate) use pick::{flip, same_face};
 
 /// Default push/pull increment, in WT (JS `PUSH_PULL_STEP`). Shift → 1 WT.
@@ -99,14 +100,6 @@ pub(crate) const PAD_PITCH_SIGN: f32 = -1.0;
 /// reads better against the level. The GE-unit weapon bone offsets and the computed
 /// `char_feet_offset` both flow through this scale, so they shrink with the model.
 pub(crate) const CHAR_SCALE: f32 = 0.000_832; // 0.00104 × 0.8
-
-/// B3 locomotion demo: linear speed (m/s) per band, indexed by `demo_band`
-/// (0=idle,1=walk,2=jog,3=run). Walk/jog/run match `SPEED_THRESHOLDS` so the
-/// JS `_playLocomotion` band selection lands exactly on each clip.
-pub(crate) const LOCO_SPEEDS: [f32; 4] = [0.0, 1.5, 3.5, 5.0];
-/// Demo circle the character paces (room centre, radius in metres).
-pub(crate) const DEMO_CENTER: Vec3 = Vec3::new(3.0, 0.0, 3.0);
-pub(crate) const DEMO_RADIUS: f32 = 1.6;
 
 /// Clip indices within the character's [`AnimPlayer`], set by the fixed load order
 /// in `World::new`: `0–3` locomotion, then one fire clip per weapon class
@@ -178,6 +171,34 @@ pub(crate) const ENEMY_ROSTER: &[(crate::combat::config::WeaponStats, bool)] = &
     (crate::combat::config::AR33, false),    // two-handed rifle
     (crate::combat::config::SHOTGUN, false), // two-handed
 ];
+
+/// How many hunters flood in at the spawn point on G→HUNT. Weapons are drawn from
+/// [`ENEMY_ROSTER`] (cycling if this exceeds the roster length), so this is the
+/// single knob for "how big is the wave" — bump it and the rest follows.
+pub(crate) const ENEMY_COUNT: usize = 6;
+
+// ─── Enemy spawn point (a FIXED world marker) ────────────────────────────────
+/// The hunters always flood in at this fixed world-space point (metres) — a
+/// consistent location the builder authors around, **not** derived from where the
+/// player happens to be at G. Marked on the floor by a colored square
+/// ([`World::spawn_marker_mesh`]) visible in both BUILD and HUNT. Defaults to the
+/// centre of the starting room; a placement tool can make it authorable later.
+pub(crate) const SPAWN_MARKER_POS: Vec3 = Vec3::new(3.0, 0.0, 3.0);
+/// Half-extent (m) of the floor marker square, and its flat colour (a bright
+/// red so it clearly reads as the enemy ingress).
+const SPAWN_MARKER_HALF: f32 = 0.6;
+const SPAWN_MARKER_COLOR: [f32; 3] = [0.95, 0.12, 0.12];
+/// Radius (m) of the ring the wave clusters into around the spawn point, so the
+/// hunters don't all stack on one cell.
+const SPAWN_CLUSTER_RADIUS: f32 = 0.7;
+
+/// Size of the fan-out search-point pool the `World` hands out during the hunt
+/// (spread standable cells). More points than hunters keeps the sweep varied.
+const SEARCH_POINT_COUNT: usize = 12;
+/// How far (m) the player's gunfire carries as a noise ping that pulls nearby
+/// searching/investigating hunters toward the sound. Comfortably past the 12 m
+/// sight range so shooting while hidden genuinely gives you away.
+const GUNSHOT_HEARING_RANGE: f32 = 25.0;
 
 /// Load a weapon's `(gun, muzzle-flash)` CPU meshes from its config, resolving the
 /// asset-relative paths under `native/assets/weapons/`. Warn-not-panic: a failed
@@ -253,7 +274,7 @@ const BRACE_MAX: f32 = 8.0;
 const BURY_EPS: f32 = WALL_THICKNESS / 2.0;
 
 /// Seconds of sustained breaching to break a door (JS `door.js` `DOOR_HP`).
-/// Unused while breach is disabled (see [`World::build_doors`]); kept for re-enable.
+/// Unused while breakable doors stay disabled; kept for re-enable.
 #[allow(dead_code)]
 const DOOR_HP: f32 = 2.5;
 
@@ -653,45 +674,20 @@ pub struct World {
     /// convenience while iterating on explosives (see `set_spawn_enemies`), so a
     /// hunt starts empty and you aren't gunned down before you can test.
     spawn_enemies: bool,
-    /// The shared skinned-character geometry (one GLB) rendered for every hunter
-    /// (and the BUILD demo viewer). `None` if the asset failed to load.
+    /// The shared skinned-character geometry (one GLB) rendered for every hunter.
+    /// `None` if the asset failed to load.
     char_model: Option<SkinnedModel>,
     /// Pristine animation mixer over the full clip set (locomotion + per-class fire
     /// + hit + death), cloned once per spawned hunter so each animates on its own
     /// clock. `None` if any clip failed to load.
     char_anim_template: Option<AnimPlayer>,
-    /// The BUILD demo viewer's own live mixer (a clone of the template). Drives the
-    /// single previewed character paced around the demo circle; unused in HUNT.
-    char_anim: Option<AnimPlayer>,
-    /// The weapon class the BUILD demo previews in-hand, and whether it's shown
-    /// dual-wielded — cycled by the `K` / `J` keys so every gun + fire animation can
-    /// be eyeballed without entering HUNT. Indexes [`crate::combat::config::WEAPONS`].
-    demo_weapon_idx: usize,
-    demo_dual: bool,
-    /// B3 demo: locomotion band (0=idle,1=walk,2=jog,3=run) cycled by `L`, and
-    /// the character's angle around the demo circle. Replaced by enemy/nav-driven
-    /// movement in B5.
-    demo_band: usize,
-    demo_angle: f32,
-    /// Character feet position (metres) + facing yaw, updated by the demo mover.
-    char_pos: Vec3,
-    char_yaw: f32,
-    /// B4: `true` while a death one-shot is clamped on its last frame (press `L`
-    /// to revive). Fire/hit are suppressed while dead.
-    char_dead: bool,
-    /// Last fire-window state, to log OPEN/closed transitions once.
-    char_fire_open: bool,
-    /// xorshift state for the hit/death random pick (no `rand` dep — a demo pick,
-    /// not a statistical roll; combat can bring `rand` when it needs one).
+    /// xorshift state for the hit/death/pain random picks (no `rand` dep).
     char_rng: u64,
     /// World-space Y offset that seats the character's feet on the floor.
     /// Computed from the **lowest skinned point of the actual idle pose** (the
     /// bind-pose AABB can't be used — the bind pose is a splayed star with the
     /// feet spread high, so seating by it leaves the standing pose sunk).
     char_feet_offset: f32,
-    /// All-white per-vertex blood colors for the BUILD demo character (it's never
-    /// shot), sized to the model's vertex count. Borrowed by `character_instances`.
-    demo_blood: Vec<f32>,
     // (Per-hunter death fade + fire cadence + muzzle timers now live on each
     // [`EnemyInstance`]; see `enemies` above.)
 
@@ -767,9 +763,18 @@ pub struct World {
     audio: Option<AudioManager>,
 
     caught: bool,
+    /// Where the hunters materialise at G→HUNT — the fixed [`SPAWN_MARKER_POS`]
+    /// snapped to a standable cell. Set by [`World::prepare_spawn`]; the wave clusters
+    /// around it. HUNT only.
+    spawn_point: Vec3,
+    /// The fan-out search-point pool for the hunt (spread standable cells). The
+    /// `World` hands these out to searching hunters so the pack sweeps the base
+    /// instead of clumping. Rebuilt each G→HUNT, cleared on return to BUILD.
+    search_points: Vec<Vec3>,
     regions: Vec<Region>,
     selected: Option<Selection>,
-    /// Breakable doors; populated at G→HUNT from door-marked brushes, cleared on
+    /// Doors, populated at G→HUNT: the fixed **spawn-door seal** (a black
+    /// non-breakable panel) plus (when re-enabled) breakable doors. Cleared on
     /// return to BUILD. `Some`-active only during the hunt.
     doors: Vec<Door>,
     /// Opening tool state (BUILD): which crosshair opening tool is armed (door or
@@ -912,13 +917,6 @@ impl World {
                 None
             }
         });
-        // The BUILD demo viewer's own live mixer (independent clock).
-        let char_anim = char_anim_template.clone();
-
-        // All-white blood colors for the BUILD demo character (never shot).
-        let demo_blood =
-            vec![1.0f32; char_model.as_ref().map(|m| m.vertices.len()).unwrap_or(0) * 3];
-
         // Seat the feet: sample the idle across its loop, skin each pose on the
         // CPU, and take the global lowest Y (the most-planted foot). Seating that
         // at the floor keeps the feet grounded while the animation's own vertical
@@ -947,12 +945,11 @@ impl World {
             .iter()
             .map(|&cfg| Weapon::new(cfg))
             .collect();
-        // Start on the Rocket Launcher (dev convenience while building explosives —
-        // saves cycling the whole arsenal; set back to 0 for PP7 when done). Cycle
-        // (Q / N64 A) reaches the grenades + the mines + the Detonator.
+        // Start on the PP7 (the default sidearm). Cycle (Q / N64 A) reaches the rest
+        // of the arsenal — rifles, the grenades, the mines, the Detonator.
         let weapon_index = crate::combat::config::WEAPONS
             .iter()
-            .position(|w| w.name == "Rocket Launcher")
+            .position(|w| w.name == "PP7")
             .unwrap_or(0);
         let (gun_model, muzzle_model) = load_weapon_models(weapons[weapon_index].config());
 
@@ -1002,12 +999,6 @@ impl World {
         }
         log::info!("loaded {} enemy weapon meshes", enemy_weapon_lib.len());
 
-        // Demo character starts on the circle at 270° — the nice centre-front
-        // spot in front of the spawn camera — facing +Z (toward the camera).
-        let demo_angle = std::f32::consts::FRAC_PI_2 * 3.0;
-        let char_pos = DEMO_CENTER
-            + Vec3::new(DEMO_RADIUS * demo_angle.cos(), 0.0, DEMO_RADIUS * demo_angle.sin());
-
         World {
             camera,
             physics: PhysicsWorld::new(),
@@ -1018,18 +1009,8 @@ impl World {
             spawn_enemies: true,
             char_model,
             char_anim_template,
-            char_anim,
-            demo_weapon_idx: 0,
-            demo_dual: false,
-            demo_band: 0,
-            demo_angle,
-            char_pos,
-            char_yaw: 0.0,
-            char_dead: false,
-            char_fire_open: false,
             char_rng: 0x9E37_79B9_7F4A_7C15,
             char_feet_offset,
-            demo_blood,
             player_health: PLAYER_MAX_HEALTH,
             player_armor: 0.0,
             player_dead: false,
@@ -1055,6 +1036,8 @@ impl World {
             aiming: false,
             audio: None,
             caught: false,
+            spawn_point: SPAWN_MARKER_POS,
+            search_points: Vec::new(),
             regions: vec![region],
             selected: None,
             doors: Vec::new(),
@@ -1119,5 +1102,19 @@ impl World {
     /// Whether the hunter has caught the player.
     pub fn is_caught(&self) -> bool {
         self.caught
+    }
+
+    /// The enemy spawn-point marker: a flat colored square laid on the floor at the
+    /// fixed [`SPAWN_MARKER_POS`], drawn in **both** BUILD and HUNT so the level can
+    /// be authored around a consistent, visible enemy-ingress point. A thin raised
+    /// tile (via [`push_colored_box`]) through the depth-tested spark pipeline.
+    pub fn spawn_marker_mesh(&self) -> Option<ColoredMesh> {
+        let c = SPAWN_MARKER_POS;
+        let min = Vec3::new(c.x - SPAWN_MARKER_HALF, c.y + 0.01, c.z - SPAWN_MARKER_HALF);
+        let max = Vec3::new(c.x + SPAWN_MARKER_HALF, c.y + 0.05, c.z + SPAWN_MARKER_HALF);
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        push_colored_box(&mut vertices, &mut indices, min, max, SPAWN_MARKER_COLOR);
+        Some(ColoredMesh { vertices, indices })
     }
 }
