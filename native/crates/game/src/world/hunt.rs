@@ -4,6 +4,16 @@
 
 use super::*;
 
+/// Character model matrix (feet-seated, faced, scaled) — the `&self`-free core of
+/// [`World::char_transform`], so the aim post-pass can build it inside the
+/// `&mut enemies` loop without reborrowing `self`.
+pub(crate) fn char_transform_raw(feet: Vec3, yaw: f32, feet_off: f32) -> Mat4 {
+    let pos = Vec3::new(feet.x, feet.y + feet_off, feet.z);
+    Mat4::from_translation(pos)
+        * Mat4::from_rotation_y(yaw)
+        * Mat4::from_scale(Vec3::splat(CHAR_SCALE))
+}
+
 /// Locomotion band (clip index 0=idle,1=walk,2=jog,3=run) for a speed (m/s),
 /// matching the JS `_playLocomotion` thresholds.
 pub(crate) fn band_for_speed(speed: f32) -> usize {
@@ -125,6 +135,14 @@ impl World {
             self.advance_procedural_preview(dt);
             return;
         }
+        // Player aim point (chest) + feet-seat offset, pulled out before the loop so
+        // it doesn't clash with the per-hunter `&mut` borrow.
+        let aim_point = self.player_pos().map(|p| p + Vec3::Y * PLAYER_AIM_Y);
+        let feet_off = self.char_feet_offset;
+        let arm = self.enemy_arm; // Copy — shared arm geometry for every hunter
+        // Skeleton borrow is a DISJOINT field from `enemies`, so both can be held.
+        let skeleton = self.char_model.as_ref().map(|m| &m.skeleton);
+
         for inst in &mut self.enemies {
             // Death fade: hold the corpse opaque THROUGH the death animation, then
             // ramp opacity 1→0 once the clip has clamped (`oneshot_finished`).
@@ -138,6 +156,43 @@ impl World {
                 inst.anim.play(band_for_speed(inst.enemy.speed()), 0.15);
             }
             inst.anim.update(dt);
+
+            // ── Procedural post-pass: aim the gun arm at the player + recoil. ──
+            let Some(sk) = skeleton else {
+                continue; // no skinned model → nothing to pose
+            };
+            // Aim while engaged (has seen the player) and NOT mid hit/death — a fire
+            // one-shot still aims (so the shot points at the player).
+            let engaged = matches!(
+                inst.enemy.state(),
+                AiState::Alert | AiState::Chase | AiState::Attack | AiState::Cooldown
+            );
+            let hit_or_death =
+                inst.anim.is_playing_oneshot() && !is_fire_clip(inst.anim.current_clip());
+            let want_aim = engaged && !inst.enemy.is_dead() && !hit_or_death;
+            let target_w = if want_aim { 1.0 } else { 0.0 };
+            // Exponential ease toward the target weight (frame-rate independent).
+            inst.aim_weight += (target_w - inst.aim_weight) * (1.0 - (-dt * AIM_RAMP).exp());
+
+            // Aim target in model space: point the arm from the shoulder toward the
+            // player, at a fraction of full reach (the muzzle rides the hand, so the
+            // gun ends up pointing at the player).
+            if let (Some(ap), Some(a)) = (aim_point, arm) {
+                let ct = char_transform_raw(inst.enemy.pos, inst.yaw(), feet_off);
+                let model_p = ct.inverse().transform_point3(ap);
+                let dir = (model_p - a.shoulder).normalize_or_zero();
+                let target = a.shoulder + dir * (a.reach * AIM_REACH_FRAC);
+                if let Some(ik) = inst.stack.layer_as::<TwoBoneIkLayer>(ENEMY_IK_LAYER) {
+                    ik.target = target;
+                    ik.weight = inst.aim_weight;
+                }
+            } else if let Some(ik) = inst.stack.layer_as::<TwoBoneIkLayer>(ENEMY_IK_LAYER) {
+                ik.weight = inst.aim_weight;
+            }
+
+            let base = inst.anim.pose(sk);
+            let ctx = LayerCtx { skeleton: sk, dt };
+            inst.final_pose = Some(inst.stack.evaluate(base, &ctx));
         }
     }
 
@@ -145,10 +200,7 @@ impl World {
     /// feet-seating offset + `CHAR_SCALE` — the model root the skinned pose + any
     /// bone-attached weapon are expressed under.
     fn char_transform(&self, feet: Vec3, yaw: f32) -> Mat4 {
-        let pos = Vec3::new(feet.x, feet.y + self.char_feet_offset, feet.z);
-        Mat4::from_translation(pos)
-            * Mat4::from_rotation_y(yaw)
-            * Mat4::from_scale(Vec3::splat(CHAR_SCALE))
+        char_transform_raw(feet, yaw, self.char_feet_offset)
     }
 
     /// Every skinned character to draw this frame as `(model, joint matrices,
@@ -174,11 +226,29 @@ impl World {
         self.enemies
             .iter()
             .map(|inst| {
-                let joints = inst.anim.skinning_matrices(&m.skeleton);
+                // Prefer the procedural post-pass pose (aim + recoil); fall back to
+                // the raw mixer pose on the first frame before it's computed.
+                let joints = match inst.final_pose.as_ref() {
+                    Some(p) => p.skinning_matrices(&m.skeleton),
+                    None => inst.anim.skinning_matrices(&m.skeleton),
+                };
                 let model = self.char_transform(inst.enemy.pos, inst.yaw());
                 (model, joints, inst.opacity(), inst.blood.as_slice())
             })
             .collect()
+    }
+
+    /// A hunter's joint global transforms for bone attachment (weapon), from its
+    /// procedural post-pass pose when available (so the gun follows the aimed arm),
+    /// else the raw mixer pose.
+    fn inst_bone_globals(&self, inst: &EnemyInstance) -> Vec<Mat4> {
+        let Some(m) = self.char_model.as_ref() else {
+            return Vec::new();
+        };
+        match inst.final_pose.as_ref() {
+            Some(p) => p.joint_global_transforms(&m.skeleton),
+            None => inst.anim.joint_global_transforms(&m.skeleton),
+        }
     }
 
     /// World transform of a weapon attached to a character's hand bone
@@ -187,7 +257,7 @@ impl World {
     /// converted to metres by the model's scale.
     fn weapon_world(
         &self,
-        anim: &AnimPlayer,
+        bone_globals: &[Mat4],
         feet: Vec3,
         yaw: f32,
         def: &EnemyWeaponDef,
@@ -196,7 +266,7 @@ impl World {
         let m = self.char_model.as_ref()?;
         let bone_name = if left { LEFT_HAND_BONE } else { RIGHT_HAND_BONE };
         let bone = m.skeleton.index_of(bone_name)?;
-        let bone_global = *anim.joint_global_transforms(&m.skeleton).get(bone)?;
+        let bone_global = *bone_globals.get(bone)?;
         let (off, rot) = if left {
             (def.left_offset, def.left_rot)
         } else {
@@ -219,11 +289,12 @@ impl World {
             if inst.enemy.is_dead() {
                 continue; // drop the gun on death
             }
-            if let Some(w) = self.weapon_world(&inst.anim, inst.enemy.pos, inst.yaw(), &inst.weapon, false) {
+            let globals = self.inst_bone_globals(inst);
+            if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, false) {
                 out.push((inst.weapon.name, vp * w));
             }
             if inst.dual {
-                if let Some(w) = self.weapon_world(&inst.anim, inst.enemy.pos, inst.yaw(), &inst.weapon, true) {
+                if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, true) {
                     out.push((inst.weapon.name, vp * w));
                 }
             }
@@ -279,11 +350,12 @@ impl World {
             if inst.enemy.is_dead() || inst.muzzle_timer <= 0.0 {
                 continue;
             }
-            if let Some(w) = self.weapon_world(&inst.anim, inst.enemy.pos, inst.yaw(), &inst.weapon, false) {
+            let globals = self.inst_bone_globals(inst);
+            if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, false) {
                 out.push((inst.weapon.name, vp * w));
             }
             if inst.dual {
-                if let Some(w) = self.weapon_world(&inst.anim, inst.enemy.pos, inst.yaw(), &inst.weapon, true) {
+                if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, true) {
                     out.push((inst.weapon.name, vp * w));
                 }
             }

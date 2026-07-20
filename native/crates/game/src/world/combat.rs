@@ -965,9 +965,12 @@ impl World {
             _ => return,
         };
         let Some(ppos) = self.player_pos() else { return };
-        // Flash + report fire on every shot, hit or miss.
+        // Flash + report fire on every shot, hit or miss; kick the procedural recoil.
         if let Some(inst) = self.enemies.get_mut(idx) {
             inst.muzzle_timer = ENEMY_MUZZLE_TIME;
+            if let Some(r) = inst.stack.layer_as::<AdditiveDecayLayer>(ENEMY_RECOIL_LAYER) {
+                r.kick(ENEMY_RECOIL_KICK);
+            }
         }
         if let Some(audio) = self.audio.as_mut() {
             audio.play(weapon.fire_sound, ENEMY_FIRE_VOL);

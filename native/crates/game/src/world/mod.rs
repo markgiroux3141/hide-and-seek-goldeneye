@@ -23,7 +23,7 @@ use crate::combat::{enemy_def_for, EnemyWeaponClass, EnemyWeaponDef, Weapon};
 use engine::geometry::csg_runtime::{
     Axis, Brush, Op, Region, Side, StairDesc, StairDir, WALL_THICKNESS, WORLD_SCALE,
 };
-use crate::enemy::Enemy;
+use crate::enemy::{AiState, Enemy};
 use rapier3d::prelude::ColliderHandle;
 use engine::platform::input::InputState;
 use engine::render::mesh::{ColorVertex, ColoredMesh, CpuMesh, TexVertex, TexturedMesh};
@@ -32,6 +32,9 @@ use engine::sim::physics::PhysicsWorld;
 use engine::skeletal::anim::AnimPlayer;
 use engine::skeletal::anim_set;
 use engine::skeletal::clip;
+use engine::skeletal::layers::{
+    AdditiveDecayLayer, LayerCtx, LayeredAnimator, Pose, TwoBoneIkLayer,
+};
 use engine::skeletal::gltf_skin::{self, SkinnedModel};
 use engine::geometry::structures::{self, Anchor, Edge, Platform, StairRun};
 use engine::render::textures::DEFAULT_SCHEME;
@@ -104,6 +107,88 @@ pub(crate) const PAD_PITCH_SIGN: f32 = -1.0;
 /// reads better against the level. The GE-unit weapon bone offsets and the computed
 /// `char_feet_offset` both flow through this scale, so they shrink with the model.
 pub(crate) const CHAR_SCALE: f32 = 0.000_832; // 0.00104 × 0.8
+
+// ─── Procedural aim + recoil (spike graduating onto live hunters) ──────────
+/// Stack layer indices for a hunter's [`LayeredAnimator`] (build order in
+/// [`EnemyArm::build_stack`]): IK aim override, then additive recoil.
+pub(crate) const ENEMY_IK_LAYER: usize = 0;
+pub(crate) const ENEMY_RECOIL_LAYER: usize = 1;
+/// How fast (1/s) a hunter's aim weight eases toward its target (0 ↔ 1), so the
+/// arm raises/lowers into aim smoothly instead of snapping.
+pub(crate) const AIM_RAMP: f32 = 9.0;
+/// Aim reaches to this fraction of full arm length (kept < 1 so the IK never
+/// slams the arm dead-straight while tracking).
+pub(crate) const AIM_REACH_FRAC: f32 = 0.9;
+/// Aim at the player this far (m) above their feet — roughly chest height.
+pub(crate) const PLAYER_AIM_Y: f32 = 1.0;
+/// Recoil kick (rad) per shot + its decay rate (1/s) and amplitude ceiling.
+pub(crate) const ENEMY_RECOIL_KICK: f32 = 0.32;
+pub(crate) const ENEMY_RECOIL_DECAY: f32 = 12.0;
+pub(crate) const ENEMY_RECOIL_MAX: f32 = 0.5;
+
+/// The resolved two-bone arm chain + rest geometry for the shared character
+/// skeleton, computed once at load. Each hunter builds its own (stateful) aim +
+/// recoil [`LayeredAnimator`] from this via [`Self::build_stack`].
+#[derive(Clone, Copy)]
+pub(crate) struct EnemyArm {
+    root: usize,
+    mid: usize,
+    end: usize,
+    /// Shoulder (root) origin in model space at the idle pose — the aim ray's
+    /// origin and the orbit center.
+    shoulder: Vec3,
+    /// Total arm reach (model units): |mid-root| + |end-mid|.
+    reach: f32,
+    /// Elbow pole hint (model space), used only when the chain goes straight.
+    pole: Vec3,
+}
+
+impl EnemyArm {
+    /// Resolve the `root→mid→end` chain from the hand bone and measure the rest
+    /// geometry off a standing (idle) pose. `None` if the chain or idle clip is
+    /// missing.
+    fn resolve(model: &SkinnedModel, idle: &clip::AnimationClip) -> Option<Self> {
+        let sk = &model.skeleton;
+        let end = sk.index_of(RIGHT_HAND_BONE)?;
+        let mid = sk.parents[end]?;
+        let root = sk.parents[mid]?;
+        let (t, r, s) = idle.pose_trs(0.0, sk);
+        let g = Pose::from_trs(t, r, s).joint_global_transforms(sk);
+        let a = g[root].to_scale_rotation_translation().2;
+        let b = g[mid].to_scale_rotation_translation().2;
+        let c = g[end].to_scale_rotation_translation().2;
+        let reach = (b - a).length() + (c - b).length();
+        Some(EnemyArm {
+            root,
+            mid,
+            end,
+            shoulder: a,
+            reach,
+            pole: a + Vec3::new(0.0, -1.0, 0.5),
+        })
+    }
+
+    /// A fresh per-hunter aim + recoil stack (disabled until aim kicks in).
+    fn build_stack(&self) -> LayeredAnimator {
+        let mut s = LayeredAnimator::new();
+        s.push(Box::new(TwoBoneIkLayer {
+            root: self.root,
+            mid: self.mid,
+            end: self.end,
+            target: Vec3::ZERO,
+            pole: self.pole,
+            weight: 0.0,
+            enabled: true,
+        }));
+        s.push(Box::new(AdditiveDecayLayer::new(
+            self.root,
+            Vec3::X,
+            ENEMY_RECOIL_DECAY,
+            ENEMY_RECOIL_MAX,
+        )));
+        s
+    }
+}
 
 /// Clip indices within the character's [`AnimPlayer`], set by the fixed load order
 /// in `World::new`: `0–3` locomotion, then one fire clip per weapon class
@@ -651,6 +736,15 @@ pub(crate) struct EnemyInstance {
     /// builds up as persistent blood); uploaded to this hunter's instance color
     /// buffer each frame. JS `EnemyCharacter` per-instance vertex colors.
     pub blood: Vec<f32>,
+    /// Procedural post-pass over `anim`'s blended pose: [IK aim, recoil]. Aims the
+    /// gun arm at the player while engaged; recoil kicks on each shot.
+    pub stack: LayeredAnimator,
+    /// Eased aim weight (0 = arm follows the clip, 1 = full IK aim at player).
+    pub aim_weight: f32,
+    /// Cached final pose after the stack this frame — the source for both the
+    /// skinning matrices and the hand-bone weapon transform (so the gun follows
+    /// the aimed arm). `None` until the first `advance_animation`.
+    pub final_pose: Option<Pose>,
 }
 
 /// A loaded enemy weapon's render assets: the gun mesh + optional muzzle-flash
@@ -694,6 +788,10 @@ pub struct World {
     /// bind-pose AABB can't be used — the bind pose is a splayed star with the
     /// feet spread high, so seating by it leaves the standing pose sunk).
     char_feet_offset: f32,
+    /// The resolved gun-arm chain + rest geometry for the shared skeleton, used to
+    /// build each hunter's procedural aim/recoil stack. `None` if the model/idle
+    /// clip failed to load or the skeleton has no arm chain.
+    enemy_arm: Option<EnemyArm>,
     /// Spike: the optional BUILD-phase procedural-anim preview character (`Y`).
     /// `None` unless the preview is toggled on. See [`world::spike_preview`].
     procedural_preview: Option<spike_preview::ProceduralPreview>,
@@ -944,6 +1042,12 @@ impl World {
             (Some(m), _) => -m.bounds_min.y * CHAR_SCALE,
             _ => 0.0,
         };
+        // Resolve the gun-arm chain once (shared across hunters); each hunter clones
+        // a fresh aim/recoil stack from it at spawn.
+        let enemy_arm = match (&char_model, char_anim_template.as_ref().and_then(|a| a.clip(0))) {
+            (Some(m), Some(idle)) => EnemyArm::resolve(m, idle),
+            _ => None,
+        };
 
         // Player Combat: build the full weapon inventory (JS `ALL_WEAPONS`) and
         // load the *active* weapon's gun + muzzle-flash meshes. The rest of the
@@ -1020,6 +1124,7 @@ impl World {
             char_anim_template,
             char_rng: 0x9E37_79B9_7F4A_7C15,
             char_feet_offset,
+            enemy_arm,
             procedural_preview: None,
             player_health: PLAYER_MAX_HEALTH,
             player_armor: 0.0,

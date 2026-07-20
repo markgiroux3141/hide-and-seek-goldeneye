@@ -315,6 +315,8 @@ impl World {
         // Face the player initially (harmless: if the player's out of sight/range the
         // search FSM takes over immediately; if in view they engage, which is right).
         let watch = self.player_pos().unwrap_or(self.spawn_point);
+        // Resolved gun-arm (shared); each hunter clones its own aim/recoil stack.
+        let arm = self.enemy_arm;
         for i in 0..ENEMY_COUNT {
             let (wcfg, dual) = ENEMY_ROSTER[i % ENEMY_ROSTER.len()];
             // Ring the cluster around the spawn point.
@@ -338,6 +340,9 @@ impl World {
                 shot_timer: 0.0,
                 muzzle_timer: 0.0,
                 blood: vec![1.0f32; vert_count * 3],
+                stack: arm.map(|a| a.build_stack()).unwrap_or_default(),
+                aim_weight: 0.0,
+                final_pose: None,
             });
             log::info!(
                 "hunter {i} flooded in at {spawn:?} with {}{}",
