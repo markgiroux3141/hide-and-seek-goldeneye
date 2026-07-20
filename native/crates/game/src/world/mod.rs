@@ -804,6 +804,9 @@ pub struct World {
     player_armor: f32,
     /// Dead — the YOU DIED screen is up; the sim freezes until a restart.
     player_dead: bool,
+    /// Dev/observe toggle (`I`): when set, the player takes no damage — enemies
+    /// still aim + fire so their behaviour can be watched safely. Default off.
+    player_invulnerable: bool,
     /// Red full-screen damage-flash alpha (decays each frame).
     damage_flash: f32,
     /// Health-HUD pop timer (s); the radial HUD is shown while >0, fading over its
@@ -1129,6 +1132,7 @@ impl World {
             player_health: PLAYER_MAX_HEALTH,
             player_armor: 0.0,
             player_dead: false,
+            player_invulnerable: false,
             damage_flash: 0.0,
             hud_show_timer: 0.0,
             health_hud,

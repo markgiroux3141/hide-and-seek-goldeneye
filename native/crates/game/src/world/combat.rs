@@ -991,7 +991,7 @@ impl World {
     /// with the damage feedback — red flash (peak α = min(0.5, dmg/40)), the
     /// breathe SFX, and the health-HUD pop. Death (→ YOU DIED) at 0 health.
     pub(crate) fn take_player_damage(&mut self, dmg: f32) {
-        if self.player_dead {
+        if self.player_dead || self.player_invulnerable {
             return;
         }
         let absorbed = self.player_armor.min(dmg);
@@ -1013,6 +1013,18 @@ impl World {
     /// probabilistic hit roll.
     fn rand_float(&mut self) -> f32 {
         (self.rand_below(1 << 24) as f32) / ((1u32 << 24) as f32)
+    }
+
+    /// Toggle player invincibility (dev/observe — bound to `I`). Returns the new
+    /// state so the caller can surface it. Enemies keep aiming + firing; the player
+    /// just stops taking damage — so you can stand and watch them work.
+    pub fn toggle_invulnerable(&mut self) -> bool {
+        self.player_invulnerable = !self.player_invulnerable;
+        log::info!(
+            "player invincibility: {}",
+            if self.player_invulnerable { "ON" } else { "off" }
+        );
+        self.player_invulnerable
     }
 
     /// Player health / armor + death, for the HUD and the app's restart routing.
