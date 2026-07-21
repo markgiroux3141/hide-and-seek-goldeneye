@@ -33,7 +33,8 @@ use engine::skeletal::anim::AnimPlayer;
 use engine::skeletal::anim_set;
 use engine::skeletal::clip;
 use engine::skeletal::layers::{
-    AdditiveDecayLayer, LayerCtx, LayeredAnimator, LocomotionBlendLayer, Pose, TwoBoneIkLayer,
+    AdditiveDecayLayer, LayerCtx, LayeredAnimator, LocomotionBlendLayer, LookAtLayer, Pose,
+    TwoBoneIkLayer,
 };
 use engine::skeletal::gltf_skin::{self, SkinnedModel};
 use engine::geometry::structures::{self, Anchor, Edge, Platform, StairRun};
@@ -110,10 +111,17 @@ pub(crate) const CHAR_SCALE: f32 = 0.000_832; // 0.00104 × 0.8
 
 // ─── Procedural aim + recoil (spike graduating onto live hunters) ──────────
 /// Stack layer indices for a hunter's [`LayeredAnimator`] (build order in
-/// [`EnemyArm::build_stack`]): continuous locomotion base, IK aim override, recoil.
+/// [`EnemyArm::build_stack`]): locomotion base, IK arm placement, hand look-at
+/// (barrel aim), recoil.
 pub(crate) const ENEMY_LOCO_LAYER: usize = 0;
 pub(crate) const ENEMY_IK_LAYER: usize = 1;
-pub(crate) const ENEMY_RECOIL_LAYER: usize = 2;
+pub(crate) const ENEMY_LOOK_LAYER: usize = 2;
+pub(crate) const ENEMY_RECOIL_LAYER: usize = 3;
+/// The gun model's local **barrel** axis (the way it points). The hand look-at
+/// aims `rot_euler(weapon.right_rot) · this` at the player, so the muzzle tracks
+/// exactly rather than the arm pointing only approximately. A guess pending live
+/// tuning — flip/rotate if the aim reads off.
+pub(crate) const BARREL_MODEL_AXIS: Vec3 = Vec3::NEG_Z;
 /// How fast (1/s) a hunter's aim weight eases toward its target (0 ↔ 1), so the
 /// arm raises/lowers into aim smoothly instead of snapping.
 pub(crate) const AIM_RAMP: f32 = 9.0;
@@ -188,6 +196,15 @@ impl EnemyArm {
             target: Vec3::ZERO,
             reach_frac: AIM_REACH_FRAC,
             pole: self.pole,
+            weight: 0.0,
+            enabled: true,
+        }));
+        // Hand look-at: point the barrel exactly at the player (aim_axis is set per
+        // frame from the weapon's attach rotation). Runs after IK places the hand.
+        s.push(Box::new(LookAtLayer {
+            joint: self.end,
+            aim_axis: Vec3::NEG_Z,
+            target: Vec3::ZERO,
             weight: 0.0,
             enabled: true,
         }));
