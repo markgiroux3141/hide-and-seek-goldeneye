@@ -327,12 +327,13 @@ impl World {
                 (anim_set::SPEED_RUN, template.clip(3)?.clone()),
             ])
         })();
-        // ANIM_DEBUG → spawn a single PP7-pistol hunter (one-handed aim + recoil,
-        // and easy to watch) so run-and-gun jank can be observed in isolation.
+        // ANIM_DEBUG → spawn a single AR33-rifle hunter (a two-handed weapon, to
+        // check the aim/hold transfers from the one-handed pistol case) so behaviour
+        // can be observed in isolation.
         let count = if self.anim_debug { 1 } else { ENEMY_COUNT };
         for i in 0..count {
             let (wcfg, dual) = if self.anim_debug {
-                (crate::combat::config::PP7, false)
+                (crate::combat::config::AR33, false)
             } else {
                 ENEMY_ROSTER[i % ENEMY_ROSTER.len()]
             };
