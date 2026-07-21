@@ -136,9 +136,11 @@ impl World {
             // a leg stutter. Band selection uses the eased value.
             inst.anim_speed +=
                 (inst.enemy.speed() - inst.anim_speed) * (1.0 - (-dt * LOCO_SMOOTH).exp());
-            // Snap the decay tail to a hard stop so `band_for_speed` (walk on any
+            // Snap the DECAY tail to a hard stop so `band_for_speed` (walk on any
             // speed > 0) settles to IDLE instead of walking in place for seconds.
-            if inst.anim_speed < LOCO_IDLE_EPS {
+            // Only when actually stopped — otherwise this clamps the accel ramp and
+            // he'd never climb out of the deadzone (floating without moving legs).
+            if inst.enemy.speed() <= 0.0 && inst.anim_speed < LOCO_IDLE_EPS {
                 inst.anim_speed = 0.0;
             }
 
