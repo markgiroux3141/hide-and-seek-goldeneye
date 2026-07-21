@@ -117,6 +117,12 @@ pub(crate) const ENEMY_LOCO_LAYER: usize = 0;
 pub(crate) const ENEMY_IK_LAYER: usize = 1;
 pub(crate) const ENEMY_LOOK_LAYER: usize = 2;
 pub(crate) const ENEMY_RECOIL_LAYER: usize = 3;
+/// Left-hand foregrip IK (two-handed rifle hold) — reaches the left hand to a
+/// point on the gun. Last so it targets the gun after aim + recoil moved it.
+pub(crate) const ENEMY_LGRIP_LAYER: usize = 4;
+/// Foregrip position along the barrel as a fraction of the muzzle distance — the
+/// left hand grips here on a two-handed weapon.
+pub(crate) const FOREGRIP_FRAC: f32 = 0.55;
 /// Fallback barrel axis (gun-model space) for weapons with no muzzle mesh to
 /// derive it from. The real axis is measured per weapon by [`mesh_barrel_axis`].
 pub(crate) const BARREL_MODEL_AXIS: Vec3 = Vec3::NEG_Z;
@@ -160,25 +166,38 @@ pub(crate) struct EnemyArm {
     end: usize,
     /// Elbow pole hint (model space), used only when the chain goes straight.
     pole: Vec3,
+    /// The left arm chain (`Bone_8` side), for the two-handed foregrip IK.
+    left_root: usize,
+    left_mid: usize,
+    left_end: usize,
+    left_pole: Vec3,
 }
 
 impl EnemyArm {
-    /// Resolve the `root→mid→end` chain from the hand bone off a standing (idle)
-    /// pose. `None` if the chain or idle clip is missing. (Reach/extension are
-    /// computed live from the current pose by the IK layer's reach-fraction mode.)
+    /// Resolve the right (`Bone_9`) and left (`Bone_8`) arm chains off a standing
+    /// (idle) pose. `None` if a chain or the idle clip is missing. (Reach/extension
+    /// are computed live from the current pose by the IK layer.)
     fn resolve(model: &SkinnedModel, idle: &clip::AnimationClip) -> Option<Self> {
         let sk = &model.skeleton;
         let end = sk.index_of(RIGHT_HAND_BONE)?;
         let mid = sk.parents[end]?;
         let root = sk.parents[mid]?;
+        let left_end = sk.index_of(LEFT_HAND_BONE)?;
+        let left_mid = sk.parents[left_end]?;
+        let left_root = sk.parents[left_mid]?;
         let (t, r, s) = idle.pose_trs(0.0, sk);
         let g = Pose::from_trs(t, r, s).joint_global_transforms(sk);
         let a = g[root].to_scale_rotation_translation().2;
+        let la = g[left_root].to_scale_rotation_translation().2;
         Some(EnemyArm {
             root,
             mid,
             end,
             pole: a + Vec3::new(0.0, -1.0, 0.5),
+            left_root,
+            left_mid,
+            left_end,
+            left_pole: la + Vec3::new(0.0, -1.0, 0.5),
         })
     }
 
@@ -212,6 +231,18 @@ impl EnemyArm {
             ENEMY_RECOIL_DECAY,
             ENEMY_RECOIL_MAX,
         )));
+        // Left-hand foregrip IK (two-handed hold) — absolute-target mode, disabled
+        // until the game sets a grip target (rifles only, non-dual).
+        s.push(Box::new(TwoBoneIkLayer {
+            root: self.left_root,
+            mid: self.left_mid,
+            end: self.left_end,
+            target: Vec3::ZERO,
+            reach_frac: 0.0, // absolute: the hand reaches the grip point exactly
+            pole: self.left_pole,
+            weight: 0.0,
+            enabled: false,
+        }));
         s
     }
 }
@@ -779,6 +810,10 @@ pub(crate) struct EnemyInstance {
     /// skinning matrices and the hand-bone weapon transform (so the gun follows
     /// the aimed arm). `None` until the first `advance_animation`.
     pub final_pose: Option<Pose>,
+    /// Two-handed foregrip point in the RIGHT hand's (`Bone_9`) local frame, or
+    /// `None` for one-handed / dual weapons. The left-hand IK reaches
+    /// `right_hand_global · grip_local` so the off hand grips the rifle.
+    pub grip_local: Option<Vec3>,
 }
 
 /// A loaded enemy weapon's render assets: the gun mesh + optional muzzle-flash
@@ -789,30 +824,37 @@ pub(crate) struct EnemyWeaponAsset {
     pub name: &'static str,
     pub gun: TexturedModel,
     pub muzzle: Option<TexturedModel>,
-    /// Barrel direction in the gun model's local space — the muzzle-flash mesh
-    /// centroid (the flash sits at the barrel tip, drawn in the gun's frame), so
-    /// the hand look-at can point the real muzzle at the player. Falls back to the
-    /// gun mesh centroid, then `-Z`, when there's no muzzle.
-    pub barrel_axis: Vec3,
+    /// Muzzle offset in the gun model's local space — the muzzle-flash mesh
+    /// centroid (the flash sits at the barrel tip, drawn in the gun's frame). Its
+    /// direction is the barrel axis (for the right-hand look-at); a fraction along
+    /// it is the two-handed foregrip point (for the left-hand IK). Falls back to
+    /// the gun-mesh centroid when there's no muzzle.
+    pub muzzle_offset: Vec3,
 }
 
-/// Barrel-forward axis (gun-model space) from a mesh centroid: the flash/gun
+impl EnemyWeaponAsset {
+    /// Barrel-forward axis (gun-model space) — the muzzle offset, normalized.
+    fn barrel_axis(&self) -> Vec3 {
+        let a = self.muzzle_offset.normalize_or_zero();
+        if a == Vec3::ZERO {
+            BARREL_MODEL_AXIS
+        } else {
+            a
+        }
+    }
+}
+
+/// Muzzle/barrel offset (gun-model space) from a mesh centroid: the flash/gun
 /// extends away from the grip origin toward the muzzle, so the mean vertex
-/// direction points down the barrel.
-fn mesh_barrel_axis(gun: &TexturedModel, muzzle: &Option<TexturedModel>) -> Vec3 {
+/// position lies down the barrel.
+fn mesh_muzzle_offset(gun: &TexturedModel, muzzle: &Option<TexturedModel>) -> Vec3 {
     let model = muzzle.as_ref().unwrap_or(gun);
     let n = model.vertices.len().max(1) as f32;
-    let c = model
+    model
         .vertices
         .iter()
         .fold(Vec3::ZERO, |a, v| a + Vec3::from(v.pos))
-        / n;
-    let axis = c.normalize_or_zero();
-    if axis == Vec3::ZERO {
-        BARREL_MODEL_AXIS
-    } else {
-        axis
-    }
+        / n
 }
 
 pub struct World {
@@ -1173,8 +1215,8 @@ impl World {
                     }
                 }
             };
-            let barrel_axis = mesh_barrel_axis(&gun, &muzzle);
-            enemy_weapon_lib.push(EnemyWeaponAsset { name: cfg.name, gun, muzzle, barrel_axis });
+            let muzzle_offset = mesh_muzzle_offset(&gun, &muzzle);
+            enemy_weapon_lib.push(EnemyWeaponAsset { name: cfg.name, gun, muzzle, muzzle_offset });
         }
         log::info!("loaded {} enemy weapon meshes", enemy_weapon_lib.len());
 

@@ -126,6 +126,7 @@ impl World {
         // it doesn't clash with the per-hunter `&mut` borrow.
         let aim_point = self.player_pos().map(|p| p + Vec3::Y * PLAYER_AIM_Y);
         let feet_off = self.char_feet_offset;
+        let arm = self.enemy_arm; // Copy — right-hand joint index for the foregrip
         // Skeleton borrow is a DISJOINT field from `enemies`, so both can be held.
         let skeleton = self.char_model.as_ref().map(|m| &m.skeleton);
 
@@ -197,6 +198,28 @@ impl World {
                 }
                 if let Some(look) = inst.stack.layer_as::<LookAtLayer>(ENEMY_LOOK_LAYER) {
                     look.weight = inst.aim_weight;
+                }
+            }
+
+            // Two-handed foregrip: reach the left hand to a point on the gun (rifles
+            // only — `grip_local` is None otherwise). Target uses the right hand's
+            // global from LAST frame's pose (a 1-frame lag, invisible), so the off
+            // hand tracks wherever the aim/recoil put the gun.
+            let grip_target = match (inst.grip_local, inst.final_pose.as_ref(), arm) {
+                (Some(gl), Some(fp), Some(a)) => fp
+                    .joint_global_transforms(sk)
+                    .get(a.end)
+                    .map(|g9| g9.transform_point3(gl)),
+                _ => None,
+            };
+            if let Some(lik) = inst.stack.layer_as::<TwoBoneIkLayer>(ENEMY_LGRIP_LAYER) {
+                match grip_target {
+                    Some(t) => {
+                        lik.target = t;
+                        lik.enabled = true;
+                        lik.weight = inst.aim_weight;
+                    }
+                    None => lik.weight = 0.0, // one-handed / no pose yet → left arm free
                 }
             }
 

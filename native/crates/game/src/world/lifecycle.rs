@@ -348,6 +348,37 @@ impl World {
             let collider =
                 self.physics
                     .add_enemy_collider(spawn, ENEMY_RADIUS, ENEMY_HALF_HEIGHT);
+
+            // Weapon-derived aim + grip geometry (from the measured muzzle offset).
+            let attach = Mat4::from_translation(weapon.right_offset)
+                * Mat4::from_euler(
+                    EulerRot::XYZ,
+                    weapon.right_rot.x,
+                    weapon.right_rot.y,
+                    weapon.right_rot.z,
+                );
+            let asset = self.enemy_weapon_lib.iter().find(|a| a.name == weapon.name);
+            // Barrel aim axis in the hand frame: attach rotation × model barrel axis.
+            let aim_axis = glam::Quat::from_euler(
+                EulerRot::XYZ,
+                weapon.right_rot.x,
+                weapon.right_rot.y,
+                weapon.right_rot.z,
+            ) * asset.map(|a| a.barrel_axis()).unwrap_or(BARREL_MODEL_AXIS);
+            // Two-handed foregrip point (Bone_9-local) — rifles only, non-dual.
+            let grip_local = if weapon.class == EnemyWeaponClass::Rifle && !dual {
+                asset.map(|a| attach.transform_point3(a.muzzle_offset * FOREGRIP_FRAC))
+            } else {
+                None
+            };
+            let mut stack = match (arm, loco_clips.clone()) {
+                (Some(a), Some(clips)) => a.build_stack(clips),
+                _ => LayeredAnimator::default(),
+            };
+            if let Some(look) = stack.layer_as::<LookAtLayer>(ENEMY_LOOK_LAYER) {
+                look.aim_axis = aim_axis;
+            }
+
             self.enemies.push(EnemyInstance {
                 enemy: Enemy::new(spawn, watch),
                 anim: template.clone(),
@@ -359,34 +390,11 @@ impl World {
                 fire_elapsed: None,
                 muzzle_timer: 0.0,
                 blood: vec![1.0f32; vert_count * 3],
-                stack: {
-                    let mut s = match (arm, loco_clips.clone()) {
-                        (Some(a), Some(clips)) => a.build_stack(clips),
-                        _ => LayeredAnimator::default(),
-                    };
-                    // Barrel aim axis in the hand's frame = the gun's attach rotation
-                    // applied to its measured model-space barrel axis, so the look-at
-                    // points the real muzzle at the player.
-                    let barrel = self
-                        .enemy_weapon_lib
-                        .iter()
-                        .find(|a| a.name == weapon.name)
-                        .map(|a| a.barrel_axis)
-                        .unwrap_or(BARREL_MODEL_AXIS);
-                    let aim_axis = glam::Quat::from_euler(
-                        EulerRot::XYZ,
-                        weapon.right_rot.x,
-                        weapon.right_rot.y,
-                        weapon.right_rot.z,
-                    ) * barrel;
-                    if let Some(look) = s.layer_as::<LookAtLayer>(ENEMY_LOOK_LAYER) {
-                        look.aim_axis = aim_axis;
-                    }
-                    s
-                },
+                stack,
                 aim_weight: 0.0,
                 anim_speed: 0.0,
                 final_pose: None,
+                grip_local,
             });
             log::info!(
                 "hunter {i} flooded in at {spawn:?} with {}{}",
