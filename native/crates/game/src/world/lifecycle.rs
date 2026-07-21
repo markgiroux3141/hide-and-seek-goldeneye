@@ -358,9 +358,30 @@ impl World {
                 fire_elapsed: None,
                 muzzle_timer: 0.0,
                 blood: vec![1.0f32; vert_count * 3],
-                stack: match (arm, loco_clips.clone()) {
-                    (Some(a), Some(clips)) => a.build_stack(clips),
-                    _ => LayeredAnimator::default(),
+                stack: {
+                    let mut s = match (arm, loco_clips.clone()) {
+                        (Some(a), Some(clips)) => a.build_stack(clips),
+                        _ => LayeredAnimator::default(),
+                    };
+                    // Barrel aim axis in the hand's frame = the gun's attach rotation
+                    // applied to its measured model-space barrel axis, so the look-at
+                    // points the real muzzle at the player.
+                    let barrel = self
+                        .enemy_weapon_lib
+                        .iter()
+                        .find(|a| a.name == weapon.name)
+                        .map(|a| a.barrel_axis)
+                        .unwrap_or(BARREL_MODEL_AXIS);
+                    let aim_axis = glam::Quat::from_euler(
+                        EulerRot::XYZ,
+                        weapon.right_rot.x,
+                        weapon.right_rot.y,
+                        weapon.right_rot.z,
+                    ) * barrel;
+                    if let Some(look) = s.layer_as::<LookAtLayer>(ENEMY_LOOK_LAYER) {
+                        look.aim_axis = aim_axis;
+                    }
+                    s
                 },
                 aim_weight: 0.0,
                 anim_speed: 0.0,

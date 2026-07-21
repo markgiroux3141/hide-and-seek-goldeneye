@@ -117,10 +117,8 @@ pub(crate) const ENEMY_LOCO_LAYER: usize = 0;
 pub(crate) const ENEMY_IK_LAYER: usize = 1;
 pub(crate) const ENEMY_LOOK_LAYER: usize = 2;
 pub(crate) const ENEMY_RECOIL_LAYER: usize = 3;
-/// The gun model's local **barrel** axis (the way it points). The hand look-at
-/// aims `rot_euler(weapon.right_rot) · this` at the player, so the muzzle tracks
-/// exactly rather than the arm pointing only approximately. A guess pending live
-/// tuning — flip/rotate if the aim reads off.
+/// Fallback barrel axis (gun-model space) for weapons with no muzzle mesh to
+/// derive it from. The real axis is measured per weapon by [`mesh_barrel_axis`].
 pub(crate) const BARREL_MODEL_AXIS: Vec3 = Vec3::NEG_Z;
 /// How fast (1/s) a hunter's aim weight eases toward its target (0 ↔ 1), so the
 /// arm raises/lowers into aim smoothly instead of snapping.
@@ -791,6 +789,30 @@ pub(crate) struct EnemyWeaponAsset {
     pub name: &'static str,
     pub gun: TexturedModel,
     pub muzzle: Option<TexturedModel>,
+    /// Barrel direction in the gun model's local space — the muzzle-flash mesh
+    /// centroid (the flash sits at the barrel tip, drawn in the gun's frame), so
+    /// the hand look-at can point the real muzzle at the player. Falls back to the
+    /// gun mesh centroid, then `-Z`, when there's no muzzle.
+    pub barrel_axis: Vec3,
+}
+
+/// Barrel-forward axis (gun-model space) from a mesh centroid: the flash/gun
+/// extends away from the grip origin toward the muzzle, so the mean vertex
+/// direction points down the barrel.
+fn mesh_barrel_axis(gun: &TexturedModel, muzzle: &Option<TexturedModel>) -> Vec3 {
+    let model = muzzle.as_ref().unwrap_or(gun);
+    let n = model.vertices.len().max(1) as f32;
+    let c = model
+        .vertices
+        .iter()
+        .fold(Vec3::ZERO, |a, v| a + Vec3::from(v.pos))
+        / n;
+    let axis = c.normalize_or_zero();
+    if axis == Vec3::ZERO {
+        BARREL_MODEL_AXIS
+    } else {
+        axis
+    }
 }
 
 pub struct World {
@@ -1151,7 +1173,8 @@ impl World {
                     }
                 }
             };
-            enemy_weapon_lib.push(EnemyWeaponAsset { name: cfg.name, gun, muzzle });
+            let barrel_axis = mesh_barrel_axis(&gun, &muzzle);
+            enemy_weapon_lib.push(EnemyWeaponAsset { name: cfg.name, gun, muzzle, barrel_axis });
         }
         log::info!("loaded {} enemy weapon meshes", enemy_weapon_lib.len());
 

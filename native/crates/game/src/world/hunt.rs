@@ -177,14 +177,9 @@ impl World {
             // current arm length toward it, so the elbow extends the same amount
             // wherever the shoulder currently sits (anchoring to a stored shoulder
             // under-reached and left the arm bent).
-            // Barrel axis in the hand's frame = the gun's attach rotation applied to
-            // the model's barrel axis (so the look-at points the actual muzzle).
-            let barrel_axis = glam::Quat::from_euler(
-                glam::EulerRot::XYZ,
-                inst.weapon.right_rot.x,
-                inst.weapon.right_rot.y,
-                inst.weapon.right_rot.z,
-            ) * BARREL_MODEL_AXIS;
+            // Aim: the IK places the hand on the line to the player; the look-at
+            // (aim_axis fixed at spawn from the gun's barrel) rotates the hand so the
+            // muzzle points exactly at the player.
             if let Some(ap) = aim_point {
                 let ct = char_transform_raw(inst.enemy.pos, inst.yaw(), feet_off);
                 let model_p = ct.inverse().transform_point3(ap);
@@ -193,7 +188,6 @@ impl World {
                     ik.weight = inst.aim_weight;
                 }
                 if let Some(look) = inst.stack.layer_as::<LookAtLayer>(ENEMY_LOOK_LAYER) {
-                    look.aim_axis = barrel_axis;
                     look.target = model_p;
                     look.weight = inst.aim_weight;
                 }
