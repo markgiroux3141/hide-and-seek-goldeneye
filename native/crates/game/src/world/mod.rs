@@ -121,8 +121,10 @@ pub(crate) const ENEMY_RECOIL_LAYER: usize = 3;
 /// point on the gun. Last so it targets the gun after aim + recoil moved it.
 pub(crate) const ENEMY_LGRIP_LAYER: usize = 4;
 /// Foregrip position along the barrel as a fraction of the muzzle distance — the
-/// left hand grips here on a two-handed weapon.
-pub(crate) const FOREGRIP_FRAC: f32 = 0.55;
+/// left hand grips here on a two-handed weapon. Lower = closer to the right hand
+/// (the barrel angles forward-and-across, so a high value floats the off hand out
+/// forward and to the model's left, off the gun).
+pub(crate) const FOREGRIP_FRAC: f32 = 0.32;
 /// Fallback barrel axis (gun-model space) for weapons with no muzzle mesh to
 /// derive it from. The real axis is measured per weapon by [`mesh_barrel_axis`].
 pub(crate) const BARREL_MODEL_AXIS: Vec3 = Vec3::NEG_Z;
