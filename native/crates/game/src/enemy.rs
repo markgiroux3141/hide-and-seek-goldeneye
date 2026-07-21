@@ -67,8 +67,13 @@ pub enum AiState {
 }
 
 const WT: f32 = WORLD_SCALE;
-/// Chase speed (JS `chaseSpeed`).
-const SPEED_CHASE: f32 = 4.0; // m/s
+/// Per-state movement speeds (m/s) — chosen so the continuous locomotion blend
+/// shows the full gait range: search/investigate walk, attack-advance jog, chase
+/// run. `speed()` reports whichever the current step used so the legs match.
+const SPEED_SEARCH: f32 = 1.6; // ~walk gait — calm sweeping / investigating
+const SPEED_ADVANCE: f32 = 3.2; // ~jog gait — closing on the player while firing
+/// Chase speed (JS `chaseSpeed`) — the urgent run.
+const SPEED_CHASE: f32 = 4.6; // m/s (~run gait)
 const REPATH_INTERVAL: f32 = 0.4; // s between path recomputes (CHASE_UPDATE_INTERVAL)
 const CATCH_DIST: f32 = 1.2 * WT; // 0.3 m — horizontal catch radius
 const WAYPOINT_EPS: f32 = 0.4 * WT; // 0.1 m — advance to next waypoint within this
@@ -122,6 +127,9 @@ pub struct Enemy {
     heading: Vec3,
     /// Whether the hunter advanced this step (false while idle/attacking/pathless).
     moving: bool,
+    /// Speed (m/s) of the step actually taken this update — 0 when stationary. Set
+    /// by [`Self::move_toward`] from the per-state speed; drives the locomotion gait.
+    move_speed: f32,
     /// Remaining health; at ≤0 the hunter is [`Self::dead`] (Track A).
     health: f32,
     /// Killed — [`Self::update`] is a full no-op (the body holds its death pose
@@ -178,6 +186,7 @@ impl Enemy {
             repath_timer: 0.0,
             heading,
             moving: false,
+            move_speed: 0.0,
             health: ENEMY_HEALTH,
             dead: false,
             stun_timer: 0.0,
@@ -233,13 +242,10 @@ impl Enemy {
         self.heading
     }
 
-    /// Current speed (m/s): the chase speed while advancing, else 0.
+    /// Current speed (m/s): the speed of the step taken this update (per-state),
+    /// or 0 when stationary. Drives the continuous locomotion gait.
     pub fn speed(&self) -> f32 {
-        if self.moving {
-            SPEED_CHASE
-        } else {
-            0.0
-        }
+        self.move_speed
     }
 
     /// The current FSM state (for inspection / tests).
@@ -317,6 +323,7 @@ impl Enemy {
         self_collider: ColliderHandle,
     ) -> EnemyStep {
         self.moving = false;
+        self.move_speed = 0.0;
         if self.dead {
             return EnemyStep::default();
         }
@@ -353,7 +360,7 @@ impl Enemy {
                 } else {
                     match self.search_target {
                         Some(t) => {
-                            if self.move_toward(dt, t, nav) {
+                            if self.move_toward(dt, t, nav, SPEED_SEARCH) {
                                 // Reached it (or it's unreachable) — ask for the next.
                                 self.search_target = None;
                                 step.needs_search_target = true;
@@ -370,7 +377,7 @@ impl Enemy {
                     match self.last_known {
                         // Still walking to the spot we're curious about.
                         Some(t) if self.dist_to(t) > ARRIVE_DIST => {
-                            self.move_toward(dt, t, nav);
+                            self.move_toward(dt, t, nav, SPEED_SEARCH);
                         }
                         // Arrived (or nothing to walk to): scan around, sweeping the
                         // cone, then give up to a fresh search.
@@ -411,7 +418,7 @@ impl Enemy {
                     // no longer freezes movement — firing is a timer, and the legs run
                     // on locomotion while the arm keeps its procedural aim.
                     let target = self.last_known.unwrap_or(player_feet);
-                    if self.move_toward(dt, target, nav) && !perceived {
+                    if self.move_toward(dt, target, nav, SPEED_CHASE) && !perceived {
                         self.state = AiState::Investigate;
                         self.scan_timer = 0.0;
                     }
@@ -436,7 +443,7 @@ impl Enemy {
                             self.holding = false;
                         }
                     } else if dist > ATTACK_STANDOFF {
-                        self.move_toward(dt, player_feet, nav); // marks `moving` → legs run
+                        self.move_toward(dt, player_feet, nav, SPEED_ADVANCE); // jog in
                     } else {
                         self.holding = true;
                     }
@@ -528,7 +535,7 @@ impl Enemy {
         }
     }
 
-    fn move_toward(&mut self, dt: f32, target: Vec3, nav: &NavWorld) -> bool {
+    fn move_toward(&mut self, dt: f32, target: Vec3, nav: &NavWorld, speed: f32) -> bool {
         let flat = Vec3::new(target.x - self.pos.x, 0.0, target.z - self.pos.z);
         if flat.length() < ARRIVE_DIST {
             return true;
@@ -552,13 +559,14 @@ impl Enemy {
             self.path.clear();
             self.repath_timer = 0.0; // force a fresh A* path the instant LOS breaks
             let dist = flat.length();
-            let stepd = (SPEED_CHASE * dt).min(dist);
+            let stepd = (speed * dt).min(dist);
             self.pos += flat / dist * stepd;
             self.heading = flat / dist; // face the (flat) travel direction
             // The beeline moves in XZ only; glue the feet back to the surface so
             // the hunter rides gentle rises instead of leaving its Y frozen.
             self.snap_to_floor(nav);
             self.moving = true;
+            self.move_speed = speed;
             return false;
         }
 
@@ -585,13 +593,14 @@ impl Enemy {
             let to = waypoint - self.pos;
             let dist = to.length();
             if dist > 1e-4 {
-                let stepd = (SPEED_CHASE * dt).min(dist);
+                let stepd = (speed * dt).min(dist);
                 self.pos += to / dist * stepd;
                 let f = Vec3::new(to.x, 0.0, to.z);
                 if f.length_squared() > 1e-6 {
                     self.heading = f.normalize();
                 }
                 self.moving = true;
+                self.move_speed = speed;
             }
             if self.pos.distance(waypoint) < WAYPOINT_EPS && self.path_idx < self.path.len() - 1 {
                 self.path_idx += 1;

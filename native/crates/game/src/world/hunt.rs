@@ -130,46 +130,44 @@ impl World {
         let skeleton = self.char_model.as_ref().map(|m| &m.skeleton);
 
         for inst in &mut self.enemies {
-            // Low-pass the locomotion speed so a hunter micro-stepping near a
-            // distance boundary (e.g. the attack standoff) doesn't flip the band
-            // idle↔jog every few frames — that restarts the crossfade and reads as
-            // a leg stutter. Band selection uses the eased value.
+            // Low-pass the AI's per-step speed → a continuous locomotion speed that
+            // drives the blend layer, so the gait eases smoothly (no band thresholds).
             inst.anim_speed +=
                 (inst.enemy.speed() - inst.anim_speed) * (1.0 - (-dt * LOCO_SMOOTH).exp());
-            // Snap the DECAY tail to a hard stop so `band_for_speed` (walk on any
-            // speed > 0) settles to IDLE instead of walking in place for seconds.
-            // Only when actually stopped — otherwise this clamps the accel ramp and
-            // he'd never climb out of the deadzone (floating without moving legs).
+            // Snap the decay tail to a hard stop (only when actually stopped) so the
+            // blend settles to pure idle rather than a sliver of walk forever.
             if inst.enemy.speed() <= 0.0 && inst.anim_speed < LOCO_IDLE_EPS {
                 inst.anim_speed = 0.0;
             }
 
             // Death fade: hold the corpse opaque THROUGH the death animation, then
             // ramp opacity 1→0 once the clip has clamped (`oneshot_finished`).
-            if inst.enemy.is_dead() {
-                if inst.anim.oneshot_finished() {
-                    let t = inst.fade.get_or_insert(0.0);
-                    *t = (*t + dt).min(FADE_DURATION);
-                }
-            } else if !inst.anim.is_playing_oneshot() {
-                // Not mid fire/hit → keep the locomotion band in sync with speed.
-                inst.anim.play(band_for_speed(inst.anim_speed), 0.15);
+            if inst.enemy.is_dead() && inst.anim.oneshot_finished() {
+                let t = inst.fade.get_or_insert(0.0);
+                *t = (*t + dt).min(FADE_DURATION);
             }
+            // The mixer now carries ONLY the hit/death one-shots — locomotion is the
+            // continuous blend layer below. Advance it so a one-shot plays out.
             inst.anim.update(dt);
 
-            // ── Procedural post-pass: aim the gun arm at the player + recoil. ──
+            // ── Procedural post-pass: locomotion blend → aim → recoil. ──
             let Some(sk) = skeleton else {
                 continue; // no skinned model → nothing to pose
             };
-            // Aim while engaged (has seen the player) and NOT mid hit/death — a fire
-            // one-shot still aims (so the shot points at the player).
+            // A hit/death one-shot takes over the whole body: feed its pose as the
+            // base and bypass locomotion + aim. `is_fire_clip` guard is vestigial
+            // (fire is a timer, never on the mixer) but keeps the check honest.
+            let one_shot =
+                inst.anim.is_playing_oneshot() && !is_fire_clip(inst.anim.current_clip());
+            if let Some(loco) = inst.stack.layer_as::<LocomotionBlendLayer>(ENEMY_LOCO_LAYER) {
+                loco.speed = inst.anim_speed;
+                loco.enabled = !one_shot;
+            }
             let engaged = matches!(
                 inst.enemy.state(),
                 AiState::Alert | AiState::Chase | AiState::Attack | AiState::Cooldown
             );
-            let hit_or_death =
-                inst.anim.is_playing_oneshot() && !is_fire_clip(inst.anim.current_clip());
-            let want_aim = engaged && !inst.enemy.is_dead() && !hit_or_death;
+            let want_aim = engaged && !inst.enemy.is_dead() && !one_shot;
             let target_w = if want_aim { 1.0 } else { 0.0 };
             // Exponential ease toward the target weight (frame-rate independent).
             inst.aim_weight += (target_w - inst.aim_weight) * (1.0 - (-dt * AIM_RAMP).exp());
@@ -190,7 +188,13 @@ impl World {
                 ik.weight = inst.aim_weight;
             }
 
-            let base = inst.anim.pose(sk);
+            // Base pose: the hit/death one-shot when active, else the bind pose for
+            // the locomotion blend layer to overwrite with the current gait.
+            let base = if one_shot {
+                inst.anim.pose(sk)
+            } else {
+                Pose::bind(sk)
+            };
             let ctx = LayerCtx { skeleton: sk, dt };
             inst.final_pose = Some(inst.stack.evaluate(base, &ctx));
         }

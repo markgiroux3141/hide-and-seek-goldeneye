@@ -33,7 +33,7 @@ use engine::skeletal::anim::AnimPlayer;
 use engine::skeletal::anim_set;
 use engine::skeletal::clip;
 use engine::skeletal::layers::{
-    AdditiveDecayLayer, LayerCtx, LayeredAnimator, Pose, TwoBoneIkLayer,
+    AdditiveDecayLayer, LayerCtx, LayeredAnimator, LocomotionBlendLayer, Pose, TwoBoneIkLayer,
 };
 use engine::skeletal::gltf_skin::{self, SkinnedModel};
 use engine::geometry::structures::{self, Anchor, Edge, Platform, StairRun};
@@ -110,9 +110,10 @@ pub(crate) const CHAR_SCALE: f32 = 0.000_832; // 0.00104 × 0.8
 
 // ─── Procedural aim + recoil (spike graduating onto live hunters) ──────────
 /// Stack layer indices for a hunter's [`LayeredAnimator`] (build order in
-/// [`EnemyArm::build_stack`]): IK aim override, then additive recoil.
-pub(crate) const ENEMY_IK_LAYER: usize = 0;
-pub(crate) const ENEMY_RECOIL_LAYER: usize = 1;
+/// [`EnemyArm::build_stack`]): continuous locomotion base, IK aim override, recoil.
+pub(crate) const ENEMY_LOCO_LAYER: usize = 0;
+pub(crate) const ENEMY_IK_LAYER: usize = 1;
+pub(crate) const ENEMY_RECOIL_LAYER: usize = 2;
 /// How fast (1/s) a hunter's aim weight eases toward its target (0 ↔ 1), so the
 /// arm raises/lowers into aim smoothly instead of snapping.
 pub(crate) const AIM_RAMP: f32 = 9.0;
@@ -175,9 +176,11 @@ impl EnemyArm {
         })
     }
 
-    /// A fresh per-hunter aim + recoil stack (disabled until aim kicks in).
-    fn build_stack(&self) -> LayeredAnimator {
+    /// A fresh per-hunter stack: continuous locomotion base (from the gait clips),
+    /// then IK aim (disabled until aim kicks in), then recoil.
+    fn build_stack(&self, loco_clips: Vec<(f32, clip::AnimationClip)>) -> LayeredAnimator {
         let mut s = LayeredAnimator::new();
+        s.push(Box::new(LocomotionBlendLayer::new(loco_clips)));
         s.push(Box::new(TwoBoneIkLayer {
             root: self.root,
             mid: self.mid,

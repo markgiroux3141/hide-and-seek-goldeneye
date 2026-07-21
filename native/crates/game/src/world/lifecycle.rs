@@ -317,6 +317,16 @@ impl World {
         let watch = self.player_pos().unwrap_or(self.spawn_point);
         // Resolved gun-arm (shared); each hunter clones its own aim/recoil stack.
         let arm = self.enemy_arm;
+        // Gait clips for the continuous locomotion blend (fixed template layout:
+        // 0 idle, 1 walk, 2 jog, 3 run), cloned once and re-cloned per hunter.
+        let loco_clips: Option<Vec<(f32, clip::AnimationClip)>> = (|| {
+            Some(vec![
+                (0.0, template.clip(0)?.clone()),
+                (anim_set::SPEED_WALK, template.clip(1)?.clone()),
+                (anim_set::SPEED_JOG, template.clip(2)?.clone()),
+                (anim_set::SPEED_RUN, template.clip(3)?.clone()),
+            ])
+        })();
         // ANIM_DEBUG → spawn a single PP7-pistol hunter (one-handed aim + recoil,
         // and easy to watch) so run-and-gun jank can be observed in isolation.
         let count = if self.anim_debug { 1 } else { ENEMY_COUNT };
@@ -348,7 +358,10 @@ impl World {
                 fire_elapsed: None,
                 muzzle_timer: 0.0,
                 blood: vec![1.0f32; vert_count * 3],
-                stack: arm.map(|a| a.build_stack()).unwrap_or_default(),
+                stack: match (arm, loco_clips.clone()) {
+                    (Some(a), Some(clips)) => a.build_stack(clips),
+                    _ => LayeredAnimator::default(),
+                },
                 aim_weight: 0.0,
                 anim_speed: 0.0,
                 final_pose: None,

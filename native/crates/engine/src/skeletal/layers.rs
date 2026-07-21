@@ -462,6 +462,9 @@ pub struct LocomotionBlendLayer {
     pub speed: f32,
     /// Shared normalized gait phase `[0,1)`.
     phase: f32,
+    /// When false, the layer is a no-op — so a hit/death one-shot pose fed as the
+    /// base can pass through untouched instead of being overwritten by locomotion.
+    pub enabled: bool,
 }
 
 impl LocomotionBlendLayer {
@@ -473,6 +476,7 @@ impl LocomotionBlendLayer {
             anchors,
             speed: 0.0,
             phase: 0.0,
+            enabled: true,
         }
     }
 
@@ -500,7 +504,7 @@ impl LocomotionBlendLayer {
 
 impl PoseLayer for LocomotionBlendLayer {
     fn apply(&mut self, pose: &mut Pose, ctx: &LayerCtx) {
-        if self.anchors.is_empty() {
+        if !self.enabled || self.anchors.is_empty() {
             return;
         }
         let (i, j, w) = self.bracket();
