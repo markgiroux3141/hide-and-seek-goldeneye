@@ -291,6 +291,26 @@ use super::editing::find_room_brushes;
         );
     }
 
+    /// Enemy separation: two hunters stacked on the exact same cell get nudged apart
+    /// by the per-step separation pass, so they don't merge into one body.
+    #[test]
+    fn stacked_hunters_are_pushed_apart() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT — spawns the wave
+        assert!(world.enemies.len() >= 2, "need at least two hunters");
+        // Stack hunter 1 exactly on hunter 0.
+        let p = world.enemies[0].enemy.pos;
+        let h1 = world.enemies[1].collider;
+        world.enemies[1].enemy.pos = p;
+        world.physics.update_enemy_collider(h1, p);
+        let input = InputState::default();
+        world.fixed_step(1.0 / 120.0, &input);
+        let (a, b) = (world.enemies[0].enemy.pos, world.enemies[1].enemy.pos);
+        let d = Vec3::new(b.x - a.x, 0.0, b.z - a.z).length();
+        assert!(d > 0.3, "stacked hunters should separate (got {d})");
+    }
+
     /// Track A: a killed hunter stops moving — its death freezes the nav-driven
     /// chase (dead `update` is a no-op), so the corpse holds position.
     #[test]

@@ -218,6 +218,23 @@ impl ApplicationHandler for App {
         for rm in world.initial_meshes() {
             renderer.set_region_textured(rm.id, &rm.mesh);
         }
+        // Optional: boot straight into a saved level slot (`LOAD_SLOT=N`), so a
+        // generated level can be explored immediately without pressing F-keys.
+        // Starts in BUILD (fly) mode; press G for HUNT (FPS), I for invincible.
+        if let Some(slot) = std::env::var("LOAD_SLOT")
+            .ok()
+            .and_then(|s| s.trim().parse::<u8>().ok())
+        {
+            match world.load_slot(slot) {
+                Ok(meshes) => {
+                    for rm in &meshes {
+                        renderer.set_region_textured(rm.id, &rm.mesh);
+                    }
+                    log::info!("booted into level slot {slot}");
+                }
+                Err(e) => log::warn!("LOAD_SLOT {slot} failed: {e}"),
+            }
+        }
         // B1: upload the skinned character once (geometry + textures); its pose is
         // driven per frame below.
         if let Some(m) = world.character_model() {
@@ -696,8 +713,8 @@ impl App {
             return;
         }
         // Spike: procedural-anim preview (BUILD only). Y toggles a preview character
-        // in front of the camera; Z fires a manual recoil kick on top of its auto
-        // cadence. See `world::spike_preview`.
+        // in front of the camera; Z fires a manual recoil kick. See
+        // `world::spike_preview`.
         if code == KeyCode::KeyY {
             if let Some(world) = self.world.as_mut() {
                 world.toggle_procedural_preview();

@@ -9,7 +9,7 @@
 
 use std::time::Instant;
 
-use glam::{EulerRot, Mat4, Vec3};
+use glam::{EulerRot, Mat4, Quat, Vec3};
 
 use engine::render::camera::FlyCamera;
 use crate::character::CharacterController;
@@ -33,8 +33,7 @@ use engine::skeletal::anim::AnimPlayer;
 use engine::skeletal::anim_set;
 use engine::skeletal::clip;
 use engine::skeletal::layers::{
-    AdditiveDecayLayer, LayerCtx, LayeredAnimator, LocomotionBlendLayer, LookAtLayer, Pose,
-    TwoBoneIkLayer,
+    AdditiveDecayLayer, AimOffsetLayer, LayerCtx, LayeredAnimator, LocomotionBlendLayer, Pose,
 };
 use engine::skeletal::gltf_skin::{self, SkinnedModel};
 use engine::geometry::structures::{self, Anchor, Edge, Platform, StairRun};
@@ -109,24 +108,27 @@ pub(crate) const PAD_PITCH_SIGN: f32 = -1.0;
 /// `char_feet_offset` both flow through this scale, so they shrink with the model.
 pub(crate) const CHAR_SCALE: f32 = 0.000_832; // 0.00104 × 0.8
 
-// ─── Procedural aim + recoil (spike graduating onto live hunters) ──────────
+// ─── Procedural aim + recoil (light additive aim over authored clips) ──────────
+// The 2-bone arm IK / hand look-at / foregrip IK were scrapped (they fought the
+// authored clips and read robotic). What's left is the GoldenEye/Perfect Dark
+// approach: authored locomotion carries the pose, and ONE cone-clamped aim layer
+// nudges the gun arm toward the player. The hit is a probability roll, so the
+// barrel never needs to point exactly at the target.
 /// Stack layer indices for a hunter's [`LayeredAnimator`] (build order in
-/// [`EnemyArm::build_stack`]): locomotion base, IK arm placement, hand look-at
-/// (barrel aim), recoil.
+/// [`EnemyArm::build_stack`]): locomotion base, light aim-offset, recoil.
 pub(crate) const ENEMY_LOCO_LAYER: usize = 0;
-pub(crate) const ENEMY_IK_LAYER: usize = 1;
-pub(crate) const ENEMY_LOOK_LAYER: usize = 2;
-pub(crate) const ENEMY_RECOIL_LAYER: usize = 3;
-/// Left-hand foregrip IK (two-handed rifle hold) — reaches the left hand to a
-/// point on the gun. Last so it targets the gun after aim + recoil moved it.
-pub(crate) const ENEMY_LGRIP_LAYER: usize = 4;
-/// Foregrip position along the barrel as a fraction of the muzzle distance — the
-/// left hand grips here on a two-handed weapon. Lower = closer to the right hand
-/// (the barrel angles forward-and-across, so a high value floats the off hand out
-/// forward and to the model's left, off the gun).
-pub(crate) const FOREGRIP_FRAC: f32 = 0.32;
-/// Fallback barrel axis (gun-model space) for weapons with no muzzle mesh to
-/// derive it from. The real axis is measured per weapon by [`mesh_barrel_axis`].
+pub(crate) const ENEMY_AIM_LAYER: usize = 1;
+pub(crate) const ENEMY_RECOIL_LAYER: usize = 2;
+/// Left-arm aim-offset — the off hand's gun for a dual-wielder (akimbo). Disabled
+/// unless the hunter is dual-wielding, so a one-gun hunter's left arm follows the
+/// clip.
+pub(crate) const ENEMY_LAIM_LAYER: usize = 3;
+/// The aim cone (radians) the shoulder may swing to point the barrel at the player —
+/// generous enough to raise the weapon from the carry pose, capped so an off-axis
+/// target (mid-turn) pins the arm at the edge instead of contorting it. ~80°.
+pub(crate) const ENEMY_AIM_MAX_CONE: f32 = 1.4;
+/// Fallback barrel axis (gun-model space) for weapons whose muzzle offset is
+/// degenerate — the real axis is the measured muzzle-flash centroid direction.
 pub(crate) const BARREL_MODEL_AXIS: Vec3 = Vec3::NEG_Z;
 /// How fast (1/s) a hunter's aim weight eases toward its target (0 ↔ 1), so the
 /// arm raises/lowers into aim smoothly instead of snapping.
@@ -142,11 +144,6 @@ pub(crate) const LOCO_SMOOTH: f32 = 6.0;
 /// exponential decay lingers as a tiny positive value for ~15 s and
 /// [`band_for_speed`] (walk when speed > 0) keeps the legs walking in place.
 pub(crate) const LOCO_IDLE_EPS: f32 = 0.35;
-/// Aim reaches to this fraction of full arm length. Near 1.0 the elbow's
-/// law-of-cosines interior angle approaches 180° → the arm holds nearly straight
-/// out (how a guard sights a pistol); lower values leave a bent elbow. Kept just
-/// under 1 so the IK isn't sitting exactly at the singular fully-extended pose.
-pub(crate) const AIM_REACH_FRAC: f32 = 0.97;
 /// Aim at the player this far (m) above their feet — roughly chest height.
 pub(crate) const PLAYER_AIM_Y: f32 = 1.0;
 /// Recoil kick (rad) per shot + its decay rate (1/s) and amplitude ceiling.
@@ -158,93 +155,104 @@ pub(crate) const ENEMY_RECOIL_MAX: f32 = 0.5;
 /// burst length now that firing is a timer, not a full-body animation clip.
 pub(crate) const ENEMY_FIRE_TAIL: f32 = 0.25;
 
-/// The resolved two-bone arm chain + rest geometry for the shared character
+/// The resolved gun-arm shoulder + rest geometry for the shared character
 /// skeleton, computed once at load. Each hunter builds its own (stateful) aim +
 /// recoil [`LayeredAnimator`] from this via [`Self::build_stack`].
 #[derive(Clone, Copy)]
 pub(crate) struct EnemyArm {
-    root: usize,
+    /// The right (gun) arm.
+    right: ArmAim,
+    /// The left (off-hand) arm — driven only for dual-wielders.
+    left: ArmAim,
+    /// Right elbow + hand, kept for the ANIM_DEBUG arm measurement only.
     mid: usize,
     end: usize,
-    /// Elbow pole hint (model space), used only when the chain goes straight.
-    pole: Vec3,
-    /// The left arm chain (`Bone_8` side), for the two-handed foregrip IK.
-    left_root: usize,
-    left_mid: usize,
-    left_end: usize,
-    left_pole: Vec3,
+}
+
+/// One arm's aim data: the shoulder joint the aim layer rotates, its + the hand's
+/// rest (idle-pose) global rotations (so a per-weapon barrel axis can be expressed
+/// in the shoulder's frame), and a fallback shoulder→hand forward.
+#[derive(Clone, Copy)]
+pub(crate) struct ArmAim {
+    shoulder: usize,
+    shoulder_rot: Quat,
+    hand_rot: Quat,
+    fallback_forward: Vec3,
+}
+
+impl ArmAim {
+    fn resolve(sk: &engine::skeletal::Skeleton, g: &[Mat4], hand_bone: &str) -> Option<Self> {
+        let end = sk.index_of(hand_bone)?;
+        let mid = sk.parents[end]?;
+        let shoulder = sk.parents[mid]?;
+        let (_, shoulder_rot, a) = g[shoulder].to_scale_rotation_translation();
+        let (_, hand_rot, hand) = g[end].to_scale_rotation_translation();
+        let fallback_forward = (shoulder_rot.inverse() * (hand - a)).normalize_or_zero();
+        Some(ArmAim {
+            shoulder,
+            shoulder_rot,
+            hand_rot,
+            fallback_forward,
+        })
+    }
+
+    /// The shoulder-local axis that, swung at the aim target, points the GUN BARREL
+    /// (not just the arm) at it. The aim layer rotates the shoulder rigidly, so the
+    /// barrel turns with it — expressing the rest barrel direction in the shoulder's
+    /// frame makes a shoulder swing aim the barrel exactly. `attach_rot` is the gun's
+    /// hand-bone attach rotation; `barrel_gun` is the barrel axis in gun-model space.
+    pub(crate) fn barrel_aim_forward(&self, attach_rot: Quat, barrel_gun: Vec3) -> Vec3 {
+        let barrel_model = self.hand_rot * (attach_rot * barrel_gun);
+        (self.shoulder_rot.inverse() * barrel_model).normalize_or_zero()
+    }
+
+    fn aim_layer(&self) -> AimOffsetLayer {
+        AimOffsetLayer {
+            joint: self.shoulder,
+            forward: self.fallback_forward,
+            target: Vec3::ZERO,
+            max_angle: ENEMY_AIM_MAX_CONE,
+            weight: 0.0,
+            enabled: true,
+        }
+    }
 }
 
 impl EnemyArm {
-    /// Resolve the right (`Bone_9`) and left (`Bone_8`) arm chains off a standing
-    /// (idle) pose. `None` if a chain or the idle clip is missing. (Reach/extension
-    /// are computed live from the current pose by the IK layer.)
+    /// Resolve the right (`Bone_9`) + left (`Bone_8`) arms off a standing (idle) pose.
+    /// `None` if a chain or the idle clip is missing.
     fn resolve(model: &SkinnedModel, idle: &clip::AnimationClip) -> Option<Self> {
         let sk = &model.skeleton;
         let end = sk.index_of(RIGHT_HAND_BONE)?;
         let mid = sk.parents[end]?;
-        let root = sk.parents[mid]?;
-        let left_end = sk.index_of(LEFT_HAND_BONE)?;
-        let left_mid = sk.parents[left_end]?;
-        let left_root = sk.parents[left_mid]?;
         let (t, r, s) = idle.pose_trs(0.0, sk);
         let g = Pose::from_trs(t, r, s).joint_global_transforms(sk);
-        let a = g[root].to_scale_rotation_translation().2;
-        let la = g[left_root].to_scale_rotation_translation().2;
-        Some(EnemyArm {
-            root,
-            mid,
-            end,
-            pole: a + Vec3::new(0.0, -1.0, 0.5),
-            left_root,
-            left_mid,
-            left_end,
-            left_pole: la + Vec3::new(0.0, -1.0, 0.5),
-        })
+        let right = ArmAim::resolve(sk, &g, RIGHT_HAND_BONE)?;
+        let left = ArmAim::resolve(sk, &g, LEFT_HAND_BONE)?;
+        Some(EnemyArm { right, left, mid, end })
+    }
+
+    /// Right shoulder joint index (the ANIM_DEBUG arm measurement anchor).
+    pub(crate) fn shoulder(&self) -> usize {
+        self.right.shoulder
     }
 
     /// A fresh per-hunter stack: continuous locomotion base (from the gait clips),
-    /// then IK aim (disabled until aim kicks in), then recoil.
+    /// then the right cone-clamped aim offset, then recoil (right shoulder), then the
+    /// left aim offset (disabled — enabled only for dual-wielders).
     fn build_stack(&self, loco_clips: Vec<(f32, clip::AnimationClip)>) -> LayeredAnimator {
         let mut s = LayeredAnimator::new();
         s.push(Box::new(LocomotionBlendLayer::new(loco_clips)));
-        s.push(Box::new(TwoBoneIkLayer {
-            root: self.root,
-            mid: self.mid,
-            end: self.end,
-            target: Vec3::ZERO,
-            reach_frac: AIM_REACH_FRAC,
-            pole: self.pole,
-            weight: 0.0,
-            enabled: true,
-        }));
-        // Hand look-at: point the barrel exactly at the player (aim_axis is set per
-        // frame from the weapon's attach rotation). Runs after IK places the hand.
-        s.push(Box::new(LookAtLayer {
-            joint: self.end,
-            aim_axis: Vec3::NEG_Z,
-            target: Vec3::ZERO,
-            weight: 0.0,
-            enabled: true,
-        }));
+        s.push(Box::new(self.right.aim_layer()));
         s.push(Box::new(AdditiveDecayLayer::new(
-            self.root,
+            self.right.shoulder,
             Vec3::X,
             ENEMY_RECOIL_DECAY,
             ENEMY_RECOIL_MAX,
         )));
-        // Left-hand foregrip IK (two-handed hold) — absolute-target mode, disabled
-        // until the game sets a grip target (rifles only, non-dual).
-        s.push(Box::new(TwoBoneIkLayer {
-            root: self.left_root,
-            mid: self.left_mid,
-            end: self.left_end,
-            target: Vec3::ZERO,
-            reach_frac: 0.0, // absolute: the hand reaches the grip point exactly
-            pole: self.left_pole,
-            weight: 0.0,
-            enabled: false,
-        }));
+        let mut left = self.left.aim_layer();
+        left.enabled = false; // dual-wielders enable it in `spawn_wave`
+        s.push(Box::new(left));
         s
     }
 }
@@ -339,6 +347,15 @@ const SPAWN_MARKER_COLOR: [f32; 3] = [0.95, 0.12, 0.12];
 /// Radius (m) of the ring the wave clusters into around the spawn point, so the
 /// hunters don't all stack on one cell.
 const SPAWN_CLUSTER_RADIUS: f32 = 0.7;
+
+/// Enemies keep this much personal space (m): pairs closer than this are nudged
+/// apart each step so they don't merge into one body / march in unison. ~3× the
+/// capsule radius, so they ring around a target instead of stacking on it.
+pub(crate) const ENEMY_SEPARATION_DIST: f32 = 0.7;
+/// A non-engaged hunter within this range (m) of an engaged packmate adopts that
+/// packmate's player fix — the squad "contact!" call, so the whole pack converges
+/// once anyone spots the player instead of some wandering off on their search.
+pub(crate) const SQUAD_ALERT_RANGE: f32 = 12.0;
 
 /// Size of the fan-out search-point pool the `World` hands out during the hunt
 /// (spread standable cells). More points than hunters keeps the sweep varied.
@@ -799,10 +816,10 @@ pub(crate) struct EnemyInstance {
     /// builds up as persistent blood); uploaded to this hunter's instance color
     /// buffer each frame. JS `EnemyCharacter` per-instance vertex colors.
     pub blood: Vec<f32>,
-    /// Procedural post-pass over `anim`'s blended pose: [IK aim, recoil]. Aims the
-    /// gun arm at the player while engaged; recoil kicks on each shot.
+    /// Procedural post-pass over `anim`'s blended pose: [aim-offset, recoil]. Nudges
+    /// the gun arm toward the player while engaged; recoil kicks on each shot.
     pub stack: LayeredAnimator,
-    /// Eased aim weight (0 = arm follows the clip, 1 = full IK aim at player).
+    /// Eased aim weight (0 = arm follows the clip, 1 = full aim swing at player).
     pub aim_weight: f32,
     /// Low-passed locomotion speed (m/s) for band selection — smooths the AI's
     /// binary `speed()` so the walk/jog/run band doesn't flip on frame-to-frame
@@ -812,10 +829,6 @@ pub(crate) struct EnemyInstance {
     /// skinning matrices and the hand-bone weapon transform (so the gun follows
     /// the aimed arm). `None` until the first `advance_animation`.
     pub final_pose: Option<Pose>,
-    /// Two-handed foregrip point in the RIGHT hand's (`Bone_9`) local frame, or
-    /// `None` for one-handed / dual weapons. The left-hand IK reaches
-    /// `right_hand_global · grip_local` so the off hand grips the rifle.
-    pub grip_local: Option<Vec3>,
 }
 
 /// A loaded enemy weapon's render assets: the gun mesh + optional muzzle-flash
@@ -826,17 +839,15 @@ pub(crate) struct EnemyWeaponAsset {
     pub name: &'static str,
     pub gun: TexturedModel,
     pub muzzle: Option<TexturedModel>,
-    /// Muzzle offset in the gun model's local space — the muzzle-flash mesh
-    /// centroid (the flash sits at the barrel tip, drawn in the gun's frame). Its
-    /// direction is the barrel axis (for the right-hand look-at); a fraction along
-    /// it is the two-handed foregrip point (for the left-hand IK). Falls back to
-    /// the gun-mesh centroid when there's no muzzle.
+    /// Muzzle offset in the gun model's local space (the muzzle-flash mesh centroid,
+    /// which sits down the barrel). Its direction is the barrel axis, used to aim the
+    /// gun (not just the arm) at the player. Falls back to the gun-mesh centroid.
     pub muzzle_offset: Vec3,
 }
 
 impl EnemyWeaponAsset {
     /// Barrel-forward axis (gun-model space) — the muzzle offset, normalized.
-    fn barrel_axis(&self) -> Vec3 {
+    pub(crate) fn barrel_axis(&self) -> Vec3 {
         let a = self.muzzle_offset.normalize_or_zero();
         if a == Vec3::ZERO {
             BARREL_MODEL_AXIS
@@ -847,8 +858,8 @@ impl EnemyWeaponAsset {
 }
 
 /// Muzzle/barrel offset (gun-model space) from a mesh centroid: the flash/gun
-/// extends away from the grip origin toward the muzzle, so the mean vertex
-/// position lies down the barrel.
+/// extends away from the grip origin toward the muzzle, so the mean vertex position
+/// lies down the barrel.
 fn mesh_muzzle_offset(gun: &TexturedModel, muzzle: &Option<TexturedModel>) -> Vec3 {
     let model = muzzle.as_ref().unwrap_or(gun);
     let n = model.vertices.len().max(1) as f32;
@@ -1199,7 +1210,15 @@ impl World {
         let asset = |rel: &str| format!("{}/../../assets/weapons/{}", env!("CARGO_MANIFEST_DIR"), rel);
         let mut enemy_weapon_lib: Vec<EnemyWeaponAsset> = Vec::new();
         for cfg in crate::combat::config::WEAPONS {
-            let gun = match crate::combat::load_gun(&asset(cfg.gun_path)) {
+            // Enemies wield the HANDLESS variant so Bond's ripped first-person hand
+            // doesn't float on the hunter's gun (see `combat::gun_strip`). Only the
+            // pistols + detonator ship a `gun_handless.glb`; everything else has no
+            // hand, so this falls back to `gun.glb`. The player viewmodel keeps the
+            // hand (it loads `gun.glb` directly — see `combat::viewmodel::load_gun`).
+            let gun_path = crate::combat::gun_strip::enemy_gun_path(cfg.gun_path, |rel| {
+                std::path::Path::new(&asset(rel)).exists()
+            });
+            let gun = match crate::combat::load_gun(&asset(&gun_path)) {
                 Ok(m) => m,
                 Err(e) => {
                     log::warn!("enemy weapon '{}' gun load failed: {e}", cfg.name);

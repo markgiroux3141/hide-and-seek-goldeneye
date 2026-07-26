@@ -374,6 +374,72 @@ impl PoseLayer for LookAtLayer {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Aim-offset layer — a light, cone-clamped single-joint aim (no IK).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Rotates ONE joint so a joint-local `forward` axis turns toward a model-space
+/// `target`, but only up to `max_angle` (a cone). This is the *light* aim used
+/// instead of two-bone IK: point the shoulder (and thus the whole arm + attached
+/// weapon) roughly at the player while **keeping the authored elbow bend** from the
+/// clip — none of the arm-straightening / robotic extension that full reach-IK
+/// produced. Blended with the incoming pose by `weight`.
+///
+/// Because only the shoulder rotates and the swing is capped, the motion reads as
+/// "raise the weapon toward you" layered on the hand-authored locomotion pose,
+/// which is how GoldenEye/Perfect Dark guards aimed — the hit itself is a
+/// probability roll, so the barrel never needs to point *exactly* at the target.
+pub struct AimOffsetLayer {
+    pub joint: usize,
+    /// The joint-local axis to aim (the arm's rest shoulder→hand direction).
+    pub forward: Vec3,
+    /// Model-space point to aim toward.
+    pub target: Vec3,
+    /// Maximum swing (radians) — the aim cone. Rotations past this are clamped, so
+    /// a target behind the shoulder just pins the arm at the cone edge, never
+    /// contorts it.
+    pub max_angle: f32,
+    pub weight: f32,
+    pub enabled: bool,
+}
+
+impl PoseLayer for AimOffsetLayer {
+    fn apply(&mut self, pose: &mut Pose, ctx: &LayerCtx) {
+        if !self.enabled || self.weight <= 1e-4 {
+            return;
+        }
+        let sk = ctx.skeleton;
+        let globals = sk.global_transforms(&pose.locals());
+        let (_, g_rot, origin) = globals[self.joint].to_scale_rotation_translation();
+        let to_target = (self.target - origin).normalize_or_zero();
+        let axis_world = (g_rot * self.forward).normalize_or_zero();
+        if to_target == Vec3::ZERO || axis_world == Vec3::ZERO {
+            return;
+        }
+        // Full rotation that would point the arm exactly at the target, then clamp
+        // its angle to the cone so the shoulder only swings so far.
+        let full = Quat::from_rotation_arc(axis_world, to_target);
+        let (axis, angle) = full.to_axis_angle();
+        let clamped = Quat::from_axis_angle(axis, angle.min(self.max_angle));
+        let g_new = clamped * g_rot;
+        let p_rot = match sk.parents[self.joint] {
+            Some(p) => globals[p].to_scale_rotation_translation().1,
+            None => Quat::IDENTITY,
+        };
+        let local_new = p_rot.inverse() * g_new;
+        let w = self.weight.clamp(0.0, 1.0);
+        pose.r[self.joint] = pose.r[self.joint].slerp(local_new, w);
+    }
+
+    fn name(&self) -> &str {
+        "aim-offset"
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Additive decay layer — recoil (stateful additive).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -636,6 +702,53 @@ mod tests {
         }
         let settled_delta = rest.angle_between(pose.r[joint]);
         assert!(settled_delta < 1e-2, "recoil should decay back to rest (got {settled_delta})");
+    }
+
+    /// Aim-offset: with a wide cone the joint's forward axis points at the target
+    /// (like a look-at); with a tiny cone the swing is clamped to `max_angle`.
+    #[test]
+    fn aim_offset_aims_forward_and_clamps_to_cone() {
+        let m = karl();
+        let sk = &m.skeleton;
+        let joint = sk.index_of("Bone_5").expect("shoulder");
+        let base = Pose::bind(sk);
+        let g = base.joint_global_transforms(sk);
+        let (_, gr, origin) = g[joint].to_scale_rotation_translation();
+        let forward_local = Vec3::Z;
+        let world_forward = (gr * forward_local).normalize();
+        let ctx = LayerCtx { skeleton: sk, dt: 0.0 };
+
+        // (a) Wide cone → axis lands on the target direction.
+        let dir = (world_forward + Vec3::new(0.2, 0.1, 0.0)).normalize();
+        let mut aim = AimOffsetLayer {
+            joint,
+            forward: forward_local,
+            target: origin + dir * 2.0,
+            max_angle: std::f32::consts::PI,
+            weight: 1.0,
+            enabled: true,
+        };
+        let mut pose = base.clone();
+        aim.apply(&mut pose, &ctx);
+        let nr = pose.joint_global_transforms(sk)[joint].to_scale_rotation_translation().1;
+        let err = (nr * forward_local).normalize().angle_between(dir);
+        assert!(err < 1e-2, "wide cone should aim at the target (off by {err})");
+
+        // (b) Opposite target + tiny cone → swing clamped to max_angle.
+        let max = 0.3;
+        let mut aim2 = AimOffsetLayer {
+            joint,
+            forward: forward_local,
+            target: origin - world_forward * 2.0,
+            max_angle: max,
+            weight: 1.0,
+            enabled: true,
+        };
+        let mut pose2 = base.clone();
+        aim2.apply(&mut pose2, &ctx);
+        let nr2 = pose2.joint_global_transforms(sk)[joint].to_scale_rotation_translation().1;
+        let swung = (nr2 * forward_local).normalize().angle_between(world_forward);
+        assert!(swung <= max + 1e-2, "swing should clamp to the cone (got {swung})");
     }
 
     fn clip(name: &str, sk: &Skeleton) -> AnimationClip {

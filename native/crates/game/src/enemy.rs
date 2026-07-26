@@ -88,6 +88,10 @@ const COPLANAR_BEELINE_EPS: f32 = 0.5 * WT; // 0.125 m
 /// Perception + FSM constants (JS `AIConfig` defaults + `EnemyManager` overrides).
 const DETECTION_RANGE: f32 = 12.0; // m
 const DETECTION_HALF_CONE: f32 = 60.0 * std::f32::consts::PI / 180.0; // 120° cone → ±60°
+/// A player closer than this is noticed **regardless of facing** (you can't sneak
+/// past a guard you're standing next to — footsteps/presence). Still LOS-gated, so a
+/// wall between hides you. Kills the "walks off ignoring me while I'm right here" bug.
+const PROXIMITY_RANGE: f32 = 3.5; // m
 const ATTACK_RANGE: f32 = 6.0; // m
 /// While attacking, the hunter advances on the player down to this standoff (m)
 /// then holds — so it fires *while moving* (run-and-gun) instead of freezing at
@@ -99,6 +103,22 @@ const ATTACK_STANDOFF: f32 = 3.0; // m
 const STANDOFF_HYST: f32 = 1.2; // m
 const ALERT_DURATION: f32 = 0.5; // s reaction delay
 const COOLDOWN_DURATION: f32 = 1.5; // s between fire bursts
+
+// ─── Burst-and-reposition (Perfect Dark "sim" repositioning) ─────────────────
+/// Between fire bursts, instead of standing at the standoff waiting out the
+/// cooldown (a turret), the hunter jukes to a fresh firing position: it swings
+/// this far around the player and re-engages from the new angle. No strafe clip is
+/// needed — it faces its *travel* direction on the move (clean legs, like Chase),
+/// then snaps back to face + fire when it plants. The direction flips each burst so
+/// it weaves back and forth rather than orbiting one way.
+const REPOSITION_ARC: f32 = 0.7; // rad (~40°) swung around the player per juke
+/// Keep the new spot within this band of the player (m): far enough to have moved,
+/// close enough (inside `ATTACK_RANGE`) that it re-engages the instant it arrives.
+const REPOSITION_MIN_R: f32 = 3.0;
+const REPOSITION_MAX_R: f32 = 5.5;
+/// Jog to the reposition spot (reads as a deliberate tactical relocate, not a panic
+/// sprint or a stroll).
+const REPOSITION_SPEED: f32 = SPEED_ADVANCE;
 
 // ─── Search layer ────────────────────────────────────────────────────────────
 /// Within this XZ distance (m) of a search / investigate target, the hunter counts
@@ -163,6 +183,14 @@ pub struct Enemy {
     last_known: Option<Vec3>,
     /// Seconds spent scanning the current spot in `Investigate`.
     scan_timer: f32,
+
+    // ─── Burst-and-reposition ──
+    /// Which way the hunter arcs when it repositions between bursts (+1 / −1),
+    /// flipped each juke so it weaves back and forth rather than orbiting the player.
+    strafe_dir: f32,
+    /// The spot the hunter is juking to during `Cooldown` (burst-and-reposition), or
+    /// `None` to hold + face like a plain cooldown (no standable/LOS spot to juke to).
+    reposition_target: Option<Vec3>,
 }
 
 impl Enemy {
@@ -200,6 +228,8 @@ impl Enemy {
             search_target: None,
             last_known: None,
             scan_timer: 0.0,
+            strafe_dir: 1.0,
+            reposition_target: None,
         }
     }
 
@@ -253,6 +283,21 @@ impl Enemy {
         self.state
     }
 
+    /// Whether the hunter is actively engaged with the player (has eyes on it or is
+    /// running the engagement chain) — the squad-alert broadcaster.
+    pub fn is_engaged(&self) -> bool {
+        matches!(
+            self.state,
+            AiState::Alert | AiState::Chase | AiState::Attack | AiState::Cooldown
+        )
+    }
+
+    /// Where this hunter last perceived the player (or a heard noise) — the position
+    /// an engaged hunter calls its packmates to converge on.
+    pub fn last_known(&self) -> Option<Vec3> {
+        self.last_known
+    }
+
     /// Apply `dmg` to the hunter; returns `true` if this shot killed it (health
     /// crossed to ≤0). A dead hunter takes no further damage. Mirrors JS
     /// `Actor.takeDamage` (armor omitted — the grunt has none).
@@ -299,6 +344,18 @@ impl Enemy {
         Vec3::new(player_feet.x - self.pos.x, 0.0, player_feet.z - self.pos.z).length()
     }
 
+    /// Whether the hunter perceives the player this step, given whether it has clear
+    /// line-of-sight. Two LOS-gated ways in: the 120° detection cone out to
+    /// [`DETECTION_RANGE`], or bare proximity within [`PROXIMITY_RANGE`] regardless of
+    /// facing (can't sneak past a guard you're standing next to).
+    fn perceives(&self, player_feet: Vec3, has_los: bool) -> bool {
+        if !has_los {
+            return false;
+        }
+        let dist = self.dist_to(player_feet);
+        dist < PROXIMITY_RANGE || (dist < DETECTION_RANGE && self.in_cone(player_feet))
+    }
+
     /// Whether the player is inside the detection cone (JS `isTargetInCone`).
     fn in_cone(&self, player_feet: Vec3) -> bool {
         let to = Vec3::new(player_feet.x - self.pos.x, 0.0, player_feet.z - self.pos.z);
@@ -335,10 +392,11 @@ impl Enemy {
 
         // Perception is checked every step, in every state: seeing the player is what
         // promotes a searcher to the engagement chain, and keeps the last-known
-        // position fresh while chasing/attacking.
-        let perceived = self.dist_to(player_feet) < DETECTION_RANGE
-            && self.in_cone(player_feet)
-            && line_of_sight(physics, self.pos, player_feet, self_collider);
+        // position fresh while chasing/attacking. Two ways in, both LOS-gated: the
+        // 120° detection cone out to `DETECTION_RANGE`, OR close proximity regardless
+        // of facing (`PROXIMITY_RANGE`).
+        let has_los = line_of_sight(physics, self.pos, player_feet, self_collider);
+        let perceived = self.perceives(player_feet, has_los);
         if perceived {
             self.last_known = Some(player_feet);
         }
@@ -457,18 +515,37 @@ impl Enemy {
                     if self.is_attacking && !self.fire_started && fire_anim {
                         self.fire_started = true;
                     }
-                    // Fire animation finished → cool down.
+                    // Fire animation finished → cool down, and pick a fresh firing
+                    // angle to juke to (burst-and-reposition). Flip the weave
+                    // direction first so successive bursts alternate sides.
                     if self.is_attacking && self.fire_started && !fire_anim {
                         self.is_attacking = false;
                         self.state = AiState::Cooldown;
                         self.cooldown_timer = 0.0;
+                        self.strafe_dir = -self.strafe_dir;
+                        self.reposition_target =
+                            self.pick_reposition(player_feet, nav, physics, self_collider);
                     }
                 }
             }
             AiState::Cooldown => {
-                self.face(player_feet);
                 self.cooldown_timer += dt;
-                if self.cooldown_timer >= COOLDOWN_DURATION {
+                // Burst-and-reposition: juke to the new firing angle while the
+                // cooldown runs, facing the travel direction so the legs read
+                // cleanly (no strafe clip). Fall back to holding + facing the player
+                // if there was no spot to juke to.
+                let arrived = match self.reposition_target {
+                    Some(t) => self.move_toward(dt, t, nav, REPOSITION_SPEED),
+                    None => {
+                        self.face(player_feet);
+                        true
+                    }
+                };
+                // Arrived at the new spot (or the cooldown elapsed) → plant, face the
+                // player, and re-evaluate the engagement exactly as before.
+                if arrived || self.cooldown_timer >= COOLDOWN_DURATION {
+                    self.reposition_target = None;
+                    self.face(player_feet);
                     let dist = self.dist_to(player_feet);
                     let los = line_of_sight(physics, self.pos, player_feet, self_collider);
                     if dist <= ATTACK_RANGE && los {
@@ -613,6 +690,58 @@ impl Enemy {
         self.snap_to_floor(nav);
         false
     }
+
+    /// Choose the spot to juke to for a burst-and-reposition (called on the
+    /// Attack→Cooldown transition). Prefers a standable spot that keeps
+    /// line-of-sight to the player — so the hunter re-engages from the new angle
+    /// rather than juking behind a wall — trying the current weave side first, then
+    /// the far side, then shallower arcs; falls back to any standable spot if none
+    /// keeps LOS, or `None` if there's nowhere standable to go (→ plain hold-and-face).
+    fn pick_reposition(
+        &self,
+        player_feet: Vec3,
+        nav: &NavWorld,
+        physics: &mut PhysicsWorld,
+        self_collider: ColliderHandle,
+    ) -> Option<Vec3> {
+        let mut fallback = None;
+        for (dir, arc) in [
+            (self.strafe_dir, REPOSITION_ARC),
+            (-self.strafe_dir, REPOSITION_ARC),
+            (self.strafe_dir, REPOSITION_ARC * 0.5),
+            (-self.strafe_dir, REPOSITION_ARC * 0.5),
+        ] {
+            let ideal = reposition_point(player_feet, self.pos, dir, arc);
+            if let Some(spot) = nav.nearest_standable(ideal.x, ideal.y.max(0.1), ideal.z, 3) {
+                if fallback.is_none() {
+                    fallback = Some(spot);
+                }
+                if line_of_sight(physics, spot, player_feet, self_collider) {
+                    return Some(spot);
+                }
+            }
+        }
+        fallback
+    }
+}
+
+/// The ideal burst-and-reposition spot (before snapping to a standable cell): swing
+/// `dir · arc` radians around the player from the hunter's current bearing, at the
+/// current player-distance clamped to `[REPOSITION_MIN_R, REPOSITION_MAX_R]`. Pure
+/// (the nav snap + LOS preference live in [`Enemy::pick_reposition`]).
+fn reposition_point(player_feet: Vec3, pos: Vec3, dir: f32, arc: f32) -> Vec3 {
+    let to = Vec3::new(pos.x - player_feet.x, 0.0, pos.z - player_feet.z);
+    let r = to.length();
+    if r < 1e-3 {
+        return pos; // sitting on the player — no meaningful bearing to arc from
+    }
+    let ang = to.z.atan2(to.x) + dir * arc;
+    let nr = r.clamp(REPOSITION_MIN_R, REPOSITION_MAX_R);
+    Vec3::new(
+        player_feet.x + ang.cos() * nr,
+        pos.y,
+        player_feet.z + ang.sin() * nr,
+    )
 }
 
 /// Rapier line-of-sight from `from_feet` to `to_feet`, cast between chest heights
@@ -681,6 +810,20 @@ mod tests {
         assert!(e.in_cone(Vec3::new(0.0, 0.0, 5.0)));
     }
 
+    /// Proximity sense: a player standing right next to the hunter is noticed even
+    /// when behind it (out of cone), but only with line-of-sight, and not once beyond
+    /// proximity range while still behind.
+    #[test]
+    fn close_player_noticed_even_from_behind() {
+        let e = Enemy::new(Vec3::ZERO, Vec3::Z); // facing +Z
+        let behind_close = Vec3::new(0.0, 0.0, -2.0); // behind, within PROXIMITY_RANGE
+        assert!(!e.in_cone(behind_close), "the close player is behind the cone");
+        assert!(e.perceives(behind_close, true), "…but proximity notices it");
+        assert!(!e.perceives(behind_close, false), "…unless a wall blocks LOS");
+        let behind_far = Vec3::new(0.0, 0.0, -8.0); // behind AND beyond proximity
+        assert!(!e.perceives(behind_far, true), "far + behind stays unnoticed");
+    }
+
     /// A freshly-spawned hunter starts hunting (Search), not standing idle — it
     /// flooded in through the door without knowing where the player is.
     #[test]
@@ -701,6 +844,33 @@ mod tests {
         e.take_damage(ENEMY_HEALTH); // kill
         e.assign_search_target(Vec3::new(9.0, 0.0, 9.0));
         assert_eq!(e.search_target(), Some(t), "a corpse ignores new orders");
+    }
+
+    /// The burst-and-reposition point swings the hunter around the player by the arc
+    /// (sign = weave direction), lands at the player-distance clamped into the band,
+    /// and flips sides with the direction. A hunter sitting on the player keeps its
+    /// spot (no bearing to arc from).
+    #[test]
+    fn reposition_point_arcs_around_the_player() {
+        let player = Vec3::ZERO;
+        // Hunter 4 m due +X of the player (bearing 0). Arc +0.7 rad should rotate the
+        // bearing that far while staying at ~4 m (inside the [3, 5.5] band).
+        let pos = Vec3::new(4.0, 0.0, 0.0);
+        let p = reposition_point(player, pos, 1.0, REPOSITION_ARC);
+        let r = (p.x * p.x + p.z * p.z).sqrt();
+        assert!((r - 4.0).abs() < 1e-3, "stays at the clamped radius, got {r}");
+        let ang = p.z.atan2(p.x);
+        assert!((ang - REPOSITION_ARC).abs() < 1e-3, "arced +{REPOSITION_ARC} rad, got {ang}");
+        // Flipping the direction arcs to the mirror bearing.
+        let q = reposition_point(player, pos, -1.0, REPOSITION_ARC);
+        assert!((q.z.atan2(q.x) + REPOSITION_ARC).abs() < 1e-3, "the other side mirrors");
+        // Too close → the radius is pushed out to the min band, not left inside it.
+        let close = Vec3::new(1.0, 0.0, 0.0);
+        let c = reposition_point(player, close, 1.0, REPOSITION_ARC);
+        let cr = (c.x * c.x + c.z * c.z).sqrt();
+        assert!((cr - REPOSITION_MIN_R).abs() < 1e-3, "clamped up to the min band, got {cr}");
+        // Sitting on the player → unchanged (no bearing).
+        assert_eq!(reposition_point(player, player, 1.0, REPOSITION_ARC), player);
     }
 
     /// A gunshot pulls a *searching* hunter to investigate the sound (last-known set

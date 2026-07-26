@@ -179,6 +179,20 @@ impl World {
                         any_caught = true;
                     }
                 }
+                // Squad coordination: an engaged hunter calls nearby packmates onto
+                // the player's last-known spot, so the pack converges once anyone spots
+                // it (rather than some wandering off on their fan-out search).
+                squad_alert(&mut enemies);
+                // Personal space: nudge apart any hunters that stacked up this step so
+                // they don't merge into one body, then resync their hitscan capsules.
+                if let Some(nav) = self.nav.as_ref() {
+                    separate_enemies(&mut enemies, nav);
+                    for inst in enemies.iter() {
+                        if !inst.enemy.is_dead() {
+                            self.physics.update_enemy_collider(inst.collider, inst.enemy.pos);
+                        }
+                    }
+                }
                 self.enemies = enemies;
                 for i in fire_requests {
                     self.start_enemy_fire(i);
@@ -349,34 +363,30 @@ impl World {
                 self.physics
                     .add_enemy_collider(spawn, ENEMY_RADIUS, ENEMY_HALF_HEIGHT);
 
-            // Weapon-derived aim + grip geometry (from the measured muzzle offset).
-            let attach = Mat4::from_translation(weapon.right_offset)
-                * Mat4::from_euler(
-                    EulerRot::XYZ,
-                    weapon.right_rot.x,
-                    weapon.right_rot.y,
-                    weapon.right_rot.z,
-                );
-            let asset = self.enemy_weapon_lib.iter().find(|a| a.name == weapon.name);
-            // Barrel aim axis in the hand frame: attach rotation × model barrel axis.
-            let aim_axis = glam::Quat::from_euler(
-                EulerRot::XYZ,
-                weapon.right_rot.x,
-                weapon.right_rot.y,
-                weapon.right_rot.z,
-            ) * asset.map(|a| a.barrel_axis()).unwrap_or(BARREL_MODEL_AXIS);
-            // Two-handed foregrip point (Bone_9-local) — rifles only, non-dual.
-            let grip_local = if weapon.class == EnemyWeaponClass::Rifle && !dual {
-                asset.map(|a| attach.transform_point3(a.muzzle_offset * FOREGRIP_FRAC))
-            } else {
-                None
-            };
+            // Per-hunter aim/recoil stack: [locomotion, right-aim, recoil, left-aim].
+            // Each aim layer swings the shoulder so the GUN BARREL (not just the arm)
+            // points at the player — set its forward axis from this weapon's barrel
+            // geometry. The left arm is driven only for dual-wielders (akimbo).
             let mut stack = match (arm, loco_clips.clone()) {
                 (Some(a), Some(clips)) => a.build_stack(clips),
                 _ => LayeredAnimator::default(),
             };
-            if let Some(look) = stack.layer_as::<LookAtLayer>(ENEMY_LOOK_LAYER) {
-                look.aim_axis = aim_axis;
+            if let (Some(a), Some(asset)) =
+                (arm, self.enemy_weapon_lib.iter().find(|a| a.name == weapon.name))
+            {
+                let barrel = asset.barrel_axis();
+                let euler = |r: Vec3| glam::Quat::from_euler(EulerRot::XYZ, r.x, r.y, r.z);
+                let r_fwd = a.right.barrel_aim_forward(euler(weapon.right_rot), barrel);
+                if let Some(aim) = stack.layer_as::<AimOffsetLayer>(ENEMY_AIM_LAYER) {
+                    aim.forward = r_fwd;
+                }
+                if dual {
+                    let l_fwd = a.left.barrel_aim_forward(euler(weapon.left_rot), barrel);
+                    if let Some(laim) = stack.layer_as::<AimOffsetLayer>(ENEMY_LAIM_LAYER) {
+                        laim.forward = l_fwd;
+                        laim.enabled = true;
+                    }
+                }
             }
 
             self.enemies.push(EnemyInstance {
@@ -394,7 +404,6 @@ impl World {
                 aim_weight: 0.0,
                 anim_speed: 0.0,
                 final_pose: None,
-                grip_local,
             });
             log::info!(
                 "hunter {i} flooded in at {spawn:?} with {}{}",
@@ -454,6 +463,94 @@ impl World {
         let origin = from + Vec3::new(0.0, 0.1, 0.0);
         let hit = self.physics.raycast(origin, Vec3::NEG_Y, 100.0)?;
         Some(hit.point)
+    }
+}
+
+/// Enemy–enemy separation: nudge apart any live pair closer than
+/// [`ENEMY_SEPARATION_DIST`] so hunters keep personal space instead of stacking into
+/// one body / marching in unison. Positions only (enemies move on nav, not physics);
+/// a nudge is applied only where it lands on standable floor (never shoves a hunter
+/// off a ledge / into a wall), with the feet re-snapped to that floor. Two relaxation
+/// passes keep a tight cluster stable.
+fn separate_enemies(enemies: &mut [EnemyInstance], nav: &NavWorld) {
+    let n = enemies.len();
+    if n < 2 {
+        return;
+    }
+    for _ in 0..2 {
+        let mut nudge = vec![Vec3::ZERO; n];
+        for i in 0..n {
+            if enemies[i].enemy.is_dead() {
+                continue;
+            }
+            for j in (i + 1)..n {
+                if enemies[j].enemy.is_dead() {
+                    continue;
+                }
+                let a = enemies[i].enemy.pos;
+                let b = enemies[j].enemy.pos;
+                let d = Vec3::new(b.x - a.x, 0.0, b.z - a.z);
+                let dist = d.length();
+                if dist >= ENEMY_SEPARATION_DIST {
+                    continue;
+                }
+                // Split along the line between them; if exactly stacked, fan out on a
+                // deterministic per-index angle (the golden angle) so they don't all
+                // pick the same escape direction.
+                let dir = if dist > 1e-4 {
+                    d / dist
+                } else {
+                    let t = i as f32 * 2.399_963;
+                    Vec3::new(t.cos(), 0.0, t.sin())
+                };
+                let push = (ENEMY_SEPARATION_DIST - dist) * 0.5;
+                nudge[i] -= dir * push;
+                nudge[j] += dir * push;
+            }
+        }
+        for i in 0..n {
+            if enemies[i].enemy.is_dead() || nudge[i] == Vec3::ZERO {
+                continue;
+            }
+            let cand = enemies[i].enemy.pos + nudge[i];
+            if let Some(fy) = nav.floor_height_at(cand.x, cand.z, cand.y + 0.25) {
+                enemies[i].enemy.pos = Vec3::new(cand.x, fy, cand.z);
+            }
+        }
+    }
+}
+
+/// Squad awareness: any hunter actively engaged with the player broadcasts its
+/// last-known player position to non-engaged packmates within [`SQUAD_ALERT_RANGE`],
+/// which converge to investigate it. So once one hunter spots the player the pack
+/// coordinates onto it, instead of some fanning off obliviously. Broadcasts the
+/// *last-known* spot (not the live player), so breaking contact + repositioning still
+/// loses them — coordinated, not omniscient.
+fn squad_alert(enemies: &mut [EnemyInstance]) {
+    let contacts: Vec<(Vec3, Vec3)> = enemies
+        .iter()
+        .filter(|e| !e.enemy.is_dead() && e.enemy.is_engaged())
+        .filter_map(|e| e.enemy.last_known().map(|lk| (e.enemy.pos, lk)))
+        .collect();
+    if contacts.is_empty() {
+        return;
+    }
+    for inst in enemies.iter_mut() {
+        if inst.enemy.is_dead() || inst.enemy.is_engaged() {
+            continue;
+        }
+        let p = inst.enemy.pos;
+        let call = contacts
+            .iter()
+            .filter(|(cpos, _)| cpos.distance(p) < SQUAD_ALERT_RANGE)
+            .min_by(|a, b| {
+                a.0.distance(p)
+                    .partial_cmp(&b.0.distance(p))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+        if let Some((_, lk)) = call {
+            inst.enemy.hear_noise(*lk);
+        }
     }
 }
 

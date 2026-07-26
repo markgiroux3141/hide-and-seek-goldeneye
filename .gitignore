@@ -21,3 +21,6 @@ Cargo.lock
 # Level editor quick-slots are local scratch; curated test bases get committed
 # later under their own named files (not slotN).
 native/levels/slot*.json
+
+# Large regenerable procedural-anim debug dump (not a shared artifact).
+anim_log.txt

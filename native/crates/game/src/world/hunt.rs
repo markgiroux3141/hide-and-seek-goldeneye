@@ -126,7 +126,6 @@ impl World {
         // it doesn't clash with the per-hunter `&mut` borrow.
         let aim_point = self.player_pos().map(|p| p + Vec3::Y * PLAYER_AIM_Y);
         let feet_off = self.char_feet_offset;
-        let arm = self.enemy_arm; // Copy — right-hand joint index for the foregrip
         // Skeleton borrow is a DISJOINT field from `enemies`, so both can be held.
         let skeleton = self.char_model.as_ref().map(|m| &m.skeleton);
 
@@ -151,7 +150,7 @@ impl World {
             // continuous blend layer below. Advance it so a one-shot plays out.
             inst.anim.update(dt);
 
-            // ── Procedural post-pass: locomotion blend → aim → recoil. ──
+            // ── Procedural post-pass: locomotion blend → aim-offset → recoil. ──
             let Some(sk) = skeleton else {
                 continue; // no skinned model → nothing to pose
             };
@@ -173,54 +172,27 @@ impl World {
             // Exponential ease toward the target weight (frame-rate independent).
             inst.aim_weight += (target_w - inst.aim_weight) * (1.0 - (-dt * AIM_RAMP).exp());
 
-            // Aim at the player in model space. The IK layer (reach-fraction mode)
-            // takes this as a far aim point and reaches `AIM_REACH_FRAC` of its own
-            // current arm length toward it, so the elbow extends the same amount
-            // wherever the shoulder currently sits (anchoring to a stored shoulder
-            // under-reached and left the arm bent).
-            // Aim: the IK places the hand on the line to the player; the look-at
-            // (aim_axis fixed at spawn from the gun's barrel) rotates the hand so the
-            // muzzle points exactly at the player.
-            if let Some(ap) = aim_point {
+            // Light aim: swing the shoulder toward the player (in model space),
+            // cone-clamped, so the gun arm raises toward you while keeping the
+            // authored elbow bend. The gun rides the hand bone, so it follows.
+            let aim_target = aim_point.map(|ap| {
                 let ct = char_transform_raw(inst.enemy.pos, inst.yaw(), feet_off);
-                let model_p = ct.inverse().transform_point3(ap);
-                if let Some(ik) = inst.stack.layer_as::<TwoBoneIkLayer>(ENEMY_IK_LAYER) {
-                    ik.target = model_p;
-                    ik.weight = inst.aim_weight;
+                ct.inverse().transform_point3(ap)
+            });
+            let aim_w = inst.aim_weight;
+            if let Some(aim) = inst.stack.layer_as::<AimOffsetLayer>(ENEMY_AIM_LAYER) {
+                if let Some(t) = aim_target {
+                    aim.target = t;
                 }
-                if let Some(look) = inst.stack.layer_as::<LookAtLayer>(ENEMY_LOOK_LAYER) {
-                    look.target = model_p;
-                    look.weight = inst.aim_weight;
-                }
-            } else {
-                if let Some(ik) = inst.stack.layer_as::<TwoBoneIkLayer>(ENEMY_IK_LAYER) {
-                    ik.weight = inst.aim_weight;
-                }
-                if let Some(look) = inst.stack.layer_as::<LookAtLayer>(ENEMY_LOOK_LAYER) {
-                    look.weight = inst.aim_weight;
-                }
+                aim.weight = aim_w;
             }
-
-            // Two-handed foregrip: reach the left hand to a point on the gun (rifles
-            // only — `grip_local` is None otherwise). Target uses the right hand's
-            // global from LAST frame's pose (a 1-frame lag, invisible), so the off
-            // hand tracks wherever the aim/recoil put the gun.
-            let grip_target = match (inst.grip_local, inst.final_pose.as_ref(), arm) {
-                (Some(gl), Some(fp), Some(a)) => fp
-                    .joint_global_transforms(sk)
-                    .get(a.end)
-                    .map(|g9| g9.transform_point3(gl)),
-                _ => None,
-            };
-            if let Some(lik) = inst.stack.layer_as::<TwoBoneIkLayer>(ENEMY_LGRIP_LAYER) {
-                match grip_target {
-                    Some(t) => {
-                        lik.target = t;
-                        lik.enabled = true;
-                        lik.weight = inst.aim_weight;
-                    }
-                    None => lik.weight = 0.0, // one-handed / no pose yet → left arm free
+            // Left arm too, for dual-wielders (the layer is disabled otherwise, so
+            // setting weight on a one-gun hunter is a no-op).
+            if let Some(laim) = inst.stack.layer_as::<AimOffsetLayer>(ENEMY_LAIM_LAYER) {
+                if let Some(t) = aim_target {
+                    laim.target = t;
                 }
+                laim.weight = aim_w;
             }
 
             // Base pose: the hit/death one-shot when active, else the bind pose for
@@ -282,7 +254,7 @@ impl World {
         let (reach_frac, elbow_deg, foot) = match (self.enemy_arm, inst.final_pose.as_ref(), self.char_model.as_ref()) {
             (Some(arm), Some(fp), Some(m)) => {
                 let g = fp.joint_global_transforms(&m.skeleton);
-                let sa = g[arm.root].to_scale_rotation_translation().2;
+                let sa = g[arm.shoulder()].to_scale_rotation_translation().2;
                 let el = g[arm.mid].to_scale_rotation_translation().2;
                 let ha = g[arm.end].to_scale_rotation_translation().2;
                 let arm_len = (el - sa).length() + (ha - el).length();
@@ -320,7 +292,7 @@ impl World {
     /// World transform placing a character (feet at `feet`, facing `yaw`) with the
     /// feet-seating offset + `CHAR_SCALE` — the model root the skinned pose + any
     /// bone-attached weapon are expressed under.
-    fn char_transform(&self, feet: Vec3, yaw: f32) -> Mat4 {
+    pub(crate) fn char_transform(&self, feet: Vec3, yaw: f32) -> Mat4 {
         char_transform_raw(feet, yaw, self.char_feet_offset)
     }
 
@@ -406,6 +378,11 @@ impl World {
     pub fn enemy_weapon_draws(&self, aspect: f32) -> Vec<(&'static str, Mat4)> {
         let vp = self.view_proj(aspect);
         let mut out = Vec::new();
+        // Spike: the BUILD bone-posing rig draws its AR33 so the foregrip can be
+        // eyeballed (the enemy/projectile/mine loops below are all empty in BUILD).
+        if let Some(d) = self.preview_weapon_draw(vp) {
+            out.push(d);
+        }
         for inst in &self.enemies {
             if inst.enemy.is_dead() {
                 continue; // drop the gun on death
