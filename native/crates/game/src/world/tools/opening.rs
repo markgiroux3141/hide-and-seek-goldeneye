@@ -164,11 +164,14 @@ impl World {
         );
         self.next_brush_id += 1;
 
+        let frame_id = frame.id;
+        let proto_id = proto.id;
         let region = self.regions.iter_mut().find(|r| r.id == p.region_id)?;
         region.brushes.push(frame);
         region.brushes.push(proto);
         log::info!("{:?} cut in region {} at {:?} {:?}", p.kind, p.region_id, p.axis, p.side);
-        self.rebuild_region(p.region_id)
+        // Incremental: assign the new carves + re-bake only their region.
+        self.rebuild_affected_regions(&[frame_id, proto_id]).into_iter().next()
     }
 
     /// The ghost preview quad (meters) for an opening placement — the opening rect

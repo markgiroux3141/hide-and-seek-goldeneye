@@ -775,11 +775,82 @@ impl Aabb {
     }
 }
 
+// ─── Localized boolean ops ──────────────────────────────────────────
+//
+// A brush's boolean op can only affect polygons its *volume* overlaps — a
+// subtract carves nothing outside its box, a union adds nothing outside its box.
+// So instead of rebuilding a BSP over the whole accumulated soup for every brush
+// (O(total polygons) per op), we split the soup into the polygons whose AABB
+// meets the brush (`near`) and the rest (`far`), run the actual boolean op on
+// `near` only, and pass `far` through untouched. The surface is identical; the
+// cost drops to O(local), which is what lets a huge level re-bake as fast as a
+// small one. AABBs are conservative, so a polygon the brush truly touches always
+// lands in `near` — no false negatives.
+
+/// AABB (meters) of a polygon's vertices.
+fn poly_aabb(p: &Polygon) -> Aabb {
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    for v in &p.vertices {
+        for k in 0..3 {
+            min[k] = min[k].min(v[k]);
+            max[k] = max[k].max(v[k]);
+        }
+    }
+    Aabb { min, max }
+}
+
+/// Split `soup` into (near, far) by whether each polygon's AABB meets `aabb`.
+fn partition_near_far(soup: Vec<Polygon>, aabb: &Aabb) -> (Vec<Polygon>, Vec<Polygon>) {
+    let mut near = Vec::new();
+    let mut far = Vec::new();
+    for p in soup {
+        if poly_aabb(&p).intersects(aabb) {
+            near.push(p);
+        } else {
+            far.push(p);
+        }
+    }
+    (near, far)
+}
+
+/// [`csg_subtract`] restricted to the polygons the brush AABB actually reaches.
+///
+/// If the brush's AABB meets no existing polygon (`near` empty) we can't tell
+/// locally whether the brush sits inside solid (→ carve a cavity) or inside air
+/// (→ no-op), so we fall back to the full op over the whole soup (`far` == soup
+/// then), which resolves it correctly. That path only fires for a brush touching
+/// no surface — e.g. the first room carved into the bare shell.
+fn subtract_local(soup: Vec<Polygon>, b_polys: Vec<Polygon>, b_aabb: &Aabb) -> Vec<Polygon> {
+    let (near, mut far) = partition_near_far(soup, b_aabb);
+    if near.is_empty() {
+        return csg_subtract(far, b_polys);
+    }
+    let mut clipped = csg_subtract(near, b_polys);
+    far.append(&mut clipped);
+    far
+}
+
+/// [`csg_union`] restricted to the polygons the brush AABB actually reaches.
+/// Same empty-`near` fallback as [`subtract_local`].
+fn union_local(soup: Vec<Polygon>, b_polys: Vec<Polygon>, b_aabb: &Aabb) -> Vec<Polygon> {
+    let (near, mut far) = partition_near_far(soup, b_aabb);
+    if near.is_empty() {
+        return csg_union(far, b_polys);
+    }
+    let mut merged = csg_union(near, b_polys);
+    far.append(&mut merged);
+    far
+}
+
 // ─── The fold ───────────────────────────────────────────────────────
 
-/// Evaluate `shell ± brushes` into a polygon soup, in meters. Direct port of
-/// the spike `evaluate()`: start from the shell, then apply each brush in order,
-/// with a disjoint-AABB early-reject and a consecutive-subtract pre-merge.
+/// Evaluate `shell ± brushes` into a polygon soup, in meters. Ported from the
+/// spike `evaluate()` — shell, then each brush in order, with a disjoint-AABB
+/// early-reject and a consecutive-subtract pre-merge — but every boolean op is
+/// **localized** ([`subtract_local`]/[`union_local`]): it only re-clips the
+/// polygons within the brush's AABB, so per-edit cost scales with the edited
+/// region's local complexity, not the whole level's.
 fn evaluate(shell: &Brush, brushes: &[Brush], ws: f32) -> Vec<Polygon> {
     let mut result = brush_to_polygons(shell, ws);
     // Grows with unions; subtracts never grow it, so it stays a correct upper
@@ -805,21 +876,28 @@ fn evaluate(shell: &Brush, brushes: &[Brush], ws: f32) -> Vec<Polygon> {
             }
             if run_end - i >= 3 {
                 let mut merged: Vec<Polygon> = Vec::new();
+                let mut merged_aabb: Option<Aabb> = None;
                 let mut started = false;
                 for j in i..run_end {
-                    if !Aabb::from_brush(&brushes[j], ws).intersects(&acc_aabb) {
+                    let j_aabb = Aabb::from_brush(&brushes[j], ws);
+                    if !j_aabb.intersects(&acc_aabb) {
                         continue;
                     }
                     let polys = brush_to_polygons(&brushes[j], ws);
+                    merged_aabb = Some(match merged_aabb {
+                        Some(a) => a.union(&j_aabb),
+                        None => j_aabb,
+                    });
                     if !started {
                         merged = polys;
                         started = true;
                     } else {
-                        merged = csg_union(merged, polys);
+                        // The merged void is itself local to the run's AABBs.
+                        merged = union_local(merged, polys, &j_aabb);
                     }
                 }
                 if started {
-                    result = csg_subtract(result, merged);
+                    result = subtract_local(result, merged, &merged_aabb.unwrap());
                 }
                 i = run_end;
                 continue;
@@ -828,19 +906,81 @@ fn evaluate(shell: &Brush, brushes: &[Brush], ws: f32) -> Vec<Polygon> {
 
         let polys = brush_to_polygons(&brushes[i], ws);
         if is_subtract {
-            result = csg_subtract(result, polys);
+            result = subtract_local(result, polys, &brush_aabb);
         } else if !brush_aabb.intersects(&acc_aabb) {
             // Disjoint union — concatenate; no BSP needed.
             result.extend(polys);
             acc_aabb = acc_aabb.union(&brush_aabb);
         } else {
-            result = csg_union(result, polys);
+            result = union_local(result, polys, &brush_aabb);
             acc_aabb = acc_aabb.union(&brush_aabb);
         }
         i += 1;
     }
 
     result
+}
+
+// ─── Region clustering (JS `src/core/csg/regions.js`) ────────────────
+//
+// Brushes are grouped into connected regions so each re-bakes independently.
+// Two brushes share a region if their AABBs overlap or merely touch — more
+// permissive than the face-adjacency `brushes_touching` used for room retexture,
+// because an additive brush sitting *inside* a room overlaps the room's subtract
+// and must fold together with it. A doorway cut that spans two rooms' walls
+// overlaps both, so it bridges them into one region without special-casing frames
+// (JS `clusterBrushes` comment). This is why a fully-connected base is a single
+// region: the win is for *disconnected* geometry (separate wings) and for
+// bounding the worst case, not for splitting a connected blob.
+
+/// Whether two brushes' AABBs overlap or touch (inclusive of edge contact), in
+/// WT. Port of JS `brushesOverlapOrTouch`.
+pub fn brushes_overlap_or_touch(a: &Brush, b: &Brush) -> bool {
+    let span = |br: &Brush, i: usize| match i {
+        0 => (br.x, br.x + br.w),
+        1 => (br.y, br.y + br.h),
+        _ => (br.z, br.z + br.d),
+    };
+    for i in 0..3 {
+        let (a0, a1) = span(a, i);
+        let (b0, b1) = span(b, i);
+        // Strict `<` so shared faces (a1 == b0) still count as touching.
+        if a1 < b0 || b1 < a0 {
+            return false;
+        }
+    }
+    true
+}
+
+/// Partition `brushes` into connected components by [`brushes_overlap_or_touch`]
+/// (JS `clusterBrushes`). Returns groups of indices into `brushes`; order within
+/// a group is arbitrary. An empty input yields no groups.
+pub fn cluster_brush_indices(brushes: &[Brush]) -> Vec<Vec<usize>> {
+    let n = brushes.len();
+    let mut visited = vec![false; n];
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for start in 0..n {
+        if visited[start] {
+            continue;
+        }
+        let mut group = Vec::new();
+        let mut stack = vec![start];
+        visited[start] = true;
+        while let Some(cur) = stack.pop() {
+            group.push(cur);
+            for (other, seen) in visited.iter_mut().enumerate() {
+                if *seen {
+                    continue;
+                }
+                if brushes_overlap_or_touch(&brushes[cur], &brushes[other]) {
+                    *seen = true;
+                    stack.push(other);
+                }
+            }
+        }
+        groups.push(group);
+    }
+    groups
 }
 
 // ─── Region ─────────────────────────────────────────────────────────
@@ -946,6 +1086,57 @@ impl Region {
         b.finish()
     }
 
+    /// Evaluate the region **once** and derive *both* the collider mesh and the
+    /// textured render mesh from the same polygon soup. This is the per-edit path
+    /// ([`World::rebuild_region`]); the standalone [`evaluate`](Self::evaluate) /
+    /// [`evaluate_textured`](Self::evaluate_textured) each run the full CSG fold,
+    /// so calling both (as the editor used to) folded the region twice per edit.
+    /// The fold is the dominant cost, so sharing it roughly halves per-edit time.
+    ///
+    /// The base soup (`pos`/`norm`/`idx`) feeds the textured classify directly by
+    /// reference; the collider clones it only to append the stair **ramp** surface
+    /// (the render mesh keeps the stepped treads via [`append_zoned`]). The clone
+    /// is a cheap memcpy next to the fold.
+    pub fn evaluate_both(&mut self) -> (CpuMesh, TexturedMesh) {
+        self.update_shell();
+        let polys = evaluate(&self.shell, &self.brushes, WORLD_SCALE);
+        let (pos, norm, idx) = polygons_to_mesh(&polys);
+
+        // Collider: base soup + smooth stair ramps.
+        let collider = if self.stairs.is_empty() {
+            CpuMesh::from_csg(&pos, &norm, &idx)
+        } else {
+            let mut cpos = pos.clone();
+            let mut cnorm = norm.clone();
+            let mut cidx = idx.clone();
+            for s in &self.stairs {
+                s.append_ramp_collision(&mut cpos, &mut cnorm, &mut cidx, WORLD_SCALE);
+            }
+            CpuMesh::from_csg(&cpos, &cnorm, &cidx)
+        };
+
+        // Textured render mesh: classify the same soup into per-zone groups, then
+        // append the stepped stair geometry with explicit zones/UVs.
+        let brush_infos: Vec<BrushInfo> = self
+            .brushes
+            .iter()
+            .map(|b| BrushInfo {
+                min: [b.x, b.y, b.z],
+                max: [b.x + b.w, b.y + b.h, b.z + b.d],
+                floor_y: b.floor_y,
+                scheme: b.scheme,
+                frame: b.frame,
+                door: b.door,
+            })
+            .collect();
+        let mut zb = ZonedBuilder::new();
+        uv_zones::classify_soup(&mut zb, &pos, &idx, &brush_infos, DEFAULT_SCHEME);
+        for s in &self.stairs {
+            s.append_zoned(&mut zb);
+        }
+        (collider, zb.finish())
+    }
+
     /// Recompute the shell to fit the current brushes (call before querying
     /// [`shell`](Self::shell) or [`solid_at`](Self::solid_at) after edits).
     pub fn refresh_shell(&mut self) {
@@ -1019,6 +1210,35 @@ mod tests {
         let mut brush = Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 3.0, 8.0, 10.0);
         assert!(!brush.pull_face(Axis::X, Side::Max, 4.0), "3 <= 4, must no-op");
         assert_eq!(brush.w, 3.0);
+    }
+
+    #[test]
+    fn overlap_or_touch_covers_edge_contact_and_gap() {
+        let a = Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 10.0, 10.0, 10.0);
+        // Shares the x=10 face → touches.
+        let flush = Brush::new(2, Op::Subtract, 10.0, 0.0, 0.0, 10.0, 10.0, 10.0);
+        assert!(brushes_overlap_or_touch(&a, &flush), "flush faces touch");
+        // Overlapping volume → touches.
+        let overlap = Brush::new(3, Op::Add, 5.0, 5.0, 5.0, 4.0, 4.0, 4.0);
+        assert!(brushes_overlap_or_touch(&a, &overlap), "overlap counts");
+        // 1-WT gap on x → disjoint.
+        let gap = Brush::new(4, Op::Subtract, 11.0, 0.0, 0.0, 10.0, 10.0, 10.0);
+        assert!(!brushes_overlap_or_touch(&a, &gap), "gap is disjoint");
+    }
+
+    #[test]
+    fn cluster_splits_disjoint_and_joins_connected() {
+        // Two connected (touching) + one far away → 2 groups of sizes {2, 1}.
+        let brushes = vec![
+            Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 10.0, 10.0, 10.0),
+            Brush::new(2, Op::Subtract, 10.0, 0.0, 0.0, 10.0, 10.0, 10.0), // touches #1
+            Brush::new(3, Op::Subtract, 100.0, 0.0, 0.0, 10.0, 10.0, 10.0), // far
+        ];
+        let mut groups = cluster_brush_indices(&brushes);
+        groups.sort_by_key(|g| g.len());
+        assert_eq!(groups.len(), 2, "one connected pair + one island");
+        assert_eq!(groups[0].len(), 1);
+        assert_eq!(groups[1].len(), 2);
     }
 
     #[test]

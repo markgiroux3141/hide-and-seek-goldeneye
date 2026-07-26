@@ -50,6 +50,7 @@ mod hunt;
 mod lifecycle;
 mod persist;
 mod pick;
+mod regions;
 mod spike_preview;
 mod tools;
 #[cfg(test)]
@@ -1014,6 +1015,19 @@ pub struct World {
     /// instead of clumping. Rebuilt each G→HUNT, cleared on return to BUILD.
     search_points: Vec<Vec3>,
     regions: Vec<Region>,
+    /// brush id → the id of the region that owns it. Maintained incrementally as
+    /// brushes are added ([`assign_brush_to_region`](Self::assign_brush_to_region))
+    /// and rebuilt wholesale by [`recluster_all`](Self::recluster_all) on load/undo.
+    /// Lets an edit re-bake only the affected region(s) instead of the whole level.
+    brush_to_region: std::collections::HashMap<u32, u32>,
+    /// Stable region-id allocator. Region ids must be unique over the session so a
+    /// reclustered region never reuses an id still held by a renderer/physics entry
+    /// mid-swap; [`recluster_all`](Self::recluster_all) hands out fresh ids from here.
+    next_region_id: u32,
+    /// Memoizes CSG results by a hash of a region's authored brushes+stairs, so a
+    /// full recluster (undo/load) re-folds only the region that actually changed;
+    /// the rest hit the cache. (JS `wasmResultCache`.)
+    csg_cache: regions::CsgCache,
     selected: Option<Selection>,
     /// Doors, populated at G→HUNT: the fixed **spawn-door seal** (a black
     /// non-breakable panel) plus (when re-enabled) breakable doors. Cleared on
@@ -1311,6 +1325,10 @@ impl World {
             spawn_point: SPAWN_MARKER_POS,
             search_points: Vec::new(),
             regions: vec![region],
+            // The opening room is region 0, owning brush 1.
+            brush_to_region: std::collections::HashMap::from([(1u32, 0u32)]),
+            next_region_id: 1,
+            csg_cache: regions::CsgCache::new(),
             selected: None,
             doors: Vec::new(),
             opening_tool: None,

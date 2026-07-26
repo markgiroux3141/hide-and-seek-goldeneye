@@ -17,7 +17,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use engine::render::mesh::{CpuMesh, TexturedMesh};
 use serde::{Deserialize, Serialize};
 
 use super::*;
@@ -134,20 +133,20 @@ impl World {
         // Region ids present before this load, so we can clear any that vanish.
         let old_ids: Vec<u32> = self.regions.iter().map(|r| r.id).collect();
 
-        // Rebuild the authored region list (shell recomputed from the brushes).
+        // Flatten the file's authored brushes/stairs; the on-disk region grouping
+        // is ignored — `rebuild_from_flat` re-partitions into connected regions
+        // (with fresh stable ids) and rebuilds `brush_to_region`. This also means a
+        // level authored under the old single-region system re-clusters correctly.
         let mut max_brush_id = 1u32;
-        let mut regions = Vec::with_capacity(file.regions.len());
+        let mut all_brushes: Vec<Brush> = Vec::new();
+        let mut all_stairs: Vec<StairDesc> = Vec::new();
         for rd in file.regions {
             for b in &rd.brushes {
                 max_brush_id = max_brush_id.max(b.id);
             }
-            let mut region = Region::new(rd.id);
-            region.brushes = rd.brushes;
-            region.stairs = rd.stairs;
-            region.refresh_shell();
-            regions.push(region);
+            all_brushes.extend(rd.brushes);
+            all_stairs.extend(rd.stairs);
         }
-        self.regions = regions;
         self.platforms = file.platforms;
         self.stair_runs = file.stair_runs;
         self.spawn_point = Vec3::from(file.spawn_point);
@@ -165,26 +164,8 @@ impl World {
         // loaded level doesn't have.
         self.reset_edit_state_for_load();
 
-        // Re-bake every loaded region (sets its collider) + collect its mesh.
-        let ids: Vec<u32> = self.regions.iter().map(|r| r.id).collect();
-        let new_ids: std::collections::HashSet<u32> = ids.iter().copied().collect();
-        let mut meshes: Vec<RegionMesh> = Vec::new();
-        for id in ids {
-            if let Some(rm) = self.rebuild_region(id) {
-                meshes.push(rm);
-            }
-        }
-        // Clear regions that existed before but not in the loaded level: empty
-        // mesh removes the renderer entry, empty collider removes the physics one.
-        for old in old_ids {
-            if !new_ids.contains(&old) {
-                self.physics.set_region_collider(old, &CpuMesh::default());
-                meshes.push(RegionMesh {
-                    id: old,
-                    mesh: TexturedMesh::default(),
-                });
-            }
-        }
+        // Re-partition + re-bake, clearing regions from the previously-loaded level.
+        let mut meshes = self.rebuild_from_flat(all_brushes, all_stairs, old_ids);
         // Always refresh the combined structures mesh + collider (an empty one
         // when the level has no platforms/stair-runs, which clears any leftover).
         meshes.push(self.rebuild_structures());
@@ -267,18 +248,27 @@ mod tests {
         let path = std::env::temp_dir().join("bah_persist_roundtrip.json");
         world.save_level(&path).expect("save");
 
-        let before_brushes: Vec<u32> =
-            world.regions[0].brushes.iter().map(|b| b.id).collect();
+        // All authored brush ids, across every region, as a set (load re-clusters
+        // into connected regions, so per-region order/grouping is not preserved —
+        // the round-trip guarantee is the *set* of authored brushes).
+        let mut before_brushes: Vec<u32> =
+            world.regions.iter().flat_map(|r| r.brushes.iter().map(|b| b.id)).collect();
+        before_brushes.sort_unstable();
 
         // Load into a fresh world.
         let mut loaded = World::new();
         let meshes = loaded.load_level(&path).expect("load");
         assert!(!meshes.is_empty(), "load should return meshes to upload");
 
-        assert_eq!(loaded.regions.len(), 1);
-        let after_brushes: Vec<u32> =
-            loaded.regions[0].brushes.iter().map(|b| b.id).collect();
+        // Brush 1 (x∈[0,24]) and brush 2 (x∈[30,42]) are disjoint, so clustering
+        // splits them into two independent regions.
+        assert_eq!(loaded.regions.len(), 2, "disjoint brushes → two regions");
+        let mut after_brushes: Vec<u32> =
+            loaded.regions.iter().flat_map(|r| r.brushes.iter().map(|b| b.id)).collect();
+        after_brushes.sort_unstable();
         assert_eq!(before_brushes, after_brushes, "brush ids must round-trip");
+        // Every brush is mapped to exactly one region.
+        assert_eq!(loaded.brush_to_region.len(), after_brushes.len());
         assert_eq!(loaded.platforms.len(), 1);
         assert_eq!(loaded.platforms[0].id, 1);
         assert!(loaded.platforms[0].grounded && loaded.platforms[0].railings);

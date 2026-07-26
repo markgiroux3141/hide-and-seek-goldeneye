@@ -211,6 +211,7 @@ impl World {
 
         let mut desc = desc;
         desc.void_ids = [brush1.id, brush2.id];
+        let (b1_id, b2_id) = (brush1.id, brush2.id);
         let region = self.regions.iter_mut().find(|r| r.id == op.region_id)?;
         region.brushes.push(brush1);
         region.brushes.push(brush2);
@@ -219,6 +220,6 @@ impl World {
             "stairs confirmed: {} step(s) {:?} in region {}",
             op.step_count, op.direction, op.region_id
         );
-        self.rebuild_region(op.region_id)
+        self.rebuild_affected_regions(&[b1_id, b2_id]).into_iter().next()
     }
 }

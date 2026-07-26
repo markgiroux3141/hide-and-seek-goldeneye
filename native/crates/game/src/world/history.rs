@@ -14,8 +14,6 @@
 //! inverse for every one of the dozen authoring tools. At [`MAX_HISTORY`] a
 //! marathon session costs a few MB — effectively unlimited in practice.
 
-use engine::render::mesh::{CpuMesh, TexturedMesh};
-
 use super::*;
 
 /// Max undo (and redo) depth. Snapshots hold only authored POD, so this bounds a
@@ -28,7 +26,6 @@ pub(crate) const MAX_HISTORY: usize = 100;
 /// isn't `Clone` (it owns a private derived shell), so we snapshot its parts.
 #[derive(Clone)]
 struct RegionSnapshot {
-    id: u32,
     brushes: Vec<Brush>,
     stairs: Vec<StairDesc>,
 }
@@ -54,7 +51,6 @@ impl World {
                 .regions
                 .iter()
                 .map(|r| RegionSnapshot {
-                    id: r.id,
                     brushes: r.brushes.clone(),
                     stairs: r.stairs.clone(),
                 })
@@ -142,15 +138,14 @@ impl World {
         // Region ids present before the restore, so any that vanish get cleared.
         let old_ids: Vec<u32> = self.regions.iter().map(|r| r.id).collect();
 
-        let mut regions = Vec::with_capacity(snap.regions.len());
+        // Flatten the snapshot's authored data and re-partition (clustering may
+        // differ from when it was captured; `rebuild_from_flat` handles it).
+        let mut all_brushes: Vec<Brush> = Vec::new();
+        let mut all_stairs: Vec<StairDesc> = Vec::new();
         for rs in snap.regions {
-            let mut region = Region::new(rs.id);
-            region.brushes = rs.brushes;
-            region.stairs = rs.stairs;
-            region.refresh_shell();
-            regions.push(region);
+            all_brushes.extend(rs.brushes);
+            all_stairs.extend(rs.stairs);
         }
-        self.regions = regions;
         self.platforms = snap.platforms;
         self.stair_runs = snap.stair_runs;
         self.spawn_point = snap.spawn_point;
@@ -161,23 +156,7 @@ impl World {
         // Any selection / armed tool may point at geometry the snapshot lacks.
         self.reset_edit_state_for_load();
 
-        let ids: Vec<u32> = self.regions.iter().map(|r| r.id).collect();
-        let new_ids: std::collections::HashSet<u32> = ids.iter().copied().collect();
-        let mut meshes: Vec<RegionMesh> = Vec::new();
-        for id in ids {
-            if let Some(rm) = self.rebuild_region(id) {
-                meshes.push(rm);
-            }
-        }
-        for old in old_ids {
-            if !new_ids.contains(&old) {
-                self.physics.set_region_collider(old, &CpuMesh::default());
-                meshes.push(RegionMesh {
-                    id: old,
-                    mesh: TexturedMesh::default(),
-                });
-            }
-        }
+        let mut meshes = self.rebuild_from_flat(all_brushes, all_stairs, old_ids);
         meshes.push(self.rebuild_structures());
         meshes
     }

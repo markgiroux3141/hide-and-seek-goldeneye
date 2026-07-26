@@ -90,16 +90,19 @@ impl World {
                 self.place_tool = None;
                 let brush = self.push_add_brush(region_id, b)?;
                 log::info!("pillar placed in region {region_id} (brush {brush})");
-                self.rebuild_region(region_id)
+                self.rebuild_affected_regions(&[brush]).into_iter().next()
             }
             PlaceKind::Brace => {
                 let (region_id, boxes) = self.resolve_brace_placed()?;
                 self.place_tool = None;
+                let mut ids = Vec::new();
                 for b in boxes {
-                    self.push_add_brush(region_id, b);
+                    if let Some(id) = self.push_add_brush(region_id, b) {
+                        ids.push(id);
+                    }
                 }
                 log::info!("brace placed in region {region_id}");
-                self.rebuild_region(region_id)
+                self.rebuild_affected_regions(&ids).into_iter().next()
             }
         }
     }

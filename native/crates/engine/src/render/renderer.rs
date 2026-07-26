@@ -140,6 +140,10 @@ struct GpuViewModel {
 struct TexturedRegion {
     vertex_buf: wgpu::Buffer,
     index_buf: wgpu::Buffer,
+    /// Allocated capacity (bytes) of each buffer, so a re-bake whose mesh fits can
+    /// `write_buffer` in place instead of reallocating (the BUILD hot path).
+    vertex_cap: u64,
+    index_cap: u64,
     index_count: u32,
     groups: Vec<ZoneGroup>,
 }
@@ -2032,21 +2036,49 @@ impl Renderer {
             self.regions.remove(&region_id);
             return;
         }
-        let vertex_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let vbytes: &[u8] = bytemuck::cast_slice(&mesh.vertices);
+        let ibytes: &[u8] = bytemuck::cast_slice(&mesh.indices);
+
+        // Fast path: the region already has buffers big enough — overwrite in
+        // place with `write_buffer` (no allocation) instead of reallocating a
+        // fresh VERTEX/INDEX buffer on every BUILD edit.
+        if let Some(existing) = self.regions.get_mut(&region_id) {
+            if (vbytes.len() as u64) <= existing.vertex_cap
+                && (ibytes.len() as u64) <= existing.index_cap
+            {
+                self.queue.write_buffer(&existing.vertex_buf, 0, vbytes);
+                self.queue.write_buffer(&existing.index_buf, 0, ibytes);
+                existing.index_count = mesh.indices.len() as u32;
+                existing.groups = mesh.groups.clone();
+                return;
+            }
+        }
+
+        // Slow path: (re)allocate with headroom so subsequent edits that grow the
+        // mesh a little still hit the fast path. COPY_DST makes them writable.
+        let vertex_cap = (vbytes.len() as u64).next_power_of_two().max(4096);
+        let index_cap = (ibytes.len() as u64).next_power_of_two().max(4096);
+        let vertex_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("region-tex-vertices"),
-            contents: bytemuck::cast_slice(&mesh.vertices),
-            usage: wgpu::BufferUsages::VERTEX,
+            size: vertex_cap,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
-        let index_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        let index_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("region-tex-indices"),
-            contents: bytemuck::cast_slice(&mesh.indices),
-            usage: wgpu::BufferUsages::INDEX,
+            size: index_cap,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
+        self.queue.write_buffer(&vertex_buf, 0, vbytes);
+        self.queue.write_buffer(&index_buf, 0, ibytes);
         self.regions.insert(
             region_id,
             TexturedRegion {
                 vertex_buf,
                 index_buf,
+                vertex_cap,
+                index_cap,
                 index_count: mesh.indices.len() as u32,
                 groups: mesh.groups.clone(),
             },

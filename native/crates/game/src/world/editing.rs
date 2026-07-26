@@ -44,7 +44,7 @@ impl World {
             engine::render::textures::SCHEMES[scheme].name,
             room_ids.len()
         );
-        self.rebuild_region(sel.region_id)
+        self.rebuild_affected_regions(&[sel.brush_id]).into_iter().next()
     }
 
     /// Clear sub-face selection sizing + any in-progress carve, and drop any
@@ -108,7 +108,7 @@ impl World {
             let brush = region.brushes.iter_mut().find(|b| b.id == sel.brush_id)?;
             brush.push_face(sel.axis, sel.side, step);
             self.active = None;
-            return self.rebuild_region(sel.region_id);
+            return self.rebuild_affected_regions(&[sel.brush_id]).into_iter().next();
         }
 
         // Sub-face carve: grow the active push brush, or spawn one over the rect.
@@ -122,7 +122,8 @@ impl World {
         self.sel_size_u = 0.0;
         self.sel_size_v = 0.0;
         self.sel_bounds = None;
-        self.rebuild_region(sel.region_id)
+        let affected = self.active.map(|a| a.brush_id).unwrap_or(sel.brush_id);
+        self.rebuild_affected_regions(&[affected]).into_iter().next()
     }
 
     /// Pull the selected face outward (JS `pullSelectedFace`). Full-face → shrink
@@ -135,7 +136,8 @@ impl World {
         if matches!(self.active, Some(a) if a.op == SubOp::Pull) {
             self.grow_active_brush(step);
             self.selected = self.active_inward_face();
-            return self.rebuild_region(sel.region_id);
+            let affected = self.active.map(|a| a.brush_id).unwrap_or(sel.brush_id);
+            return self.rebuild_affected_regions(&[affected]).into_iter().next();
         }
 
         if self.is_full_face() {
@@ -146,7 +148,7 @@ impl World {
                 return None;
             }
             self.active = None;
-            return self.rebuild_region(sel.region_id);
+            return self.rebuild_affected_regions(&[sel.brush_id]).into_iter().next();
         }
 
         // Sub-face extend.
@@ -156,7 +158,7 @@ impl World {
         self.sel_size_u = 0.0;
         self.sel_size_v = 0.0;
         self.sel_bounds = None;
-        self.rebuild_region(sel.region_id)
+        self.rebuild_affected_regions(&[id]).into_iter().next()
     }
 
     /// Spawn a sub-face brush over the current sub-rect (JS `createSubFaceBrush`):
@@ -273,16 +275,27 @@ impl World {
     /// Re-evaluate a region: rebuild its collider in place and return its mesh.
     /// Logs the bake time — the Phase 1 "does authoring feel instant?" signal.
     pub(crate) fn rebuild_region(&mut self, region_id: u32) -> Option<RegionMesh> {
-        let region = self.regions.iter_mut().find(|r| r.id == region_id)?;
-        let t0 = Instant::now();
-        let mesh = region.evaluate();
-        let tex = region.evaluate_textured();
-        let bake_ms = t0.elapsed().as_secs_f32() * 1000.0;
-        self.physics.set_region_collider(region_id, &mesh);
-        log::info!(
-            "region {region_id} re-baked in {bake_ms:.2} ms ({} tris)",
-            mesh.indices.len() / 3
-        );
+        let idx = self.regions.iter().position(|r| r.id == region_id)?;
+        self.regions[idx].refresh_shell();
+        // Memoize by the region's authored data: undo/redo/load re-bakes only the
+        // region that actually changed; unchanged regions hit the cache and skip
+        // the fold (JS `wasmResultCache`).
+        let key = super::regions::region_hash(&self.regions[idx]);
+        let (collider, tex) = if let Some((c, t)) = self.csg_cache.get(key) {
+            (c.clone(), t.clone())
+        } else {
+            let t0 = Instant::now();
+            // One CSG fold, both outputs derived from it (was two full folds).
+            let (c, t) = self.regions[idx].evaluate_both();
+            let bake_ms = t0.elapsed().as_secs_f32() * 1000.0;
+            log::info!(
+                "region {region_id} re-baked in {bake_ms:.2} ms ({} tris)",
+                c.indices.len() / 3
+            );
+            self.csg_cache.insert(key, (c.clone(), t.clone()));
+            (c, t)
+        };
+        self.physics.set_region_collider(region_id, &collider);
         Some(RegionMesh { id: region_id, mesh: tex })
     }
 }

@@ -96,35 +96,39 @@ impl World {
         const PLANE_EPS: f32 = 0.15;
         const RECT_EPS: f32 = 0.15;
 
-        let region = &self.regions[0]; // Phase 1: single region.
-        let mut best: Option<(u32, Side, f32)> = None;
-        for b in &region.brushes {
-            for side in [Side::Min, Side::Max] {
-                let plane = b.face_pos(axis, side);
-                let d = (plane - hit_a).abs();
-                if d > PLANE_EPS {
-                    continue;
-                }
-                // Hit point must lie within the face's other-axes extent.
-                let (u0, u1) = (b.min(u_axis), b.min(u_axis) + b.dim(u_axis));
-                let (v0, v1) = (b.min(v_axis), b.min(v_axis) + b.dim(v_axis));
-                if hit_u < u0 - RECT_EPS
-                    || hit_u > u1 + RECT_EPS
-                    || hit_v < v0 - RECT_EPS
-                    || hit_v > v1 + RECT_EPS
-                {
-                    continue;
-                }
-                if best.map(|(_, _, bd)| d < bd).unwrap_or(true) {
-                    best = Some((b.id, side, d));
+        // Search every region's brushes for the face plane the hit lies on, and
+        // keep the closest match (regions may be disjoint — the ray landed on one
+        // of them, but we resolve by geometry, not by which collider was struck).
+        let mut best: Option<(u32, u32, Side, f32)> = None; // (region_id, brush_id, side, dist)
+        for region in &self.regions {
+            for b in &region.brushes {
+                for side in [Side::Min, Side::Max] {
+                    let plane = b.face_pos(axis, side);
+                    let d = (plane - hit_a).abs();
+                    if d > PLANE_EPS {
+                        continue;
+                    }
+                    // Hit point must lie within the face's other-axes extent.
+                    let (u0, u1) = (b.min(u_axis), b.min(u_axis) + b.dim(u_axis));
+                    let (v0, v1) = (b.min(v_axis), b.min(v_axis) + b.dim(v_axis));
+                    if hit_u < u0 - RECT_EPS
+                        || hit_u > u1 + RECT_EPS
+                        || hit_v < v0 - RECT_EPS
+                        || hit_v > v1 + RECT_EPS
+                    {
+                        continue;
+                    }
+                    if best.map(|(_, _, _, bd)| d < bd).unwrap_or(true) {
+                        best = Some((region.id, b.id, side, d));
+                    }
                 }
             }
         }
 
-        best.map(|(brush_id, side, _)| {
+        best.map(|(region_id, brush_id, side, _)| {
             (
                 Selection {
-                    region_id: region.id,
+                    region_id,
                     brush_id,
                     axis,
                     side,
