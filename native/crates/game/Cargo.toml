@@ -22,3 +22,8 @@ env_logger = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[dev-dependencies]
+# Used by the gun_strip tests to re-walk a stripped GLB through the SAME glTF
+# crate the engine loader uses, verifying the hand geometry no longer loads.
+gltf = { workspace = true }

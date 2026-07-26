@@ -16,6 +16,7 @@
 pub mod config;
 pub mod enemy_weapons;
 pub mod explosives;
+pub mod gun_strip;
 pub mod shooting;
 pub mod viewmodel;
 
