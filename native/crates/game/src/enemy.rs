@@ -92,11 +92,14 @@ const DETECTION_HALF_CONE: f32 = 60.0 * std::f32::consts::PI / 180.0; // 120° c
 /// past a guard you're standing next to — footsteps/presence). Still LOS-gated, so a
 /// wall between hides you. Kills the "walks off ignoring me while I'm right here" bug.
 const PROXIMITY_RANGE: f32 = 3.5; // m
-const ATTACK_RANGE: f32 = 6.0; // m
-/// While attacking, the hunter advances on the player down to this standoff (m)
-/// then holds — so it fires *while moving* (run-and-gun) instead of freezing at
-/// first sight of the player. Firing is a timer now, so movement + shooting mix.
-const ATTACK_STANDOFF: f32 = 3.0; // m
+/// The advance-and-fire band inside the standoff: the hunter enters `Attack` (and
+/// re-engages from `Cooldown`) once within `standoff + this`, then closes to the
+/// per-weapon standoff and holds — so it fires *while moving* (run-and-gun) instead
+/// of freezing at first sight of the player. Firing is a timer now, so movement +
+/// shooting mix. The effective attack range is capped at [`DETECTION_RANGE`] (it
+/// can't fight what it can't see). Replaces the old fixed `ATTACK_RANGE`; the
+/// standoff it's measured from is now the weapon's ([`crate::combat::standoff_for`]).
+const ATTACK_FIRE_BAND: f32 = 3.0; // m
 /// Hysteresis around the standoff: once holding, the hunter only resumes closing
 /// if the player pulls beyond `standoff + this`. Prevents the micro-step-in-and-out
 /// at the exact boundary that kept the legs walking in place.
@@ -112,10 +115,12 @@ const COOLDOWN_DURATION: f32 = 1.5; // s between fire bursts
 /// then snaps back to face + fire when it plants. The direction flips each burst so
 /// it weaves back and forth rather than orbiting one way.
 const REPOSITION_ARC: f32 = 0.7; // rad (~40°) swung around the player per juke
-/// Keep the new spot within this band of the player (m): far enough to have moved,
-/// close enough (inside `ATTACK_RANGE`) that it re-engages the instant it arrives.
-const REPOSITION_MIN_R: f32 = 3.0;
-const REPOSITION_MAX_R: f32 = 5.5;
+/// Keep the reposition juke around the hunter's standoff (as a fraction of it), so a
+/// sniper weaves at long range and a shotgunner weaves up close — rather than every
+/// hunter re-closing to the same fixed band. Far enough to have moved, close enough
+/// that it re-engages the instant it arrives.
+const REPOSITION_MIN_FRAC: f32 = 0.8;
+const REPOSITION_MAX_FRAC: f32 = 1.4;
 /// Jog to the reposition spot (reads as a deliberate tactical relocate, not a panic
 /// sprint or a stroll).
 const REPOSITION_SPEED: f32 = SPEED_ADVANCE;
@@ -365,20 +370,28 @@ impl Enemy {
         self.heading.angle_between(to.normalize()) < DETECTION_HALF_CONE
     }
 
-    /// Advance the FSM one step. `fire_anim` = a fire one-shot is currently playing
-    /// on the shared mixer (the JS `enemyState === 'action'` proxy, disambiguated
-    /// from hit/death by the caller). Returns `want_fire` when it wants the caller
-    /// to start a fire burst this step, and `needs_search_target` when it's searching
-    /// and needs the `World` to hand it a fresh point.
+    /// Advance the FSM one step. `standoff` is the distance (m) this hunter holds at
+    /// while attacking — the weapon's ([`crate::combat::EnemyWeaponDef::standoff`]),
+    /// threaded in so a sniper hangs back and a shotgunner charges in. `fire_anim` =
+    /// a fire one-shot is currently playing on the shared mixer (the JS
+    /// `enemyState === 'action'` proxy, disambiguated from hit/death by the caller).
+    /// Returns `want_fire` when it wants the caller to start a fire burst this step,
+    /// and `needs_search_target` when it's searching and needs the `World` to hand it
+    /// a fresh point.
     pub fn update(
         &mut self,
         dt: f32,
         player_feet: Vec3,
+        standoff: f32,
         nav: &NavWorld,
         physics: &mut PhysicsWorld,
         fire_anim: bool,
         self_collider: ColliderHandle,
     ) -> EnemyStep {
+        // The hunter enters/holds the fight within `standoff + band`, capped at the
+        // perception range (it can't engage what it can't see). Both the standoff and
+        // this attack range now scale with the equipped weapon.
+        let attack_range = (standoff + ATTACK_FIRE_BAND).min(DETECTION_RANGE);
         self.moving = false;
         self.move_speed = 0.0;
         if self.dead {
@@ -463,7 +476,7 @@ impl Enemy {
             AiState::Chase => {
                 let dist = self.dist_to(player_feet);
                 let los = line_of_sight(physics, self.pos, player_feet, self_collider);
-                if dist <= ATTACK_RANGE && !fire_anim && los {
+                if dist <= attack_range && !fire_anim && los {
                     self.face(player_feet);
                     self.state = AiState::Attack;
                     self.is_attacking = false;
@@ -485,23 +498,30 @@ impl Enemy {
             AiState::Attack => {
                 let dist = self.dist_to(player_feet);
                 let los = line_of_sight(physics, self.pos, player_feet, self_collider);
-                if dist > ATTACK_RANGE * 1.3 || !los {
+                if dist > attack_range * 1.3 || !los {
                     self.state = AiState::Chase;
                     self.chase_timer = 0.0;
                     self.is_attacking = false;
                     self.holding = false;
                 } else {
-                    // Advance-fire with a hold dead-band: close to the standoff, then
-                    // plant the feet and HOLD until the player pulls beyond
-                    // standoff+hyst. This stops the micro-step-in-and-out at the exact
-                    // boundary that left the legs walking in place. Always face the
-                    // player so the procedural aim points the gun at them.
+                    // Advance / hold / back off around the standoff, with a hysteresis
+                    // dead-band so the feet don't micro-step at the boundary. Too far →
+                    // jog in; too close → give ground (the player, or a packmate's
+                    // separation-nudge, can otherwise shove a hunter to point-blank —
+                    // enemies don't collide with the player, so nothing else stops it);
+                    // inside the band → plant and hold. Always face the player so the
+                    // procedural aim points the gun at them (backpedal look while
+                    // retreating).
                     if self.holding {
-                        if dist > ATTACK_STANDOFF + STANDOFF_HYST {
+                        // Leave the hold only when the player pulls clearly outside the
+                        // band on either side.
+                        if !(standoff - STANDOFF_HYST..=standoff + STANDOFF_HYST).contains(&dist) {
                             self.holding = false;
                         }
-                    } else if dist > ATTACK_STANDOFF {
+                    } else if dist > standoff {
                         self.move_toward(dt, player_feet, nav, SPEED_ADVANCE); // jog in
+                    } else if dist < standoff - STANDOFF_HYST {
+                        self.back_off(dt, player_feet, nav, SPEED_ADVANCE); // give ground
                     } else {
                         self.holding = true;
                     }
@@ -524,7 +544,7 @@ impl Enemy {
                         self.cooldown_timer = 0.0;
                         self.strafe_dir = -self.strafe_dir;
                         self.reposition_target =
-                            self.pick_reposition(player_feet, nav, physics, self_collider);
+                            self.pick_reposition(player_feet, standoff, nav, physics, self_collider);
                     }
                 }
             }
@@ -548,7 +568,7 @@ impl Enemy {
                     self.face(player_feet);
                     let dist = self.dist_to(player_feet);
                     let los = line_of_sight(physics, self.pos, player_feet, self_collider);
-                    if dist <= ATTACK_RANGE && los {
+                    if dist <= attack_range && los {
                         self.state = AiState::Attack;
                         self.is_attacking = false;
                         self.holding = false;
@@ -609,6 +629,32 @@ impl Enemy {
             if (fy - self.pos.y).abs() <= 1.0 {
                 self.pos.y = fy;
             }
+        }
+    }
+
+    /// Give ground: step straight back from the player to regain the standoff. Called
+    /// from `Attack` when the player has closed inside the standoff dead-band. Enemies
+    /// don't collide with the player, so without this a rush (or a packmate's
+    /// separation-nudge) could pin a hunter at point-blank and it would just hold and
+    /// fire in your face. Only retreats where the step-back line is clear and lands on
+    /// floor — it won't moonwalk through a wall or off a ledge (it just holds there
+    /// instead, and the reposition juke will find a better angle next burst). The
+    /// caller re-faces the player, so the model backpedals while covering you.
+    fn back_off(&mut self, dt: f32, player_feet: Vec3, nav: &NavWorld, speed: f32) {
+        let away = Vec3::new(self.pos.x - player_feet.x, 0.0, self.pos.z - player_feet.z);
+        if away.length_squared() < 1e-6 {
+            return; // standing on the player — no direction to back toward
+        }
+        let dir = away.normalize();
+        let dest = self.pos + dir * (speed * dt);
+        let up = Vec3::new(0.0, 0.5, 0.0);
+        if nav.los_clear(self.pos + up, dest + up) && nav.ground_path_clear(self.pos, dest) {
+            self.path.clear();
+            self.repath_timer = 0.0; // force a fresh A* path when it re-engages
+            self.pos = dest;
+            self.snap_to_floor(nav);
+            self.moving = true;
+            self.move_speed = speed;
         }
     }
 
@@ -700,10 +746,14 @@ impl Enemy {
     fn pick_reposition(
         &self,
         player_feet: Vec3,
+        standoff: f32,
         nav: &NavWorld,
         physics: &mut PhysicsWorld,
         self_collider: ColliderHandle,
     ) -> Option<Vec3> {
+        // Weave around the hunter's own standoff (not a fixed band) so it holds the
+        // weapon's engagement range across the reposition.
+        let (min_r, max_r) = (standoff * REPOSITION_MIN_FRAC, standoff * REPOSITION_MAX_FRAC);
         let mut fallback = None;
         for (dir, arc) in [
             (self.strafe_dir, REPOSITION_ARC),
@@ -711,7 +761,7 @@ impl Enemy {
             (self.strafe_dir, REPOSITION_ARC * 0.5),
             (-self.strafe_dir, REPOSITION_ARC * 0.5),
         ] {
-            let ideal = reposition_point(player_feet, self.pos, dir, arc);
+            let ideal = reposition_point(player_feet, self.pos, dir, arc, min_r, max_r);
             if let Some(spot) = nav.nearest_standable(ideal.x, ideal.y.max(0.1), ideal.z, 3) {
                 if fallback.is_none() {
                     fallback = Some(spot);
@@ -727,16 +777,16 @@ impl Enemy {
 
 /// The ideal burst-and-reposition spot (before snapping to a standable cell): swing
 /// `dir · arc` radians around the player from the hunter's current bearing, at the
-/// current player-distance clamped to `[REPOSITION_MIN_R, REPOSITION_MAX_R]`. Pure
-/// (the nav snap + LOS preference live in [`Enemy::pick_reposition`]).
-fn reposition_point(player_feet: Vec3, pos: Vec3, dir: f32, arc: f32) -> Vec3 {
+/// current player-distance clamped to `[min_r, max_r]` (the standoff-relative band).
+/// Pure (the nav snap + LOS preference live in [`Enemy::pick_reposition`]).
+fn reposition_point(player_feet: Vec3, pos: Vec3, dir: f32, arc: f32, min_r: f32, max_r: f32) -> Vec3 {
     let to = Vec3::new(pos.x - player_feet.x, 0.0, pos.z - player_feet.z);
     let r = to.length();
     if r < 1e-3 {
         return pos; // sitting on the player — no meaningful bearing to arc from
     }
     let ang = to.z.atan2(to.x) + dir * arc;
-    let nr = r.clamp(REPOSITION_MIN_R, REPOSITION_MAX_R);
+    let nr = r.clamp(min_r, max_r);
     Vec3::new(
         player_feet.x + ang.cos() * nr,
         pos.y,
@@ -855,22 +905,24 @@ mod tests {
         let player = Vec3::ZERO;
         // Hunter 4 m due +X of the player (bearing 0). Arc +0.7 rad should rotate the
         // bearing that far while staying at ~4 m (inside the [3, 5.5] band).
+        // A standoff-relative band around a 3 m standoff: [2.4, 4.2].
+        let (min_r, max_r) = (2.4, 4.2);
         let pos = Vec3::new(4.0, 0.0, 0.0);
-        let p = reposition_point(player, pos, 1.0, REPOSITION_ARC);
+        let p = reposition_point(player, pos, 1.0, REPOSITION_ARC, min_r, max_r);
         let r = (p.x * p.x + p.z * p.z).sqrt();
         assert!((r - 4.0).abs() < 1e-3, "stays at the clamped radius, got {r}");
         let ang = p.z.atan2(p.x);
         assert!((ang - REPOSITION_ARC).abs() < 1e-3, "arced +{REPOSITION_ARC} rad, got {ang}");
         // Flipping the direction arcs to the mirror bearing.
-        let q = reposition_point(player, pos, -1.0, REPOSITION_ARC);
+        let q = reposition_point(player, pos, -1.0, REPOSITION_ARC, min_r, max_r);
         assert!((q.z.atan2(q.x) + REPOSITION_ARC).abs() < 1e-3, "the other side mirrors");
         // Too close → the radius is pushed out to the min band, not left inside it.
         let close = Vec3::new(1.0, 0.0, 0.0);
-        let c = reposition_point(player, close, 1.0, REPOSITION_ARC);
+        let c = reposition_point(player, close, 1.0, REPOSITION_ARC, min_r, max_r);
         let cr = (c.x * c.x + c.z * c.z).sqrt();
-        assert!((cr - REPOSITION_MIN_R).abs() < 1e-3, "clamped up to the min band, got {cr}");
+        assert!((cr - min_r).abs() < 1e-3, "clamped up to the min band, got {cr}");
         // Sitting on the player → unchanged (no bearing).
-        assert_eq!(reposition_point(player, player, 1.0, REPOSITION_ARC), player);
+        assert_eq!(reposition_point(player, player, 1.0, REPOSITION_ARC, min_r, max_r), player);
     }
 
     /// A gunshot pulls a *searching* hunter to investigate the sound (last-known set

@@ -46,10 +46,15 @@ pub struct EnemyWeaponDef {
     pub damage: f32,
     /// Base hit chance 0–1 (scaled by distance at the shot; JS `accuracy`).
     pub accuracy: f32,
-    /// Effective range in metres (the hit roll goes to 0 beyond it).
+    /// Effective range in metres (the hit roll goes to 0 beyond it, and the FSM
+    /// [`Self::standoff`] is derived from it).
     pub range: f32,
     /// Shots per second while inside the fire-animation window.
     pub fire_rate: f32,
+    /// Distance (m) the hunter advances to and holds at while attacking — derived
+    /// from [`Self::range`] via [`standoff_for`], so a sniper hangs way back and a
+    /// shotgunner charges in. Threaded into the FSM ([`crate::enemy::Enemy::update`]).
+    pub standoff: f32,
     /// Right-hand (`Bone_9`) bone-local offset + XYZ-euler rotation, GE units.
     pub right_offset: Vec3,
     pub right_rot: Vec3,
@@ -95,6 +100,55 @@ const PISTOL_NAMES: &[&str] = &[
     "PP7 (Silenced)",
 ];
 
+// ─── Engagement range (drives standoff + accuracy falloff) ───────────────────────
+// The class default `range` (pistol 8 / rifle 12) doesn't distinguish a shotgun from
+// a sniper — both are class Rifle. These name bands give the CQC and long-reach guns
+// an engagement range that matches how they actually fight, so the derived standoff
+// (and the accuracy falloff) reads right: a shotgunner charges in, a sniper hangs back.
+
+/// Close-quarters weapons — the hunter closes right in (short range → short standoff).
+/// Shotguns and SMGs are murderous up close and fall off fast at distance.
+const CQC_NAMES: &[&str] = &[
+    "Shotgun",
+    "Auto Shotgun",
+    "Klobb",
+    "D5K Deutsche",
+    "D5K (Silenced)",
+    "Phantom",
+    "ZMG 9mm",
+];
+/// Long-reach weapons — the hunter deliberately hangs way back (long range → the
+/// standoff clamps near the perception edge). Snipers + the laser reach across a room.
+const LONG_NAMES: &[&str] = &["Sniper Rifle", "Moonraker Laser"];
+
+/// The hunter's effective engagement range in metres: the CQC / long bands above,
+/// else the weapon's class default (`class_default`).
+fn engagement_range(w: &WeaponStats, class_default: f32) -> f32 {
+    if CQC_NAMES.contains(&w.name) {
+        5.0
+    } else if LONG_NAMES.contains(&w.name) {
+        18.0
+    } else {
+        class_default
+    }
+}
+
+/// Fraction of a weapon's effective `range` a hunter holds at while attacking — it
+/// advances to here, plants, and fires. `< 1` so it stays comfortably inside its own
+/// range (where its accuracy is still up).
+const STANDOFF_FRAC: f32 = 0.6;
+/// Standoff clamps (m): never closer than knife-fight range, never past what the
+/// hunter can still perceive — kept below the FSM `DETECTION_RANGE` (12 m) so it
+/// re-acquires the player at its hold distance.
+const MIN_STANDOFF: f32 = 2.5;
+const MAX_STANDOFF: f32 = 11.0;
+
+/// The FSM standoff for a weapon of effective `range`: a fixed fraction of range,
+/// clamped. A shotgun (range 5) holds at 3 m; a sniper (range 18) holds at ~11 m.
+pub fn standoff_for(range: f32) -> f32 {
+    (range * STANDOFF_FRAC).clamp(MIN_STANDOFF, MAX_STANDOFF)
+}
+
 /// Build the enemy-side definition for any player [`WeaponStats`]. The four
 /// source-defined guns (pp7/kf7/ar33/rcp90) get their exact bone offsets + AI
 /// stats; every other weapon gets its class defaults so the full arsenal is
@@ -107,14 +161,28 @@ pub fn enemy_def_for(w: &WeaponStats) -> EnemyWeaponDef {
         EnemyWeaponClass::Rifle
     };
 
-    // Class-default AI stats + offsets (pp7 for pistols, kf7 for rifles).
-    let (accuracy, range, fire_rate, r_off, r_rot, l_off, l_rot) = match class {
+    // Class-default AI stats + offsets (pp7 for pistols, kf7 for rifles). The class
+    // default `range` / `fire_rate` are refined below by the weapon's identity.
+    let (accuracy, class_range, class_fire_rate, r_off, r_rot, l_off, l_rot) = match class {
         EnemyWeaponClass::Pistol => (
             0.85, 8.0, 2.0, PISTOL_R_OFF, PISTOL_R_ROT, PISTOL_L_OFF, PISTOL_L_ROT,
         ),
         EnemyWeaponClass::Rifle => (
             0.75, 12.0, 8.0, RIFLE_R_OFF, RIFLE_R_ROT, RIFLE_L_OFF, RIFLE_L_ROT,
         ),
+    };
+
+    // Effective engagement range — CQC guns close in, snipers hang back (drives both
+    // the standoff and the accuracy falloff).
+    let range = engagement_range(w, class_range);
+    // Enemy fire cadence. A pump shotgun / sniper / single-shot is class `Rifle`, so
+    // the 8/s class default turns it full-auto. Clamp NON-automatic weapons to their
+    // real cadence (`1/fire_cooldown`), only ever slowing below the class default —
+    // so a shotgun fires ~1.25/s and a sniper ~0.8/s, while true autos keep 8/s.
+    let fire_rate = if w.automatic {
+        class_fire_rate
+    } else {
+        (1.0 / w.fire_cooldown).min(class_fire_rate)
     };
 
     // Bespoke overrides for the four source-defined guns (exact EnemyWeaponConfig.ts
@@ -155,6 +223,7 @@ pub fn enemy_def_for(w: &WeaponStats) -> EnemyWeaponDef {
         accuracy,
         range,
         fire_rate,
+        standoff: standoff_for(range),
         right_offset: r_off,
         right_rot: r_rot,
         left_offset: l_off,
@@ -205,5 +274,60 @@ mod tests {
         let d = enemy_def_for(&config::KF7);
         assert_eq!(d.gun_path, config::KF7.gun_path);
         assert_eq!(d.fire_sound, config::KF7.fire_sound);
+    }
+
+    /// A semi-auto weapon that inherits the rifle class (the pump shotgun, the
+    /// sniper, single-shot launchers) must NOT fire at the 8/s rifle-class default —
+    /// it fires at its real cadence (`1/fire_cooldown`). Regression for the
+    /// "shotgun fires full-auto" bug.
+    #[test]
+    fn semi_auto_weapons_are_not_full_auto() {
+        // Shotgun: class Rifle, semi (0.8 s cooldown) → ~1.25/s, well below 8/s.
+        let shotgun = enemy_def_for(&config::SHOTGUN);
+        assert_eq!(shotgun.class, EnemyWeaponClass::Rifle);
+        assert!(
+            (shotgun.fire_rate - 1.0 / config::SHOTGUN.fire_cooldown).abs() < 1e-3,
+            "shotgun fires at its real cadence, got {}",
+            shotgun.fire_rate
+        );
+        assert!(shotgun.fire_rate < 2.0, "shotgun is pistol-slow, not full-auto");
+        // Sniper: even slower (1.2 s cooldown → ~0.83/s).
+        let sniper = enemy_def_for(&config::SNIPER);
+        assert!(sniper.fire_rate < 1.0, "sniper is single-shot-slow, got {}", sniper.fire_rate);
+    }
+
+    /// True automatic weapons keep the sustained class fire rate (they're meant to
+    /// hose), and pistols keep their 2/s default (the semi cap only slows below it).
+    #[test]
+    fn automatic_weapons_keep_the_class_rate() {
+        assert_eq!(enemy_def_for(&config::KLOBB).fire_rate, 8.0, "SMG hoses");
+        assert_eq!(enemy_def_for(&config::LASER).fire_rate, 8.0, "laser hoses");
+        assert_eq!(enemy_def_for(&config::PP7).fire_rate, 2.0, "pistol default unchanged");
+    }
+
+    /// Standoff scales with the weapon's engagement range: a shotgunner charges in,
+    /// a rifleman holds mid, a sniper hangs way back.
+    #[test]
+    fn standoff_scales_with_range() {
+        let shotgun = enemy_def_for(&config::SHOTGUN);
+        let rifle = enemy_def_for(&config::KF7);
+        let sniper = enemy_def_for(&config::SNIPER);
+        assert!(
+            shotgun.standoff < rifle.standoff && rifle.standoff < sniper.standoff,
+            "shotgun {} < rifle {} < sniper {}",
+            shotgun.standoff,
+            rifle.standoff,
+            sniper.standoff
+        );
+        // The shotgunner closes right in; the sniper holds near the perception edge.
+        assert!(shotgun.standoff <= 3.5, "shotgun charges in, got {}", shotgun.standoff);
+        assert!(sniper.standoff >= 9.0, "sniper hangs way back, got {}", sniper.standoff);
+        // Every standoff stays inside the perception range so the hunter re-acquires
+        // at its hold distance.
+        for w in config::WEAPONS {
+            let d = enemy_def_for(w);
+            assert!(d.standoff <= MAX_STANDOFF, "{} standoff exceeds the cap", d.name);
+            assert!(d.standoff >= MIN_STANDOFF, "{} standoff below the floor", d.name);
+        }
     }
 }

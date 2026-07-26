@@ -113,6 +113,60 @@ use super::editing::find_room_brushes;
         );
     }
 
+    /// Back-off: a hunter shoved inside its standoff gives ground until it regains the
+    /// weapon's hold distance, instead of firing point-blank. Regression for "enemies
+    /// get right on top of me." Uses a shotgun (3 m standoff) so only a couple metres
+    /// of retreat room is needed in the open spawn area.
+    #[test]
+    fn a_pinned_hunter_backs_off_toward_its_standoff() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT — bake nav + spawn the roster
+        assert!(!world.enemies.is_empty(), "hunters spawned");
+        let ppos = world.player_pos().expect("player exists in HUNT");
+
+        // Isolate hunter 0: kill + banish every packmate so no separation-nudge or
+        // stale capsule interferes with its retreat lane.
+        let far = Vec3::new(500.0, 0.0, 500.0);
+        for i in 1..world.enemies.len() {
+            world.enemies[i].enemy.take_damage(1e6);
+            let c = world.enemies[i].collider;
+            world.physics.update_enemy_collider(c, far);
+        }
+
+        // Give it a short-standoff weapon so the open spawn area easily fits the retreat.
+        world.enemies[0].weapon = crate::combat::enemy_def_for(&crate::combat::config::SHOTGUN);
+        let standoff = world.enemies[0].weapon.standoff;
+
+        // Pin it at point-blank on the open line toward the spawn marker (walkable both
+        // ways — the wave fanned out through here) so it has room to give ground.
+        let toward_spawn = {
+            let d = Vec3::new(SPAWN_MARKER_POS.x - ppos.x, 0.0, SPAWN_MARKER_POS.z - ppos.z);
+            if d.length_squared() > 1e-6 { d.normalize() } else { Vec3::X }
+        };
+        let pinned = ppos + toward_spawn * 1.0;
+        world.enemies[0].enemy.pos = pinned;
+        let c0 = world.enemies[0].collider;
+        world.physics.update_enemy_collider(c0, pinned);
+        let start = Vec3::new(pinned.x - ppos.x, 0.0, pinned.z - ppos.z).length();
+
+        let input = InputState::default(); // player stands still
+        let dt = 1.0 / 60.0;
+        for _ in 0..300 {
+            world.fixed_step(dt, &input); // 5 s
+        }
+
+        let e = world.enemies[0].enemy.pos;
+        let end = Vec3::new(e.x - ppos.x, 0.0, e.z - ppos.z).length();
+        assert!(!world.enemies[0].enemy.is_dead(), "the test hunter stays alive");
+        assert!(end > start + 0.5, "gave ground from point-blank (start {start:.2}, end {end:.2})");
+        // Settles back near the standoff band ([standoff−hyst, …]); hyst is 1.2 m.
+        assert!(
+            end >= standoff - 1.6,
+            "regained ~standoff (end {end:.2}, standoff {standoff:.2})"
+        );
+    }
+
     /// The fixed spawn point: the floor marker renders in BOTH modes, and entering
     /// HUNT floods exactly [`ENEMY_COUNT`] hunters in clustered at the marker (snapped
     /// to a standable cell) — independent of where the player is standing.

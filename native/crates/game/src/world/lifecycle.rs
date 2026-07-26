@@ -156,6 +156,7 @@ impl World {
                         Some(nav) => inst.enemy.update(
                             dt,
                             feet,
+                            inst.weapon.standoff,
                             nav,
                             &mut self.physics,
                             fire_anim,
