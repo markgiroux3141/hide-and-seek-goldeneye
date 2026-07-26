@@ -123,7 +123,8 @@ impl World {
             return;
         }
         // Player aim point (chest) + feet-seat offset, pulled out before the loop so
-        // it doesn't clash with the per-hunter `&mut` borrow.
+        // they don't clash with the per-hunter `&mut` borrow. The chest-aim points the
+        // gun barrel at this, so the hunters track the player's height as well as bearing.
         let aim_point = self.player_pos().map(|p| p + Vec3::Y * PLAYER_AIM_Y);
         let feet_off = self.char_feet_offset;
         // Skeleton borrow is a DISJOINT field from `enemies`, so both can be held.
@@ -172,27 +173,26 @@ impl World {
             // Exponential ease toward the target weight (frame-rate independent).
             inst.aim_weight += (target_w - inst.aim_weight) * (1.0 - (-dt * AIM_RAMP).exp());
 
-            // Light aim: swing the shoulder toward the player (in model space),
-            // cone-clamped, so the gun arm raises toward you while keeping the
-            // authored elbow bend. The gun rides the hand bone, so it follows.
+            // Raise/lower the authored upper-body aim hold by weight: the overlay
+            // poses BOTH arms into the correct gun hold (two-hand rifle, leveled
+            // pistol, akimbo) over the running legs. The gun rides the hand bone, so
+            // it follows. Bypassed during a hit/death one-shot.
+            if let Some(ov) = inst.stack.layer_as::<ClipOverlayLayer>(ENEMY_AIM_OVERLAY_LAYER) {
+                ov.weight = inst.aim_weight;
+                ov.enabled = !one_shot;
+            }
+            // Chest-aim: swing the whole hold so the real gun barrel points at the
+            // player (bearing + height), cone-clamped, eased in with the aim weight.
+            // Target is the player's chest in the hunter's MODEL space.
             let aim_target = aim_point.map(|ap| {
                 let ct = char_transform_raw(inst.enemy.pos, inst.yaw(), feet_off);
                 ct.inverse().transform_point3(ap)
             });
-            let aim_w = inst.aim_weight;
-            if let Some(aim) = inst.stack.layer_as::<AimOffsetLayer>(ENEMY_AIM_LAYER) {
+            if let Some(ca) = inst.stack.layer_as::<AimOffsetLayer>(ENEMY_CHEST_AIM_LAYER) {
                 if let Some(t) = aim_target {
-                    aim.target = t;
+                    ca.target = t;
                 }
-                aim.weight = aim_w;
-            }
-            // Left arm too, for dual-wielders (the layer is disabled otherwise, so
-            // setting weight on a one-gun hunter is a no-op).
-            if let Some(laim) = inst.stack.layer_as::<AimOffsetLayer>(ENEMY_LAIM_LAYER) {
-                if let Some(t) = aim_target {
-                    laim.target = t;
-                }
-                laim.weight = aim_w;
+                ca.weight = if one_shot { 0.0 } else { inst.aim_weight };
             }
 
             // Base pose: the hit/death one-shot when active, else the bind pose for
@@ -251,7 +251,7 @@ impl World {
         // Also measure the rendered right foot so we can see if the LEGS actually
         // move while "stopped" (foot pos changing frame-to-frame = walking legs),
         // and log the clip the mixer is really playing vs the band we requested.
-        let (reach_frac, elbow_deg, foot) = match (self.enemy_arm, inst.final_pose.as_ref(), self.char_model.as_ref()) {
+        let (reach_frac, elbow_deg, foot) = match (self.enemy_arm.as_ref(), inst.final_pose.as_ref(), self.char_model.as_ref()) {
             (Some(arm), Some(fp), Some(m)) => {
                 let g = fp.joint_global_transforms(&m.skeleton);
                 let sa = g[arm.shoulder()].to_scale_rotation_translation().2;

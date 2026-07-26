@@ -360,6 +360,40 @@ pub fn stair_run_boxes(
     boxes
 }
 
+/// The four WT corners of a stair-run's **smooth walking ramp** — the base
+/// endpoint (bottom of the run) up to the top endpoint, spanning the run width.
+/// `None` for a degenerate run. The player collider uses this in place of the
+/// stepped [`stair_run_boxes`] so the player walks the run's true slope smoothly;
+/// nav and render keep the stepped boxes. Corners are ordered CCW for a quad.
+pub fn stair_run_ramp(
+    run: &StairRun,
+    from_platform: Option<&Platform>,
+    to_platform: Option<&Platform>,
+    brushes: &[Brush],
+) -> Option<[[f32; 3]; 4]> {
+    let g = resolve_run(run, from_platform, to_platform, brushes)?;
+    if g.steps == 0 {
+        return None;
+    }
+    // Ramp spans from (bottom_run, stair_base_y) up to (top_run, top_y); the run
+    // width is perp_min..perp_max. Whatever the endpoints, this reproduces the
+    // run's actual slope.
+    Some(match g.run_axis {
+        RunAxis::X => [
+            [g.bottom_run, g.stair_base_y, g.perp_min],
+            [g.top_run, g.top_y, g.perp_min],
+            [g.top_run, g.top_y, g.perp_max],
+            [g.bottom_run, g.stair_base_y, g.perp_max],
+        ],
+        RunAxis::Z => [
+            [g.perp_min, g.stair_base_y, g.bottom_run],
+            [g.perp_min, g.top_y, g.top_run],
+            [g.perp_max, g.top_y, g.top_run],
+            [g.perp_max, g.stair_base_y, g.bottom_run],
+        ],
+    })
+}
+
 /// Highest CSG room floor at `(x, z)` strictly below `above_y` (all WT). Used by
 /// grounded platforms/stairs to extend their undersides to the visible floor
 /// beneath them. Returns 0 when no subtract brush covers that XZ (preserves the

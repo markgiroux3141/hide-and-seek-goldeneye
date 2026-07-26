@@ -33,7 +33,8 @@ use engine::skeletal::anim::AnimPlayer;
 use engine::skeletal::anim_set;
 use engine::skeletal::clip;
 use engine::skeletal::layers::{
-    AdditiveDecayLayer, AimOffsetLayer, LayerCtx, LayeredAnimator, LocomotionBlendLayer, Pose,
+    AdditiveDecayLayer, AimOffsetLayer, ClipOverlayLayer, LayerCtx, LayeredAnimator,
+    LocomotionBlendLayer, Pose,
 };
 use engine::skeletal::gltf_skin::{self, SkinnedModel};
 use engine::geometry::structures::{self, Anchor, Edge, Platform, StairRun};
@@ -44,6 +45,7 @@ use engine::render::uv_zones::ZonedBuilder;
 mod combat;
 mod editing;
 mod geom;
+mod history;
 mod hunt;
 mod lifecycle;
 mod persist;
@@ -58,6 +60,7 @@ mod tests;
 // / `brushes_touching` are used only within `editing`, so they aren't re-exported.)
 pub(crate) use geom::{
     append_textured_collision, boxes_mesh, make_stair_void, make_wall_brush, push_colored_box,
+    structure_collider_mesh,
 };
 pub(crate) use hunt::{band_for_speed, fire_window_for};
 pub(crate) use lifecycle::pick_spread_spawns;
@@ -108,30 +111,44 @@ pub(crate) const PAD_PITCH_SIGN: f32 = -1.0;
 /// `char_feet_offset` both flow through this scale, so they shrink with the model.
 pub(crate) const CHAR_SCALE: f32 = 0.000_832; // 0.00104 × 0.8
 
-// ─── Procedural aim + recoil (light additive aim over authored clips) ──────────
-// The 2-bone arm IK / hand look-at / foregrip IK were scrapped (they fought the
-// authored clips and read robotic). What's left is the GoldenEye/Perfect Dark
-// approach: authored locomotion carries the pose, and ONE cone-clamped aim layer
-// nudges the gun arm toward the player. The hit is a probability roll, so the
-// barrel never needs to point exactly at the target.
+// ─── Procedural aim + recoil (authored upper-body aim clip over locomotion) ─────
+// History: 2-bone arm IK → foregrip IK → a single cone-clamped shoulder swing were
+// all tried and scrapped. IK fought the authored clips and read robotic; the lone
+// shoulder swing could only rotate ONE joint, so it held two-handed rifles
+// one-handed and canted the pistols (it never posed the off hand or the wrist).
+//
+// What's here now is the authentic GoldenEye/Perfect Dark technique: the authored
+// fire/aim clip — which already poses BOTH arms into the correct weapon-specific
+// hold — is overlaid on the **upper body only** (chest + arms) via a masked
+// [`engine::skeletal::layers::ClipOverlayLayer`], while the continuous locomotion
+// blend keeps driving the **legs**. So a hunter runs AND holds the gun correctly.
+// Recoil kicks on top; the hit is a probability roll, so the barrel needn't point
+// exactly at the target (the model's yaw already faces the player).
+//
+// One catch the overlay can't fix alone: each authored fire clip aims the barrel in
+// its own model-space direction (the single-pistol and rifle clips are bladed off to
+// a side, the dual clip aims forward), and none of them track the player's height. A
+// light `AimOffsetLayer` on the **chest** (`Bone_2`, the parent of both arms) rotates
+// the whole authored hold rigidly so the **real gun barrel points at the player** —
+// yaw AND pitch — with the hold intact. The model yaw still does the gross turn; the
+// chest-aim corrects the clip's bias + tracks the player, cone-clamped so it never
+// over-twists the torso.
 /// Stack layer indices for a hunter's [`LayeredAnimator`] (build order in
-/// [`EnemyArm::build_stack`]): locomotion base, light aim-offset, recoil.
+/// [`EnemyArm::build_stack`]): locomotion base, upper-body aim overlay, chest-aim
+/// correction, recoil.
 pub(crate) const ENEMY_LOCO_LAYER: usize = 0;
-pub(crate) const ENEMY_AIM_LAYER: usize = 1;
-pub(crate) const ENEMY_RECOIL_LAYER: usize = 2;
-/// Left-arm aim-offset — the off hand's gun for a dual-wielder (akimbo). Disabled
-/// unless the hunter is dual-wielding, so a one-gun hunter's left arm follows the
-/// clip.
-pub(crate) const ENEMY_LAIM_LAYER: usize = 3;
-/// The aim cone (radians) the shoulder may swing to point the barrel at the player —
-/// generous enough to raise the weapon from the carry pose, capped so an off-axis
-/// target (mid-turn) pins the arm at the edge instead of contorting it. ~80°.
-pub(crate) const ENEMY_AIM_MAX_CONE: f32 = 1.4;
+pub(crate) const ENEMY_AIM_OVERLAY_LAYER: usize = 1;
+pub(crate) const ENEMY_CHEST_AIM_LAYER: usize = 2;
+pub(crate) const ENEMY_RECOIL_LAYER: usize = 3;
+/// Aim cone (radians) the chest may swing to point the barrel at the player — wide
+/// enough for the clip bias (~45°) plus pitch, capped (~80°) so a target that's
+/// swung behind the shoulder pins the torso at the edge instead of contorting it.
+pub(crate) const ENEMY_CHEST_AIM_CONE: f32 = 1.4;
 /// Fallback barrel axis (gun-model space) for weapons whose muzzle offset is
 /// degenerate — the real axis is the measured muzzle-flash centroid direction.
 pub(crate) const BARREL_MODEL_AXIS: Vec3 = Vec3::NEG_Z;
 /// How fast (1/s) a hunter's aim weight eases toward its target (0 ↔ 1), so the
-/// arm raises/lowers into aim smoothly instead of snapping.
+/// upper body raises/lowers into the aim hold smoothly instead of snapping.
 pub(crate) const AIM_RAMP: f32 = 9.0;
 /// Low-pass rate (1/s) for the locomotion speed that drives band selection. The
 /// AI's `speed()` is binary (0 or chase-speed) and toggles frame-to-frame when a
@@ -144,7 +161,8 @@ pub(crate) const LOCO_SMOOTH: f32 = 6.0;
 /// exponential decay lingers as a tiny positive value for ~15 s and
 /// [`band_for_speed`] (walk when speed > 0) keeps the legs walking in place.
 pub(crate) const LOCO_IDLE_EPS: f32 = 0.35;
-/// Aim at the player this far (m) above their feet — roughly chest height.
+/// Aim at the player this far (m) above their feet — roughly chest height. The
+/// chest-aim points the gun barrel here, so hunters track the player's height.
 pub(crate) const PLAYER_AIM_Y: f32 = 1.0;
 /// Recoil kick (rad) per shot + its decay rate (1/s) and amplitude ceiling.
 /// Applied to PISTOLS only — automatic weapons kick too fast to read well.
@@ -155,105 +173,101 @@ pub(crate) const ENEMY_RECOIL_MAX: f32 = 0.5;
 /// burst length now that firing is a timer, not a full-body animation clip.
 pub(crate) const ENEMY_FIRE_TAIL: f32 = 0.25;
 
-/// The resolved gun-arm shoulder + rest geometry for the shared character
+/// The resolved gun-arm chain + upper-body joint mask for the shared character
 /// skeleton, computed once at load. Each hunter builds its own (stateful) aim +
 /// recoil [`LayeredAnimator`] from this via [`Self::build_stack`].
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct EnemyArm {
-    /// The right (gun) arm.
-    right: ArmAim,
-    /// The left (off-hand) arm — driven only for dual-wielders.
-    left: ArmAim,
+    /// Right (gun) shoulder — the recoil kick anchor + ANIM_DEBUG measurement.
+    shoulder: usize,
     /// Right elbow + hand, kept for the ANIM_DEBUG arm measurement only.
     mid: usize,
     end: usize,
-}
-
-/// One arm's aim data: the shoulder joint the aim layer rotates, its + the hand's
-/// rest (idle-pose) global rotations (so a per-weapon barrel axis can be expressed
-/// in the shoulder's frame), and a fallback shoulder→hand forward.
-#[derive(Clone, Copy)]
-pub(crate) struct ArmAim {
-    shoulder: usize,
-    shoulder_rot: Quat,
-    hand_rot: Quat,
-    fallback_forward: Vec3,
-}
-
-impl ArmAim {
-    fn resolve(sk: &engine::skeletal::Skeleton, g: &[Mat4], hand_bone: &str) -> Option<Self> {
-        let end = sk.index_of(hand_bone)?;
-        let mid = sk.parents[end]?;
-        let shoulder = sk.parents[mid]?;
-        let (_, shoulder_rot, a) = g[shoulder].to_scale_rotation_translation();
-        let (_, hand_rot, hand) = g[end].to_scale_rotation_translation();
-        let fallback_forward = (shoulder_rot.inverse() * (hand - a)).normalize_or_zero();
-        Some(ArmAim {
-            shoulder,
-            shoulder_rot,
-            hand_rot,
-            fallback_forward,
-        })
-    }
-
-    /// The shoulder-local axis that, swung at the aim target, points the GUN BARREL
-    /// (not just the arm) at it. The aim layer rotates the shoulder rigidly, so the
-    /// barrel turns with it — expressing the rest barrel direction in the shoulder's
-    /// frame makes a shoulder swing aim the barrel exactly. `attach_rot` is the gun's
-    /// hand-bone attach rotation; `barrel_gun` is the barrel axis in gun-model space.
-    pub(crate) fn barrel_aim_forward(&self, attach_rot: Quat, barrel_gun: Vec3) -> Vec3 {
-        let barrel_model = self.hand_rot * (attach_rot * barrel_gun);
-        (self.shoulder_rot.inverse() * barrel_model).normalize_or_zero()
-    }
-
-    fn aim_layer(&self) -> AimOffsetLayer {
-        AimOffsetLayer {
-            joint: self.shoulder,
-            forward: self.fallback_forward,
-            target: Vec3::ZERO,
-            max_angle: ENEMY_AIM_MAX_CONE,
-            weight: 0.0,
-            enabled: true,
-        }
-    }
+    /// Chest joint (`Bone_2`, the two hands' common ancestor + parent of both arms)
+    /// — the joint the chest-aim correction rotates to point the barrel at the player.
+    chest: usize,
+    /// Upper-body joint mask (chest + head + both arms) the authored aim clip
+    /// overlays — the two hands' common-ancestor (`Bone_2`) subtree, so the
+    /// locomotion legs stay untouched and the hunter can run while aiming.
+    upper_body: Vec<usize>,
 }
 
 impl EnemyArm {
-    /// Resolve the right (`Bone_9`) + left (`Bone_8`) arms off a standing (idle) pose.
-    /// `None` if a chain or the idle clip is missing.
-    fn resolve(model: &SkinnedModel, idle: &clip::AnimationClip) -> Option<Self> {
+    /// Resolve the right-arm chain (`Bone_9`) + the upper-body mask. The `idle` clip
+    /// is no longer needed to derive rest geometry (the authored aim clip supplies
+    /// the pose), so it's ignored. `None` if a required bone is missing.
+    fn resolve(model: &SkinnedModel, _idle: &clip::AnimationClip) -> Option<Self> {
         let sk = &model.skeleton;
         let end = sk.index_of(RIGHT_HAND_BONE)?;
         let mid = sk.parents[end]?;
-        let (t, r, s) = idle.pose_trs(0.0, sk);
-        let g = Pose::from_trs(t, r, s).joint_global_transforms(sk);
-        let right = ArmAim::resolve(sk, &g, RIGHT_HAND_BONE)?;
-        let left = ArmAim::resolve(sk, &g, LEFT_HAND_BONE)?;
-        Some(EnemyArm { right, left, mid, end })
+        let shoulder = sk.parents[mid]?;
+        // Upper body = the subtree of the two hands' lowest common ancestor (the
+        // chest): chest + head + both arms, excluding the pelvis + legs.
+        let left_hand = sk.index_of(LEFT_HAND_BONE)?;
+        let chest = sk.lowest_common_ancestor(&[end, left_hand])?;
+        let upper_body = sk.subtree(chest);
+        Some(EnemyArm { shoulder, mid, end, chest, upper_body })
     }
 
     /// Right shoulder joint index (the ANIM_DEBUG arm measurement anchor).
     pub(crate) fn shoulder(&self) -> usize {
-        self.right.shoulder
+        self.shoulder
     }
 
-    /// A fresh per-hunter stack: continuous locomotion base (from the gait clips),
-    /// then the right cone-clamped aim offset, then recoil (right shoulder), then the
-    /// left aim offset (disabled — enabled only for dual-wielders).
-    fn build_stack(&self, loco_clips: Vec<(f32, clip::AnimationClip)>) -> LayeredAnimator {
+    /// A fresh per-hunter stack: continuous locomotion base (drives the legs), the
+    /// authored **upper-body aim overlay** (`aim_clip` — the weapon class's
+    /// fire/aim pose, which holds the gun correctly in both hands), a **chest-aim**
+    /// that rotates the whole hold so the real gun barrel points at the player
+    /// (`spawn_wave` sets its per-weapon `forward`; `advance_animation` drives its
+    /// target + weight), then recoil on the right shoulder. The overlay + chest-aim
+    /// weights are eased 0↔1 in `advance_animation`.
+    fn build_stack(
+        &self,
+        loco_clips: Vec<(f32, clip::AnimationClip)>,
+        aim_clip: clip::AnimationClip,
+    ) -> LayeredAnimator {
         let mut s = LayeredAnimator::new();
         s.push(Box::new(LocomotionBlendLayer::new(loco_clips)));
-        s.push(Box::new(self.right.aim_layer()));
+        s.push(Box::new(ClipOverlayLayer::new(aim_clip, self.upper_body.clone())));
+        s.push(Box::new(AimOffsetLayer {
+            joint: self.chest,
+            forward: Vec3::Z,       // set per-weapon in `spawn_wave` (real barrel)
+            target: Vec3::Z,        // set to the player each frame in `advance_animation`
+            max_angle: ENEMY_CHEST_AIM_CONE,
+            weight: 0.0,
+            enabled: false,         // enabled once its `forward` is measured
+        }));
         s.push(Box::new(AdditiveDecayLayer::new(
-            self.right.shoulder,
+            self.shoulder,
             Vec3::X,
             ENEMY_RECOIL_DECAY,
             ENEMY_RECOIL_MAX,
         )));
-        let mut left = self.left.aim_layer();
-        left.enabled = false; // dual-wielders enable it in `spawn_wave`
-        s.push(Box::new(left));
         s
+    }
+
+    /// The **real gun barrel** direction expressed in the **chest's local frame**,
+    /// measured at the overlay aim pose `aim_pose`. The gun rides the right-hand bone
+    /// (`Bone_9`) with attach rotation `attach_rot`, and points along `barrel_gun`
+    /// (its muzzle axis in gun-model space). Feeding this as the chest-aim layer's
+    /// `forward` makes that layer swing the chest until the barrel points at its
+    /// target (the player), regardless of the clip's authored bias. `None` if
+    /// degenerate.
+    fn barrel_forward_in_chest(
+        &self,
+        aim_pose: &Pose,
+        sk: &engine::skeletal::Skeleton,
+        attach_rot: Quat,
+        barrel_gun: Vec3,
+    ) -> Option<Vec3> {
+        let g = aim_pose.joint_global_transforms(sk);
+        let hand_rot = g[self.end].to_scale_rotation_translation().1;
+        let barrel_model = (hand_rot * (attach_rot * barrel_gun)).normalize_or_zero();
+        if barrel_model == Vec3::ZERO {
+            return None;
+        }
+        let chest_rot = g[self.chest].to_scale_rotation_translation().1;
+        Some((chest_rot.inverse() * barrel_model).normalize_or_zero())
     }
 }
 
@@ -840,8 +854,9 @@ pub(crate) struct EnemyWeaponAsset {
     pub gun: TexturedModel,
     pub muzzle: Option<TexturedModel>,
     /// Muzzle offset in the gun model's local space (the muzzle-flash mesh centroid,
-    /// which sits down the barrel). Its direction is the barrel axis, used to aim the
-    /// gun (not just the arm) at the player. Falls back to the gun-mesh centroid.
+    /// which sits down the barrel). Its direction is the barrel axis — used by the
+    /// chest-aim to point the real gun barrel at the player. Falls back to the gun
+    /// mesh centroid.
     pub muzzle_offset: Vec3,
 }
 
@@ -1068,6 +1083,16 @@ pub struct World {
     next_run_id: u32,
     /// An active gizmo drag on the selected platform, if any (JS `gizmo.drag`).
     gizmo_drag: Option<GizmoDrag>,
+
+    // ─── Undo / redo (BUILD authoring; see `world::history`) ──────────────────
+    /// Snapshots of the authored level state (the same source of truth
+    /// [`save_level`](Self::save_level) serializes), one per committed edit. Undo
+    /// pops here and re-bakes; a fresh edit clears [`redo_stack`](Self::redo_stack).
+    /// Capped at [`history::MAX_HISTORY`].
+    undo_stack: Vec<history::LevelSnapshot>,
+    /// Snapshots popped by undo, replayed by redo. Cleared whenever a new edit is
+    /// recorded (you can't redo past a divergent edit).
+    redo_stack: Vec<history::LevelSnapshot>,
 }
 
 impl Default for World {
@@ -1317,6 +1342,8 @@ impl World {
             next_platform_id: 1,
             next_run_id: 1,
             gizmo_drag: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 

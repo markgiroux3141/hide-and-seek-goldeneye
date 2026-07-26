@@ -99,6 +99,67 @@ pub(crate) fn boxes_mesh(boxes: &[[f32; 6]]) -> CpuMesh {
     CpuMesh::from_csg(&positions, &normals, &indices)
 }
 
+/// Build the structures **collider** mesh (meters): platform slabs as solid AABB
+/// `boxes`, plus one **double-sided sloped ramp** quad per stair-run in `ramps`
+/// (WT CCW corner quads). The ramps let the player walk a run's true slope
+/// instead of auto-stepping each riser; nav keeps the stepped boxes (see
+/// `structure_solid_boxes`). Collision-only — never rendered, so the ramp normals
+/// are just the face cross-product (Rapier derives its own contact normals).
+pub(crate) fn structure_collider_mesh(boxes: &[[f32; 6]], ramps: &[[[f32; 3]; 4]]) -> CpuMesh {
+    let mut positions: Vec<f32> = Vec::new();
+    let mut normals: Vec<f32> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+
+    for b in boxes {
+        let c = [
+            (b[0] + b[3] * 0.5) * WORLD_SCALE,
+            (b[1] + b[4] * 0.5) * WORLD_SCALE,
+            (b[2] + b[5] * 0.5) * WORLD_SCALE,
+        ];
+        let half = [
+            b[3] * 0.5 * WORLD_SCALE,
+            b[4] * 0.5 * WORLD_SCALE,
+            b[5] * 0.5 * WORLD_SCALE,
+        ];
+        let polys = csg::box_polygons(c, half);
+        let (p, n, i) = csg::polygons_to_mesh(&polys);
+        let base = (positions.len() / 3) as u32;
+        positions.extend_from_slice(&p);
+        normals.extend_from_slice(&n);
+        indices.extend(i.iter().map(|idx| idx + base));
+    }
+
+    for q in ramps {
+        let s = |p: [f32; 3]| [p[0] * WORLD_SCALE, p[1] * WORLD_SCALE, p[2] * WORLD_SCALE];
+        let (q0, q1, q2, q3) = (s(q[0]), s(q[1]), s(q[2]), s(q[3]));
+        let e1 = [q1[0] - q0[0], q1[1] - q0[1], q1[2] - q0[2]];
+        let e2 = [q2[0] - q0[0], q2[1] - q0[1], q2[2] - q0[2]];
+        let n = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        let nb = [-n[0], -n[1], -n[2]];
+        // Front winding.
+        let base = (positions.len() / 3) as u32;
+        for p in [q0, q1, q2, q3] {
+            positions.extend_from_slice(&p);
+            normals.extend_from_slice(&n);
+        }
+        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        // Back winding (a trimesh collides from both faces regardless, but keep it
+        // closed and consistent with the CSG stair ramp emitter).
+        let base = (positions.len() / 3) as u32;
+        for p in [q0, q1, q2, q3] {
+            positions.extend_from_slice(&p);
+            normals.extend_from_slice(&nb);
+        }
+        indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+    }
+
+    CpuMesh::from_csg(&positions, &normals, &indices)
+}
+
 /// Fold a textured mesh's raw triangles (position + normal; UV/zone/colour
 /// dropped) onto a collider [`CpuMesh`]. Lets the render-side railing geometry
 /// double as player collision without re-deriving the segment/slope math.

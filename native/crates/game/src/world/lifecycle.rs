@@ -329,8 +329,9 @@ impl World {
         // Face the player initially (harmless: if the player's out of sight/range the
         // search FSM takes over immediately; if in view they engage, which is right).
         let watch = self.player_pos().unwrap_or(self.spawn_point);
-        // Resolved gun-arm (shared); each hunter clones its own aim/recoil stack.
-        let arm = self.enemy_arm;
+        // Resolved gun-arm + upper-body mask (shared); each hunter clones its own
+        // aim/recoil stack (borrowed — `EnemyArm` owns a joint-mask `Vec`, not `Copy`).
+        let arm = self.enemy_arm.as_ref();
         // Gait clips for the continuous locomotion blend (fixed template layout:
         // 0 idle, 1 walk, 2 jog, 3 run), cloned once and re-cloned per hunter.
         let loco_clips: Option<Vec<(f32, clip::AnimationClip)>> = (|| {
@@ -363,31 +364,57 @@ impl World {
                 self.physics
                     .add_enemy_collider(spawn, ENEMY_RADIUS, ENEMY_HALF_HEIGHT);
 
-            // Per-hunter aim/recoil stack: [locomotion, right-aim, recoil, left-aim].
-            // Each aim layer swings the shoulder so the GUN BARREL (not just the arm)
-            // points at the player — set its forward axis from this weapon's barrel
-            // geometry. The left arm is driven only for dual-wielders (akimbo).
-            let mut stack = match (arm, loco_clips.clone()) {
-                (Some(a), Some(clips)) => a.build_stack(clips),
+            // Per-hunter stack: [locomotion, upper-body aim overlay, chest-aim, recoil].
+            // The overlay plays this weapon class's authored fire/aim clip on the arms
+            // + chest — the hand-made two-hand rifle grip, leveled pistol, or akimbo
+            // hold — held at the shot instant (the "weapon up" pose). Locomotion drives
+            // the legs, so the hunter runs while holding the gun correctly.
+            let aim_idx = if dual {
+                FIRE_DUAL_IDX
+            } else {
+                match weapon.class {
+                    EnemyWeaponClass::Pistol => FIRE_PISTOL_IDX,
+                    EnemyWeaponClass::Rifle => FIRE_RIFLE_IDX,
+                }
+            };
+            let skel = self.char_model.as_ref().map(|m| &m.skeleton);
+            let asset = self.enemy_weapon_lib.iter().find(|w| w.name == weapon.name);
+            let stack = match (arm, loco_clips.clone(), template.clip(aim_idx).cloned()) {
+                (Some(a), Some(clips), Some(aim_clip)) => {
+                    let mut s = a.build_stack(clips, aim_clip);
+                    // Freeze the overlay at the shot instant — the fully-raised aim pose.
+                    if let Some(ov) = s.layer_as::<ClipOverlayLayer>(ENEMY_AIM_OVERLAY_LAYER) {
+                        ov.time = super::hunt::fire_window_for(weapon.class, dual).0;
+                    }
+                    // Measure the real gun barrel (in the chest frame) at the aim pose,
+                    // then enable the chest-aim so it swings the whole hold to point the
+                    // barrel at the player each frame — for EVERY clip (each fire clip
+                    // aims in its own direction; this corrects them all + tracks pitch).
+                    if let (Some(sk), Some(asset)) = (skel, asset) {
+                        if let Some(ov) = s.layer_as::<ClipOverlayLayer>(ENEMY_AIM_OVERLAY_LAYER) {
+                            ov.weight = 1.0; // full aim pose for the measurement
+                        }
+                        let aim_pose = s.evaluate(Pose::bind(sk), &LayerCtx { skeleton: sk, dt: 0.0 });
+                        if let Some(ov) = s.layer_as::<ClipOverlayLayer>(ENEMY_AIM_OVERLAY_LAYER) {
+                            ov.weight = 0.0; // advance_animation eases it back in
+                        }
+                        let attach = Quat::from_euler(
+                            EulerRot::XYZ,
+                            weapon.right_rot.x,
+                            weapon.right_rot.y,
+                            weapon.right_rot.z,
+                        );
+                        if let Some(fwd) = a.barrel_forward_in_chest(&aim_pose, sk, attach, asset.barrel_axis()) {
+                            if let Some(ca) = s.layer_as::<AimOffsetLayer>(ENEMY_CHEST_AIM_LAYER) {
+                                ca.forward = fwd;
+                                ca.enabled = true;
+                            }
+                        }
+                    }
+                    s
+                }
                 _ => LayeredAnimator::default(),
             };
-            if let (Some(a), Some(asset)) =
-                (arm, self.enemy_weapon_lib.iter().find(|a| a.name == weapon.name))
-            {
-                let barrel = asset.barrel_axis();
-                let euler = |r: Vec3| glam::Quat::from_euler(EulerRot::XYZ, r.x, r.y, r.z);
-                let r_fwd = a.right.barrel_aim_forward(euler(weapon.right_rot), barrel);
-                if let Some(aim) = stack.layer_as::<AimOffsetLayer>(ENEMY_AIM_LAYER) {
-                    aim.forward = r_fwd;
-                }
-                if dual {
-                    let l_fwd = a.left.barrel_aim_forward(euler(weapon.left_rot), barrel);
-                    if let Some(laim) = stack.layer_as::<AimOffsetLayer>(ENEMY_LAIM_LAYER) {
-                        laim.forward = l_fwd;
-                        laim.enabled = true;
-                    }
-                }
-            }
 
             self.enemies.push(EnemyInstance {
                 enemy: Enemy::new(spawn, watch),

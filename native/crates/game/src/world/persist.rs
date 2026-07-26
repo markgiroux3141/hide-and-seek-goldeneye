@@ -214,7 +214,9 @@ impl World {
 
     /// Clear every transient authoring selection / armed-tool field, so a fresh
     /// load never leaves a selection or gizmo pointing at geometry that's gone.
-    fn reset_edit_state_for_load(&mut self) {
+    /// Shared by [`load_level`](Self::load_level) and the undo/redo restore path
+    /// (see `world::history`).
+    pub(crate) fn reset_edit_state_for_load(&mut self) {
         self.selected = None;
         self.active = None;
         self.pending_stair = None;

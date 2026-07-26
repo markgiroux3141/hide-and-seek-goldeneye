@@ -440,6 +440,72 @@ impl PoseLayer for AimOffsetLayer {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Clip overlay layer — an authored pose over a masked joint subset (upper body).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Overlays an authored [`AnimationClip`] onto a **masked subset of joints**
+/// (e.g. the upper body — chest + arms), blended by `weight`, leaving every other
+/// joint whatever an earlier layer produced (the locomotion legs).
+///
+/// This is the authentic GoldenEye / Perfect Dark "aim while moving" technique.
+/// The hand-authored fire/aim clip already poses BOTH arms into the correct
+/// weapon-specific hold (two-hand rifle grip, leveled pistol, akimbo) — so
+/// overlaying it on the arm joints restores that exact hold *for free*, with none
+/// of the single-joint procedural swing that could only rotate the shoulder and
+/// left the off hand and wrist un-posed. The legs keep running from the base.
+///
+/// `time` is a fixed sample point for a static aim hold (advance it for an
+/// animated overlay). At `weight` 1 the masked joints exactly match the clip at
+/// `time`; at 0 the layer is a no-op (the test oracle).
+pub struct ClipOverlayLayer {
+    clip: AnimationClip,
+    /// The joint indices this clip writes (the upper-body mask).
+    joints: Vec<usize>,
+    /// Sample time (s) into the clip — held fixed for a static aim pose.
+    pub time: f32,
+    pub weight: f32,
+    pub enabled: bool,
+}
+
+impl ClipOverlayLayer {
+    pub fn new(clip: AnimationClip, joints: Vec<usize>) -> Self {
+        ClipOverlayLayer {
+            clip,
+            joints,
+            time: 0.0,
+            weight: 0.0,
+            enabled: true,
+        }
+    }
+}
+
+impl PoseLayer for ClipOverlayLayer {
+    fn apply(&mut self, pose: &mut Pose, ctx: &LayerCtx) {
+        if !self.enabled || self.weight <= 1e-4 || self.joints.is_empty() {
+            return;
+        }
+        let (t, r, s) = self.clip.pose_trs(self.time, ctx.skeleton);
+        let w = self.weight.clamp(0.0, 1.0);
+        for &j in &self.joints {
+            if j >= pose.joint_count() {
+                continue;
+            }
+            pose.t[j] = pose.t[j].lerp(t[j], w);
+            pose.r[j] = pose.r[j].slerp(r[j], w);
+            pose.s[j] = pose.s[j].lerp(s[j], w);
+        }
+    }
+
+    fn name(&self) -> &str {
+        "clip-overlay"
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Additive decay layer — recoil (stateful additive).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -749,6 +815,71 @@ mod tests {
         let nr2 = pose2.joint_global_transforms(sk)[joint].to_scale_rotation_translation().1;
         let swung = (nr2 * forward_local).normalize().angle_between(world_forward);
         assert!(swung <= max + 1e-2, "swing should clamp to the cone (got {swung})");
+    }
+
+    /// Clip overlay writes ONLY the masked joints (to the clip's pose) and leaves
+    /// every other joint untouched — the upper/lower-body split the run-and-gun aim
+    /// relies on. Weight 0 is a full no-op.
+    #[test]
+    fn clip_overlay_masks_joints_and_respects_weight() {
+        let m = karl();
+        let sk = &m.skeleton;
+        // Upper body = the Bone_2 (chest) subtree — chest + head + both arms.
+        let chest = sk.index_of("Bone_2").unwrap();
+        let mask: Vec<usize> = (0..sk.joint_count())
+            .filter(|&i| {
+                let mut j = i;
+                loop {
+                    if j == chest {
+                        break true;
+                    }
+                    match sk.parents[j] {
+                        Some(p) => j = p,
+                        None => break false,
+                    }
+                }
+            })
+            .collect();
+        let fire = clip("01-fire-standing.glb", sk);
+        let ctx = LayerCtx { skeleton: sk, dt: 0.0 };
+
+        // Start from the walk pose so masked joints visibly change and the rest don't.
+        let walk = clip("28-walking.glb", sk);
+        let (t, r, s) = walk.pose_trs(0.4, sk);
+        let base = Pose::from_trs(t, r, s);
+
+        // Rotation "equal" via the dot product (handles the q ≡ -q double cover, and
+        // avoids `angle_between`'s acos-of-≥1 NaN on near-identical quats).
+        let rot_close = |a: Quat, b: Quat| (1.0 - a.dot(b).abs()) < 1e-6;
+
+        // Weight 0 → identical to base everywhere.
+        let mut off = ClipOverlayLayer::new(fire.clone(), mask.clone());
+        let mut p0 = base.clone();
+        off.apply(&mut p0, &ctx);
+        for i in 0..sk.joint_count() {
+            assert!(rot_close(p0.r[i], base.r[i]), "weight 0 must be a no-op at joint {i}");
+        }
+
+        // Weight 1 → masked joints match the fire clip; unmasked match the base.
+        let mut on = ClipOverlayLayer::new(fire.clone(), mask.clone());
+        on.time = 0.5;
+        on.weight = 1.0;
+        let mut p1 = base.clone();
+        on.apply(&mut p1, &ctx);
+        let (ft, fr, fs) = fire.pose_trs(0.5, sk);
+        let is_masked = |i: usize| mask.contains(&i);
+        for i in 0..sk.joint_count() {
+            if is_masked(i) {
+                assert!(rot_close(p1.r[i], fr[i]), "masked joint {i} should equal the fire clip");
+                assert!((p1.t[i] - ft[i]).length() < 1e-4 && (p1.s[i] - fs[i]).length() < 1e-4);
+            } else {
+                assert!(rot_close(p1.r[i], base.r[i]), "unmasked joint {i} must be untouched");
+            }
+        }
+        // Sanity: the mask excludes the legs (Bone_10..15 hang off the root).
+        for leg in ["Bone_10", "Bone_12", "Bone_14", "Bone_11", "Bone_13", "Bone_15"] {
+            assert!(!is_masked(sk.index_of(leg).unwrap()), "{leg} must not be in the upper-body mask");
+        }
     }
 
     fn clip(name: &str, sk: &Skeleton) -> AnimationClip {

@@ -120,13 +120,21 @@ impl App {
     /// re-uploading every region + structures mesh (stale ones cleared).
     fn load_slot(&mut self, slot: u8) {
         let meshes = match self.world.as_mut() {
-            Some(world) => match world.load_slot(slot) {
-                Ok(meshes) => meshes,
-                Err(e) => {
-                    log::warn!("load slot {slot} failed: {e}");
-                    return;
+            Some(world) => {
+                // Snapshot first so an accidental slot-load is undoable; commit it
+                // only once the load succeeds (a failed load leaves state as-is).
+                let snap = world.snapshot();
+                match world.load_slot(slot) {
+                    Ok(meshes) => {
+                        world.commit_snapshot(snap);
+                        meshes
+                    }
+                    Err(e) => {
+                        log::warn!("load slot {slot} failed: {e}");
+                        return;
+                    }
                 }
-            },
+            }
             None => return,
         };
         for rm in &meshes {
@@ -329,11 +337,14 @@ impl ApplicationHandler for App {
                 let placing = self.world.as_ref().map(|w| w.is_placing()).unwrap_or(false);
                 let platform = self.world.as_ref().map(|w| w.is_platform_tool()).unwrap_or(false);
                 let rm = if opening {
-                    self.world.as_mut().and_then(|w| w.confirm_opening())
+                    self.world.as_mut().and_then(|w| w.with_undo(|w| w.confirm_opening()))
                 } else if placing {
-                    self.world.as_mut().and_then(|w| w.confirm_place())
+                    self.world.as_mut().and_then(|w| w.with_undo(|w| w.confirm_place()))
                 } else if platform {
-                    self.world.as_mut().and_then(|w| w.platform_click())
+                    // `platform_click` may start a gizmo drag (records its own undo
+                    // in `gizmo_start`) or place/connect a structure; `with_undo`
+                    // only commits when it actually returns a rebuilt mesh.
+                    self.world.as_mut().and_then(|w| w.with_undo(|w| w.platform_click()))
                 } else {
                     if let Some(world) = self.world.as_mut() {
                         world.select_at_crosshair();
@@ -682,6 +693,32 @@ impl App {
             }
             return;
         }
+        // Undo / redo (BUILD only — geometry is frozen in HUNT). Ctrl+Z steps back
+        // through authored edits, Ctrl+R re-applies. Both re-bake + re-upload every
+        // affected region + the structures mesh, then clear any stale highlight.
+        // Checked before the bare-key Z (proc-anim preview) / R (brace) handlers,
+        // and before the pointer-lock gate, so it works grabbed or not (like the
+        // F-key save/load). When Ctrl isn't held, these fall through to those keys.
+        if matches!(code, KeyCode::KeyZ | KeyCode::KeyR) {
+            let ctrl = self.input.key_down(KeyCode::ControlLeft)
+                || self.input.key_down(KeyCode::ControlRight);
+            let build = self.world.as_ref().map(|w| w.is_build()).unwrap_or(false);
+            if ctrl && build {
+                let meshes = if code == KeyCode::KeyZ {
+                    self.world.as_mut().and_then(|w| w.undo())
+                } else {
+                    self.world.as_mut().and_then(|w| w.redo())
+                };
+                if let Some(meshes) = meshes {
+                    for rm in &meshes {
+                        self.upload(rm);
+                    }
+                    // Selection was cleared by the restore — drop any highlight.
+                    self.refresh_highlight();
+                }
+                return;
+            }
+        }
         // I toggles player invincibility (dev/observe): enemies keep aiming + firing
         // but you take no damage, so you can watch them chase + shoot. Works anytime.
         if code == KeyCode::KeyI {
@@ -698,7 +735,11 @@ impl App {
         // bounded by door/hole frames).
         if let Some(key) = digit_char(code) {
             if let Some(scheme) = engine::render::textures::scheme_for_key(key) {
-                if let Some(rm) = self.world.as_mut().and_then(|w| w.set_scheme_at_crosshair(scheme)) {
+                if let Some(rm) = self
+                    .world
+                    .as_mut()
+                    .and_then(|w| w.with_undo(|w| w.set_scheme_at_crosshair(scheme)))
+                {
                     self.upload(&rm);
                 }
             }
@@ -819,10 +860,12 @@ impl App {
             return;
         }
         if matches!(code, KeyCode::KeyF | KeyCode::KeyV | KeyCode::KeyX | KeyCode::Delete) {
-            let rm = self.world.as_mut().and_then(|w| match code {
-                KeyCode::KeyF => w.toggle_grounded_key(),
-                KeyCode::KeyV => w.toggle_railings_key(),
-                _ => w.delete_selected(),
+            let rm = self.world.as_mut().and_then(|w| {
+                w.with_undo(|w| match code {
+                    KeyCode::KeyF => w.toggle_grounded_key(),
+                    KeyCode::KeyV => w.toggle_railings_key(),
+                    _ => w.delete_selected(),
+                })
             });
             if let Some(rm) = rm {
                 self.upload(&rm);
@@ -850,7 +893,7 @@ impl App {
             return;
         }
         if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
-            if let Some(rm) = self.world.as_mut().and_then(|w| w.confirm_stairs()) {
+            if let Some(rm) = self.world.as_mut().and_then(|w| w.with_undo(|w| w.confirm_stairs())) {
                 self.upload(&rm);
                 self.refresh_highlight();
             }
@@ -861,12 +904,14 @@ impl App {
         let step = if fine { 1.0 } else { PUSH_PULL_STEP };
 
         let result = match code {
-            // `+` and `=` share a key; NumpadAdd for good measure.
+            // `+` and `=` share a key; NumpadAdd for good measure. Each press is
+            // one undo step (a no-op push/pull returns `None`, so `with_undo`
+            // records nothing).
             KeyCode::Equal | KeyCode::NumpadAdd => {
-                self.world.as_mut().and_then(|w| w.push(step))
+                self.world.as_mut().and_then(|w| w.with_undo(|w| w.push(step)))
             }
             KeyCode::Minus | KeyCode::NumpadSubtract => {
-                self.world.as_mut().and_then(|w| w.pull(step))
+                self.world.as_mut().and_then(|w| w.with_undo(|w| w.pull(step)))
             }
             _ => None,
         };

@@ -55,6 +55,55 @@ impl Skeleton {
         self.names.iter().position(|n| n == name)
     }
 
+    /// Every joint in the subtree rooted at `root` (inclusive) — `root` plus all
+    /// its descendants. Used to build a body-part mask (e.g. the upper body =
+    /// the chest subtree) for a masked pose overlay.
+    pub fn subtree(&self, root: usize) -> Vec<usize> {
+        (0..self.joint_count())
+            .filter(|&i| {
+                let mut j = i;
+                loop {
+                    if j == root {
+                        break true;
+                    }
+                    match self.parents[j] {
+                        Some(p) => j = p,
+                        None => break false,
+                    }
+                }
+            })
+            .collect()
+    }
+
+    /// The lowest (deepest) common ancestor of `joints` — the joint from which they
+    /// all branch. `None` if `joints` is empty or they share no common ancestor.
+    /// For the two hand bones this is the chest, so `subtree(lca(hands))` is exactly
+    /// "chest + head + both arms" (the upper-body mask), excluding pelvis + legs.
+    pub fn lowest_common_ancestor(&self, joints: &[usize]) -> Option<usize> {
+        // Ancestor chain of a joint, from the joint itself up to the root (deepest
+        // first).
+        let ancestors = |mut i: usize| -> Vec<usize> {
+            let mut chain = vec![i];
+            while let Some(p) = self.parents[i] {
+                chain.push(p);
+                i = p;
+            }
+            chain
+        };
+        let mut it = joints.iter();
+        let mut common = ancestors(*it.next()?);
+        for &j in it {
+            let set: std::collections::HashSet<usize> = ancestors(j).into_iter().collect();
+            common.retain(|a| set.contains(a));
+            if common.is_empty() {
+                return None;
+            }
+        }
+        // `common` stays ordered deepest-first (it started as the first joint's
+        // chain), so the first surviving entry is the lowest common ancestor.
+        common.first().copied()
+    }
+
     /// Global (model-space) transform of every joint, given each joint's local
     /// transform. `locals` must be joint-indexed and the same length as the
     /// skeleton. Parents are resolved by walking up `parents`, so the joint list

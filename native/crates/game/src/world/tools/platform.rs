@@ -618,16 +618,30 @@ impl World {
     /// shell** (top + skirt + grounded pillar legs; stair treads + stringers) plus
     /// the cosmetic railings — thin planes that never enter the collider.
     pub(crate) fn rebuild_structures(&mut self) -> RegionMesh {
-        let boxes = self.structure_solid_boxes();
         let brushes = self.all_region_brushes();
 
-        // Collider = the solid slab/tread boxes PLUS the railings. Railings are
-        // thin cosmetic planes (never solid boxes), so they'd otherwise let the
-        // player walk straight off a platform/stair edge; folding the exact same
-        // railing geometry into the collision trimesh gives them real collision.
-        // (Enemies don't use this collider — they're kept on-surface by the
-        // grid-nav edge check in `Enemy::move_toward`.)
-        let mut collider = boxes_mesh(&boxes);
+        // Collider = platform slabs as solid boxes, each stair-run as a smooth
+        // sloped RAMP (so the player walks the true slope, no per-riser auto-step
+        // pop), PLUS the railings. Railings are thin cosmetic planes (never solid
+        // boxes), so they'd otherwise let the player walk straight off a
+        // platform/stair edge; folding the exact same railing geometry into the
+        // collision trimesh gives them real collision. Nav still uses the stepped
+        // boxes from `structure_solid_boxes` (enemies don't touch this collider —
+        // they're kept on-surface by the grid-nav edge check in `move_toward`).
+        let mut platform_boxes = Vec::new();
+        for p in &self.platforms {
+            if let Some(bx) = p.solid_box(&brushes) {
+                platform_boxes.push(bx);
+            }
+        }
+        let mut ramps = Vec::new();
+        for r in &self.stair_runs {
+            let (fp, tp) = self.run_platforms(r);
+            if let Some(q) = structures::stair_run_ramp(r, fp.as_ref(), tp.as_ref(), &brushes) {
+                ramps.push(q);
+            }
+        }
+        let mut collider = structure_collider_mesh(&platform_boxes, &ramps);
         let mut rail = ZonedBuilder::new();
         self.append_railings(&brushes, &mut rail);
         append_textured_collision(&mut collider, &rail.finish());

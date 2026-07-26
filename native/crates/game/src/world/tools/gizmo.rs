@@ -80,6 +80,10 @@ impl World {
     pub(crate) fn gizmo_start(&mut self, handle: GizmoHandle) {
         if let Some(pid) = self.selected_platform {
             if let Some(orig) = self.platform_by_id(pid) {
+                // One undo checkpoint per drag: recorded here at drag-begin, so
+                // the whole continuous move/scale (many per-frame `gizmo_drag_delta`
+                // steps) collapses to a single undo — not one step per WT nudge.
+                self.record_undo();
                 self.gizmo_drag = Some(GizmoDrag {
                     handle,
                     platform_id: pid,

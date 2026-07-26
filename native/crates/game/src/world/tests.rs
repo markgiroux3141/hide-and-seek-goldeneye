@@ -1265,3 +1265,165 @@ use super::editing::find_room_brushes;
         assert_eq!(world.platforms[0].x, x_before, "cancel restored the position");
         assert!(!world.is_gizmo_dragging());
     }
+
+    // ─── Undo / redo (see `world::history`) ──────────────────────────────────
+
+    /// A one-line signature of region 0's authored brush geometry — enough to
+    /// tell "state changed" / "state restored exactly" without `PartialEq`. The
+    /// per-field weights are distinct primes so a face move (which shifts a min
+    /// coord one way and its dim the other) can't cancel out to no change.
+    fn region0_sig(world: &World) -> f32 {
+        world.regions[0]
+            .brushes
+            .iter()
+            .map(|b| b.id as f32 + 2.0 * b.x + 3.0 * b.y + 5.0 * b.z + 7.0 * b.w + 11.0 * b.h + 13.0 * b.d)
+            .sum()
+    }
+
+    /// The core contract: a push is recorded, `undo` restores the pre-edit
+    /// geometry byte-for-byte (via re-bake), and `redo` re-applies it.
+    #[test]
+    fn undo_restores_geometry_and_redo_reapplies() {
+        let mut world = World::new();
+        world.initial_meshes();
+
+        let s0 = region0_sig(&world);
+        // Author an edit through the same wrapper the app uses.
+        let rm = world
+            .with_undo(|w| w.push(PUSH_PULL_STEP))
+            .expect("crosshair hits the −Z wall");
+        assert_eq!(rm.id, 0);
+        let s1 = region0_sig(&world);
+        assert!((s1 - s0).abs() > 0.01, "push changed the geometry");
+
+        let meshes = world.undo().expect("one edit to undo");
+        assert!(!meshes.is_empty(), "undo returns meshes to upload");
+        assert!((region0_sig(&world) - s0).abs() < 1e-4, "undo restored pre-edit state");
+
+        world.redo().expect("one edit to redo");
+        assert!((region0_sig(&world) - s1).abs() < 1e-4, "redo re-applied the edit");
+
+        // Nothing left to redo once re-applied.
+        assert!(world.redo().is_none(), "redo stack drained");
+    }
+
+    /// A no-op edit (crosshair hits nothing) records no history, so `undo` has
+    /// nothing to pop.
+    #[test]
+    fn no_op_edit_records_no_undo_step() {
+        let mut world = World::new();
+        world.initial_meshes();
+        // Fly outside the room, look away → the push misses.
+        world.camera.pos = Vec3::new(1000.0, 1000.0, 1000.0);
+        world.camera.yaw = 0.0;
+
+        assert!(world.with_undo(|w| w.push(PUSH_PULL_STEP)).is_none(), "push missed");
+        assert!(world.undo().is_none(), "a no-op leaves the history empty");
+    }
+
+    /// A fresh edit after an undo forks history — the redo stack is cleared.
+    #[test]
+    fn new_edit_clears_redo() {
+        let mut world = World::new();
+        world.initial_meshes();
+
+        world.with_undo(|w| w.push(PUSH_PULL_STEP)).expect("edit 1");
+        world.undo().expect("undo edit 1"); // redo now has one entry
+        world.with_undo(|w| w.push(PUSH_PULL_STEP)).expect("edit 2 forks history");
+
+        assert!(world.redo().is_none(), "the divergent edit cleared the redo stack");
+    }
+
+    /// The undo stack is bounded: past [`history::MAX_HISTORY`], the oldest
+    /// snapshot is dropped rather than growing without limit.
+    #[test]
+    fn history_is_capped_at_max_depth() {
+        let mut world = World::new();
+        world.initial_meshes();
+        // Carve well past the cap; every full-face push mutates, so every one is
+        // recorded (a subtract push has no thinness guard).
+        for _ in 0..(history::MAX_HISTORY + 10) {
+            world.with_undo(|w| w.push(1.0));
+        }
+        assert_eq!(
+            world.undo_stack.len(),
+            history::MAX_HISTORY,
+            "undo depth is clamped to the cap"
+        );
+    }
+
+    /// Chest-aim oracle: after measuring a rifle's real barrel and aiming the chest
+    /// at a known model-space target, the **actual gun barrel** ends up pointing from
+    /// the chest at that target. This is the headless proof that the overlay-hold +
+    /// chest-aim chain points the gun where intended (no over/under-shoot), for the
+    /// bladed rifle clip that was aiming off to the side. Skips if assets are absent.
+    #[test]
+    fn chest_aim_points_the_real_barrel_at_the_target() {
+        let world = World::new();
+        let (Some(arm), Some(template), Some(model)) = (
+            world.enemy_arm.as_ref(),
+            world.char_anim_template.as_ref(),
+            world.char_model.as_ref(),
+        ) else {
+            eprintln!("skipping: character assets not loaded");
+            return;
+        };
+        let sk = &model.skeleton;
+        let weapon = crate::combat::enemy_def_for(&crate::combat::config::AR33); // rifle
+        let asset = world
+            .enemy_weapon_lib
+            .iter()
+            .find(|w| w.name == weapon.name)
+            .expect("AR33 weapon asset");
+
+        let loco: Vec<(f32, clip::AnimationClip)> = vec![
+            (0.0, template.clip(0).unwrap().clone()),
+            (anim_set::SPEED_WALK, template.clip(1).unwrap().clone()),
+            (anim_set::SPEED_JOG, template.clip(2).unwrap().clone()),
+            (anim_set::SPEED_RUN, template.clip(3).unwrap().clone()),
+        ];
+        let aim_clip = template.clip(FIRE_RIFLE_IDX).unwrap().clone();
+        let mut stack = arm.build_stack(loco, aim_clip);
+
+        // Full aim pose (overlay on) → measure the real barrel in the chest frame.
+        {
+            let ov = stack.layer_as::<ClipOverlayLayer>(ENEMY_AIM_OVERLAY_LAYER).unwrap();
+            ov.time = super::hunt::fire_window_for(weapon.class, false).0;
+            ov.weight = 1.0;
+        }
+        let aim_pose = stack.evaluate(Pose::bind(sk), &LayerCtx { skeleton: sk, dt: 0.0 });
+        let attach = Quat::from_euler(
+            EulerRot::XYZ,
+            weapon.right_rot.x,
+            weapon.right_rot.y,
+            weapon.right_rot.z,
+        );
+        let fwd = arm
+            .barrel_forward_in_chest(&aim_pose, sk, attach, asset.barrel_axis())
+            .expect("barrel measured");
+
+        // Aim the chest at an arbitrary reachable model-space target (no cone clamp).
+        let target = Vec3::new(0.6, 1.4, 3.0);
+        {
+            let ca = stack.layer_as::<AimOffsetLayer>(ENEMY_CHEST_AIM_LAYER).unwrap();
+            ca.forward = fwd;
+            ca.target = target;
+            ca.max_angle = std::f32::consts::PI;
+            ca.weight = 1.0;
+            ca.enabled = true;
+        }
+        let posed = stack.evaluate(Pose::bind(sk), &LayerCtx { skeleton: sk, dt: 0.0 });
+        let g = posed.joint_global_transforms(sk);
+
+        // The ACTUAL barrel (gun rides Bone_9 with the attach + muzzle axis) vs the
+        // direction from the chest to the target.
+        let (_, hand_rot, _) = g[arm.end].to_scale_rotation_translation();
+        let barrel = (hand_rot * (attach * asset.barrel_axis())).normalize();
+        let chest_origin = g[arm.chest].to_scale_rotation_translation().2;
+        let to_target = (target - chest_origin).normalize();
+        let err = barrel.angle_between(to_target);
+        assert!(
+            err < 0.05,
+            "barrel should point at the target (off by {err} rad); barrel={barrel:?} to_target={to_target:?}"
+        );
+    }

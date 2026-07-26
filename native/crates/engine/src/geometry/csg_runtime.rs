@@ -445,6 +445,47 @@ impl StairDesc {
         }
     }
 
+    /// Append a **smooth ramp** walking surface for this stair to a collider mesh
+    /// buffer (meters): a single double-sided sloped quad from the base nosing to
+    /// the top nosing, in place of the stepped tread/riser geometry. Used only by
+    /// the collider path ([`Region::evaluate`]); the visible mesh keeps its
+    /// discrete steps via [`append_zoned`](Self::append_zoned), so the player sees
+    /// stairs but walks a ramp — no per-riser auto-step pop. The ramp reproduces
+    /// the stair's true slope (here always 45°, since each CSG step is 1×1 WT).
+    fn append_ramp_collision(
+        &self,
+        pos: &mut Vec<f32>,
+        norm: &mut Vec<f32>,
+        idx: &mut Vec<u32>,
+        ws: f32,
+    ) {
+        let sc = self.step_count as f32;
+        if sc <= 0.0 {
+            return;
+        }
+        let dir = if self.side == Side::Max { 1.0 } else { -1.0 };
+        let (u0, u1) = (self.u0, self.u1);
+        // Base edge sits on the room floor at the wall face; the top edge lands on
+        // the destination floor `step_count` WT away along the wall normal.
+        let n0 = self.face_pos;
+        let n1 = self.face_pos + dir * sc;
+        let y0 = self.floor;
+        let y1 = match self.direction {
+            StairDir::Up => self.floor + sc,
+            StairDir::Down => self.floor - sc,
+        };
+        geom::push_quad_double(
+            pos,
+            norm,
+            idx,
+            self.tw(n0, y0, u0),
+            self.tw(n1, y1, u0),
+            self.tw(n1, y1, u1),
+            self.tw(n0, y0, u1),
+            ws,
+        );
+    }
+
     /// The tread/riser/side geometry as a standalone mesh (meters), for the ghost
     /// preview drawn while a stair op is pending.
     pub fn mesh(&self) -> CpuMesh {
@@ -859,16 +900,17 @@ impl Region {
         self.shell.d = (max[2] - min[2]) + SHELL_PAD * 2.0;
     }
 
-    /// Re-run CSG for this region and return the resulting mesh in meters. Any
-    /// confirmed stairs then get their tread/riser/side geometry appended, so a
-    /// single mesh (and thus a single trimesh collider) carries both the carved
-    /// walls and the walkable steps.
+    /// Re-run CSG for this region and return the resulting **collider** mesh in
+    /// meters. Any confirmed stairs then get a smooth **ramp** walking surface
+    /// appended (not the stepped treads), so the player walks the slope without
+    /// auto-stepping each riser — the discrete steps live only in the render mesh
+    /// ([`evaluate_textured`](Self::evaluate_textured)).
     pub fn evaluate(&mut self) -> CpuMesh {
         self.update_shell();
         let polys = evaluate(&self.shell, &self.brushes, WORLD_SCALE);
         let (mut pos, mut norm, mut idx) = polygons_to_mesh(&polys);
         for s in &self.stairs {
-            s.append_geometry(&mut pos, &mut norm, &mut idx, WORLD_SCALE);
+            s.append_ramp_collision(&mut pos, &mut norm, &mut idx, WORLD_SCALE);
         }
         CpuMesh::from_csg(&pos, &norm, &idx)
     }

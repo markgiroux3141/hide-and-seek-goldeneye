@@ -20,7 +20,7 @@ const WT: f32 = WORLD_SCALE; // meters per world tile
 const RADIUS: f32 = 1.0 * WT; // capsule radius (0.25 m)
 const HEIGHT: f32 = 6.0 * WT; // full standing height (1.5 m)
 const EYE: f32 = 5.4 * WT; // eye offset above feet (1.35 m)
-const WALK_SPEED: f32 = 3.2; // m/s
+const WALK_SPEED: f32 = 6.4; // m/s
 const GRAVITY: f32 = 20.0; // m/s²
 const JUMP_VELOCITY: f32 = 5.5; // m/s
 
