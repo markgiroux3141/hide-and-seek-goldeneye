@@ -33,7 +33,27 @@ gilrs = "0.11"
 csg = { path = "crates/csg" }
 engine = { path = "crates/engine" }
 
+# Day-to-day test / handoff build (what `cargo build --release` produces).
+# opt-level 3 keeps the game smooth to play; dropping fat LTO and raising
+# codegen-units cuts most of the compile+link time. `incremental` lets small
+# edits relink instead of rebuilding from scratch. For a true max-perf ship
+# build use `--profile release-dist` below.
 [profile.release]
 opt-level = 3
+lto = false
+codegen-units = 16
+incremental = true
+
+# Maximum-runtime-perf distribution build (slow to compile — fat LTO, single
+# codegen unit). Only needed for a real shippable artifact, not for iterating.
+[profile.release-dist]
+inherits = "release"
 lto = true
 codegen-units = 1
+incremental = false
+
+# Debug builds: keep OUR crates cheap to rebuild (opt-level 0, the default) but
+# optimize DEPENDENCIES once and cache them, so physics/render aren't unusably
+# slow when running an unoptimized debug build (e.g. the levelgen harness).
+[profile.dev.package."*"]
+opt-level = 3

@@ -1,0 +1,12 @@
+# Cargo config for the native workspace. Applies to any build run from `native/`.
+#
+# Faster linking on Windows MSVC: use the LLVM linker (rust-lld) that ships
+# bundled with the Rust toolchain instead of the default MSVC `link.exe`. We're
+# link-heavy (wgpu + rapier3d + gltf + image + kira), so this is a big chunk of
+# every incremental build. No install needed — `rust-lld` resolves from the
+# toolchain sysroot; `-Clinker-flavor=lld-link` makes it behave like link.exe.
+#
+# To fall back to the default linker, comment out this whole block.
+[target.x86_64-pc-windows-msvc]
+linker = "rust-lld"
+rustflags = ["-Clinker-flavor=lld-link"]
