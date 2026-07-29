@@ -39,6 +39,14 @@ const WALK_IN_PLACE_DISP: f32 = 0.3; // m of net travel that counts as "actually
 /// A single-step vertical jump larger than this means the model fell/teleported
 /// through geometry (nav-gate violation).
 const ILLEGAL_Y_STEP: f32 = 1.0;
+/// Two live hunters whose centres stay closer than this (m) are interpenetrating —
+/// well inside the `2·ENEMY_RADIUS` = 0.48 m combined radius. Local avoidance (ORCA)
+/// must keep hunters from *remaining* stacked into one body (the crowd defect the old
+/// position-nudge separation papered over); a brief transient while they resolve is
+/// fine, a sustained one is the defect.
+const OVERLAP_DIST: f32 = 0.34;
+/// How long (s) two hunters may stay interpenetrated before it's flagged as a stack.
+const OVERLAP_SECS: f32 = 1.0;
 
 /// One flagged behavioral defect, with enough context to reproduce it.
 #[derive(Clone, Debug)]
@@ -139,6 +147,7 @@ pub(crate) struct JankMonitor {
     still_anchor: Vec<Vec3>,    // where the still streak began
     prev_pos: Vec<Option<Vec3>>,
     packmate_blocks: Vec<u32>,  // frames a packmate capsule occluded the player ray
+    overlap_secs: Vec<f32>,     // continuous time interpenetrating a packmate
     ever_fired: Vec<bool>,
     violations: Vec<Violation>,
 }
@@ -155,6 +164,7 @@ impl JankMonitor {
             still_anchor: vec![Vec3::ZERO; n],
             prev_pos: vec![None; n],
             packmate_blocks: vec![0; n],
+            overlap_secs: vec![0.0; n],
             ever_fired: vec![false; n],
             violations: Vec::new(),
         }
@@ -182,6 +192,28 @@ impl JankMonitor {
             }
             if firing {
                 self.ever_fired[i] = true;
+            }
+
+            // ── Overlap: two live hunters interpenetrating (stacked into one body) for
+            //    a sustained stretch → local avoidance failed to keep them apart. ──
+            let nearest = world
+                .enemies
+                .iter()
+                .enumerate()
+                .filter(|(j, e)| *j != i && !e.enemy.is_dead())
+                .map(|(_, e)| Vec3::new(e.enemy.pos.x - epos.x, 0.0, e.enemy.pos.z - epos.z).length())
+                .fold(f32::INFINITY, f32::min);
+            if nearest < OVERLAP_DIST {
+                self.overlap_secs[i] += dt;
+                if self.overlap_secs[i] >= OVERLAP_SECS {
+                    self.flag("overlap", i, format!(
+                        "a packmate stayed {nearest:.2}m away (interpenetrating) for {:.1}s in {state:?}",
+                        self.overlap_secs[i]
+                    ));
+                    self.overlap_secs[i] = 0.0; // one flag per streak
+                }
+            } else {
+                self.overlap_secs[i] = 0.0;
             }
 
             // ── LOS: the AI's world-only perception (friendlies don't occlude). Plus a
@@ -515,6 +547,111 @@ fn extended_run_holds_the_hard_invariants() {
     let mon = extended_wander_run();
     assert!(mon.violations_of("illegal_y").is_empty(), "a hunter clipped/fell through geometry");
     assert!(mon.violations_of("thrash").is_empty(), "a hunter thrashed states on the long run");
+    // ORCA keeps the pack from stacking into one body over the whole soak.
+    assert!(mon.violations_of("overlap").is_empty(), "hunters interpenetrated (local avoidance failed)");
+}
+
+// ═══ Local avoidance (ORCA) scenarios ═══════════════════════════════════════
+// These assert the NEW capability the RVO/ORCA layer adds — hunters steer smoothly
+// around one another (and the player) instead of interpenetrating + being shoved
+// apart after the fact. They exercise exactly the crowd cases the old position-nudge
+// `separate_enemies` handled badly: a tight cluster, and a pack funnelling through a
+// narrow gap. The `overlap` detector (added above) is the invariant.
+
+/// A pack spawned almost on top of one another must fan out under ORCA to a
+/// non-overlapping ring within a beat — never staying stacked into one body. The ORCA
+/// analog of the legacy-path `stacked_hunters_are_pushed_apart` (which the nudge did in
+/// a single teleport-y step); ORCA separates smoothly over a few frames, so we assert
+/// the settled state + that they never *remained* interpenetrated.
+#[test]
+fn orca_a_stacked_pack_fans_out_without_interpenetrating() {
+    let mut arena = TestArena::build([48.0, 16.0, 48.0], &[], 5, Vec3::new(6.0, 0.0, 6.0));
+    // Cram all five into a 0.2 m knot far from the player (isolate the separation).
+    for i in 0..arena.world.enemies.len() {
+        let a = i as f32 * 1.3;
+        arena.place_hunter(i, 9.0 + a.cos() * 0.1, 9.0 + a.sin() * 0.1);
+    }
+    let mut mon = JankMonitor::new(arena.world.enemies.len());
+    let dt = 1.0 / 60.0;
+    for _ in 0..300 {
+        // 5 s
+        arena.step(dt);
+        mon.sample(&mut arena.world, dt);
+    }
+    mon.report();
+    // They separated (smallest pairwise gap cleared the interpenetration band)…
+    let n = arena.world.enemies.len();
+    let mut min_gap = f32::INFINITY;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (a, b) = (arena.world.enemies[i].enemy.pos, arena.world.enemies[j].enemy.pos);
+            min_gap = min_gap.min(Vec3::new(a.x - b.x, 0.0, a.z - b.z).length());
+        }
+    }
+    assert!(min_gap > OVERLAP_DIST, "the pack fanned out (closest pair {min_gap:.2} m)");
+    // …and none stayed interpenetrated for a sustained stretch getting there.
+    assert!(mon.violations_of("overlap").is_empty(), "a hunter stayed stacked on a packmate");
+    assert!(mon.violations_of("walk_in_place").is_empty(), "a hunter ground in place while separating");
+}
+
+/// A whole pack must funnel through a one-doorway gap toward the player instead of
+/// jamming shoulder-to-shoulder at the pinch. Under the old nudge this was the worst
+/// case (hunters converging on the gap shoved each other sideways into the walls and
+/// ground in place); ORCA should queue them through. Assert they cross to the far side
+/// with no stacking / grinding / thrash and stay on legal ground.
+#[test]
+fn orca_a_pack_funnels_through_a_doorway() {
+    // Room 60×60 WT (15×15 m) split at z∈[28,32] WT by two wall segments leaving a
+    // ~1.5 m central gap (x∈[27,33] WT). Player on the far side, pack on the near side.
+    let walls = [
+        [0.0, 0.0, 28.0, 27.0, 16.0, 4.0],  // left wall  (x 0..6.75 m)
+        [33.0, 0.0, 28.0, 27.0, 16.0, 4.0], // right wall (x 8.25..15 m)
+    ];
+    let mut arena = TestArena::build([60.0, 16.0, 60.0], &walls, 5, Vec3::new(7.5, 0.0, 11.0));
+    // Cluster the pack tight on the near side, dead in front of the gap.
+    for i in 0..arena.world.enemies.len() {
+        let col = (i % 3) as f32 - 1.0;
+        let row = (i / 3) as f32;
+        arena.place_hunter(i, 7.5 + col * 0.4, 3.0 - row * 0.4);
+    }
+    let mut mon = JankMonitor::new(arena.world.enemies.len());
+    let dt = 1.0 / 60.0;
+    for _ in 0..1500 {
+        // 25 s
+        arena.step(dt);
+        mon.sample(&mut arena.world, dt);
+    }
+    mon.report();
+    // At least one hunter made it through the gap to the player's side (z past the wall).
+    let crossed = arena.world.enemies.iter().filter(|e| e.enemy.pos.z > 9.0).count();
+    assert!(crossed >= 1, "at least one hunter funnelled through the gap (crossed={crossed})");
+    assert!(mon.violations_of("overlap").is_empty(), "hunters jammed/stacked at the pinch");
+    assert!(mon.violations_of("walk_in_place").is_empty(), "a hunter ground in place at the pinch");
+    assert!(mon.violations_of("thrash").is_empty(), "a hunter thrashed states at the pinch");
+    assert!(mon.violations_of("illegal_y").is_empty(), "a hunter clipped/fell through geometry");
+}
+
+/// The player-as-obstacle half of ORCA: a pack converging on a stationary player must
+/// ring up around it rather than piling onto its exact cell (they still don't collide
+/// with the player — the standoff owns spacing — but avoidance keeps them from
+/// converging *through* it). Assert engagement holds with no stacking.
+#[test]
+fn orca_a_converging_pack_rings_the_player_without_stacking() {
+    let mut arena = TestArena::build([48.0, 16.0, 48.0], &[], 5, Vec3::new(6.0, 0.0, 6.0));
+    // Line the pack up behind one another charging straight at the player.
+    for i in 0..arena.world.enemies.len() {
+        arena.place_hunter(i, 6.0, 10.0 + i as f32 * 0.6);
+    }
+    let mut mon = JankMonitor::new(arena.world.enemies.len());
+    let dt = 1.0 / 60.0;
+    for _ in 0..900 {
+        // 15 s
+        arena.step(dt);
+        mon.sample(&mut arena.world, dt);
+    }
+    mon.report();
+    assert!(mon.ever_fired.iter().any(|&f| f), "the converging pack engages the player");
+    assert!(mon.violations_of("overlap").is_empty(), "hunters stacked converging on the player");
 }
 
 // ─── Tracked defect repros (the lab caught these; un-ignore each when fixing) ────

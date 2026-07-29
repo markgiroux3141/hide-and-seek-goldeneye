@@ -4,5 +4,6 @@
 //! [`nav`] is the baked WT-cell nav grid + A*. The game-side controllers that
 //! ride on these (player capsule, enemy pathfinder) live in the `game` crate.
 
+pub mod avoidance;
 pub mod nav;
 pub mod physics;

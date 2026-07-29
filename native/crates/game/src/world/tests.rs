@@ -629,11 +629,15 @@ use super::editing::find_room_brushes;
         );
     }
 
-    /// Enemy separation: two hunters stacked on the exact same cell get nudged apart
-    /// by the per-step separation pass, so they don't merge into one body.
+    /// Enemy separation (legacy nudge path): two hunters stacked on the exact same cell
+    /// get pushed apart in a single step by the position-nudge separation pass, so they
+    /// don't merge into one body. This guards the pre-ORCA baseline (`local_avoidance`
+    /// off); the ORCA path separates smoothly over several frames instead — see the
+    /// `orca_*` lab scenarios.
     #[test]
     fn stacked_hunters_are_pushed_apart() {
         let mut world = World::new();
+        world.set_local_avoidance(false); // exercise the legacy instant-nudge path
         world.set_wave_size(6); // separation needs a pack (gameplay default is 1)
         world.initial_meshes();
         world.toggle_mode(); // HUNT — spawns the wave

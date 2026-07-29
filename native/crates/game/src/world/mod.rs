@@ -27,6 +27,7 @@ use crate::enemy::{AiState, Enemy};
 use rapier3d::prelude::ColliderHandle;
 use engine::platform::input::InputState;
 use engine::render::mesh::{ColorVertex, ColoredMesh, CpuMesh, TexVertex, TexturedMesh};
+use engine::sim::avoidance;
 use engine::sim::nav::{self, NavWorld};
 use engine::sim::physics::PhysicsWorld;
 use engine::skeletal::anim::AnimPlayer;
@@ -159,6 +160,13 @@ pub(crate) const AIM_RAMP: f32 = 9.0;
 /// selection off the RAW value thrashes idle↔jog, restarting the crossfade every
 /// few frames (visible leg stutter). Easing it kills the flip.
 pub(crate) const LOCO_SMOOTH: f32 = 6.0;
+/// Max angular speed (rad/s, ~515°/s) the RENDERED hunter body rotates to face its AI
+/// heading. The logic facing ([`crate::enemy::Enemy::heading`]) can snap instantly —
+/// evade jukes, reposition weave flips, travel↔player facing swaps — which reads as a
+/// per-frame spin / flicker; turning the model toward it at this bounded rate smooths
+/// those into realistic turns. The chest-aim layer keeps the gun on the player while
+/// the body catches up, so aim isn't laggy. See [`EnemyInstance::advance_facing`].
+pub(crate) const TURN_RATE: f32 = 9.0;
 /// Idle deadzone (m/s): a smoothed locomotion speed below this snaps to 0 so the
 /// hunter settles to the IDLE band instead of the WALK band. Without it the
 /// exponential decay lingers as a tiny positive value for ~15 s and
@@ -509,6 +517,23 @@ const SPAWN_CLUSTER_RADIUS: f32 = 0.7;
 /// apart each step so they don't merge into one body / march in unison. ~3× the
 /// capsule radius, so they ring around a target instead of stacking on it.
 pub(crate) const ENEMY_SEPARATION_DIST: f32 = 0.7;
+
+// ─── Local avoidance (ORCA — replaces the position-nudge separation) ─────────
+/// The player's disc radius (m) hunters treat as a non-reciprocal ORCA obstacle, so
+/// they steer around the player instead of piling onto its exact cell (hunters still
+/// don't physically collide with the player — the Attack standoff/back-off owns
+/// engagement spacing; this just keeps the crowd from converging *through* you).
+pub(crate) const PLAYER_AVOID_RADIUS: f32 = 0.3;
+/// Speed (m/s) a hunter with no movement intent of its own may still use to yield
+/// ground to a packmate under ORCA — so a holding / attacking hunter shuffles aside
+/// to let one pass instead of being interpenetrated, without wandering off station.
+pub(crate) const AVOID_YIELD_SPEED: f32 = 1.2;
+/// Local-avoidance look-ahead horizons (s): how far ahead a predicted collision must
+/// be before a hunter starts steering around it. Tuned for tight indoor quarters +
+/// our small (~0.24 m) agent radius — react early enough to weave, not so early a
+/// whole room over-avoids.
+pub(crate) const AVOID_HORIZONS: avoidance::Horizons =
+    avoidance::Horizons { agents: 1.5, obstacles: 1.0 };
 /// A non-engaged hunter within this range (m) of an engaged packmate adopts that
 /// packmate's player fix — the squad "contact!" call, so the whole pack converges
 /// once anyone spots the player instead of some wandering off on their search.
@@ -1034,6 +1059,12 @@ pub(crate) struct EnemyInstance {
     /// binary `speed()` so the walk/jog/run band doesn't flip on frame-to-frame
     /// jitter. See [`LOCO_SMOOTH`].
     pub anim_speed: f32,
+    /// The **rendered** facing yaw, eased toward the AI heading at [`TURN_RATE`] so the
+    /// body turns at a believable rate instead of snapping when the FSM flips heading
+    /// (evade jukes, reposition, travel↔player facing). `None` until the first frame
+    /// (then it snaps to the current heading, and smooths thereafter). Drives every
+    /// model/weapon/muzzle transform via [`EnemyInstance::yaw`]. See [`Self::yaw`].
+    pub render_yaw: Option<f32>,
     /// Cached final pose after the stack this frame — the source for both the
     /// skinning matrices and the hand-bone weapon transform (so the gun follows
     /// the aimed arm). `None` until the first `advance_animation`.
@@ -1127,6 +1158,14 @@ pub struct World {
     /// mode can turn the authored hit reactions back on. Death animations are
     /// unaffected (a kill always plays its death clip).
     hit_reactions: bool,
+    /// Whether hunters use **ORCA local avoidance** to steer smoothly around one
+    /// another + the player (the modern crowd-movement layer), replacing the old
+    /// position-nudge separation. **On by default.** A kill-switch for A/B + a
+    /// regression baseline: when off, each hunter applies its preferred velocity
+    /// directly and the legacy [`separate_enemies`] nudge runs instead. Movement
+    /// quality only — it never changes who/when a hunter shoots, so the difficulty-0
+    /// engagement baseline is unaffected either way.
+    local_avoidance: bool,
     /// Per-body world-space Y offset that seats that body's feet on the floor
     /// (parallel to [`Self::char_models`]). Computed from the **lowest skinned point
     /// of the actual idle pose** for each body (the bind-pose AABB can't be used —
@@ -1533,6 +1572,7 @@ impl World {
             wave_size: ENEMY_COUNT,
             hunt_spawn: None,
             hit_reactions: false, // Perfect-Dark sim style; flag for a future GE mode
+            local_avoidance: true, // ORCA crowd steering on by default (kill-switch below)
             char_feet_offset,
             enemy_arm,
             procedural_preview: None,
@@ -1639,6 +1679,18 @@ impl World {
     /// on; the current sim-style hunt leaves it off so hurt hunters keep fighting.
     pub fn set_hit_reactions(&mut self, on: bool) {
         self.hit_reactions = on;
+    }
+
+    /// Toggle ORCA local avoidance (default ON — see [`Self::local_avoidance`]). Off
+    /// falls back to applying each hunter's preferred velocity directly + the legacy
+    /// position-nudge separation, the pre-ORCA baseline.
+    pub fn set_local_avoidance(&mut self, on: bool) {
+        self.local_avoidance = on;
+    }
+
+    /// Whether ORCA local avoidance is active (inspection / tests).
+    pub fn local_avoidance(&self) -> bool {
+        self.local_avoidance
     }
 
     /// The difficulty-derived tuning for the current level (see [`DiffParams`]). Linear

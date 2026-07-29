@@ -50,10 +50,50 @@ pub(crate) fn is_fire_clip(idx: usize) -> bool {
 }
 
 impl EnemyInstance {
-    /// Horizontal facing yaw (model faces +Z at yaw 0 → `atan2(x, z)`).
+    /// The RENDERED horizontal facing yaw (model faces +Z at yaw 0 → `atan2(x, z)`) —
+    /// the smoothed [`render_yaw`](EnemyInstance::render_yaw) if [`Self::advance_facing`]
+    /// has run, else the raw AI heading. Every model / weapon / muzzle transform reads
+    /// this, so the body, gun and flash all turn together and smoothly.
     pub(crate) fn yaw(&self) -> f32 {
+        self.render_yaw.unwrap_or_else(|| self.raw_yaw())
+    }
+
+    /// The un-smoothed AI facing yaw straight off the [`Enemy`] heading — the target
+    /// the rendered yaw eases toward.
+    fn raw_yaw(&self) -> f32 {
         let h = self.enemy.heading();
         h.x.atan2(h.z)
+    }
+
+    /// Ease the rendered facing toward the AI heading at [`TURN_RATE`] (shortest arc),
+    /// so a snappy heading flip becomes a believable turn instead of a per-frame spin.
+    /// First call snaps (no history to ease from). Call once per rendered frame.
+    pub(crate) fn advance_facing(&mut self, dt: f32) {
+        let target = self.raw_yaw();
+        let cur = match self.render_yaw {
+            Some(y) => y,
+            None => {
+                self.render_yaw = Some(target);
+                return;
+            }
+        };
+        // Shortest signed angular difference in (−π, π].
+        let mut delta = target - cur;
+        while delta > std::f32::consts::PI {
+            delta -= std::f32::consts::TAU;
+        }
+        while delta < -std::f32::consts::PI {
+            delta += std::f32::consts::TAU;
+        }
+        let max = TURN_RATE * dt;
+        let mut y = cur + delta.clamp(-max, max);
+        // Keep it bounded to (−π, π] so it never drifts unbounded.
+        if y > std::f32::consts::PI {
+            y -= std::f32::consts::TAU;
+        } else if y < -std::f32::consts::PI {
+            y += std::f32::consts::TAU;
+        }
+        self.render_yaw = Some(y);
     }
 
     /// Whole-body opacity this frame: 1 while alive / mid death-anim, ramping 1→0
@@ -142,6 +182,10 @@ impl World {
             if inst.enemy.speed() <= 0.0 && inst.anim_speed < LOCO_IDLE_EPS {
                 inst.anim_speed = 0.0;
             }
+            // Ease the rendered body facing toward the AI heading at a realistic turn
+            // rate, so heading flips (jukes / reposition / travel↔player) read as turns
+            // rather than a per-frame spin. All model/weapon transforms use this yaw.
+            inst.advance_facing(dt);
 
             // Death fade: hold the corpse opaque THROUGH the death animation, then
             // ramp opacity 1→0 once the clip has clamped (`oneshot_finished`).

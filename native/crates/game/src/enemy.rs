@@ -214,6 +214,12 @@ const ATTACK_FIRE_BAND: f32 = 3.0; // m
 /// if the player pulls beyond `standoff + this`. Prevents the micro-step-in-and-out
 /// at the exact boundary that kept the legs walking in place.
 const STANDOFF_HYST: f32 = 1.2; // m
+/// How long (s) line-of-sight to the player must stay broken before an `Attack`
+/// hunter falls back to `Chase`. A brief flicker — the player flashing past a pillar
+/// edge, or the hunter holding on a wall-corner sightline seam — shouldn't drop
+/// engagement and bounce Attack↔Chase (a thrash the AI lab flagged once ORCA could
+/// settle a hunter on such a seam). Genuine loss (beyond the grace) still bails.
+const ATTACK_LOS_GRACE: f32 = 0.3; // s
 pub(crate) const ALERT_DURATION: f32 = 0.5; // s reaction delay (level-0 baseline)
 pub(crate) const COOLDOWN_DURATION: f32 = 1.5; // s between fire bursts (level-0 baseline)
 
@@ -297,6 +303,16 @@ pub struct Enemy {
     /// Speed (m/s) of the step actually taken this update — 0 when stationary. Set
     /// by [`Self::move_toward`] from the per-state speed; drives the locomotion gait.
     move_speed: f32,
+    /// The **preferred velocity** the FSM wants this step (planar, XZ; Y is 0), before
+    /// local avoidance. The movement helpers accumulate into it via [`Self::add_move`]
+    /// instead of committing `pos` directly; the `World` runs ORCA over every hunter's
+    /// preferred velocity + the player, then commits the resolved velocity through
+    /// [`Self::integrate_move`]. Reset to zero at the top of each [`Self::update`].
+    desired_vel: Vec3,
+    /// The actual planar velocity committed last step (post-avoidance). Fed back into
+    /// ORCA as this agent's current velocity so the reciprocal responsibility split is
+    /// stable + smooth across frames. Zero until the first move.
+    vel: Vec3,
     /// Remaining health; at ≤0 the hunter is [`Self::dead`] (Track A).
     health: f32,
     /// Killed — [`Self::update`] is a full no-op (the body holds its death pose
@@ -316,6 +332,10 @@ pub struct Enemy {
     /// In `Attack`, whether the hunter has reached its standoff and is holding
     /// position (feet planted). Hysteresis flag — see [`STANDOFF_HYST`].
     holding: bool,
+    /// Time (s) line-of-sight to the player has been continuously broken while in
+    /// `Attack`. Debounces the Attack→Chase bail so a momentary flicker doesn't thrash
+    /// — see [`ATTACK_LOS_GRACE`]. Reset whenever LOS is clear.
+    attack_los_lost: f32,
     /// The fire animation has actually started playing (JS `fireAnimStarted`) —
     /// so we detect its *completion* (not just its not-yet-started frames).
     fire_started: bool,
@@ -400,6 +420,8 @@ impl Enemy {
             heading,
             moving: false,
             move_speed: 0.0,
+            desired_vel: Vec3::ZERO,
+            vel: Vec3::ZERO,
             health: ENEMY_HEALTH,
             dead: false,
             stun_timer: 0.0,
@@ -409,6 +431,7 @@ impl Enemy {
             cooldown_timer: 0.0,
             is_attacking: false,
             holding: false,
+            attack_los_lost: 0.0,
             fire_started: false,
             search_target: None,
             last_known: None,
@@ -521,6 +544,80 @@ impl Enemy {
     /// or 0 when stationary. Drives the continuous locomotion gait.
     pub fn speed(&self) -> f32 {
         self.move_speed
+    }
+
+    /// The preferred (pre-avoidance) planar velocity the FSM wants this step — the
+    /// `World`'s ORCA solve reads this as the agent's goal velocity.
+    pub(crate) fn desired_velocity(&self) -> Vec3 {
+        self.desired_vel
+    }
+
+    /// The actual velocity committed last step, fed back into ORCA for a stable
+    /// reciprocal split.
+    pub(crate) fn velocity(&self) -> Vec3 {
+        self.vel
+    }
+
+    /// The speed (m/s) the FSM intended this step — the ORCA max-speed cap for this
+    /// hunter, so avoidance can't make it move faster than its own state wanted.
+    pub(crate) fn move_intent(&self) -> f32 {
+        self.move_speed
+    }
+
+    /// Accumulate a preferred planar velocity for this step (additive, so a radial
+    /// standoff move and a lateral evade combine — the same net displacement the old
+    /// sequential `pos` steps produced). `dir` need not be unit; the Y component is
+    /// dropped (hunters move on the nav floor — Y comes from [`Self::snap_to_floor`]).
+    fn add_move(&mut self, dir: Vec3, speed: f32) {
+        let flat = Vec3::new(dir.x, 0.0, dir.z);
+        if flat.length_squared() < 1e-12 || speed <= 0.0 {
+            return;
+        }
+        self.desired_vel += flat.normalize() * speed;
+        self.move_speed = self.move_speed.max(speed);
+        self.moving = true;
+    }
+
+    /// Commit an avoidance-resolved planar velocity `vel` for `dt`. Nav/LOS-gated +
+    /// floor-snapped exactly like the old movement helpers, so avoidance never clips a
+    /// wall or walks the hunter off a ledge: if the resolved step is blocked (ORCA
+    /// deflected it into geometry) it falls back to the raw preferred velocity — which
+    /// the FSM already vetted as nav-clear — and otherwise holds. Persists the actual
+    /// committed velocity for next step's reciprocal ORCA. Called by the `World` after
+    /// the FSM + ORCA solve (see `world::lifecycle`); a no-op once dead.
+    pub(crate) fn integrate_move(&mut self, vel: Vec3, dt: f32, nav: &NavWorld) {
+        if self.dead {
+            self.vel = Vec3::ZERO;
+            return;
+        }
+        let start = self.pos;
+        let planar = Vec3::new(vel.x, 0.0, vel.z);
+        if !self.try_step(planar, dt, nav) {
+            let pref = self.desired_vel;
+            self.try_step(pref, dt, nav);
+        }
+        let actual = Vec3::new(self.pos.x - start.x, 0.0, self.pos.z - start.z);
+        self.vel = if dt > 1e-6 { actual / dt } else { Vec3::ZERO };
+    }
+
+    /// Try to move `v·dt` in the plane from the current position: applies + snaps to
+    /// the floor if the step stays on clear, continuous ground, else leaves `pos`
+    /// untouched. Returns whether it moved. The nav gate is the same LOS + ground
+    /// continuity check the beeline / back-off / lateral steps use.
+    fn try_step(&mut self, v: Vec3, dt: f32, nav: &NavWorld) -> bool {
+        let flat = Vec3::new(v.x, 0.0, v.z);
+        if flat.length_squared() < 1e-12 {
+            return false;
+        }
+        let dest = self.pos + flat * dt;
+        let up = Vec3::new(0.0, 0.5, 0.0);
+        if nav.los_clear(self.pos + up, dest + up) && nav.ground_path_clear(self.pos, dest) {
+            self.pos = Vec3::new(dest.x, self.pos.y, dest.z);
+            self.snap_to_floor(nav);
+            true
+        } else {
+            false
+        }
     }
 
     /// The current FSM state (for inspection / tests).
@@ -685,6 +782,7 @@ impl Enemy {
         let attack_range = (standoff + ATTACK_FIRE_BAND).min(perception);
         self.moving = false;
         self.move_speed = 0.0;
+        self.desired_vel = Vec3::ZERO;
         if self.dead {
             return EnemyStep::default();
         }
@@ -792,9 +890,7 @@ impl Enemy {
                 let los = perception_los(physics, self.pos, player_feet);
                 if dist <= attack_range && !fire_anim && los {
                     self.face(player_feet);
-                    self.state = AiState::Attack;
-                    self.is_attacking = false;
-                    self.holding = false;
+                    self.enter_attack();
                     self.path.clear();
                 } else {
                     // Suppressing fire while closing (difficulty-gated): if we can see
@@ -845,7 +941,15 @@ impl Enemy {
             AiState::Attack => {
                 let dist = self.dist_to(player_feet);
                 let los = perception_los(physics, self.pos, player_feet);
-                if dist > attack_range * 1.3 || !los {
+                // Debounce the LOS bail: only a *sustained* loss ([`ATTACK_LOS_GRACE`])
+                // drops us to Chase, so a one-frame corner-seam flicker doesn't thrash
+                // Attack↔Chase (the ORCA-exposed jank the lab caught).
+                if los {
+                    self.attack_los_lost = 0.0;
+                } else {
+                    self.attack_los_lost += dt;
+                }
+                if dist > attack_range * 1.3 || self.attack_los_lost >= ATTACK_LOS_GRACE {
                     self.state = AiState::Chase;
                     self.chase_timer = 0.0;
                     self.is_attacking = false;
@@ -944,9 +1048,7 @@ impl Enemy {
                     let dist = self.dist_to(player_feet);
                     let los = perception_los(physics, self.pos, player_feet);
                     if dist <= attack_range && los {
-                        self.state = AiState::Attack;
-                        self.is_attacking = false;
-                        self.holding = false;
+                        self.enter_attack();
                     } else if dist <= perception {
                         self.state = AiState::Chase;
                         self.chase_timer = 0.0;
@@ -983,9 +1085,7 @@ impl Enemy {
                             self.is_attacking = false;
                             self.fire_started = false;
                         } else if perceived {
-                            self.state = AiState::Attack;
-                            self.is_attacking = false;
-                            self.holding = false;
+                            self.enter_attack();
                         } else {
                             self.state = AiState::Investigate;
                             self.scan_timer = 0.0;
@@ -1024,11 +1124,15 @@ impl Enemy {
                             self.duck_to_cover(player_feet, nav, physics, self_collider);
                         }
                     } else {
-                        // Popped out but the player isn't there any more — chase to
-                        // re-acquire if still perceived, else investigate the LKP.
-                        self.state = if perceived { AiState::Attack } else { AiState::Investigate };
-                        self.is_attacking = false;
-                        self.holding = false;
+                        // Popped out but the player isn't there any more — re-engage if
+                        // still perceived, else investigate the LKP.
+                        if perceived {
+                            self.enter_attack();
+                        } else {
+                            self.state = AiState::Investigate;
+                            self.is_attacking = false;
+                            self.holding = false;
+                        }
                         self.scan_timer = 0.0;
                     }
                 }
@@ -1047,6 +1151,16 @@ impl Enemy {
         self.state = AiState::Alert;
         self.alert_timer = 0.0;
         self.path.clear();
+    }
+
+    /// Enter `Attack`: reset the fire lifecycle, the standoff-hold hysteresis, and the
+    /// LOS-loss grace (so a stale grace from a previous engagement can't bail us out on
+    /// the first flickering frame). Every Attack transition goes through here.
+    fn enter_attack(&mut self) {
+        self.state = AiState::Attack;
+        self.is_attacking = false;
+        self.holding = false;
+        self.attack_los_lost = 0.0;
     }
 
     /// Rotate the facing in place (used to scan a spot in `Investigate`), so the
@@ -1102,10 +1216,9 @@ impl Enemy {
         if nav.los_clear(self.pos + up, dest + up) && nav.ground_path_clear(self.pos, dest) {
             self.path.clear();
             self.repath_timer = 0.0; // force a fresh A* path when it re-engages
-            self.pos = dest;
-            self.snap_to_floor(nav);
-            self.moving = true;
-            self.move_speed = speed;
+            // Preferred backpedal velocity; the caller re-faces the player so the model
+            // covers you while giving ground. Committed by the `World`'s integrator.
+            self.add_move(dir, speed);
         }
     }
 
@@ -1134,10 +1247,10 @@ impl Enemy {
         if nav.los_clear(self.pos + up, dest + up) && nav.ground_path_clear(self.pos, dest) {
             self.path.clear();
             self.repath_timer = 0.0;
-            self.pos = dest;
-            self.snap_to_floor(nav);
-            self.moving = true;
-            self.move_speed = self.move_speed.max(speed);
+            // Preferred lateral (evade) velocity, layered onto any radial move already
+            // requested this step; the `World`'s integrator commits it. Returns whether
+            // the sidestep was clear so `evade_step` can flip direction if walled.
+            self.add_move(perp, speed);
             true
         } else {
             false
@@ -1176,14 +1289,13 @@ impl Enemy {
             self.path.clear();
             self.repath_timer = 0.0; // force a fresh A* path the instant LOS breaks
             let dist = flat.length();
-            let stepd = (speed * dt).min(dist);
-            self.pos += flat / dist * stepd;
-            self.heading = flat / dist; // face the (flat) travel direction
-            // The beeline moves in XZ only; glue the feet back to the surface so
-            // the hunter rides gentle rises instead of leaving its Y frozen.
-            self.snap_to_floor(nav);
-            self.moving = true;
-            self.move_speed = speed;
+            let dir = flat / dist;
+            self.heading = dir; // face the (flat) travel direction
+            // Preferred velocity toward the target, capped so a single step can't
+            // overshoot it (the `World`'s ORCA solve + integrator commit the move —
+            // XZ only, with the feet re-snapped to the floor, so the hunter rides
+            // gentle rises instead of leaving its Y frozen).
+            self.add_move(dir, speed.min(dist / dt.max(1e-6)));
             return false;
         }
 
@@ -1206,28 +1318,26 @@ impl Enemy {
         }
 
         if self.path_idx < self.path.len() {
-            let waypoint = self.path[self.path_idx];
-            let to = waypoint - self.pos;
-            let dist = to.length();
-            if dist > 1e-4 {
-                let stepd = (speed * dt).min(dist);
-                self.pos += to / dist * stepd;
-                let f = Vec3::new(to.x, 0.0, to.z);
-                if f.length_squared() > 1e-6 {
-                    self.heading = f.normalize();
-                }
-                self.moving = true;
-                self.move_speed = speed;
-            }
-            if self.pos.distance(waypoint) < WAYPOINT_EPS && self.path_idx < self.path.len() - 1 {
+            // Advance past a waypoint already reached (checked on the current,
+            // already-integrated position — the integrator commits the move between
+            // steps, so `pos` is up to date here).
+            if self.pos.distance(self.path[self.path_idx]) < WAYPOINT_EPS
+                && self.path_idx < self.path.len() - 1
+            {
                 self.path_idx += 1;
             }
+            let waypoint = self.path[self.path_idx];
+            // Aim in the XZ plane toward the waypoint; the tread height is handled by
+            // the integrator's floor-snap (A* waypoints are quantized to cell floors,
+            // so following them in XZ + snapping never floats the hunter over a step).
+            let to = Vec3::new(waypoint.x - self.pos.x, 0.0, waypoint.z - self.pos.z);
+            let dist = to.length();
+            if dist > 1e-4 {
+                let dir = to / dist;
+                self.heading = dir;
+                self.add_move(dir, speed.min(dist / dt.max(1e-6)));
+            }
         }
-        // Keep the feet on the real tread/slab surface while following the path —
-        // A* waypoints are quantized to integer-WT cell floors, so raw
-        // interpolation can leave the hunter slightly above/below the surface it's
-        // crossing. Snapping smooths that and guarantees it never floats over a step.
-        self.snap_to_floor(nav);
         false
     }
 
@@ -1303,9 +1413,7 @@ impl Enemy {
                 self.state = AiState::TakeCover;
             }
             None => {
-                self.state = AiState::Attack;
-                self.is_attacking = false;
-                self.holding = false;
+                self.enter_attack();
             }
         }
     }
@@ -1586,6 +1694,30 @@ mod tests {
         engine::sim::nav::bake(&mut regions, &[]).expect("room bakes")
     }
 
+    /// Drive one FSM step then commit the movement the way the `World` does for a lone
+    /// hunter: with no packmates, ORCA is a no-op, so the preferred velocity is applied
+    /// straight through the integrator. Mirrors the two-stage update→integrate pipeline
+    /// (`Enemy::update` now only *decides* a velocity; the `World` commits it) so the
+    /// movement-dependent FSM tests still exercise real motion.
+    #[allow(clippy::too_many_arguments)]
+    fn drive(
+        e: &mut Enemy,
+        dt: f32,
+        player: Vec3,
+        standoff: f32,
+        tuning: AiTuning,
+        aimed: bool,
+        nav: &NavWorld,
+        physics: &mut PhysicsWorld,
+        fire_anim: bool,
+        collider: ColliderHandle,
+    ) -> EnemyStep {
+        let step = e.update(dt, player, standoff, tuning, aimed, nav, physics, fire_anim, collider);
+        let dv = e.desired_vel;
+        e.integrate_move(dv, dt, nav);
+        step
+    }
+
     /// #2 suppressing fire: a difficulty-aggressive hunter (`suppress` 1) opens fire
     /// while it's still closing — beyond its weapon's attack range — whereas a baseline
     /// hunter (`suppress` 0) holds fire until it has closed to that range. Drives the
@@ -1609,7 +1741,7 @@ mod tests {
             let tuning = AiTuning { alert: 0.05, suppress, sense: 1.4, ..AiTuning::default() };
             let dt = 1.0 / 60.0;
             for _ in 0..600 {
-                let step = e.update(dt, player, standoff, tuning, false, &nav, &mut physics, false, collider);
+                let step = drive(&mut e, dt, player, standoff, tuning, false, &nav, &mut physics, false, collider);
                 let d = Vec3::new(e.pos.x - player.x, 0.0, e.pos.z - player.z).length();
                 if step.want_fire {
                     return Some(d);
@@ -1683,7 +1815,7 @@ mod tests {
             let dt = 1.0 / 60.0;
             let mut max_dx = 0.0f32;
             for _ in 0..600 {
-                e.update(dt, player, standoff, tuning, false, &nav, &mut physics, false, collider);
+                drive(&mut e, dt, player, standoff, tuning, false, &nav, &mut physics, false, collider);
                 max_dx = max_dx.max((e.pos.x - 6.0).abs());
                 let d = Vec3::new(e.pos.x - player.x, 0.0, e.pos.z - player.z).length();
                 if d <= attack_range {
@@ -1782,7 +1914,7 @@ mod tests {
         for _ in 0..1200 {
             // 20 s
             let step =
-                e.update(dt, player, standoff, tuning, false, &nav, &mut physics, fire.anim(), collider);
+                drive(&mut e, dt, player, standoff, tuning, false, &nav, &mut physics, fire.anim(), collider);
             fire.tick(step.want_fire);
             match e.state() {
                 AiState::TakeCover => {
@@ -1822,7 +1954,7 @@ mod tests {
         let (mut cooled, mut took_cover) = (false, false);
         for _ in 0..1200 {
             let step =
-                e.update(dt, player, standoff, tuning, false, &nav, &mut physics, fire.anim(), collider);
+                drive(&mut e, dt, player, standoff, tuning, false, &nav, &mut physics, fire.anim(), collider);
             fire.tick(step.want_fire);
             match e.state() {
                 AiState::Cooldown => cooled = true,

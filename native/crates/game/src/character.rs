@@ -41,6 +41,10 @@ pub struct CharacterController {
     /// hunters' movement-noise sense ([`crate::world::World`]) reads this: the faster you
     /// move, the louder your footsteps, the further a searcher hears you.
     speed_xz: f32,
+    /// Resolved planar velocity (m/s, XZ; Y always 0) achieved on the last
+    /// [`Self::apply_move`]. The hunters' local-avoidance (ORCA) reads this so they
+    /// steer around where the player is *heading*, not just its current cell.
+    vel_xz: Vec3,
 }
 
 impl CharacterController {
@@ -53,6 +57,7 @@ impl CharacterController {
             vel_y: 0.0,
             grounded: false,
             speed_xz: 0.0,
+            vel_xz: Vec3::ZERO,
         }
     }
 
@@ -119,8 +124,10 @@ impl CharacterController {
         // Horizontal speed actually travelled this step (XZ only), for the enemy
         // movement-noise sense. Measured off the resolved displacement so hugging a
         // wall (little real motion) is quiet.
-        let horiz = Vec3::new(corrected.x, 0.0, corrected.z).length();
+        let horiz_v = Vec3::new(corrected.x, 0.0, corrected.z);
+        let horiz = horiz_v.length();
         self.speed_xz = if dt > 1e-6 { horiz / dt } else { 0.0 };
+        self.vel_xz = if dt > 1e-6 { horiz_v / dt } else { Vec3::ZERO };
         // Stop accumulating fall speed once the floor is under us.
         if grounded && self.vel_y < 0.0 {
             self.vel_y = 0.0;
@@ -131,6 +138,12 @@ impl CharacterController {
     /// at a full run, 0 when standing still or pinned against a wall.
     pub fn speed(&self) -> f32 {
         self.speed_xz
+    }
+
+    /// Resolved planar velocity (m/s, XZ; Y = 0) from the last [`Self::apply_move`] —
+    /// the hunters' local-avoidance treats the player as a moving disc obstacle.
+    pub fn velocity(&self) -> Vec3 {
+        self.vel_xz
     }
 
     pub fn view_proj(&self, aspect: f32) -> glam::Mat4 {

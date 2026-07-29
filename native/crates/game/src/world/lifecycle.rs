@@ -3,6 +3,8 @@
 
 use super::*;
 use engine::render::camera::apply_look_delta;
+use engine::sim::avoidance;
+use glam::Vec2;
 
 impl World {
     /// Apply mouse-look — once per rendered frame, so aim is decoupled from the
@@ -139,6 +141,8 @@ impl World {
                 let Some(c) = self.character.as_mut() else { return };
                 c.apply_move(dt, input, &mut self.physics);
                 let feet = c.pos;
+                // The player's planar velocity — the moving-disc obstacle for ORCA.
+                let player_vel = c.velocity();
                 // The player's crosshair line, for the hunters' reactive aim-dodge.
                 let aim_origin = c.eye();
                 let aim_dir = c.forward();
@@ -192,12 +196,9 @@ impl World {
                         ),
                         None => crate::enemy::EnemyStep::default(),
                     };
-                    // Keep this hunter's hitscan capsule on it each step (marks the
-                    // query pipeline dirty so raycasts see the move). Skipped once
-                    // dead — the collider is already gone.
-                    if !inst.enemy.is_dead() {
-                        self.physics.update_enemy_collider(inst.collider, inst.enemy.pos);
-                    }
+                    // (The FSM no longer moves `pos` — it only decides a preferred
+                    // velocity. Movement is committed after the loop by the local-
+                    // avoidance stage, which resyncs every hunter's capsule then.)
                     if step.want_fire {
                         fire_requests.push(i);
                     }
@@ -212,10 +213,70 @@ impl World {
                 // the player's last-known spot, so the pack converges once anyone spots
                 // it (rather than some wandering off on their fan-out search).
                 squad_alert(&mut enemies);
-                // Personal space: nudge apart any hunters that stacked up this step so
-                // they don't merge into one body, then resync their hitscan capsules.
+                // Local avoidance: each hunter steers around its packmates + the player
+                // toward the velocity its FSM asked for (ORCA), then the resolved move is
+                // committed (nav/LOS-gated + floor-snapped by `integrate_move`). This is
+                // the modern replacement for the old position-nudge separation. With the
+                // flag off, hunters apply their preferred velocity directly and the legacy
+                // `separate_enemies` nudge runs — the pre-ORCA baseline. Either way the
+                // capsules are resynced afterward so hitscan sees the new positions.
                 if let Some(nav) = self.nav.as_ref() {
-                    separate_enemies(&mut enemies, nav);
+                    if self.local_avoidance {
+                        let obstacles = [avoidance::Obstacle {
+                            pos: Vec2::new(feet.x, feet.z),
+                            vel: Vec2::new(player_vel.x, player_vel.z),
+                            radius: PLAYER_AVOID_RADIUS,
+                        }];
+                        // Snapshot every live hunter as an ORCA agent (index-tagged so
+                        // the resolved velocity maps back). A tiny deterministic per-index
+                        // offset breaks the degenerate exactly-coincident case (ORCA can't
+                        // choose a split direction for two agents sharing a point).
+                        let agents: Vec<(usize, avoidance::Agent)> = enemies
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, e)| !e.enemy.is_dead())
+                            .map(|(i, e)| {
+                                let p = e.enemy.pos;
+                                let v = e.enemy.velocity();
+                                let dv = e.enemy.desired_velocity();
+                                let ang = i as f32 * 2.399_963; // golden angle
+                                let jitter = Vec2::new(ang.cos(), ang.sin()) * 1e-2;
+                                (
+                                    i,
+                                    avoidance::Agent {
+                                        pos: Vec2::new(p.x, p.z) + jitter,
+                                        vel: Vec2::new(v.x, v.z),
+                                        pref_vel: Vec2::new(dv.x, dv.z),
+                                        radius: ENEMY_RADIUS,
+                                        max_speed: e.enemy.move_intent().max(AVOID_YIELD_SPEED),
+                                    },
+                                )
+                            })
+                            .collect();
+                        // Solve each agent against the others + the player, then commit.
+                        let resolved: Vec<(usize, Vec3)> = agents
+                            .iter()
+                            .map(|(i, a)| {
+                                let neighbors: Vec<avoidance::Agent> = agents
+                                    .iter()
+                                    .filter(|(j, _)| j != i)
+                                    .map(|(_, x)| *x)
+                                    .collect();
+                                let v =
+                                    avoidance::orca_velocity(a, &neighbors, &obstacles, AVOID_HORIZONS, dt);
+                                (*i, Vec3::new(v.x, 0.0, v.y))
+                            })
+                            .collect();
+                        for (i, v) in resolved {
+                            enemies[i].enemy.integrate_move(v, dt, nav);
+                        }
+                    } else {
+                        for inst in enemies.iter_mut() {
+                            let dv = inst.enemy.desired_velocity();
+                            inst.enemy.integrate_move(dv, dt, nav);
+                        }
+                        separate_enemies(&mut enemies, nav);
+                    }
                     for inst in enemies.iter() {
                         if !inst.enemy.is_dead() {
                             self.physics.update_enemy_collider(inst.collider, inst.enemy.pos);
@@ -536,6 +597,7 @@ impl World {
                 stack,
                 aim_weight: 0.0,
                 anim_speed: 0.0,
+                render_yaw: None,
                 final_pose: None,
             });
             log::info!(
