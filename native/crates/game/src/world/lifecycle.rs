@@ -610,6 +610,7 @@ impl World {
                 aim_weight: 0.0,
                 head_look_weight: 0.0,
                 head_look_point: None,
+                foot_delta: [0.0, 0.0],
                 anim_speed: 0.0,
                 render_yaw: None,
                 final_pose: None,

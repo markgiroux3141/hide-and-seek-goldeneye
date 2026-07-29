@@ -18,7 +18,9 @@ use crate::character::CharacterController;
 // module fully-qualified (`crate::combat::…`) to avoid the shadow.
 use engine::assets::textured_model::TexturedModel;
 use engine::audio::AudioManager;
-use crate::combat::enemy_weapons::{HEAD_BONE, LEFT_HAND_BONE, RIGHT_HAND_BONE};
+use crate::combat::enemy_weapons::{
+    HEAD_BONE, LEFT_FOOT_BONE, LEFT_HAND_BONE, PELVIS_BONE, RIGHT_FOOT_BONE, RIGHT_HAND_BONE,
+};
 use crate::combat::{enemy_def_for, EnemyWeaponClass, EnemyWeaponDef, Weapon};
 use engine::geometry::csg_runtime::{
     Axis, Brush, Op, Region, Side, StairDesc, StairDir, WALL_THICKNESS, WORLD_SCALE,
@@ -35,7 +37,7 @@ use engine::skeletal::anim_set;
 use engine::skeletal::clip;
 use engine::skeletal::layers::{
     AdditiveDecayLayer, AimOffsetLayer, ClipOverlayLayer, LayerCtx, LayeredAnimator,
-    LocomotionBlendLayer, Pose,
+    LocomotionBlendLayer, Pose, PoseLayer, RootTranslateLayer, TwoBoneIkLayer,
 };
 use engine::skeletal::gltf_skin::{self, SkinnedModel};
 use engine::geometry::structures::{self, Anchor, Edge, Platform, StairRun};
@@ -165,6 +167,23 @@ pub(crate) const HEAD_LOOK_TRACK: f32 = 8.0;
 /// direction — far enough that the gaze reads as a direction (a level scan), not a
 /// look at a spot on the floor. See [`crate::enemy::Enemy::head_scan_dir`].
 pub(crate) const HEAD_SCAN_DIST: f32 = 6.0;
+/// Foot IK: how fast (1/s) each foot's applied ground offset eases toward the freshly
+/// sampled floor delta, so a foot crossing a stair edge glides onto the new step
+/// instead of popping. Also smooths the derived pelvis drop.
+pub(crate) const FOOT_IK_EASE: f32 = 10.0;
+/// Foot IK: the most (m) the pelvis will drop to let a trailing foot reach a lower
+/// step without a leg stretching bolt-straight. Caps the crouch on steep geometry.
+pub(crate) const FOOT_IK_MAX_DROP: f32 = 0.45;
+/// Foot IK: a floor sample this much (m) further below the root than this is treated as
+/// "no step here" (a ledge / hole under the foot) and that foot's grounding is skipped,
+/// so a hunter at a platform edge doesn't splay a leg into the void.
+pub(crate) const FOOT_IK_MAX_REACH: f32 = 0.9;
+/// Cadence (stride-warp) clamp: the locomotion phase-rate multiplier from the ratio of
+/// actual ground speed to the gait speed is held within this band, so a briefly-stalled
+/// or ORCA-shoved hunter neither freezes its feet nor sprints them. See
+/// [`engine::skeletal::layers::LocomotionBlendLayer::stride_scale`].
+pub(crate) const STRIDE_SCALE_MIN: f32 = 0.35;
+pub(crate) const STRIDE_SCALE_MAX: f32 = 1.5;
 /// Fallback barrel axis (gun-model space) for weapons whose muzzle offset is
 /// degenerate — the real axis is the measured muzzle-flash centroid direction.
 pub(crate) const BARREL_MODEL_AXIS: Vec3 = Vec3::NEG_Z;
@@ -226,6 +245,11 @@ pub(crate) struct EnemyArm {
     /// overlays — the two hands' common-ancestor (`Bone_2`) subtree, so the
     /// locomotion legs stay untouched and the hunter can run while aiming.
     upper_body: Vec<usize>,
+    /// Pelvis (root) joint — lowered by the foot-IK pelvis drop.
+    pelvis: usize,
+    /// The two leg IK chains `(hip, knee, foot)` — `[left, right]` — for ground-adaptive
+    /// foot IK. Each foot's global origin is solved onto the floor beneath it.
+    legs: [(usize, usize, usize); 2],
 }
 
 impl EnemyArm {
@@ -249,7 +273,16 @@ impl EnemyArm {
         let bind_globals = Pose::bind(sk).joint_global_transforms(sk);
         let head_rot = bind_globals[head].to_scale_rotation_translation().1;
         let head_forward = (head_rot.inverse() * Vec3::Z).normalize_or_zero();
-        Some(EnemyArm { shoulder, mid, end, chest, head, head_forward, upper_body })
+        // Leg IK chains: walk two parents up from each foot (foot←knee←hip).
+        let pelvis = sk.index_of(PELVIS_BONE)?;
+        let leg_chain = |foot_bone: &str| -> Option<(usize, usize, usize)> {
+            let foot = sk.index_of(foot_bone)?;
+            let knee = sk.parents[foot]?;
+            let hip = sk.parents[knee]?;
+            Some((hip, knee, foot))
+        };
+        let legs = [leg_chain(LEFT_FOOT_BONE)?, leg_chain(RIGHT_FOOT_BONE)?];
+        Some(EnemyArm { shoulder, mid, end, chest, head, head_forward, upper_body, pelvis, legs })
     }
 
     /// Right shoulder joint index (the ANIM_DEBUG arm measurement anchor).
@@ -1106,6 +1139,11 @@ pub(crate) struct EnemyInstance {
     /// focus (player / last-known / search point) at [`HEAD_LOOK_TRACK`] so a focus
     /// switch sweeps the gaze rather than snapping. `None` until the first focus.
     pub head_look_point: Option<Vec3>,
+    /// Foot IK: the eased per-foot vertical ground offset (world m, `[left, right]`) —
+    /// how far each foot is lifted/dropped from its animated height onto the floor
+    /// beneath it. Eased toward the freshly sampled floor delta at [`FOOT_IK_EASE`] so
+    /// stair edges glide rather than pop; also the source of the pelvis drop.
+    pub foot_delta: [f32; 2],
     /// Low-passed locomotion speed (m/s) for band selection — smooths the AI's
     /// binary `speed()` so the walk/jog/run band doesn't flip on frame-to-frame
     /// jitter. See [`LOCO_SMOOTH`].
@@ -1224,6 +1262,12 @@ pub struct World {
     /// authored clip + locomotion pose. Purely visual — it never touches perception
     /// or engagement, so the difficulty-0 combat baseline is unaffected either way.
     head_look: bool,
+    /// Whether hunters use **ground-adaptive foot IK** (feet plant on stairs/platforms
+    /// instead of floating/clipping) + stride-warped cadence (feet cycle at the real
+    /// ground speed instead of skating). **On by default.** A kill-switch / regression
+    /// baseline: when off, the model uses the raw locomotion pose seated at its root.
+    /// Purely visual (enemy model only) — no perception/engagement effect.
+    foot_ik: bool,
     /// Per-body world-space Y offset that seats that body's feet on the floor
     /// (parallel to [`Self::char_models`]). Computed from the **lowest skinned point
     /// of the actual idle pose** for each body (the bind-pose AABB can't be used —
@@ -1638,6 +1682,7 @@ impl World {
             hit_reactions: false, // Perfect-Dark sim style; flag for a future GE mode
             local_avoidance: true, // ORCA crowd steering on by default (kill-switch below)
             head_look: true, // procedural head look-at on by default (kill-switch below)
+            foot_ik: true, // ground-adaptive foot IK + cadence on by default (kill-switch below)
             char_feet_offset,
             enemy_arm,
             procedural_preview: None,
@@ -1768,6 +1813,18 @@ impl World {
     /// Whether procedural head look-at is active (inspection / tests).
     pub fn head_look(&self) -> bool {
         self.head_look
+    }
+
+    /// Toggle ground-adaptive foot IK + cadence (default ON — see [`Self::foot_ik`]).
+    /// Off, the model uses the raw locomotion pose seated at its root (pre-foot-IK
+    /// baseline).
+    pub fn set_foot_ik(&mut self, on: bool) {
+        self.foot_ik = on;
+    }
+
+    /// Whether foot IK is active (inspection / tests).
+    pub fn foot_ik(&self) -> bool {
+        self.foot_ik
     }
 
     /// The difficulty-derived tuning for the current level (see [`DiffParams`]). Linear

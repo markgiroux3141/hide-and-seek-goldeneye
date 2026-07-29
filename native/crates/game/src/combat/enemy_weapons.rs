@@ -77,6 +77,12 @@ pub const LEFT_HAND_BONE: &str = "Bone_8";
 /// focused on. There's no separate neck bone in the 15-bone rig, so this single
 /// head joint carries the whole gaze (cone-clamped to hide the missing neck).
 pub const HEAD_BONE: &str = "Bone_3";
+/// The pelvis (root) bone and the two foot bones, for ground-adaptive foot IK. Leg
+/// chains walk up from each foot: `Bone_14`←`Bone_12`←`Bone_10` (left),
+/// `Bone_15`←`Bone_13`←`Bone_11` (right); all three hang off the pelvis `Bone_1`.
+pub const PELVIS_BONE: &str = "Bone_1";
+pub const LEFT_FOOT_BONE: &str = "Bone_14";
+pub const RIGHT_FOOT_BONE: &str = "Bone_15";
 
 // ─── Bespoke source offsets (EnemyWeaponConfig.ts) ──────────────────────────────
 // Pistol class defaults come from pp7; rifle class defaults from kf7; the dual

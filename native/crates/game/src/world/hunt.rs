@@ -14,6 +14,89 @@ pub(crate) fn char_transform_raw(feet: Vec3, yaw: f32, feet_off: f32) -> Mat4 {
         * Mat4::from_scale(Vec3::splat(CHAR_SCALE))
 }
 
+/// Ground-adaptive **foot IK** post-pass: after the animation stack has posed the
+/// hunter (seated with its root on the floor beneath its root cell), plant each foot on
+/// the floor *beneath that foot* — so on stairs / platform edges the feet land on their
+/// own tread instead of the whole model floating above the higher step or clipping
+/// through it. Runs on the finished `pose`; needs the world transform + nav floor query,
+/// so it lives here rather than in the engine stack.
+///
+/// Method (no root-motion, no sole calibration): read each foot's world position from
+/// the posed skeleton, sample the floor under it, and shift the foot vertically by
+/// `floor_under_foot − floor_under_root` (0 on flat ground → a no-op there). The shift
+/// is eased per foot ([`FOOT_IK_EASE`]) so a stair edge glides. The pelvis is then
+/// dropped by the most-negative shift (capped at [`FOOT_IK_MAX_DROP`]) so a trailing
+/// foot on a lower step reaches without a leg locking straight, and each foot is solved
+/// onto its target by the two-bone leg IK.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn ground_feet(
+    pose: &mut Pose,
+    sk: &engine::skeletal::Skeleton,
+    arm: &EnemyArm,
+    pos: Vec3,
+    yaw: f32,
+    feet_off: f32,
+    foot_delta: &mut [f32; 2],
+    nav: &engine::sim::nav::NavWorld,
+    dt: f32,
+) {
+    let ct = char_transform_raw(pos, yaw, feet_off);
+    let inv = ct.inverse();
+    let g = pose.joint_global_transforms(sk);
+    let root_floor = pos.y; // the root cell's floor (already snapped by the nav step)
+    let ease = 1.0 - (-dt * FOOT_IK_EASE).exp();
+    let ctx = LayerCtx { skeleton: sk, dt };
+
+    // Per-foot: sample the floor, ease the vertical shift, and build the ground target.
+    let mut targets: [Option<Vec3>; 2] = [None, None];
+    let mut pelvis_drop = 0.0f32; // most-negative eased shift (world m)
+    for k in 0..2 {
+        let (_, _, foot) = arm.legs[k];
+        let foot_world = ct.transform_point3(g[foot].to_scale_rotation_translation().2);
+        // Target shift vs the root's floor. No floor, or a floor far below the root
+        // (a ledge / hole under the foot), → ease back to the animated height (0).
+        let target_delta = match nav.floor_height_at(foot_world.x, foot_world.z, foot_world.y + 0.3) {
+            Some(fy) if fy - root_floor >= -FOOT_IK_MAX_REACH => fy - root_floor,
+            _ => 0.0,
+        };
+        foot_delta[k] += (target_delta - foot_delta[k]) * ease;
+        pelvis_drop = pelvis_drop.min(foot_delta[k]);
+        let target_world = foot_world + Vec3::Y * foot_delta[k];
+        targets[k] = Some(inv.transform_point3(target_world));
+    }
+
+    // Drop the pelvis (root, whose local space is model space) so the lower foot reaches
+    // without over-extending; convert the world drop to model units via the char scale.
+    let drop = pelvis_drop.clamp(-FOOT_IK_MAX_DROP, 0.0);
+    if drop < 0.0 {
+        RootTranslateLayer {
+            joint: arm.pelvis,
+            offset: Vec3::new(0.0, drop / CHAR_SCALE, 0.0),
+            enabled: true,
+        }
+        .apply(pose, &ctx);
+    }
+
+    // Solve each foot onto its (absolute, model-space) ground target from the lowered
+    // hips. Targets were captured pre-drop, so the IK reaches the real ground point.
+    for k in 0..2 {
+        if let Some(target) = targets[k] {
+            let (root, mid, end) = arm.legs[k];
+            TwoBoneIkLayer {
+                root,
+                mid,
+                end,
+                target,
+                reach_frac: 0.0,
+                pole: Vec3::ZERO,
+                weight: 1.0,
+                enabled: true,
+            }
+            .apply(pose, &ctx);
+        }
+    }
+}
+
 /// Locomotion band (clip index 0=idle,1=walk,2=jog,3=run) for a speed (m/s),
 /// matching the JS `_playLocomotion` thresholds.
 pub(crate) fn band_for_speed(speed: f32) -> usize {
@@ -167,12 +250,17 @@ impl World {
         // they don't clash with the per-hunter `&mut` borrow. The chest-aim points the
         // gun barrel at this, so the hunters track the player's height as well as bearing.
         let aim_point = self.player_pos().map(|p| p + Vec3::Y * PLAYER_AIM_Y);
-        // Head look-at kill-switch, read once so it doesn't reborrow `self` in the loop.
+        // Head look-at + foot-IK kill-switches, read once so they don't reborrow `self`
+        // in the loop.
         let head_look_on = self.head_look;
-        // Bodies + feet offsets are DISJOINT fields from `enemies`, so both can be
-        // held across the `&mut enemies` loop; each hunter indexes its own body.
+        let foot_ik_on = self.foot_ik;
+        // Bodies + feet offsets + resolved rig + nav are DISJOINT fields from `enemies`,
+        // so all can be held across the `&mut enemies` loop; each hunter indexes its own
+        // body. `nav` is the floor-height source for ground-adaptive foot IK.
         let models = &self.char_models;
         let feet_offs = &self.char_feet_offset;
+        let arms = &self.enemy_arm;
+        let nav = self.nav.as_ref();
 
         for inst in &mut self.enemies {
             // Low-pass the AI's per-step speed → a continuous locomotion speed that
@@ -210,8 +298,20 @@ impl World {
             // (fire is a timer, never on the mixer) but keeps the check honest.
             let one_shot =
                 inst.anim.is_playing_oneshot() && !is_fire_clip(inst.anim.current_clip());
+            // Cadence: warp the gait phase rate to the hunter's ACTUAL committed ground
+            // speed (which ORCA can drop below the intended gait speed), so the feet
+            // cycle at the real travel rate instead of skating. Only while moving; off
+            // (1.0) when foot-IK is disabled or the hunter is ~stopped.
+            let stride_scale = if foot_ik_on && inst.anim_speed > 0.2 {
+                let v = inst.enemy.velocity();
+                let actual = (v.x * v.x + v.z * v.z).sqrt();
+                (actual / inst.anim_speed).clamp(STRIDE_SCALE_MIN, STRIDE_SCALE_MAX)
+            } else {
+                1.0
+            };
             if let Some(loco) = inst.stack.layer_as::<LocomotionBlendLayer>(ENEMY_LOCO_LAYER) {
                 loco.speed = inst.anim_speed;
+                loco.stride_scale = stride_scale;
                 loco.enabled = !one_shot;
             }
             let engaged = matches!(
@@ -313,7 +413,29 @@ impl World {
                 Pose::bind(sk)
             };
             let ctx = LayerCtx { skeleton: sk, dt };
-            inst.final_pose = Some(inst.stack.evaluate(base, &ctx));
+            let mut pose = inst.stack.evaluate(base, &ctx);
+
+            // ── Ground-adaptive foot IK post-pass (after the stack, not a stack layer:
+            // the feet must be read from the finished locomotion pose, and grounding
+            // needs the world transform + nav floor query only the `World` has). Skipped
+            // during a hit/death one-shot so the canned clip plays untouched. ──
+            if foot_ik_on && !one_shot {
+                if let (Some(arm), Some(nav)) = (arms.get(inst.body).and_then(|a| a.as_ref()), nav) {
+                    let yaw = inst.yaw();
+                    ground_feet(
+                        &mut pose,
+                        sk,
+                        arm,
+                        inst.enemy.pos,
+                        yaw,
+                        feet_off,
+                        &mut inst.foot_delta,
+                        nav,
+                        dt,
+                    );
+                }
+            }
+            inst.final_pose = Some(pose);
         }
 
         self.log_anim_debug();

@@ -1848,6 +1848,49 @@ use super::editing::find_room_brushes;
         );
     }
 
+    /// Foot-IK leg chains: each resolved `(hip, knee, foot)` chain solves the foot onto
+    /// a reachable ground target — the headless proof the leg chains resolve to real
+    /// hip/knee/foot joints and the two-bone solve plants the foot. Skips w/o assets.
+    #[test]
+    fn foot_ik_plants_each_foot_on_a_reachable_target() {
+        let world = World::new();
+        let (Some(arm), Some(model)) = (
+            world.enemy_arm.first().and_then(|a| a.as_ref()),
+            world.char_models.first(),
+        ) else {
+            eprintln!("skipping: character assets not loaded");
+            return;
+        };
+        let sk = &model.skeleton;
+        let ctx = LayerCtx { skeleton: sk, dt: 0.0 };
+        for k in 0..2 {
+            let (root, mid, end) = arm.legs[k];
+            let base = Pose::bind(sk);
+            let g = base.joint_global_transforms(sk);
+            let a = g[root].to_scale_rotation_translation().2;
+            let b = g[mid].to_scale_rotation_translation().2;
+            let c = g[end].to_scale_rotation_translation().2;
+            let l = (b - a).length() + (c - b).length();
+            // Reachable target at 70% of leg reach, offset off-axis so the knee bends.
+            let target = a + Vec3::new(0.2, -0.9, 0.3).normalize() * (0.7 * l);
+            let mut ik = TwoBoneIkLayer {
+                root,
+                mid,
+                end,
+                target,
+                reach_frac: 0.0,
+                pole: Vec3::ZERO,
+                weight: 1.0,
+                enabled: true,
+            };
+            let mut pose = base;
+            ik.apply(&mut pose, &ctx);
+            let reached = pose.joint_global_transforms(sk)[end].to_scale_rotation_translation().2;
+            let err = (reached - target).length();
+            assert!(err < 1e-2, "leg {k} foot should reach the ground target (off by {err})");
+        }
+    }
+
     /// PERF BASELINE (run: `cargo test --release bench_rebake_slot1 -- --nocapture --ignored`).
     /// Loads slot1 and times the CSG paths on its single region so we can measure
     /// the fold-once / incremental optimizations against real authored data.

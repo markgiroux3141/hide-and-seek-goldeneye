@@ -506,6 +506,40 @@ impl PoseLayer for ClipOverlayLayer {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Root translate layer — offset one joint's local position (pelvis drop for foot IK).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Adds a fixed offset to ONE joint's **local** translation. Used to lower the pelvis
+/// (the root joint, whose local space is model space) so ground-adaptive foot IK can
+/// plant both feet on uneven ground — stairs, platform edges — without a leg stretching
+/// straight to reach a lower step. Runs after locomotion (which sets the leg pose) and
+/// before the foot IK (which then solves each foot to the ground from the lowered hips).
+/// A no-op at `offset == 0` or when disabled.
+pub struct RootTranslateLayer {
+    pub joint: usize,
+    /// Local-space translation added to the joint (model space for the root joint).
+    pub offset: Vec3,
+    pub enabled: bool,
+}
+
+impl PoseLayer for RootTranslateLayer {
+    fn apply(&mut self, pose: &mut Pose, _ctx: &LayerCtx) {
+        if !self.enabled || self.joint >= pose.joint_count() {
+            return;
+        }
+        pose.t[self.joint] += self.offset;
+    }
+
+    fn name(&self) -> &str {
+        "root-translate"
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Additive decay layer — recoil (stateful additive).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -592,6 +626,12 @@ pub struct LocomotionBlendLayer {
     anchors: Vec<(f32, AnimationClip)>,
     /// Target locomotion speed (m/s); clamped into the anchor range.
     pub speed: f32,
+    /// Multiplier on the gait phase advance rate — the cadence knob. `1.0` cycles the
+    /// feet at the blended clip's authored cadence; `< 1.0` slows the cadence so the
+    /// stride matches a character whose ACTUAL ground speed is below the gait speed
+    /// (e.g. an avoidance-yielded hunter), cutting foot-skate. Pose blend is unaffected
+    /// (that still comes from [`Self::speed`]); only the foot timing changes.
+    pub stride_scale: f32,
     /// Shared normalized gait phase `[0,1)`.
     phase: f32,
     /// When false, the layer is a no-op — so a hit/death one-shot pose fed as the
@@ -607,6 +647,7 @@ impl LocomotionBlendLayer {
         LocomotionBlendLayer {
             anchors,
             speed: 0.0,
+            stride_scale: 1.0,
             phase: 0.0,
             enabled: true,
         }
@@ -660,9 +701,11 @@ impl PoseLayer for LocomotionBlendLayer {
         }
 
         // Advance the shared phase by the BLENDED cadence, so a faster gait cycles
-        // faster and the two clips stay in step.
+        // faster and the two clips stay in step. `stride_scale` warps the cadence to
+        // the character's real ground speed (cut foot-skate) without touching the pose.
         let period = d0 + (d1 - d0) * w;
-        self.phase = (self.phase + ctx.dt / period.max(1e-3)).rem_euclid(1.0);
+        self.phase =
+            (self.phase + self.stride_scale.max(0.0) * ctx.dt / period.max(1e-3)).rem_euclid(1.0);
     }
 
     fn name(&self) -> &str {
@@ -970,6 +1013,55 @@ mod tests {
         let mut pose = Pose::bind(sk);
         loco.apply(&mut pose, &LayerCtx { skeleton: sk, dt: 1.0 / 60.0 });
         assert!(loco.phase > 0.0 && loco.phase < 1.0, "phase advanced into range");
+    }
+
+    /// Cadence knob: halving `stride_scale` halves the phase advance (feet cycle at
+    /// half rate) — the pose blend is untouched, only the timing.
+    #[test]
+    fn stride_scale_warps_cadence() {
+        let m = karl();
+        let sk = &m.skeleton;
+        let dt = 1.0 / 60.0;
+        let mut full = loco_layer(sk);
+        full.speed = 5.0;
+        full.phase = 0.0;
+        full.stride_scale = 1.0;
+        let mut half = loco_layer(sk);
+        half.speed = 5.0;
+        half.phase = 0.0;
+        half.stride_scale = 0.5;
+        let mut pf = Pose::bind(sk);
+        let mut ph = Pose::bind(sk);
+        full.apply(&mut pf, &LayerCtx { skeleton: sk, dt });
+        half.apply(&mut ph, &LayerCtx { skeleton: sk, dt });
+        assert!(full.phase > 0.0, "full-stride phase advanced");
+        assert!(
+            (half.phase - full.phase * 0.5).abs() < 1e-6,
+            "half stride_scale should advance phase half as far ({} vs {})",
+            half.phase,
+            full.phase
+        );
+    }
+
+    /// Root translate offsets the joint's local position, and is a no-op when disabled.
+    #[test]
+    fn root_translate_offsets_joint_and_respects_enabled() {
+        let m = karl();
+        let sk = &m.skeleton;
+        let root = sk.index_of("Bone_1").expect("pelvis");
+        let base = Pose::bind(sk);
+        let off = Vec3::new(0.0, -5.0, 0.0);
+        let ctx = LayerCtx { skeleton: sk, dt: 0.0 };
+
+        let mut on = RootTranslateLayer { joint: root, offset: off, enabled: true };
+        let mut p = base.clone();
+        on.apply(&mut p, &ctx);
+        assert!((p.t[root] - (base.t[root] + off)).length() < 1e-6, "offset should apply");
+
+        let mut off_layer = RootTranslateLayer { joint: root, offset: off, enabled: false };
+        let mut p2 = base.clone();
+        off_layer.apply(&mut p2, &ctx);
+        assert!((p2.t[root] - base.t[root]).length() < 1e-6, "disabled must be a no-op");
     }
 
     /// The stack composes: IK aims the arm, recoil rides on top, and the final
