@@ -18,7 +18,7 @@ use crate::character::CharacterController;
 // module fully-qualified (`crate::combat::…`) to avoid the shadow.
 use engine::assets::textured_model::TexturedModel;
 use engine::audio::AudioManager;
-use crate::combat::enemy_weapons::{LEFT_HAND_BONE, RIGHT_HAND_BONE};
+use crate::combat::enemy_weapons::{HEAD_BONE, LEFT_HAND_BONE, RIGHT_HAND_BONE};
 use crate::combat::{enemy_def_for, EnemyWeaponClass, EnemyWeaponDef, Weapon};
 use engine::geometry::csg_runtime::{
     Axis, Brush, Op, Region, Side, StairDesc, StairDir, WALL_THICKNESS, WORLD_SCALE,
@@ -139,15 +139,32 @@ pub(crate) const CHAR_SCALE: f32 = 0.000_832; // 0.00104 × 0.8
 // over-twists the torso.
 /// Stack layer indices for a hunter's [`LayeredAnimator`] (build order in
 /// [`EnemyArm::build_stack`]): locomotion base, upper-body aim overlay, chest-aim
-/// correction, recoil.
+/// correction, head look-at, recoil. The head look-at sits AFTER the chest-aim so it
+/// overrides the overlay's authored head pose and resolves globals against the
+/// already-swung chest (its parent); recoil (shoulder-local) stays last.
 pub(crate) const ENEMY_LOCO_LAYER: usize = 0;
 pub(crate) const ENEMY_AIM_OVERLAY_LAYER: usize = 1;
 pub(crate) const ENEMY_CHEST_AIM_LAYER: usize = 2;
-pub(crate) const ENEMY_RECOIL_LAYER: usize = 3;
+pub(crate) const ENEMY_HEAD_LOOK_LAYER: usize = 3;
+pub(crate) const ENEMY_RECOIL_LAYER: usize = 4;
 /// Aim cone (radians) the chest may swing to point the barrel at the player — wide
 /// enough for the clip bias (~45°) plus pitch, capped (~80°) so a target that's
 /// swung behind the shoulder pins the torso at the edge instead of contorting it.
 pub(crate) const ENEMY_CHEST_AIM_CONE: f32 = 1.4;
+/// Gaze cone (radians, ~55°) the head may swing to look at what the hunter is
+/// focused on. Deliberately TIGHTER than the chest cone: the 15-bone rig has no
+/// separate neck, so a lone head joint over-rotated past ~60° reads as the head
+/// detaching from a rigid neck. Anything beyond the cone is left to the body yaw
+/// (which turns at [`TURN_RATE`]) to bring back into range.
+pub(crate) const ENEMY_HEAD_LOOK_CONE: f32 = 0.95;
+/// Ease rate (1/s) the smoothed head look POINT tracks toward the current focus,
+/// so switching focus (player ↔ last-known ↔ search point) sweeps the gaze across
+/// instead of snapping it. The look WEIGHT eases separately at [`AIM_RAMP`].
+pub(crate) const HEAD_LOOK_TRACK: f32 = 8.0;
+/// How far (m) ahead a blindly-hunting hunter's head-scan point sits along its scan
+/// direction — far enough that the gaze reads as a direction (a level scan), not a
+/// look at a spot on the floor. See [`crate::enemy::Enemy::head_scan_dir`].
+pub(crate) const HEAD_SCAN_DIST: f32 = 6.0;
 /// Fallback barrel axis (gun-model space) for weapons whose muzzle offset is
 /// degenerate — the real axis is the measured muzzle-flash centroid direction.
 pub(crate) const BARREL_MODEL_AXIS: Vec3 = Vec3::NEG_Z;
@@ -197,6 +214,14 @@ pub(crate) struct EnemyArm {
     /// Chest joint (`Bone_2`, the two hands' common ancestor + parent of both arms)
     /// — the joint the chest-aim correction rotates to point the barrel at the player.
     chest: usize,
+    /// Head joint (`Bone_3`) — the joint the head look-at rotates toward the hunter's
+    /// current focus (player / last-known / search point).
+    head: usize,
+    /// The head's gaze axis expressed in the head joint's LOCAL frame — the fixed
+    /// anatomical "forward" the look-at layer swings toward the target. Derived from
+    /// the bind pose (`head_global_rot⁻¹ · model_forward`), so it's frame-invariant:
+    /// `head_global_rot · head_forward` recovers the world gaze at any runtime pose.
+    head_forward: Vec3,
     /// Upper-body joint mask (chest + head + both arms) the authored aim clip
     /// overlays — the two hands' common-ancestor (`Bone_2`) subtree, so the
     /// locomotion legs stay untouched and the hunter can run while aiming.
@@ -217,7 +242,14 @@ impl EnemyArm {
         let left_hand = sk.index_of(LEFT_HAND_BONE)?;
         let chest = sk.lowest_common_ancestor(&[end, left_hand])?;
         let upper_body = sk.subtree(chest);
-        Some(EnemyArm { shoulder, mid, end, chest, upper_body })
+        // Head gaze axis in the head's local frame, from the bind pose. The model
+        // faces +Z at rest (see `char_transform_raw`), so world gaze = +Z there;
+        // expressing that in the head's local frame gives a pose-invariant forward.
+        let head = sk.index_of(HEAD_BONE)?;
+        let bind_globals = Pose::bind(sk).joint_global_transforms(sk);
+        let head_rot = bind_globals[head].to_scale_rotation_translation().1;
+        let head_forward = (head_rot.inverse() * Vec3::Z).normalize_or_zero();
+        Some(EnemyArm { shoulder, mid, end, chest, head, head_forward, upper_body })
     }
 
     /// Right shoulder joint index (the ANIM_DEBUG arm measurement anchor).
@@ -230,8 +262,11 @@ impl EnemyArm {
     /// fire/aim pose, which holds the gun correctly in both hands), a **chest-aim**
     /// that rotates the whole hold so the real gun barrel points at the player
     /// (`spawn_wave` sets its per-weapon `forward`; `advance_animation` drives its
-    /// target + weight), then recoil on the right shoulder. The overlay + chest-aim
-    /// weights are eased 0↔1 in `advance_animation`.
+    /// target + weight), a **head look-at** that turns the head toward whatever the
+    /// hunter is focused on, then recoil on the right shoulder. The overlay / chest-aim
+    /// / head-look weights are all eased 0↔1 in `advance_animation`. The head-look's
+    /// `forward` (the gaze axis) is baked from the rig, so it's live here; `spawn_wave`
+    /// just flips its `enabled` on (kept off in headless callers that don't drive it).
     fn build_stack(
         &self,
         loco_clips: Vec<(f32, clip::AnimationClip)>,
@@ -247,6 +282,14 @@ impl EnemyArm {
             max_angle: ENEMY_CHEST_AIM_CONE,
             weight: 0.0,
             enabled: false,         // enabled once its `forward` is measured
+        }));
+        s.push(Box::new(AimOffsetLayer {
+            joint: self.head,
+            forward: self.head_forward, // baked gaze axis (head-local)
+            target: Vec3::Z,            // set to the focus point each frame in `advance_animation`
+            max_angle: ENEMY_HEAD_LOOK_CONE,
+            weight: 0.0,
+            enabled: false,             // `spawn_wave` enables it (off in headless callers)
         }));
         s.push(Box::new(AdditiveDecayLayer::new(
             self.shoulder,
@@ -1055,6 +1098,14 @@ pub(crate) struct EnemyInstance {
     pub stack: LayeredAnimator,
     /// Eased aim weight (0 = arm follows the clip, 1 = full aim swing at player).
     pub aim_weight: f32,
+    /// Eased head look-at weight (0 = head follows the clip/loco pose, 1 = full gaze
+    /// swing toward the focus). Ramped like [`Self::aim_weight`] so the head raises /
+    /// lowers its gaze smoothly as the hunter acquires / loses a focus.
+    pub head_look_weight: f32,
+    /// Smoothed WORLD-space point the head is looking at — eased toward the current
+    /// focus (player / last-known / search point) at [`HEAD_LOOK_TRACK`] so a focus
+    /// switch sweeps the gaze rather than snapping. `None` until the first focus.
+    pub head_look_point: Option<Vec3>,
     /// Low-passed locomotion speed (m/s) for band selection — smooths the AI's
     /// binary `speed()` so the walk/jog/run band doesn't flip on frame-to-frame
     /// jitter. See [`LOCO_SMOOTH`].
@@ -1166,6 +1217,13 @@ pub struct World {
     /// quality only — it never changes who/when a hunter shoots, so the difficulty-0
     /// engagement baseline is unaffected either way.
     local_avoidance: bool,
+    /// Whether hunters turn their **head toward what they're focused on** (the player
+    /// while engaged, the last-known position while investigating, the search point
+    /// while sweeping) — the procedural look-at "aliveness" cue. **On by default.**
+    /// A kill-switch / regression baseline: when off, the head just follows the
+    /// authored clip + locomotion pose. Purely visual — it never touches perception
+    /// or engagement, so the difficulty-0 combat baseline is unaffected either way.
+    head_look: bool,
     /// Per-body world-space Y offset that seats that body's feet on the floor
     /// (parallel to [`Self::char_models`]). Computed from the **lowest skinned point
     /// of the actual idle pose** for each body (the bind-pose AABB can't be used —
@@ -1197,6 +1255,12 @@ pub struct World {
     /// Dev/observe toggle (`I`): when set, the player takes no damage — enemies
     /// still aim + fire so their behaviour can be watched safely. Default off.
     player_invulnerable: bool,
+    /// Dev/observe toggle (`N`, "iNvisible"): when set, no hunter can perceive the
+    /// player (see [`crate::enemy::Enemy::set_detectable`]), so they never engage and
+    /// revert to searching — you can walk around and watch the search + head-scan
+    /// behaviour. Applied to every hunter each step in `fixed_step`. Default off (all
+    /// hunters detectable).
+    player_invisible: bool,
     /// Red full-screen damage-flash alpha (decays each frame).
     damage_flash: f32,
     /// Health-HUD pop timer (s); the radial HUD is shown while >0, fading over its
@@ -1573,6 +1637,7 @@ impl World {
             hunt_spawn: None,
             hit_reactions: false, // Perfect-Dark sim style; flag for a future GE mode
             local_avoidance: true, // ORCA crowd steering on by default (kill-switch below)
+            head_look: true, // procedural head look-at on by default (kill-switch below)
             char_feet_offset,
             enemy_arm,
             procedural_preview: None,
@@ -1582,6 +1647,7 @@ impl World {
             player_armor: 0.0,
             player_dead: false,
             player_invulnerable: false,
+            player_invisible: false,
             damage_flash: 0.0,
             hud_show_timer: 0.0,
             health_hud,
@@ -1691,6 +1757,17 @@ impl World {
     /// Whether ORCA local avoidance is active (inspection / tests).
     pub fn local_avoidance(&self) -> bool {
         self.local_avoidance
+    }
+
+    /// Toggle procedural head look-at (default ON — see [`Self::head_look`]). Off, the
+    /// head follows only the authored clip + locomotion pose (the pre-look-at baseline).
+    pub fn set_head_look(&mut self, on: bool) {
+        self.head_look = on;
+    }
+
+    /// Whether procedural head look-at is active (inspection / tests).
+    pub fn head_look(&self) -> bool {
+        self.head_look
     }
 
     /// The difficulty-derived tuning for the current level (see [`DiffParams`]). Linear

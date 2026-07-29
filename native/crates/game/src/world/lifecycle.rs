@@ -156,10 +156,16 @@ impl World {
                 let prev_pos: Vec<Vec3> = enemies.iter().map(|e| e.enemy.pos).collect();
                 // Difficulty-scaled FSM knobs (reaction/cooldown/dodge) for this step.
                 let tuning = self.ai_tuning();
+                // Player-visibility toggle (`N`): when invisible, hunters can't perceive
+                // the player and revert to searching (dev/observe aid for the head-scan).
+                let player_visible = !self.player_invisible;
                 let mut fire_requests: Vec<usize> = Vec::new();
                 let mut needs_target: Vec<usize> = Vec::new();
                 let mut any_caught = false;
                 for (i, inst) in enemies.iter_mut().enumerate() {
+                    // Apply the player-visibility toggle so an invisible player can't be
+                    // perceived (all LOS/proximity checks in `update` fail).
+                    inst.enemy.set_detectable(player_visible);
                     // Is THIS hunter mid fire burst? (the JS `enemyState === 'action'`
                     // proxy the attack→cooldown transition needs). Firing is a timer
                     // now, so the hunter can move + aim through it.
@@ -569,6 +575,12 @@ impl World {
                             }
                         }
                     }
+                    // Enable the head look-at (its gaze `forward` is baked from the rig
+                    // in `build_stack`); `advance_animation` drives its target + weight,
+                    // and honours the `head_look` kill-switch.
+                    if let Some(hl) = s.layer_as::<AimOffsetLayer>(ENEMY_HEAD_LOOK_LAYER) {
+                        hl.enabled = true;
+                    }
                     s
                 }
                 _ => LayeredAnimator::default(),
@@ -596,6 +608,8 @@ impl World {
                 blood: vec![1.0f32; vert_count * 3],
                 stack,
                 aim_weight: 0.0,
+                head_look_weight: 0.0,
+                head_look_point: None,
                 anim_speed: 0.0,
                 render_yaw: None,
                 final_pose: None,

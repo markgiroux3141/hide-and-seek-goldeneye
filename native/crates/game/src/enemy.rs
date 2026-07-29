@@ -198,6 +198,12 @@ const SEARCH_HALF_CONE: f32 = 70.0 * std::f32::consts::PI / 180.0; // ±70° per
 /// How fast the searching view axis sweeps (rad/s). A full circle every ~2.4 s — under
 /// the 3 s stall threshold — so a visible player is always caught within one sweep.
 const SEARCH_SWEEP_RATE: f32 = 2.6;
+/// Peak head-scan swing (rad, ~46°) a blindly-hunting hunter turns its head left↔right
+/// while its body faces its travel direction — the readable VISUAL analogue of the
+/// invisible 360° perception sweep above. Kept inside the head look-at cone
+/// (`ENEMY_HEAD_LOOK_CONE`) so the gaze never pins at the clamp. See
+/// [`Enemy::head_scan_dir`].
+const HEAD_SCAN_AMP: f32 = 0.8;
 /// A player closer than this is noticed **regardless of facing** (you can't sneak
 /// past a guard you're standing next to — footsteps/presence). Still LOS-gated, so a
 /// wall between hides you. Kills the "walks off ignoring me while I'm right here" bug.
@@ -396,6 +402,13 @@ pub struct Enemy {
     evade_dir: f32,
     /// Seconds until another reactive juke may trigger (rate-limits the dodging).
     evade_cooldown: f32,
+
+    /// Whether the player is currently perceivable by this hunter. The `World` sets it
+    /// each step from its player-visibility toggle (a dev/observe aid, bound to `N`);
+    /// when false, ALL perception in [`Self::update`] fails (no sight, no proximity), so
+    /// the hunter can never see / keep the player and drops back to searching — letting
+    /// you walk around and watch the search + head-scan behaviour. Defaults to `true`.
+    detectable: bool,
 }
 
 impl Enemy {
@@ -451,7 +464,15 @@ impl Enemy {
             evade_burst: 0.0,
             evade_dir: 1.0,
             evade_cooldown: 0.0,
+            detectable: true,
         }
+    }
+
+    /// Set whether the player is perceivable by this hunter (the `World`'s
+    /// player-visibility toggle). When `false`, perception is disabled and the hunter
+    /// reverts to searching. See [`Self::detectable`].
+    pub fn set_detectable(&mut self, v: bool) {
+        self.detectable = v;
     }
 
     /// The point this hunter is currently sweeping toward in `Search` (so the
@@ -538,6 +559,20 @@ impl Enemy {
     /// Horizontal facing (unit vector) — the direction the model faces.
     pub fn heading(&self) -> Vec3 {
         self.heading
+    }
+
+    /// A cosmetic head-scan DIRECTION for the blind states (Search / Idle): the body
+    /// heading swung left↔right by a smooth ±[`HEAD_SCAN_AMP`] oscillation, reusing the
+    /// perception sweep phase ([`Self::search_look`]) so it advances in step and paces
+    /// with the scan. The perception cone does a full 360° sweep for gameplay
+    /// ([`Self::perception_view`]) while the body faces its travel direction; this is
+    /// the readable VISUAL analogue — a searching hunter turning its head side to side —
+    /// for the head look-at to track. Stays inside the head cone so the gaze never pins.
+    pub fn head_scan_dir(&self) -> Vec3 {
+        let off = self.search_look.sin() * HEAD_SCAN_AMP;
+        let (s, c) = off.sin_cos();
+        let h = self.heading;
+        Vec3::new(h.x * c - h.z * s, 0.0, h.x * s + h.z * c).normalize_or_zero()
     }
 
     /// Current speed (m/s): the speed of the step taken this update (per-state),
@@ -797,7 +832,7 @@ impl Enemy {
         // position fresh while chasing/attacking. Two ways in, both LOS-gated: the
         // 120° detection cone out to `DETECTION_RANGE`, OR close proximity regardless
         // of facing (`PROXIMITY_RANGE`).
-        let has_los = perception_los(physics, self.pos, player_feet);
+        let has_los = self.detectable && perception_los(physics, self.pos, player_feet);
         let (look, half_cone) = self.perception_view(dt);
         let perceived = self.perceives(player_feet, has_los, tuning.sense, look, half_cone);
         if perceived {
@@ -887,7 +922,7 @@ impl Enemy {
             }
             AiState::Chase => {
                 let dist = self.dist_to(player_feet);
-                let los = perception_los(physics, self.pos, player_feet);
+                let los = self.detectable && perception_los(physics, self.pos, player_feet);
                 if dist <= attack_range && !fire_anim && los {
                     self.face(player_feet);
                     self.enter_attack();
@@ -940,7 +975,7 @@ impl Enemy {
             }
             AiState::Attack => {
                 let dist = self.dist_to(player_feet);
-                let los = perception_los(physics, self.pos, player_feet);
+                let los = self.detectable && perception_los(physics, self.pos, player_feet);
                 // Debounce the LOS bail: only a *sustained* loss ([`ATTACK_LOS_GRACE`])
                 // drops us to Chase, so a one-frame corner-seam flicker doesn't thrash
                 // Attack↔Chase (the ORCA-exposed jank the lab caught).
@@ -1046,7 +1081,7 @@ impl Enemy {
                     self.reposition_target = None;
                     self.face(player_feet);
                     let dist = self.dist_to(player_feet);
-                    let los = perception_los(physics, self.pos, player_feet);
+                    let los = self.detectable && perception_los(physics, self.pos, player_feet);
                     if dist <= attack_range && los {
                         self.enter_attack();
                     } else if dist <= perception {
@@ -1067,7 +1102,7 @@ impl Enemy {
                     Some(t) => self.move_toward(dt, t, nav, SPEED_ADVANCE * tuning.speed_mult),
                     None => true,
                 };
-                let hidden = !perception_los(physics, self.pos, player_feet);
+                let hidden = !(self.detectable && perception_los(physics, self.pos, player_feet));
                 if arrived || hidden {
                     self.face(player_feet); // ready to pop back out
                     self.cover_timer += dt;
@@ -1099,7 +1134,7 @@ impl Enemy {
                     Some(t) => self.move_toward(dt, t, nav, SPEED_ADVANCE * tuning.speed_mult),
                     None => true,
                 };
-                let los = perception_los(physics, self.pos, player_feet);
+                let los = self.detectable && perception_los(physics, self.pos, player_feet);
                 if arrived {
                     // Keep dodging while exposed at the peek: if the player has a bead
                     // on us, juke off the shot line (same reactive evade as Attack), so
@@ -1716,6 +1751,37 @@ mod tests {
         let dv = e.desired_vel;
         e.integrate_move(dv, dt, nav);
         step
+    }
+
+    /// Player-visibility toggle (the `N` dev/observe aid): with `detectable` false, a
+    /// hunter never perceives a player in plain sight — no last-known, no fire — so it
+    /// stays blind (searching); with `detectable` true the same setup acquires it.
+    #[test]
+    fn undetectable_player_is_never_perceived() {
+        let nav = open_room();
+        let dt = 1.0 / 60.0;
+        let player = Vec3::new(4.0, 0.0, 10.0);
+        // Returns (acquired the player?, ever wanted to fire?) after a run.
+        let run = |detectable: bool| -> (bool, bool) {
+            let mut physics = PhysicsWorld::new(); // empty → LOS always clear
+            let feet = Vec3::new(4.0, 0.05, 4.0); // ~6 m away, facing the player
+            let collider = physics.add_enemy_collider(feet, 0.24, 0.48);
+            let mut e = Enemy::new(feet, player);
+            let tuning = AiTuning { sense: 1.4, ..AiTuning::default() };
+            let mut ever_fire = false;
+            for _ in 0..300 {
+                e.set_detectable(detectable); // the `World` sets this each step
+                let step = drive(&mut e, dt, player, 3.0, tuning, false, &nav, &mut physics, false, collider);
+                ever_fire |= step.want_fire;
+            }
+            (e.last_known().is_some(), ever_fire)
+        };
+
+        let (seen, _) = run(true);
+        assert!(seen, "a detectable player in plain sight should be perceived");
+        let (acquired, fired) = run(false);
+        assert!(!acquired, "an invisible player must never be perceived (no last-known)");
+        assert!(!fired, "an invisible player must never draw fire");
     }
 
     /// #2 suppressing fire: a difficulty-aggressive hunter (`suppress` 1) opens fire

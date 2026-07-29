@@ -289,7 +289,7 @@ impl ApplicationHandler for App {
             world.attach_audio(audio);
         }
         log::info!(
-            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  F1-F8=load level slot  Ctrl+F1-F8=save level slot  Y=proc-anim preview(Z=fire)  I=invincible  G=HUNT  [HUNT: click=fire  RMB=aim  R=reload  Q=weapon  F=detonate mines]"
+            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  F1-F8=load level slot  Ctrl+F1-F8=save level slot  Y=proc-anim preview(Z=fire)  I=invincible  N=invisible  G=HUNT  [HUNT: click=fire  RMB=aim  R=reload  Q=weapon  F=detonate mines]"
         );
 
         window.request_redraw();
@@ -732,6 +732,14 @@ impl App {
         if code == KeyCode::KeyI {
             if let Some(world) = self.world.as_mut() {
                 world.toggle_invulnerable();
+            }
+            return;
+        }
+        // N toggles player invisibility (dev/observe): no hunter can perceive you, so
+        // the pack drops to searching — walk around and watch them scan for you.
+        if code == KeyCode::KeyN {
+            if let Some(world) = self.world.as_mut() {
+                world.toggle_invisible();
             }
             return;
         }

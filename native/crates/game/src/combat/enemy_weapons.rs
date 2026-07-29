@@ -72,6 +72,11 @@ pub const ENEMY_DAMAGE: f32 = 8.0;
 /// copy (JS `Bone_8`).
 pub const RIGHT_HAND_BONE: &str = "Bone_9";
 pub const LEFT_HAND_BONE: &str = "Bone_8";
+/// The head bone (`Bone_3`, a direct child of the chest `Bone_2`) — the joint the
+/// procedural head look-at rotates so a hunter turns its head toward what it's
+/// focused on. There's no separate neck bone in the 15-bone rig, so this single
+/// head joint carries the whole gaze (cone-clamped to hide the missing neck).
+pub const HEAD_BONE: &str = "Bone_3";
 
 // ─── Bespoke source offsets (EnemyWeaponConfig.ts) ──────────────────────────────
 // Pistol class defaults come from pp7; rifle class defaults from kf7; the dual

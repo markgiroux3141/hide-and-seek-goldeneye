@@ -1773,6 +1773,81 @@ use super::editing::find_room_brushes;
         );
     }
 
+    /// Head look-at oracle: the gaze axis baked from the rig (`EnemyArm::head_forward`),
+    /// swung by the head look-at layer, ends up pointing from the head at the focus —
+    /// the headless proof the head actually turns toward what the hunter's thinking
+    /// about. Also checks the missing-neck safeguard: a focus behind the head clamps
+    /// the swing to [`ENEMY_HEAD_LOOK_CONE`] instead of over-rotating. Skips w/o assets.
+    #[test]
+    fn head_look_points_the_head_at_the_focus_and_clamps_to_the_cone() {
+        let world = World::new();
+        let (Some(arm), Some(template), Some(model)) = (
+            world.enemy_arm.first().and_then(|a| a.as_ref()),
+            world.char_anim_template.as_ref(),
+            world.char_models.first(),
+        ) else {
+            eprintln!("skipping: character assets not loaded");
+            return;
+        };
+        let sk = &model.skeleton;
+        let loco: Vec<(f32, clip::AnimationClip)> = vec![
+            (0.0, template.clip(0).unwrap().clone()),
+            (anim_set::SPEED_WALK, template.clip(1).unwrap().clone()),
+            (anim_set::SPEED_JOG, template.clip(2).unwrap().clone()),
+            (anim_set::SPEED_RUN, template.clip(3).unwrap().clone()),
+        ];
+        let aim_clip = template.clip(FIRE_RIFLE_IDX).unwrap().clone();
+        let ctx = LayerCtx { skeleton: sk, dt: 0.0 };
+
+        // (a) Wide cone → the gaze lands on an in-front, reachable model-space focus.
+        let focus = Vec3::new(0.5, 1.4, 3.0);
+        let mut stack = arm.build_stack(loco.clone(), aim_clip.clone());
+        {
+            let hl = stack.layer_as::<AimOffsetLayer>(ENEMY_HEAD_LOOK_LAYER).unwrap();
+            hl.target = focus;
+            hl.max_angle = std::f32::consts::PI;
+            hl.weight = 1.0;
+            hl.enabled = true;
+        }
+        let posed = stack.evaluate(Pose::bind(sk), &ctx);
+        let g = posed.joint_global_transforms(sk);
+        let (_, head_rot, head_origin) = g[arm.head].to_scale_rotation_translation();
+        let gaze = (head_rot * arm.head_forward).normalize();
+        let to_focus = (focus - head_origin).normalize();
+        let err = gaze.angle_between(to_focus);
+        assert!(
+            err < 0.05,
+            "head gaze should point at the focus (off by {err} rad); gaze={gaze:?} to_focus={to_focus:?}"
+        );
+
+        // (b) A focus directly behind → the swing is clamped to the gaze cone (the
+        // no-neck safeguard), never a full 180° over-rotation.
+        let rest = arm.build_stack(loco.clone(), aim_clip.clone())
+            .evaluate(Pose::bind(sk), &ctx);
+        let rest_gaze = {
+            let rg = rest.joint_global_transforms(sk)[arm.head].to_scale_rotation_translation().1;
+            (rg * arm.head_forward).normalize()
+        };
+        let mut stack2 = arm.build_stack(loco, aim_clip);
+        {
+            let hl = stack2.layer_as::<AimOffsetLayer>(ENEMY_HEAD_LOOK_LAYER).unwrap();
+            hl.target = head_origin - rest_gaze * 2.0; // behind the head
+            hl.max_angle = ENEMY_HEAD_LOOK_CONE;
+            hl.weight = 1.0;
+            hl.enabled = true;
+        }
+        let posed2 = stack2.evaluate(Pose::bind(sk), &ctx);
+        let swung_gaze = {
+            let rg = posed2.joint_global_transforms(sk)[arm.head].to_scale_rotation_translation().1;
+            (rg * arm.head_forward).normalize()
+        };
+        let swung = swung_gaze.angle_between(rest_gaze);
+        assert!(
+            swung <= ENEMY_HEAD_LOOK_CONE + 1e-2,
+            "gaze swing should clamp to the cone ({ENEMY_HEAD_LOOK_CONE} rad), got {swung}"
+        );
+    }
+
     /// PERF BASELINE (run: `cargo test --release bench_rebake_slot1 -- --nocapture --ignored`).
     /// Loads slot1 and times the CSG paths on its single region so we can measure
     /// the fold-once / incremental optimizations against real authored data.

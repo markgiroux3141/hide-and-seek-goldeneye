@@ -1204,6 +1204,19 @@ impl World {
         self.player_invulnerable
     }
 
+    /// Toggle player invisibility (dev/observe — bound to `N`). Returns the new state.
+    /// When ON, no hunter can perceive the player, so the pack drops to searching and
+    /// you can watch the head-scan behaviour without being engaged. See
+    /// [`crate::enemy::Enemy::set_detectable`]; applied per hunter in `fixed_step`.
+    pub fn toggle_invisible(&mut self) -> bool {
+        self.player_invisible = !self.player_invisible;
+        log::info!(
+            "player invisibility: {}",
+            if self.player_invisible { "ON" } else { "off" }
+        );
+        self.player_invisible
+    }
+
     /// Player health / armor + death, for the HUD and the app's restart routing.
     pub fn player_health(&self) -> f32 {
         self.player_health

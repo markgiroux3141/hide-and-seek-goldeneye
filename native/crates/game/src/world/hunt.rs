@@ -167,6 +167,8 @@ impl World {
         // they don't clash with the per-hunter `&mut` borrow. The chest-aim points the
         // gun barrel at this, so the hunters track the player's height as well as bearing.
         let aim_point = self.player_pos().map(|p| p + Vec3::Y * PLAYER_AIM_Y);
+        // Head look-at kill-switch, read once so it doesn't reborrow `self` in the loop.
+        let head_look_on = self.head_look;
         // Bodies + feet offsets are DISJOINT fields from `enemies`, so both can be
         // held across the `&mut enemies` loop; each hunter indexes its own body.
         let models = &self.char_models;
@@ -246,6 +248,61 @@ impl World {
                     ca.target = t;
                 }
                 ca.weight = if one_shot { 0.0 } else { inst.aim_weight };
+            }
+
+            // ── Head look-at: turn the head toward what the hunter is thinking about. ──
+            // The focus is the player while engaged, the last-known position while
+            // investigating, the search point while sweeping, and nothing when idle /
+            // during a hit/death one-shot (the head returns to the pose as weight fades).
+            let focus = if !head_look_on || inst.enemy.is_dead() || one_shot {
+                None
+            } else {
+                match inst.enemy.state() {
+                    AiState::Alert
+                    | AiState::Chase
+                    | AiState::Attack
+                    | AiState::Cooldown
+                    | AiState::TakeCover
+                    | AiState::Peek => aim_point
+                        .or_else(|| inst.enemy.last_known().map(|p| p + Vec3::Y * PLAYER_AIM_Y)),
+                    AiState::Investigate => {
+                        inst.enemy.last_known().map(|p| p + Vec3::Y * PLAYER_AIM_Y)
+                    }
+                    // Blind & sweeping: the head visibly scans side to side (the readable
+                    // cue for the invisible 360° perception sweep) while the body faces
+                    // its travel direction — a point out along the scan direction.
+                    AiState::Search | AiState::Idle => Some(
+                        inst.enemy.pos
+                            + inst.enemy.head_scan_dir() * HEAD_SCAN_DIST
+                            + Vec3::Y * PLAYER_AIM_Y,
+                    ),
+                }
+            };
+            // Ease the smoothed look point toward the focus so switching focus sweeps
+            // the gaze across instead of snapping (first acquire snaps — no history).
+            if let Some(f) = focus {
+                let track = 1.0 - (-dt * HEAD_LOOK_TRACK).exp();
+                inst.head_look_point = Some(match inst.head_look_point {
+                    Some(p) => p + (f - p) * track,
+                    None => f,
+                });
+            }
+            // Weight eases in while there's a focus, out otherwise (same ramp as the arm).
+            let head_target_w = if focus.is_some() { 1.0 } else { 0.0 };
+            inst.head_look_weight +=
+                (head_target_w - inst.head_look_weight) * (1.0 - (-dt * AIM_RAMP).exp());
+            // Model-space gaze target, resolved BEFORE the `&mut stack` borrow (same as
+            // the chest-aim's `aim_target`).
+            let head_target = inst.head_look_point.map(|wp| {
+                let ct = char_transform_raw(inst.enemy.pos, inst.yaw(), feet_off);
+                ct.inverse().transform_point3(wp)
+            });
+            if let Some(hl) = inst.stack.layer_as::<AimOffsetLayer>(ENEMY_HEAD_LOOK_LAYER) {
+                if let Some(t) = head_target {
+                    hl.target = t;
+                }
+                hl.enabled = head_look_on;
+                hl.weight = if one_shot { 0.0 } else { inst.head_look_weight };
             }
 
             // Base pose: the hit/death one-shot when active, else the bind pose for
