@@ -72,7 +72,7 @@ impl World {
     /// failed to load (otherwise the hunters ARE the skinned characters). `None`
     /// when the model loaded or no hunters are live.
     pub fn enemy_mesh(&self) -> Option<CpuMesh> {
-        if self.char_model.is_some() || self.enemies.is_empty() {
+        if !self.char_models.is_empty() || self.enemies.is_empty() {
             return None;
         }
         let mut positions: Vec<f32> = Vec::new();
@@ -90,10 +90,11 @@ impl World {
         Some(CpuMesh::from_csg(&positions, &normals, &indices))
     }
 
-    /// The shared skinned-character CPU model, for one-time GPU upload at startup.
-    /// `None` if the asset failed to load.
-    pub fn character_model(&self) -> Option<&SkinnedModel> {
-        self.char_model.as_ref()
+    /// Every loaded skinned-character CPU body (body-id order), for one-time GPU
+    /// upload at startup — the renderer uploads one GPU mesh per body. Empty if no
+    /// asset loaded.
+    pub fn character_models(&self) -> &[SkinnedModel] {
+        &self.char_models
     }
 
     /// The enemy weapon render library (gun + muzzle meshes for the arsenal), for
@@ -126,9 +127,10 @@ impl World {
         // they don't clash with the per-hunter `&mut` borrow. The chest-aim points the
         // gun barrel at this, so the hunters track the player's height as well as bearing.
         let aim_point = self.player_pos().map(|p| p + Vec3::Y * PLAYER_AIM_Y);
-        let feet_off = self.char_feet_offset;
-        // Skeleton borrow is a DISJOINT field from `enemies`, so both can be held.
-        let skeleton = self.char_model.as_ref().map(|m| &m.skeleton);
+        // Bodies + feet offsets are DISJOINT fields from `enemies`, so both can be
+        // held across the `&mut enemies` loop; each hunter indexes its own body.
+        let models = &self.char_models;
+        let feet_offs = &self.char_feet_offset;
 
         for inst in &mut self.enemies {
             // Low-pass the AI's per-step speed → a continuous locomotion speed that
@@ -152,9 +154,11 @@ impl World {
             inst.anim.update(dt);
 
             // ── Procedural post-pass: locomotion blend → aim-offset → recoil. ──
-            let Some(sk) = skeleton else {
-                continue; // no skinned model → nothing to pose
+            let Some(m) = models.get(inst.body) else {
+                continue; // no body for this hunter → nothing to pose
             };
+            let sk = &m.skeleton;
+            let feet_off = feet_offs.get(inst.body).copied().unwrap_or(0.0);
             // A hit/death one-shot takes over the whole body: feed its pose as the
             // base and bypass locomotion + aim. `is_fire_clip` guard is vestigial
             // (fire is a timer, never on the mixer) but keeps the check honest.
@@ -166,7 +170,12 @@ impl World {
             }
             let engaged = matches!(
                 inst.enemy.state(),
-                AiState::Alert | AiState::Chase | AiState::Attack | AiState::Cooldown
+                AiState::Alert
+                    | AiState::Chase
+                    | AiState::Attack
+                    | AiState::Cooldown
+                    | AiState::TakeCover
+                    | AiState::Peek
             );
             let want_aim = engaged && !inst.enemy.is_dead() && !one_shot;
             let target_w = if want_aim { 1.0 } else { 0.0 };
@@ -223,7 +232,12 @@ impl World {
             if inst.enemy.is_dead()
                 || !matches!(
                     inst.enemy.state(),
-                    AiState::Alert | AiState::Chase | AiState::Attack | AiState::Cooldown
+                    AiState::Alert
+                        | AiState::Chase
+                        | AiState::Attack
+                        | AiState::Cooldown
+                        | AiState::TakeCover
+                        | AiState::Peek
                 )
             {
                 continue;
@@ -251,7 +265,7 @@ impl World {
         // Also measure the rendered right foot so we can see if the LEGS actually
         // move while "stopped" (foot pos changing frame-to-frame = walking legs),
         // and log the clip the mixer is really playing vs the band we requested.
-        let (reach_frac, elbow_deg, foot) = match (self.enemy_arm.as_ref(), inst.final_pose.as_ref(), self.char_model.as_ref()) {
+        let (reach_frac, elbow_deg, foot) = match (self.enemy_arm.get(inst.body).and_then(|a| a.as_ref()), inst.final_pose.as_ref(), self.char_models.get(inst.body)) {
             (Some(arm), Some(fp), Some(m)) => {
                 let g = fp.joint_global_transforms(&m.skeleton);
                 let sa = g[arm.shoulder()].to_scale_rotation_translation().2;
@@ -289,26 +303,35 @@ impl World {
         );
     }
 
-    /// World transform placing a character (feet at `feet`, facing `yaw`) with the
-    /// feet-seating offset + `CHAR_SCALE` — the model root the skinned pose + any
-    /// bone-attached weapon are expressed under.
-    pub(crate) fn char_transform(&self, feet: Vec3, yaw: f32) -> Mat4 {
-        char_transform_raw(feet, yaw, self.char_feet_offset)
+    /// The feet-seating Y offset for a given body id (0 if the body id is out of
+    /// range, e.g. no assets loaded).
+    pub(crate) fn body_feet_offset(&self, body: usize) -> f32 {
+        self.char_feet_offset.get(body).copied().unwrap_or(0.0)
     }
 
-    /// Every skinned character to draw this frame as `(model, joint matrices,
+    /// World transform placing a character of body `body` (feet at `feet`, facing
+    /// `yaw`) with that body's feet-seating offset + `CHAR_SCALE` — the model root the
+    /// skinned pose + any bone-attached weapon are expressed under.
+    pub(crate) fn char_transform(&self, feet: Vec3, yaw: f32, body: usize) -> Mat4 {
+        char_transform_raw(feet, yaw, self.body_feet_offset(body))
+    }
+
+    /// Every skinned character to draw this frame as `(body id, model, joint matrices,
     /// opacity, blood_colors)` — one per live hunter (each its own mid-crossfade pose,
     /// positioned/faced by its AI, faded on death, with its accumulated per-vertex
-    /// blood). Empty in BUILD (no character is drawn while authoring).
-    pub fn character_instances(&self) -> Vec<(Mat4, Vec<Mat4>, f32, &[f32])> {
-        let Some(m) = self.char_model.as_ref() else {
+    /// blood). The body id selects the renderer's GPU mesh. Empty in BUILD (no
+    /// character is drawn while authoring), except the optional procedural preview
+    /// (always body 0).
+    pub fn character_instances(&self) -> Vec<(usize, Mat4, Vec<Mat4>, f32, &[f32])> {
+        if self.char_models.is_empty() {
             return Vec::new();
-        };
-        // Spike: in BUILD the only character is the optional procedural preview.
+        }
+        // Spike: in BUILD the only character is the optional procedural preview (body 0).
         if self.is_build() {
             return match self.procedural_preview.as_ref() {
                 Some(p) => vec![(
-                    self.char_transform(p.feet, p.yaw),
+                    0,
+                    self.char_transform(p.feet, p.yaw, 0),
                     p.joints.clone(),
                     1.0,
                     p.blood.as_slice(),
@@ -318,15 +341,16 @@ impl World {
         }
         self.enemies
             .iter()
-            .map(|inst| {
+            .filter_map(|inst| {
+                let m = self.char_models.get(inst.body)?;
                 // Prefer the procedural post-pass pose (aim + recoil); fall back to
                 // the raw mixer pose on the first frame before it's computed.
                 let joints = match inst.final_pose.as_ref() {
                     Some(p) => p.skinning_matrices(&m.skeleton),
                     None => inst.anim.skinning_matrices(&m.skeleton),
                 };
-                let model = self.char_transform(inst.enemy.pos, inst.yaw());
-                (model, joints, inst.opacity(), inst.blood.as_slice())
+                let model = self.char_transform(inst.enemy.pos, inst.yaw(), inst.body);
+                Some((inst.body, model, joints, inst.opacity(), inst.blood.as_slice()))
             })
             .collect()
     }
@@ -335,7 +359,7 @@ impl World {
     /// procedural post-pass pose when available (so the gun follows the aimed arm),
     /// else the raw mixer pose.
     fn inst_bone_globals(&self, inst: &EnemyInstance) -> Vec<Mat4> {
-        let Some(m) = self.char_model.as_ref() else {
+        let Some(m) = self.char_models.get(inst.body) else {
             return Vec::new();
         };
         match inst.final_pose.as_ref() {
@@ -355,8 +379,9 @@ impl World {
         yaw: f32,
         def: &EnemyWeaponDef,
         left: bool,
+        body: usize,
     ) -> Option<Mat4> {
-        let m = self.char_model.as_ref()?;
+        let m = self.char_models.get(body)?;
         let bone_name = if left { LEFT_HAND_BONE } else { RIGHT_HAND_BONE };
         let bone = m.skeleton.index_of(bone_name)?;
         let bone_global = *bone_globals.get(bone)?;
@@ -367,7 +392,7 @@ impl World {
         };
         let offset = Mat4::from_translation(off)
             * Mat4::from_euler(EulerRot::XYZ, rot.x, rot.y, rot.z);
-        Some(self.char_transform(feet, yaw) * bone_global * offset)
+        Some(self.char_transform(feet, yaw, body) * bone_global * offset)
     }
 
     /// The enemy weapon draws this frame: `(weapon name, view_proj · world)` for
@@ -388,11 +413,11 @@ impl World {
                 continue; // drop the gun on death
             }
             let globals = self.inst_bone_globals(inst);
-            if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, false) {
+            if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, false, inst.body) {
                 out.push((inst.weapon.name, vp * w));
             }
             if inst.dual {
-                if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, true) {
+                if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, true, inst.body) {
                     out.push((inst.weapon.name, vp * w));
                 }
             }
@@ -449,11 +474,11 @@ impl World {
                 continue;
             }
             let globals = self.inst_bone_globals(inst);
-            if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, false) {
+            if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, false, inst.body) {
                 out.push((inst.weapon.name, vp * w));
             }
             if inst.dual {
-                if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, true) {
+                if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, true, inst.body) {
                     out.push((inst.weapon.name, vp * w));
                 }
             }

@@ -163,8 +163,11 @@ impl World {
             log::info!("procedural preview: off");
             return;
         }
-        let (Some(arm), Some(template)) = (self.enemy_arm.clone(), self.char_anim_template.clone())
-        else {
+        // The BUILD preview always uses body 0 (Karl).
+        let (Some(arm), Some(template)) = (
+            self.enemy_arm.first().cloned().flatten(),
+            self.char_anim_template.clone(),
+        ) else {
             log::warn!("procedural preview: no arm chain / anim template");
             return;
         };
@@ -211,7 +214,7 @@ impl World {
         let to_cam = cam_pos - feet;
         let yaw = to_cam.x.atan2(to_cam.z);
 
-        let model = self.char_model.as_ref().unwrap();
+        let model = &self.char_models[0];
         match ProceduralPreview::new(
             model, &arm, loco_clips, aim_clip, aim_time, weapon.name, attach, attach_rot,
             barrel_gun, feet, yaw,
@@ -234,7 +237,7 @@ impl World {
     /// Advance the BUILD preview one frame (disjoint borrows of the two fields).
     pub(crate) fn advance_procedural_preview(&mut self, dt: f32) {
         let (Some(preview), Some(model)) =
-            (self.procedural_preview.as_mut(), self.char_model.as_ref())
+            (self.procedural_preview.as_mut(), self.char_models.first())
         else {
             return;
         };
@@ -246,7 +249,7 @@ impl World {
     pub(crate) fn preview_weapon_draw(&self, vp: Mat4) -> Option<(&'static str, Mat4)> {
         let p = self.procedural_preview.as_ref()?;
         let g9 = *p.globals.get(p.bone9)?;
-        let world = self.char_transform(p.feet, p.yaw) * g9 * p.attach;
+        let world = self.char_transform(p.feet, p.yaw, 0) * g9 * p.attach;
         Some((p.weapon_name, vp * world))
     }
 }

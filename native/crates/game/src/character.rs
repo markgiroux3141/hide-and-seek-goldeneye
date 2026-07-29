@@ -36,6 +36,11 @@ pub struct CharacterController {
     pub pitch: f32,
     vel_y: f32,
     grounded: bool,
+    /// Horizontal speed (m/s) actually achieved on the last [`Self::apply_move`] — the
+    /// resolved XZ displacement over dt (so wall-slides / blocked moves read slow). The
+    /// hunters' movement-noise sense ([`crate::world::World`]) reads this: the faster you
+    /// move, the louder your footsteps, the further a searcher hears you.
+    speed_xz: f32,
 }
 
 impl CharacterController {
@@ -47,6 +52,7 @@ impl CharacterController {
             pitch,
             vel_y: 0.0,
             grounded: false,
+            speed_xz: 0.0,
         }
     }
 
@@ -110,10 +116,21 @@ impl CharacterController {
 
         self.pos += corrected;
         self.grounded = grounded;
+        // Horizontal speed actually travelled this step (XZ only), for the enemy
+        // movement-noise sense. Measured off the resolved displacement so hugging a
+        // wall (little real motion) is quiet.
+        let horiz = Vec3::new(corrected.x, 0.0, corrected.z).length();
+        self.speed_xz = if dt > 1e-6 { horiz / dt } else { 0.0 };
         // Stop accumulating fall speed once the floor is under us.
         if grounded && self.vel_y < 0.0 {
             self.vel_y = 0.0;
         }
+    }
+
+    /// Horizontal speed (m/s) achieved on the last [`Self::apply_move`]. ~[`WALK_SPEED`]
+    /// at a full run, 0 when standing still or pinned against a wall.
+    pub fn speed(&self) -> f32 {
+        self.speed_xz
     }
 
     pub fn view_proj(&self, aspect: f32) -> glam::Mat4 {

@@ -79,27 +79,33 @@ struct GpuPrimitive {
     tex_bind: wgpu::BindGroup,
 }
 
-/// A GPU-resident skinned character's shared geometry: vertex/index buffers +
-/// per-texture primitives + the decoded textures. One is uploaded (all hunters
-/// share the same GLB); the per-instance pose lives in [`GpuCharacterInstance`].
+/// A GPU-resident skinned character body's geometry: vertex/index buffers +
+/// per-texture primitives + the decoded textures. One is uploaded per body id (see
+/// [`Renderer::character_meshes`]); each hunter selects its body and its per-instance
+/// pose lives in [`GpuCharacterInstance`].
 struct GpuCharacterMesh {
     vertex_buf: wgpu::Buffer,
     index_buf: wgpu::Buffer,
     primitives: Vec<GpuPrimitive>,
-    /// Vertex count — sizes each instance's per-vertex blood-color buffer.
-    vertex_count: u32,
     _textures: Vec<wgpu::Texture>,
 }
 
-/// One drawn instance of the shared character mesh: its own joint/model/opacity
-/// uniform + its own per-vertex blood-color buffer (both rewritten each frame).
-/// Pooled + reused across frames so N hunters draw the one [`GpuCharacterMesh`] N
-/// times with distinct poses and independent accumulated blood.
+/// One drawn instance of a character mesh: which body it draws + its own
+/// joint/model/opacity uniform + its own per-vertex blood-color buffer (all
+/// rewritten each frame). Pooled + reused across frames so N hunters draw with
+/// distinct poses and independent accumulated blood. A pooled slot can be reused for
+/// a different body between frames, so the blood buffer is re-sized whenever the
+/// body's vertex count changes (bodies differ in geometry).
 struct GpuCharacterInstance {
+    /// The body id this slot draws this frame — an index into
+    /// [`Renderer::character_meshes`].
+    body: usize,
     uniform_buf: wgpu::Buffer,
     uniform_bind: wgpu::BindGroup,
     /// Per-vertex RGB damage/blood color (second vertex buffer). White = clean.
     color_buf: wgpu::Buffer,
+    /// Vertex count the `color_buf` is currently sized for (to detect a body switch).
+    color_verts: u32,
 }
 
 /// A GPU-resident enemy weapon's shared geometry (gun or muzzle-flash): the same
@@ -198,10 +204,11 @@ pub struct Renderer {
     char_tex_layout: wgpu::BindGroupLayout,
     char_uniform_layout: wgpu::BindGroupLayout,
     char_sampler: wgpu::Sampler,
-    /// The shared skinned-character geometry (uploaded once), and a reused pool of
-    /// per-instance pose uniforms — `character_instance_count` of them are drawn
-    /// this frame (one per hunter, or the single BUILD demo).
-    character_mesh: Option<GpuCharacterMesh>,
+    /// One GPU mesh per character body id (uploaded once at startup, [`BODY_CATALOG`]
+    /// order), and a reused pool of per-instance pose uniforms — `character_instance_
+    /// count` of them are drawn this frame (one per hunter, or the single BUILD demo),
+    /// each selecting its body via [`GpuCharacterInstance::body`].
+    character_meshes: Vec<GpuCharacterMesh>,
     character_instances: Vec<GpuCharacterInstance>,
     character_instance_count: usize,
     /// Texture bind-group layout for the viewmodel/muzzle/enemy-weapon meshes:
@@ -1415,7 +1422,7 @@ impl Renderer {
             char_tex_layout,
             char_uniform_layout,
             char_sampler,
-            character_mesh: None,
+            character_meshes: Vec::new(),
             character_instances: Vec::new(),
             character_instance_count: 0,
             viewmodel_tex_layout,
@@ -1498,11 +1505,11 @@ impl Renderer {
         };
     }
 
-    /// Upload the shared skinned-character geometry to the GPU: shared vertex/index
-    /// buffers, one GPU texture per referenced image, and per-primitive texture bind
-    /// groups. Call once — all hunters (and the BUILD demo) share this mesh; each
-    /// drawn instance's pose comes from [`Renderer::set_character_instances`].
-    pub fn upload_character(&mut self, model: &SkinnedModel) {
+    /// Upload one character body's geometry to the GPU at body id `index`: vertex/
+    /// index buffers, one GPU texture per referenced image, and per-primitive texture
+    /// bind groups. Call once per body at startup, in ascending `index` order; a
+    /// hunter selects its body per frame via [`Renderer::set_character_instances`].
+    pub fn upload_character(&mut self, index: usize, model: &SkinnedModel) {
         let vertex_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("char-vertices"),
             contents: bytemuck::cast_slice(&model.vertices),
@@ -1554,18 +1561,25 @@ impl Renderer {
             })
             .collect();
 
-        self.character_mesh = Some(GpuCharacterMesh {
+        let mesh = GpuCharacterMesh {
             vertex_buf,
             index_buf,
             primitives,
-            vertex_count: model.vertices.len() as u32,
             _textures: textures,
-        });
+        };
+        // Uploaded in ascending body-id order at startup, so `index` is either the
+        // next slot (push) or an existing one being replaced (a reload).
+        if index < self.character_meshes.len() {
+            self.character_meshes[index] = mesh;
+        } else {
+            self.character_meshes.push(mesh);
+        }
     }
 
     /// Build one pooled character-instance pose uniform + its bind group, plus a
-    /// per-vertex blood-color buffer initialized to white (clean). Sized to the
-    /// uploaded character mesh's vertex count.
+    /// placeholder per-vertex blood-color buffer. `color_verts` starts at 0 so the
+    /// first [`Renderer::set_character_instances`] write sizes the blood buffer to the
+    /// body this slot actually draws (bodies differ in vertex count).
     fn make_character_instance(&self) -> GpuCharacterInstance {
         let uniform_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("char-uniform"),
@@ -1580,49 +1594,61 @@ impl Renderer {
                 resource: uniform_buf.as_entire_binding(),
             }],
         });
-        let n = self.character_mesh.as_ref().map(|m| m.vertex_count).unwrap_or(0) as usize;
-        let white = vec![1.0f32; n * 3];
+        // 1-vertex placeholder; resized to the real body on first use.
         let color_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("char-blood"),
-            contents: bytemuck::cast_slice(&white),
+            contents: bytemuck::cast_slice(&[1.0f32; 3]),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
-        GpuCharacterInstance { uniform_buf, uniform_bind, color_buf }
+        GpuCharacterInstance { body: 0, uniform_buf, uniform_bind, color_buf, color_verts: 0 }
     }
 
-    /// Set every character instance to draw this frame as `(model, joint matrices,
-    /// opacity, blood_colors)`. `blood_colors` is the flat per-vertex RGB (len =
-    /// 3×vertex_count) painted by shots — white where clean. Grows the reused
-    /// instance pool to fit, writes each pose uniform + blood buffer, and records
-    /// the count. `joints` is truncated/padded to `MAX_JOINTS`. No-op geometry-wise
-    /// if no character mesh is uploaded.
-    pub fn set_character_instances(&mut self, instances: &[(Mat4, Vec<Mat4>, f32, &[f32])]) {
+    /// Set every character instance to draw this frame as `(body id, model, joint
+    /// matrices, opacity, blood_colors)`. `blood_colors` is the flat per-vertex RGB
+    /// (len = 3×that body's vertex_count) painted by shots — white where clean. Grows
+    /// the reused instance pool to fit, re-sizes a slot's blood buffer when its body
+    /// changes, writes each pose uniform + blood buffer, and records the count.
+    /// `joints` is truncated/padded to `MAX_JOINTS`. No-op geometry-wise if no body
+    /// mesh is uploaded.
+    pub fn set_character_instances(&mut self, instances: &[(usize, Mat4, Vec<Mat4>, f32, &[f32])]) {
         self.character_instance_count = instances.len();
         while self.character_instances.len() < instances.len() {
             let inst = self.make_character_instance();
             self.character_instances.push(inst);
         }
-        for (slot, (model, joints, opacity, colors)) in
-            self.character_instances.iter().zip(instances)
-        {
+        for (i, (body, model, joints, opacity, colors)) in instances.iter().enumerate() {
+            // Re-size this slot's blood buffer if it's now drawing a body with a
+            // different vertex count (a pooled slot can switch bodies frame-to-frame).
+            let verts = (colors.len() / 3) as u32;
+            if self.character_instances[i].color_verts != verts {
+                let white = vec![1.0f32; colors.len().max(3)];
+                let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("char-blood"),
+                    contents: bytemuck::cast_slice(&white),
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                });
+                self.character_instances[i].color_buf = buf;
+                self.character_instances[i].color_verts = verts;
+            }
+            self.character_instances[i].body = *body;
             let mut u = CharUniform {
                 model: model.to_cols_array_2d(),
                 opacity: [*opacity, 0.0, 0.0, 0.0],
                 ..Default::default()
             };
-            for (i, m) in joints.iter().take(MAX_JOINTS).enumerate() {
-                u.joints[i] = m.to_cols_array_2d();
+            for (j, m) in joints.iter().take(MAX_JOINTS).enumerate() {
+                u.joints[j] = m.to_cols_array_2d();
             }
             self.queue
-                .write_buffer(&slot.uniform_buf, 0, bytemuck::cast_slice(&[u]));
+                .write_buffer(&self.character_instances[i].uniform_buf, 0, bytemuck::cast_slice(&[u]));
             self.queue
-                .write_buffer(&slot.color_buf, 0, bytemuck::cast_slice(colors));
+                .write_buffer(&self.character_instances[i].color_buf, 0, bytemuck::cast_slice(colors));
         }
     }
 
-    /// Remove the character geometry + all instances (e.g. reload).
+    /// Remove all character geometry + instances (e.g. reload).
     pub fn clear_character(&mut self) {
-        self.character_mesh = None;
+        self.character_meshes.clear();
         self.character_instances.clear();
         self.character_instance_count = 0;
     }
@@ -2275,13 +2301,18 @@ impl Renderer {
 
             // 2.2) Skinned characters (opaque, unlit textured) — one draw per live
             // hunter (or the BUILD demo). group(0)=camera; group(2)=this instance's
-            // joints/model; group(1)=texture per primitive. All share one mesh.
-            if let Some(ch) = &self.character_mesh {
+            // joints/model; group(1)=texture per primitive. Each instance selects its
+            // body's mesh (bodies vary), so vertex/index buffers are re-bound per
+            // instance — cheap at hunter counts.
+            if !self.character_meshes.is_empty() {
                 rp.set_pipeline(&self.skinned_pipeline);
                 rp.set_bind_group(0, &self.camera_bind_group, &[]);
-                rp.set_vertex_buffer(0, ch.vertex_buf.slice(..));
-                rp.set_index_buffer(ch.index_buf.slice(..), wgpu::IndexFormat::Uint32);
                 for inst in self.character_instances.iter().take(self.character_instance_count) {
+                    let Some(ch) = self.character_meshes.get(inst.body) else {
+                        continue; // unknown body id → skip (shouldn't happen)
+                    };
+                    rp.set_vertex_buffer(0, ch.vertex_buf.slice(..));
+                    rp.set_index_buffer(ch.index_buf.slice(..), wgpu::IndexFormat::Uint32);
                     rp.set_bind_group(2, &inst.uniform_bind, &[]);
                     // Per-instance blood colors in the second vertex buffer.
                     rp.set_vertex_buffer(1, inst.color_buf.slice(..));

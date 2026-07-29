@@ -121,6 +121,21 @@ pub fn ammo_quads(magazine: u32, reserve: u32, aspect: f32) -> Vec<HudVertex> {
     out
 }
 
+/// The difficulty-dial readout quads: `DANGER n / max`, centered along the top edge.
+/// A live gauge for the `=` / `-` difficulty keys while tuning enemy hardness.
+/// `aspect` = framebuffer w/h (keeps glyphs proportioned).
+pub fn danger_quads(level: u32, max: u32, aspect: f32) -> Vec<HudVertex> {
+    let text = format!("DANGER {level} / {max}");
+    let gh = 0.05;
+    let gw = gh / aspect.max(1e-6) * (GLYPH_W as f32 / GLYPH_H as f32);
+    let gap = gw * 0.4;
+    let x_start = -text_width(&text, gw, gap) / 2.0; // top-center
+    let y_top = 0.96;
+    let mut out = Vec::with_capacity(text.chars().count() * 6);
+    layout_text(&text, x_start, y_top, gw, gh, gap, &mut out);
+    out
+}
+
 /// The "YOU DIED" death-screen text quads (P5): a centered title + a smaller
 /// "PRESS R" prompt. Drawn white over the dark death overlay. `aspect` = w/h.
 pub fn death_quads(aspect: f32) -> Vec<HudVertex> {

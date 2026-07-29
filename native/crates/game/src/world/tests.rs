@@ -173,6 +173,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn wave_floods_in_at_the_fixed_marker() {
         let mut world = World::new();
+        world.set_wave_size(6); // a real wave (gameplay default is 1 — "duel mode")
         world.initial_meshes();
 
         // The marker is visible while authoring (BUILD), before any hunt.
@@ -183,7 +184,7 @@ use super::editing::find_room_brushes;
         assert!(world.spawn_marker_mesh().is_some(), "marker still shows in HUNT");
 
         // The whole wave floods in, clustered at the fixed marker (not the player).
-        assert_eq!(world.enemies.len(), ENEMY_COUNT, "ENEMY_COUNT hunters flood in");
+        assert_eq!(world.enemies.len(), 6, "the whole requested wave floods in");
         assert!(
             world.spawn_point.distance(SPAWN_MARKER_POS) < 1.0,
             "spawn snaps to the fixed marker, got {:?}",
@@ -211,7 +212,7 @@ use super::editing::find_room_brushes;
         world.initial_meshes();
         world.toggle_mode(); // HUNT: bake nav + spawn hunter roster
         assert!(!world.enemies.is_empty(), "hunters spawned");
-        assert!(world.char_model.is_some(), "character model loaded");
+        assert!(!world.char_models.is_empty(), "character model loaded");
         // The placeholder box is suppressed (the model is the hunter).
         assert!(world.enemy_mesh().is_none(), "box replaced by the model");
 
@@ -225,10 +226,293 @@ use super::editing::find_room_brushes;
         // One skinned instance per hunter; each a real 15-joint pose, opaque alive.
         let instances = world.character_instances();
         assert_eq!(instances.len(), world.enemies.len(), "one instance per hunter");
-        let (_, joints, opacity, colors) = &instances[0];
+        let (_body, _model, joints, opacity, colors) = &instances[0];
         assert_eq!(joints.len(), 15);
         assert_eq!(*opacity, 1.0, "alive hunter is opaque");
         assert!(colors.iter().all(|&c| c == 1.0), "un-shot hunter is clean (white blood)");
+    }
+
+    /// Multi-body: the whole character catalog loads onto the shared 15-bone rig, and
+    /// every per-body derived table stays parallel to it. This is the headless proof
+    /// that any of the 44 GoldenEye bodies is loadable + drivable by the one shared
+    /// clip set (skinning uses each body's own skeleton). Skips if assets are absent.
+    #[test]
+    fn character_catalog_loads_onto_the_shared_rig() {
+        let world = World::new();
+        if world.char_models.is_empty() {
+            eprintln!("skipping: character assets not loaded");
+            return;
+        }
+        // More than the single original guard, and the per-body tables are parallel.
+        assert!(world.char_models.len() > 1, "multiple bodies loaded");
+        assert_eq!(world.char_models.len(), world.char_feet_offset.len(), "feet offsets parallel");
+        assert_eq!(world.char_models.len(), world.enemy_arm.len(), "arm chains parallel");
+        // Every loaded body rides the identical 15-bone rig, so the shared clip set
+        // (bound to body 0) retargets onto it: the idle clip must skin cleanly on each
+        // body's OWN skeleton, producing 15 finite joint matrices.
+        let idle = world
+            .char_anim_template
+            .as_ref()
+            .and_then(|a| a.clip(0))
+            .expect("idle clip loaded");
+        for (i, m) in world.char_models.iter().enumerate() {
+            assert_eq!(m.skeleton.joint_count(), 15, "body {i} on the 15-bone rig");
+            let mats = idle.skinning_matrices(0.0, &m.skeleton);
+            assert_eq!(mats.len(), 15, "body {i} skins to 15 joints");
+            assert!(
+                mats.iter().all(|mm| mm.to_cols_array().iter().all(|f| f.is_finite())),
+                "body {i} skinning matrices are finite"
+            );
+        }
+    }
+
+    /// Multi-body spawn: a flooded-in wave wears a spread of bodies across the catalog
+    /// (not six clones of body 0), and each drawn instance references a valid,
+    /// in-range body id whose blood buffer matches that body's vertex count.
+    #[test]
+    fn wave_spreads_across_multiple_bodies() {
+        let mut world = World::new();
+        world.set_wave_size(6); // spread needs a pack (gameplay default is 1)
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT: spawn the wave
+        if world.char_models.len() < 2 || world.enemies.is_empty() {
+            eprintln!("skipping: need multiple bodies + spawned hunters");
+            return;
+        }
+        // The wave isn't all one body (the spread picks distinct bodies for ENEMY_COUNT
+        // hunters over a 44-body catalog).
+        let distinct: std::collections::HashSet<usize> =
+            world.enemies.iter().map(|e| e.body).collect();
+        assert!(distinct.len() > 1, "wave wears more than one body, got {distinct:?}");
+        // Every hunter's body id is in range, and its blood buffer matches that body.
+        for inst in &world.enemies {
+            let m = world.char_models.get(inst.body).expect("hunter body in range");
+            assert_eq!(inst.blood.len(), m.vertices.len() * 3, "blood sized to the body");
+        }
+        // Each render instance carries the hunter's body id.
+        for (body, _model, joints, _opacity, _colors) in world.character_instances() {
+            assert!(body < world.char_models.len(), "instance body id in range");
+            assert_eq!(joints.len(), 15);
+        }
+    }
+
+    /// The difficulty dial: level 0 is the neutral baseline (all multipliers 1.0 /
+    /// dodge 0), and it ramps to a harder-hitting, tankier, evasive hunter at the cap.
+    #[test]
+    fn difficulty_params_ramp_from_baseline_to_brutal() {
+        let mut world = World::new();
+        assert_eq!(world.difficulty(), 0, "starts at the baseline");
+        let base = world.difficulty_params();
+        assert_eq!(base.speed_mult, 1.0);
+        assert_eq!(base.cooldown_mult, 1.0);
+        assert_eq!(base.reaction_mult, 1.0);
+        assert_eq!(base.health_mult, 1.0);
+        assert_eq!(base.dodge, 0.0);
+        assert_eq!(base.sense_mult, 1.0, "baseline perception reach");
+        assert_eq!(base.suppress, 0.0, "baseline holds fire until standoff");
+        assert_eq!(base.flank, 0.0, "baseline chases straight");
+        assert_eq!(base.cover, 0.0, "baseline never breaks to cover");
+
+        world.change_difficulty(100); // clamps to DIFFICULTY_MAX
+        assert_eq!(world.difficulty(), DIFFICULTY_MAX);
+        let hard = world.difficulty_params();
+        assert!(hard.accuracy_mult > 1.0, "more accurate");
+        assert!(hard.speed_mult > 1.0, "moves faster");
+        assert!(hard.cooldown_mult < 1.0, "shorter burst cooldown");
+        assert!(hard.reaction_mult < 1.0, "reacts faster");
+        assert!(hard.health_mult > 1.0, "tankier");
+        assert!(hard.dodge > 0.0, "evades");
+        assert!(hard.sense_mult > 1.0, "sharper senses");
+        assert!(hard.suppress > 0.0, "suppresses while closing");
+        assert!(hard.flank > 0.0, "flanks the approach");
+        assert!(hard.cover > 0.0, "uses cover");
+
+        // Clamps at both ends.
+        world.change_difficulty(-100);
+        assert_eq!(world.difficulty(), 0, "clamped at the floor");
+    }
+
+    /// #6 footstep noise: a *moving* player pulls a blind (searching) hunter within
+    /// footstep range to Investigate — but only at higher difficulty; at level 0 the
+    /// hunter is deaf to footsteps (range 0). Drives one player move directly so the
+    /// perception FSM never runs (the hunter stays blind), then calls the emitter.
+    #[test]
+    fn footsteps_divert_blind_hunters_only_at_higher_difficulty() {
+        let run = |difficulty: u32| -> crate::enemy::AiState {
+            let mut world = World::new();
+            world.set_difficulty(difficulty); // set the dial in BUILD (no restart churn)
+            world.initial_meshes();
+            world.toggle_mode(); // HUNT — spawns the lone hunter in Search (no FSM step yet)
+            assert!(!world.enemies.is_empty(), "hunter spawned");
+            let ppos = world.player_pos().unwrap();
+            // Give the player real horizontal speed by driving ONE move step directly —
+            // deliberately NOT via fixed_step, so the perception FSM never runs and the
+            // hunter stays blind (Search).
+            let mut input = InputState::default();
+            input.pointer_locked = true;
+            input.press(winit::keyboard::KeyCode::KeyW);
+            world
+                .character
+                .as_mut()
+                .unwrap()
+                .apply_move(1.0 / 60.0, &input, &mut world.physics);
+            assert!(
+                world.character.as_ref().unwrap().speed() > MOVE_NOISE_MIN_SPEED,
+                "player is moving above the sneak threshold"
+            );
+            // Park the still-blind hunter 6 m from the player (inside footstep range at
+            // max difficulty, ~10 m; outside it at level 0, where range is 0).
+            world.enemies[0].enemy.pos = ppos + Vec3::new(6.0, 0.0, 0.0);
+            assert_eq!(
+                world.enemies[0].enemy.state(),
+                crate::enemy::AiState::Search,
+                "hunter is still blind before the emitter runs"
+            );
+            world.alert_enemies_to_movement();
+            world.enemies[0].enemy.state()
+        };
+        assert_eq!(
+            run(0),
+            crate::enemy::AiState::Search,
+            "difficulty 0: deaf to footsteps — the hunter keeps searching"
+        );
+        assert_eq!(
+            run(DIFFICULTY_MAX),
+            crate::enemy::AiState::Investigate,
+            "hard: footsteps within range pull the blind hunter to investigate"
+        );
+    }
+
+    /// #5 grenade flush: when the pack is HELD AT RANGE from a camping player, an
+    /// engaged hunter lobs a grenade (a projectile is spawned). Drives a hunter to
+    /// engage naturally, then relocates it out beyond the blast-safe distance and
+    /// runs the flush with the camp dwell satisfied — the "flush a camper you can't
+    /// walk up to" case (which real play produces via cover/walls, not the open room).
+    #[test]
+    fn a_held_at_range_pack_flushes_a_camper() {
+        let mut world = World::new();
+        world.set_difficulty(DIFFICULTY_MAX);
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT — the hunter engages the standing player
+        world.toggle_invulnerable();
+        let input = InputState::default();
+        let dt = 1.0 / 60.0;
+        // Let the lone hunter engage.
+        for _ in 0..120 {
+            world.fixed_step(dt, &input);
+            if world.enemies[0].enemy.is_engaged() {
+                break;
+            }
+        }
+        assert!(world.enemies[0].enemy.is_engaged(), "hunter engaged the camper");
+
+        // Hold it out at range (as cover/geometry would in a real level), and satisfy
+        // the camp dwell, then run one flush step.
+        let ppos = world.player_pos().unwrap();
+        let far = ppos + Vec3::new(9.0, 0.0, 0.0); // ≥ GRENADE_SAFE_DIST from the camp spot
+        world.enemies[0].enemy.pos = far;
+        world.camp_anchor = Some(ppos);
+        world.camp_timer = 100.0; // well past the dwell
+        world.grenade_cooldown = 0.0;
+        world.grenade_flush_step(dt);
+        assert!(
+            !world.projectiles.is_empty(),
+            "a hunter held at range lobs a grenade to flush the camper"
+        );
+    }
+
+    /// #5 no self-harm: a hunter that's right on top of the camper does NOT lob a
+    /// grenade (it would blast itself / packmates). Regression for "explodes in front
+    /// of them." Everything is set up to throw EXCEPT the hunter is point-blank.
+    #[test]
+    fn no_grenade_when_a_hunter_is_point_blank() {
+        let mut world = World::new();
+        world.set_difficulty(DIFFICULTY_MAX);
+        world.initial_meshes();
+        world.toggle_mode();
+        world.toggle_invulnerable();
+        let input = InputState::default();
+        let dt = 1.0 / 60.0;
+        for _ in 0..120 {
+            world.fixed_step(dt, &input);
+            if world.enemies[0].enemy.is_engaged() {
+                break;
+            }
+        }
+        let ppos = world.player_pos().unwrap();
+        world.enemies[0].enemy.pos = ppos + Vec3::new(2.0, 0.0, 0.0); // inside the blast radius
+        world.camp_anchor = Some(ppos);
+        world.camp_timer = 100.0;
+        world.grenade_cooldown = 0.0;
+        world.grenade_flush_step(dt);
+        assert!(
+            world.projectiles.is_empty(),
+            "no grenade is lobbed while a hunter is point-blank (it would self-harm)"
+        );
+    }
+
+    /// #5 baseline: at difficulty 0 the grenade flush is disabled — camping forever
+    /// never spawns a grenade.
+    #[test]
+    fn no_grenade_flush_at_difficulty_zero() {
+        let mut world = World::new(); // difficulty 0
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT
+        world.toggle_invulnerable();
+        let input = InputState::default();
+        let dt = 1.0 / 60.0;
+        for _ in 0..600 {
+            world.fixed_step(dt, &input);
+        }
+        assert!(world.projectiles.is_empty(), "no grenades are lobbed at difficulty 0");
+    }
+
+    /// Sim-style hits (default): a non-lethal hit plays NO flinch/hurt animation, so
+    /// the hunter keeps fighting through it. Turning hit reactions on (the GoldenEye
+    /// mode flag) restores the authored flinch one-shot.
+    #[test]
+    fn hits_flinch_only_when_hit_reactions_enabled() {
+        let mut world = World::new();
+        world.weapon_index = 0; // PP7, 25 dmg — non-lethal on a 100-hp hunter
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT: spawn one hunter
+        assert!(!world.enemies.is_empty(), "hunter spawned");
+        let torso = {
+            let p = world.enemies[0].enemy.pos;
+            Vec3::new(p.x, p.y + 0.8, p.z)
+        };
+
+        // Default: no flinch clip, and the hunter isn't stunned.
+        world.hit_enemy(0, torso);
+        assert!(!world.enemies[0].enemy.is_dead(), "non-lethal");
+        assert!(
+            !world.enemies[0].anim.is_playing_oneshot(),
+            "sim style: no flinch animation by default"
+        );
+
+        // Opt into GoldenEye-style reactions → a hit now plays the flinch one-shot.
+        world.set_hit_reactions(true);
+        world.hit_enemy(0, torso);
+        assert!(
+            world.enemies[0].anim.is_playing_oneshot(),
+            "flinch animation plays when hit reactions are enabled"
+        );
+    }
+
+    /// Duel mode: exactly one hunter spawns, and difficulty scales its spawn health.
+    #[test]
+    fn one_hunter_spawns_with_difficulty_scaled_health() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.change_difficulty(DIFFICULTY_MAX as i32); // before the spawn
+        world.toggle_mode(); // HUNT: spawn the (single) wave
+        assert_eq!(world.enemies.len(), 1, "duel mode spawns exactly one hunter");
+        let hp = world.enemies[0].enemy.health();
+        assert!(
+            hp > crate::enemy::ENEMY_HEALTH,
+            "difficulty scales spawn health up ({hp} vs base {})",
+            crate::enemy::ENEMY_HEALTH
+        );
     }
 
     /// Track A: four PP7 hits kill a hunter — it takes damage each shot, and the
@@ -270,7 +554,7 @@ use super::editing::find_room_brushes;
         // stays fully opaque while the death clip plays.
         assert!(world.enemies[0].fade.is_none(), "fade not armed at the moment of death");
         assert!(
-            (world.character_instances()[0].2 - 1.0).abs() < 1e-3,
+            (world.character_instances()[0].3 - 1.0).abs() < 1e-3,
             "opaque during the death anim"
         );
 
@@ -280,7 +564,7 @@ use super::editing::find_room_brushes;
         }
         assert!(world.enemies[0].fade.is_some(), "fade started once the anim finished");
         assert!(
-            world.character_instances()[0].2 <= 1e-3,
+            world.character_instances()[0].3 <= 1e-3,
             "faded to invisible after the animation"
         );
     }
@@ -350,6 +634,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn stacked_hunters_are_pushed_apart() {
         let mut world = World::new();
+        world.set_wave_size(6); // separation needs a pack (gameplay default is 1)
         world.initial_meshes();
         world.toggle_mode(); // HUNT — spawns the wave
         assert!(world.enemies.len() >= 2, "need at least two hunters");
@@ -468,6 +753,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn dual_wield_hunters_draw_two_guns() {
         let mut world = World::new();
+        world.set_wave_size(6); // roster has dual-wielders past index 0 (default is 1)
         world.initial_meshes();
         world.toggle_mode(); // HUNT: spawn the roster
         let expected: usize = world
@@ -491,6 +777,7 @@ use super::editing::find_room_brushes;
     fn hit_zones_scale_damage_by_impact_height() {
         let mut world = World::new();
         world.weapon_index = 0; // pin PP7 (25 dmg hitscan) — zone multipliers are relative to it
+        world.set_wave_size(6); // need a couple of hunters (gameplay default is 1)
         world.initial_meshes();
         world.toggle_mode(); // HUNT: spawn the roster
         assert!(world.enemies.len() >= 2, "roster spawned at least two hunters");
@@ -1415,9 +1702,9 @@ use super::editing::find_room_brushes;
     fn chest_aim_points_the_real_barrel_at_the_target() {
         let world = World::new();
         let (Some(arm), Some(template), Some(model)) = (
-            world.enemy_arm.as_ref(),
+            world.enemy_arm.first().and_then(|a| a.as_ref()),
             world.char_anim_template.as_ref(),
-            world.char_model.as_ref(),
+            world.char_models.first(),
         ) else {
             eprintln!("skipping: character assets not loaded");
             return;

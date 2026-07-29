@@ -139,11 +139,19 @@ impl World {
                 let Some(c) = self.character.as_mut() else { return };
                 c.apply_move(dt, input, &mut self.physics);
                 let feet = c.pos;
+                // The player's crosshair line, for the hunters' reactive aim-dodge.
+                let aim_origin = c.eye();
+                let aim_dir = c.forward();
                 // Advance each hunter's perception FSM. Take the roster out so it
                 // isn't borrowed while each FSM needs `&self.nav` + `&mut self.physics`
                 // (the LOS raycast). Fire requests are collected + applied after the
                 // roster is restored (`start_enemy_fire` needs `&mut self`).
                 let mut enemies = std::mem::take(&mut self.enemies);
+                // Pre-step positions, to measure each hunter's ACTUAL travel this step
+                // (after movement AND the separation nudge) for the anti-grind gait.
+                let prev_pos: Vec<Vec3> = enemies.iter().map(|e| e.enemy.pos).collect();
+                // Difficulty-scaled FSM knobs (reaction/cooldown/dodge) for this step.
+                let tuning = self.ai_tuning();
                 let mut fire_requests: Vec<usize> = Vec::new();
                 let mut needs_target: Vec<usize> = Vec::new();
                 let mut any_caught = false;
@@ -152,11 +160,31 @@ impl World {
                     // proxy the attack→cooldown transition needs). Firing is a timer
                     // now, so the hunter can move + aim through it.
                     let fire_anim = inst.fire_elapsed.is_some();
+                    // Does the player's crosshair line fall on this hunter (cone + clear
+                    // LOS)? Drives its reactive aim-dodge. Excludes the hunter's own
+                    // capsule so it doesn't self-block the ray.
+                    let aimed_at = {
+                        let chest = inst.enemy.pos + Vec3::new(0.0, AIM_SENSE_CHEST_Y, 0.0);
+                        let to = chest - aim_origin;
+                        let d = to.length();
+                        if d < 1e-3 {
+                            false
+                        } else {
+                            let dir = to / d;
+                            let clear = self
+                                .physics
+                                .raycast_excluding(aim_origin, dir, d, Some(inst.collider))
+                                .map_or(true, |hit| (hit.point - aim_origin).length() >= d - 0.15);
+                            aim_dir.dot(dir) >= AIM_SENSE_COS && clear
+                        }
+                    };
                     let step = match self.nav.as_ref() {
                         Some(nav) => inst.enemy.update(
                             dt,
                             feet,
                             inst.weapon.standoff,
+                            tuning,
+                            aimed_at,
                             nav,
                             &mut self.physics,
                             fire_anim,
@@ -194,7 +222,22 @@ impl World {
                         }
                     }
                 }
+                // Anti-grind: tell each hunter how far it ACTUALLY travelled this step
+                // (post-separation), so a hunter held in place by the crowd settles +
+                // idles instead of walk-cycling on the spot ("manic strafing").
+                for (i, inst) in enemies.iter_mut().enumerate() {
+                    let a = inst.enemy.pos;
+                    let b = prev_pos[i];
+                    let disp = ((a.x - b.x).powi(2) + (a.z - b.z).powi(2)).sqrt();
+                    inst.enemy.note_travel(disp, dt);
+                }
                 self.enemies = enemies;
+                // Footstep noise (#6): a moving player pulls nearby blind hunters to
+                // investigate (difficulty-scaled range; silent at level 0).
+                self.alert_enemies_to_movement();
+                // Grenade flush (#5): camp one spot too long and a hunter lobs a
+                // grenade to shift you (difficulty-scaled; off at level 0).
+                self.grenade_flush_step(dt);
                 for i in fire_requests {
                     self.start_enemy_fire(i);
                 }
@@ -259,6 +302,8 @@ impl World {
                     self.camera.yaw,
                     self.camera.pitch,
                 ));
+                // Remember the duel start so a difficulty-change reset returns here.
+                self.hunt_spawn = Some((feet, self.camera.yaw, self.camera.pitch));
                 self.selected = None; // clear any authoring selection
                 self.caught = false;
 
@@ -297,6 +342,7 @@ impl World {
                 }
                 self.nav = None;
                 self.enemies.clear();
+                self.hunt_spawn = None;
                 self.search_points.clear();
                 self.caught = false;
                 self.sparks.clear();
@@ -305,10 +351,53 @@ impl World {
                 self.projectiles.clear();
                 self.mines.clear();
                 self.blasts.clear();
+                self.camp_anchor = None;
+                self.camp_timer = 0.0;
+                self.grenade_cooldown = 0.0;
                 self.physics.clear_door_colliders();
                 self.doors.clear();
                 self.mode = Mode::Build;
                 log::info!("→ BUILD");
+            }
+        }
+    }
+
+    /// Restart the current duel WITHOUT leaving HUNT (bound to the difficulty keys):
+    /// heal the player and drop them back at the hunt-start pose, clear combat VFX,
+    /// then despawn + respawn the wave so it comes back fresh at the CURRENT difficulty
+    /// (spawn health/lethality reflect the new level). No-op outside HUNT — in BUILD a
+    /// difficulty change just updates the dial for the next hunt. Reuses the baked nav
+    /// (no re-bake), so it's cheap enough to fire on every key press.
+    pub fn restart_hunt(&mut self) {
+        if self.mode != Mode::Hunt {
+            return;
+        }
+        // Fresh player-combat state, and back to the duel start if we recorded it.
+        self.player_health = PLAYER_MAX_HEALTH;
+        self.player_armor = 0.0;
+        self.player_dead = false;
+        self.damage_flash = 0.0;
+        self.hud_show_timer = 0.0;
+        self.caught = false;
+        if let Some((feet, yaw, pitch)) = self.hunt_spawn {
+            self.character = Some(CharacterController::new(feet, yaw, pitch));
+        }
+        // Clear transient combat VFX so nothing leaks across the reset.
+        self.sparks.clear();
+        self.projectiles.clear();
+        self.mines.clear();
+        self.blasts.clear();
+        // Fresh grenade-flush camp tracker for the new encounter.
+        self.camp_anchor = None;
+        self.camp_timer = 0.0;
+        self.grenade_cooldown = 0.0;
+        // Despawn the current wave and re-flood it in at the current difficulty.
+        self.physics.clear_enemy_colliders();
+        self.enemies.clear();
+        if self.spawn_enemies {
+            if let Some(nav) = self.nav.take() {
+                self.spawn_wave(&nav);
+                self.nav = Some(nav);
             }
         }
     }
@@ -325,14 +414,13 @@ impl World {
             log::warn!("no animation template loaded — spawning no hunters");
             return;
         };
-        // Each hunter starts clean (all-white blood colors), sized to the model.
-        let vert_count = self.char_model.as_ref().map(|m| m.vertices.len()).unwrap_or(0);
         // Face the player initially (harmless: if the player's out of sight/range the
         // search FSM takes over immediately; if in view they engage, which is right).
         let watch = self.player_pos().unwrap_or(self.spawn_point);
-        // Resolved gun-arm + upper-body mask (shared); each hunter clones its own
-        // aim/recoil stack (borrowed — `EnemyArm` owns a joint-mask `Vec`, not `Copy`).
-        let arm = self.enemy_arm.as_ref();
+        // How many distinct bodies loaded — hunters spread across the catalog below.
+        let body_count = self.char_models.len();
+        // Difficulty survivability: each hunter spawns with scaled health.
+        let spawn_hp = crate::enemy::ENEMY_HEALTH * self.difficulty_params().health_mult;
         // Gait clips for the continuous locomotion blend (fixed template layout:
         // 0 idle, 1 walk, 2 jog, 3 run), cloned once and re-cloned per hunter.
         let loco_clips: Option<Vec<(f32, clip::AnimationClip)>> = (|| {
@@ -346,13 +434,21 @@ impl World {
         // ANIM_DEBUG → spawn a single AR33-rifle hunter (a two-handed weapon, to
         // check the aim/hold transfers from the one-handed pistol case) so behaviour
         // can be observed in isolation.
-        let count = if self.anim_debug { 1 } else { ENEMY_COUNT };
+        let count = if self.anim_debug { 1 } else { self.wave_size };
         for i in 0..count {
             let (wcfg, dual) = if self.anim_debug {
                 (crate::combat::config::AR33, false)
             } else {
                 ENEMY_ROSTER[i % ENEMY_ROSTER.len()]
             };
+            // Spread the wave across the whole body catalog so a single hunt shows a
+            // varied squad rather than six clones (body 0 = Karl when only one loaded).
+            let body = if body_count == 0 { 0 } else { (i * body_count / count.max(1)) % body_count };
+            // This hunter starts clean (all-white blood), sized to ITS body's mesh.
+            let vert_count = self.char_models.get(body).map(|m| m.vertices.len()).unwrap_or(0);
+            // This body's resolved gun-arm + upper-body mask; the hunter clones its own
+            // aim/recoil stack (borrowed — `EnemyArm` owns a joint-mask `Vec`, not `Copy`).
+            let arm = self.enemy_arm.get(body).and_then(|a| a.as_ref());
             // Ring the cluster around the spawn point.
             let ang = i as f32 / count as f32 * std::f32::consts::TAU;
             let raw = self.spawn_point
@@ -378,7 +474,7 @@ impl World {
                     EnemyWeaponClass::Rifle => FIRE_RIFLE_IDX,
                 }
             };
-            let skel = self.char_model.as_ref().map(|m| &m.skeleton);
+            let skel = self.char_models.get(body).map(|m| &m.skeleton);
             let asset = self.enemy_weapon_lib.iter().find(|w| w.name == weapon.name);
             let stack = match (arm, loco_clips.clone(), template.clip(aim_idx).cloned()) {
                 (Some(a), Some(clips), Some(aim_clip)) => {
@@ -418,7 +514,15 @@ impl World {
             };
 
             self.enemies.push(EnemyInstance {
-                enemy: Enemy::new(spawn, watch),
+                enemy: {
+                    let mut e = Enemy::new(spawn, watch);
+                    e.set_max_health(spawn_hp); // difficulty survivability scaling
+                    // Flank side: alternate hunters left/right so the pack surrounds the
+                    // player rather than chasing single-file down one lane (#3).
+                    e.set_flank_side(if i % 2 == 0 { 1.0 } else { -1.0 });
+                    e
+                },
+                body,
                 anim: template.clone(),
                 weapon,
                 dual,
@@ -427,6 +531,7 @@ impl World {
                 shot_timer: 0.0,
                 fire_elapsed: None,
                 muzzle_timer: 0.0,
+                damage_cooldown: 0.0,
                 blood: vec![1.0f32; vert_count * 3],
                 stack,
                 aim_weight: 0.0,
@@ -434,7 +539,7 @@ impl World {
                 final_pose: None,
             });
             log::info!(
-                "hunter {i} flooded in at {spawn:?} with {}{}",
+                "hunter {i} flooded in at {spawn:?} as body {body} with {}{}",
                 weapon.name,
                 if dual { " (dual-wield)" } else { "" }
             );

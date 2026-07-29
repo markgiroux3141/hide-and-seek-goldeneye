@@ -275,6 +275,38 @@ impl PhysicsWorld {
         })
     }
 
+    /// Raycast that ignores ALL enemy capsules (friendly actors) — only WORLD
+    /// geometry (walls / floors / doors) can block it. Used for perception
+    /// line-of-sight: a packmate standing on the ray must not hide the player from a
+    /// hunter's sight (which caused hunters to flip-flop engage/disengage and "give
+    /// up"). Shooting keeps the normal [`Self::raycast_excluding`], so a friendly in
+    /// the line still blocks a shot.
+    pub fn raycast_world_only(&mut self, origin: Vec3, dir: Vec3, max_toi: f32) -> Option<RayHit> {
+        self.ensure_current();
+        let ray = Ray::new(
+            point![origin.x, origin.y, origin.z],
+            vector![dir.x, dir.y, dir.z],
+        );
+        let enemy_colliders = &self.enemy_colliders;
+        let predicate = |handle: ColliderHandle, _: &Collider| !enemy_colliders.contains(&handle);
+        let filter = QueryFilter::default().predicate(&predicate);
+        let (handle, intersection) = self.query_pipeline.cast_ray_and_get_normal(
+            &self.bodies,
+            &self.colliders,
+            &ray,
+            max_toi,
+            true,
+            filter,
+        )?;
+        let p = ray.point_at(intersection.time_of_impact);
+        let n = intersection.normal;
+        Some(RayHit {
+            point: Vec3::new(p.x, p.y, p.z),
+            normal: Vec3::new(n.x, n.y, n.z),
+            collider: handle,
+        })
+    }
+
     /// Move a character capsule against the static world with move-and-slide,
     /// autostep, and ground-snap. `capsule_center` is the world position of the
     /// capsule's midpoint; `desired` is the attempted translation this step.

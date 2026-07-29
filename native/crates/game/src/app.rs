@@ -223,6 +223,14 @@ impl ApplicationHandler for App {
 
         // Build the world, upload its initial region meshes.
         let mut world = World::new();
+        // Pin the difficulty dial to a fixed level at boot so it doesn't have to be
+        // managed by hand while evaluating the AI (the `=`/`-` keys still nudge it).
+        // Max = the full expression of the lethality/health/evasion + aim-dodge work.
+        world.set_difficulty(crate::world::DIFFICULTY_MAX);
+        // Restore a small pack at boot (the code default stays at duel = 1 so the
+        // duel-mode tests are unaffected) — the coordinated AI (flanking, squad
+        // suppression, cover) only reads with more than one hunter on the field.
+        world.set_wave_size(crate::world::PLAYTEST_WAVE_SIZE);
         for rm in world.initial_meshes() {
             renderer.set_region_textured(rm.id, &rm.mesh);
         }
@@ -243,10 +251,10 @@ impl ApplicationHandler for App {
                 Err(e) => log::warn!("LOAD_SLOT {slot} failed: {e}"),
             }
         }
-        // B1: upload the skinned character once (geometry + textures); its pose is
-        // driven per frame below.
-        if let Some(m) = world.character_model() {
-            renderer.upload_character(m);
+        // B1: upload every skinned character body once (geometry + textures) — one GPU
+        // mesh per body id; each hunter's pose + body selection is driven per frame.
+        for (i, m) in world.character_models().iter().enumerate() {
+            renderer.upload_character(i, m);
         }
         // Player Combat P1: upload the weapon viewmodel once (gun geometry +
         // textures); its overlay transform is driven per frame + it's shown only
@@ -724,6 +732,23 @@ impl App {
         if code == KeyCode::KeyI {
             if let Some(world) = self.world.as_mut() {
                 world.toggle_invulnerable();
+            }
+            return;
+        }
+        // `=` crank difficulty up, `-` down (each is a single key — no Shift needed;
+        // NumpadAdd/Subtract too). Changing the dial restarts the duel fresh at the new
+        // level (heal + respawn — see `World::change_difficulty`). **HUNT only** — these
+        // keys are the BUILD push/pull step (`+`/`=` push, `-` pull), so in BUILD we let
+        // them fall through to the authoring handler below instead of eating them here.
+        // See `DiffParams`.
+        if matches!(
+            code,
+            KeyCode::Equal | KeyCode::NumpadAdd | KeyCode::Minus | KeyCode::NumpadSubtract
+        ) && self.world.as_ref().map(|w| !w.is_build()).unwrap_or(false)
+        {
+            if let Some(world) = self.world.as_mut() {
+                let up = matches!(code, KeyCode::Equal | KeyCode::NumpadAdd);
+                world.change_difficulty(if up { 1 } else { -1 });
             }
             return;
         }

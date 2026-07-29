@@ -153,6 +153,9 @@ impl World {
         // Explosives: preload the blast so the first detonation doesn't hitch (the
         // launcher/throw/detonator fire sounds ride the per-weapon loop above).
         audio.load(EXPLOSION_SOUND);
+        // Enemy grenade flush (#5): the toss SFX isn't a player weapon sound, so
+        // preload it here or the first lob hitches.
+        audio.load(GRENADE_THROW_SOUND);
         // Mines: the attach beep (on stick), the timed-mine arm beep, and the remote
         // detonation click — none is a weapon fire_sound, so preload them here.
         audio.load(MINE_PLACE_SOUND);
@@ -190,11 +193,14 @@ impl World {
         if self.player_dead {
             Some(crate::hud::death_quads(aspect))
         } else {
-            Some(crate::hud::ammo_quads(
+            let mut q = crate::hud::ammo_quads(
                 self.weapon().magazine(),
                 self.weapon().reserve(),
                 aspect,
-            ))
+            );
+            // Live difficulty-dial readout along the top edge (`=` / `-` to change).
+            q.extend(crate::hud::danger_quads(self.difficulty, DIFFICULTY_MAX, aspect));
+            Some(q)
         }
     }
 
@@ -411,6 +417,134 @@ impl World {
             if inst.enemy.pos.distance(ppos) <= GUNSHOT_HEARING_RANGE {
                 inst.enemy.hear_noise(ppos);
             }
+        }
+    }
+
+    /// Footstep noise (#6, difficulty-scaled): a *moving* player emits a quiet
+    /// movement ping that pulls nearby **blind** hunters (searching / investigating /
+    /// idle) toward the sound — much shorter-ranged than gunfire, and 0-range at
+    /// difficulty 0 (a baseline hunter is deaf to footsteps). Engaged hunters keep
+    /// their own better info ([`crate::enemy::Enemy::hear_noise`] gates that). Called
+    /// each fixed step in HUNT; reads the player's actual travelled speed, so hugging
+    /// a wall (little real motion) or standing still is silent.
+    pub(crate) fn alert_enemies_to_movement(&mut self) {
+        let Some(c) = self.character.as_ref() else { return };
+        let speed = c.speed();
+        if speed < MOVE_NOISE_MIN_SPEED {
+            return; // sneaking / stopped — no footstep noise
+        }
+        let ppos = c.pos;
+        let t = self.difficulty as f32 / DIFFICULTY_MAX as f32;
+        let speed_frac = (speed / PLAYER_RUN_SPEED).clamp(0.0, 1.0);
+        let range = MOVE_NOISE_RANGE_MAX * t * speed_frac;
+        if range <= 0.0 {
+            return; // difficulty 0 → footsteps carry nowhere
+        }
+        for inst in &mut self.enemies {
+            if inst.enemy.is_dead() {
+                continue;
+            }
+            if inst.enemy.pos.distance(ppos) <= range {
+                inst.enemy.hear_noise(ppos);
+            }
+        }
+    }
+
+    /// Grenade flush (#5, difficulty-scaled): track how long the player has held one
+    /// spot and, once they've camped past a difficulty-scaled dwell, have an engaged
+    /// hunter within range lob a grenade at that spot to flush them out. **Off at
+    /// difficulty 0.** The lob is a **blind** throw at the camp spot (no LOS needed —
+    /// the point is to shift a camper who's behind cover); the existing projectile sim
+    /// (`explosives_step` → `detonate`) arcs it, detonates it, and damages the player.
+    /// Squad-wide cooldown so the pack doesn't drop a simultaneous volley. Called each
+    /// fixed step in HUNT.
+    pub(crate) fn grenade_flush_step(&mut self, dt: f32) {
+        if self.grenade_cooldown > 0.0 {
+            self.grenade_cooldown = (self.grenade_cooldown - dt).max(0.0);
+        }
+        let t = self.difficulty as f32 / DIFFICULTY_MAX as f32;
+        if t <= 0.0 {
+            // Difficulty 0: no grenades. Keep the camp tracker quiescent.
+            self.camp_anchor = None;
+            self.camp_timer = 0.0;
+            return;
+        }
+        let Some(ppos) = self.player_pos() else { return };
+        // Update the camp tracker: stay within CAMP_RADIUS of the anchor → accrue time;
+        // wander off → re-anchor here and reset the clock.
+        match self.camp_anchor {
+            Some(a) if a.distance(ppos) <= CAMP_RADIUS => self.camp_timer += dt,
+            _ => {
+                self.camp_anchor = Some(ppos);
+                self.camp_timer = 0.0;
+            }
+        }
+        let dwell = CAMP_DWELL_MAX + (CAMP_DWELL_MIN - CAMP_DWELL_MAX) * t; // 5 s → 2 s
+        if self.camp_timer < dwell || self.grenade_cooldown > 0.0 {
+            return;
+        }
+        let Some(anchor) = self.camp_anchor else { return };
+        // Don't lob if ANY living hunter is close to the camp spot: it would be caught
+        // in its own blast (the self/friendly-fire bug), and a hunter that close should
+        // just shoot. Grenades are only for a camper the pack is held away from.
+        let anyone_close = self
+            .enemies
+            .iter()
+            .any(|e| !e.enemy.is_dead() && e.enemy.pos.distance(anchor) < GRENADE_SAFE_DIST);
+        if anyone_close {
+            return;
+        }
+        // Pick the nearest engaged, living hunter within throw range of the camp spot
+        // (guaranteed ≥ GRENADE_SAFE_DIST away by the guard above).
+        let thrower = self
+            .enemies
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !e.enemy.is_dead() && e.enemy.is_engaged())
+            .map(|(i, e)| (i, e.enemy.pos.distance(anchor)))
+            .filter(|(_, d)| *d <= GRENADE_THROW_RANGE)
+            .min_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        let Some((idx, _)) = thrower else { return };
+        let origin = self.enemies[idx].enemy.pos + Vec3::Y * GRENADE_THROW_Y;
+        self.throw_enemy_grenade(origin, anchor);
+        self.grenade_cooldown = GRENADE_COOLDOWN;
+        self.camp_timer = 0.0; // re-arm the camp clock after a lob
+        log::info!("hunter {idx} lobs a grenade to flush the camping player");
+    }
+
+    /// Lob a grenade from `origin` to land near `target`, blind (a `#5` flush throw).
+    /// Reuses the [`crate::combat::GRENADE`] blast/model but computes a per-throw
+    /// ballistic 45° lob (launch speed from the horizontal distance) so it arcs onto
+    /// the camp spot instead of flying flat. Detonates on impact (no bounce) so it
+    /// lands where aimed. The projectile then rides the normal `explosives_step`.
+    fn throw_enemy_grenade(&mut self, origin: Vec3, target: Vec3) {
+        let base = match crate::combat::config::GRENADE.fire_kind {
+            crate::combat::FireKind::Projectile(p) => p,
+            _ => return,
+        };
+        let to = Vec3::new(target.x - origin.x, 0.0, target.z - origin.z);
+        let d = to.length();
+        let dir_h = if d > 1e-3 { to / d } else { Vec3::X };
+        // 45° lob: for a launch at 45°, range = 2·u²/g (u = each component's speed), so
+        // u = sqrt(d·g/2). Split equally between horizontal aim + vertical loft.
+        let g = base.gravity.max(1.0);
+        let u = (d * g / 2.0).sqrt().clamp(GRENADE_LOB_MIN, GRENADE_LOB_MAX);
+        let spec = crate::combat::ProjectileSpec {
+            speed: u,
+            gravity: base.gravity,
+            loft: u,
+            fuse: Some(3.0), // air backstop if it somehow never lands
+            bounce: 0.0,     // detonate on impact → lands on the camp spot
+            explosion: base.explosion,
+            model: base.model,
+        };
+        // Release a little ahead of the chest along the throw so the round clears the
+        // thrower's own capsule and doesn't detonate on it at launch.
+        let launch = origin + dir_h * 0.6;
+        let proj = crate::combat::Projectile::spawn(launch, dir_h, Vec3::Y, spec);
+        self.projectiles.push(proj);
+        if let Some(audio) = self.audio.as_mut() {
+            audio.play(GRENADE_THROW_SOUND, GRENADE_THROW_VOL);
         }
     }
 
@@ -799,7 +933,10 @@ impl World {
                 inst.anim.play_once(death_start + pick, 0.2, None, None);
             }
             log::info!("HUNTER DOWN (blast, {dmg:.0} dmg)");
-        } else {
+        } else if self.hit_reactions {
+            // GoldenEye-style flinch (opt-in — OFF by default, matching `hit_enemy`):
+            // a non-lethal blast staggers with a torso hurt clip + brief stun. The
+            // sim-style default plays NO flinch, so a blasted hunter keeps fighting.
             let clips = anim_set::TORSO_HIT_CLIPS;
             let name = clips[self.rand_below(clips.len())];
             let clip = CHAR_HIT_START + anim_set::hit_clip_pos(name).unwrap_or(0);
@@ -810,6 +947,10 @@ impl World {
             inst.enemy.stun(dur);
             let hp = inst.enemy.health();
             log::info!("hunter caught in blast — {dmg:.0} dmg, {hp:.0} hp left");
+        } else {
+            // Sim style (default): damage + pain SFX, no flinch/stun.
+            let hp = self.enemies.get(idx).map(|i| i.enemy.health()).unwrap_or(0.0);
+            log::info!("hunter caught in blast — {dmg:.0} dmg, {hp:.0} hp left (no flinch)");
         }
     }
 
@@ -825,10 +966,11 @@ impl World {
     pub(crate) fn hit_enemy(&mut self, idx: usize, hit_point: Vec3) {
         let base = self.weapon().config().damage;
         // Paint blood at the impact (before damage, so it shows even on the kill
-        // shot). Needs the shared model (immut) + this hunter's pose/blood (mut) —
-        // disjoint fields, split-borrowed. `char_feet_offset` read out first.
-        let feet_offset = self.char_feet_offset;
-        if let Some(model) = self.char_model.as_ref() {
+        // shot). Needs this hunter's body model (immut) + its pose/blood (mut) —
+        // disjoint fields, split-borrowed. Body id + its feet offset read out first.
+        let body = self.enemies.get(idx).map(|i| i.body).unwrap_or(0);
+        let feet_offset = self.body_feet_offset(body);
+        if let Some(model) = self.char_models.get(body) {
             if let Some(inst) = self.enemies.get_mut(idx) {
                 if !inst.enemy.is_dead() {
                     let joints = inst.anim.skinning_matrices(&model.skeleton);
@@ -871,8 +1013,10 @@ impl World {
                 inst.anim.play_once(death_start + pick, 0.2, None, None);
             }
             log::info!("HUNTER DOWN ({zone:?}, {dmg:.0} dmg — {})", anim_set::DEATH_CLIPS[pick]);
-        } else {
-            // Pick a hurt clip fitting the zone, resolve it to an AnimPlayer index.
+        } else if self.hit_reactions {
+            // GoldenEye-style flinch (opt-in — off by default): play a zone-appropriate
+            // hurt clip + a brief stun. The pain SFX + blood above already read the hit;
+            // this adds the authored reaction for a future GE-faithful mode.
             let clips = zone.hurt_clips();
             let name = clips[self.rand_below(clips.len())];
             let clip = CHAR_HIT_START + anim_set::hit_clip_pos(name).unwrap_or(0);
@@ -885,6 +1029,12 @@ impl World {
             inst.enemy.stun(dur);
             let hp = inst.enemy.health();
             log::info!("hunter hit — {zone:?} {dmg:.0} dmg, {hp:.0} hp left ({name})");
+        } else {
+            // Perfect-Dark "sim" style (default): no flinch animation or stun — the
+            // hunter keeps chasing + firing through the hit. The pain vocal + the
+            // persistent blood color already signal the damage.
+            let hp = self.enemies.get(idx).map(|i| i.enemy.health()).unwrap_or(0.0);
+            log::info!("hunter hit — {zone:?} {dmg:.0} dmg, {hp:.0} hp left (no flinch)");
         }
     }
 
@@ -921,10 +1071,13 @@ impl World {
         if self.hud_show_timer > 0.0 {
             self.hud_show_timer = (self.hud_show_timer - dt).max(0.0);
         }
-        // Per-hunter muzzle decay (blood is persistent — no decay).
+        // Per-hunter muzzle + damage-cooldown decay (blood is persistent — no decay).
         for inst in &mut self.enemies {
             if inst.muzzle_timer > 0.0 {
                 inst.muzzle_timer = (inst.muzzle_timer - dt).max(0.0);
+            }
+            if inst.damage_cooldown > 0.0 {
+                inst.damage_cooldown = (inst.damage_cooldown - dt).max(0.0);
             }
         }
         if self.player_dead {
@@ -934,6 +1087,8 @@ impl World {
         // Each hunter fires only while its FIRE one-shot is inside its window
         // (the FIRE_TIMING mapping), spaced by 1/fireRate. Collect the shot events
         // first (emitting needs `&mut self`, which would clash with the iterator).
+        // The visual cadence is the weapon's own fire rate (difficulty no longer scales
+        // it — the damage that lands is capped by MAX_HIT_RATE in `emit_enemy_shot`).
         let mut shots: Vec<usize> = Vec::new();
         for (i, inst) in self.enemies.iter_mut().enumerate() {
             let Some(t) = inst.fire_elapsed else {
@@ -985,11 +1140,27 @@ impl World {
         if !crate::enemy::line_of_sight(&mut self.physics, epos, ppos, collider) {
             return;
         }
+        // Hit-rate cap: even mid-spray, a hunter can only LAND a shot every
+        // 1/MAX_HIT_RATE seconds — so full-auto can't one-shot you. Shots fired while
+        // the cooldown is up still flash + report, they just can't damage.
+        let ready = self.enemies.get(idx).map(|i| i.damage_cooldown <= 0.0).unwrap_or(false);
+        if !ready {
+            return;
+        }
+        // Difficulty scales accuracy up (capped at a full hit) and eases out the
+        // distance falloff, so a high-difficulty hunter lands shots at range too.
+        let dp = self.difficulty_params();
         let dist = Vec3::new(ppos.x - epos.x, 0.0, ppos.z - epos.z).length();
+        let acc = (weapon.accuracy * dp.accuracy_mult).min(1.0);
         let dist_factor = (1.0 - dist / weapon.range).max(0.0);
-        let hit_chance = weapon.accuracy * dist_factor;
+        let eased = dist_factor + (1.0 - dist_factor) * dp.falloff_ease;
+        let hit_chance = acc * eased;
         if self.rand_float() < hit_chance {
             self.take_player_damage(weapon.damage);
+            // Start the hit-rate cooldown only on a shot that actually landed.
+            if let Some(inst) = self.enemies.get_mut(idx) {
+                inst.damage_cooldown = 1.0 / MAX_HIT_RATE;
+            }
         }
     }
 

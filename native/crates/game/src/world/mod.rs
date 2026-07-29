@@ -55,6 +55,8 @@ mod spike_preview;
 mod tools;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod ai_testbed;
 
 // Module-internal free helpers, re-exported so every submodule reaches them
 // through `use super::*` regardless of which file defines them. (`find_room_brushes`
@@ -328,6 +330,24 @@ pub(crate) const ENEMY_MUZZLE_TIME: f32 = 0.1;
 /// Enemy gun-report volume (linear amplitude).
 pub(crate) const ENEMY_FIRE_VOL: f32 = 0.7;
 
+/// Cap on how often an enemy shot may actually DAMAGE the player (hits/second),
+/// independent of the weapon's visual fire rate. Stops a full-auto spray from being a
+/// one-hit kill: the gun still muzzle-flashes at its own cadence, but at most this many
+/// of those shots per second can land. A pistol (2/s) is already under it; only fast
+/// autos get throttled. Max sustained enemy DPS = `MAX_HIT_RATE * ENEMY_DAMAGE`.
+/// Difficulty scales accuracy / speed / evasion — NOT this ceiling.
+pub(crate) const MAX_HIT_RATE: f32 = 4.0;
+
+/// Reactive-evasion aim sense: a hunter counts as "aimed at" when the player's
+/// crosshair line is within this cosine of the direction to its chest (≈12° half-
+/// angle) AND the line to it is unobstructed. Feeds the FSM's aim-dodge (see
+/// [`crate::enemy::Enemy::update`]'s `aimed_at`). The omniscience the user OK'd — the
+/// hunter "feels" the bead being drawn on it and jukes off the line.
+pub(crate) const AIM_SENSE_COS: f32 = 0.978;
+/// Height (m above feet) the aim sense targets — the torso, matching where the player
+/// naturally lines a shot up.
+pub(crate) const AIM_SENSE_CHEST_Y: f32 = 1.0;
+
 /// The hunter roster spawned at G→HUNT: `(weapon, dual-wield?)`, one hunter per
 /// entry (capped by available standable cells). Covers every animation class —
 /// two-handed rifle, one-handed pistol, dual rifle (the canonical akimbo weapon),
@@ -346,7 +366,129 @@ pub(crate) const ENEMY_ROSTER: &[(crate::combat::config::WeaponStats, bool)] = &
 /// How many hunters flood in at the spawn point on G→HUNT. Weapons are drawn from
 /// [`ENEMY_ROSTER`] (cycling if this exceeds the roster length), so this is the
 /// single knob for "how big is the wave" — bump it and the rest follows.
-pub(crate) const ENEMY_COUNT: usize = 6;
+///
+/// **Default set to 1 (2026-07-27) — "duel mode":** while tuning the difficulty dial
+/// we spawn a single hunter so its beatability can be judged in isolation. This is the
+/// initial value of the runtime [`World`] `wave_size` field; bump the field (or this
+/// default) back up once the per-enemy difficulty curve is dialed in.
+pub(crate) const ENEMY_COUNT: usize = 1;
+
+/// The wave size the **app** pins at boot (the code default [`ENEMY_COUNT`] stays at
+/// 1 so the duel-mode tests are unaffected). A small pack so the coordinated AI —
+/// flanking approach angles, squad suppression, cover — actually reads in playtest;
+/// bump/lower freely while tuning. Set in `app.rs` right after the difficulty pin.
+pub const PLAYTEST_WAVE_SIZE: usize = 4;
+
+/// Top of the difficulty dial ([`World::difficulty`] runs `0..=DIFFICULTY_MAX`). 0 is
+/// the original baseline; DIFFICULTY_MAX is brutal. Driven live with the `=` / `-`
+/// keys (see `app.rs`), read into [`DiffParams`] each frame.
+pub(crate) const DIFFICULTY_MAX: u32 = 10;
+
+/// Difficulty-derived tuning for the current [`World::difficulty`], recomputed on read
+/// (cheap). One dial ramps three axes at once: **lethality** (accuracy + fire cadence
+/// + reaction), **survivability** (health), and **evasion** (dodge). All multipliers
+/// are 1.0 / neutral at level 0 (original behaviour) and ramp linearly to level
+/// [`DIFFICULTY_MAX`]. Damage per hit is NOT scaled, and neither is fire rate — the
+/// landed-hit rate is capped ([`MAX_HIT_RATE`]) so difficulty comes from being more
+/// accurate, faster, and more evasive, not from a one-shot spray.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DiffParams {
+    /// Multiplies the weapon's base accuracy (hit chance is still capped at 1.0).
+    pub accuracy_mult: f32,
+    /// Eases out the distance accuracy falloff: 0 = full falloff (baseline), 1 = the
+    /// hunter is as accurate at range as point-blank.
+    pub falloff_ease: f32,
+    /// Multiplies enemy movement speed (chase / attack-advance / reposition), so a
+    /// high-difficulty hunter closes + repositions faster and is harder to escape.
+    pub speed_mult: f32,
+    /// Scales the between-bursts cooldown DOWN (→ more relentless fire).
+    pub cooldown_mult: f32,
+    /// Scales the reaction delay DOWN (→ engages faster on sight).
+    pub reaction_mult: f32,
+    /// Multiplies enemy spawn health (→ harder to put down).
+    pub health_mult: f32,
+    /// Lateral-evasion intensity 0..1 handed to the FSM (see [`crate::enemy::AiTuning`]).
+    pub dodge: f32,
+    /// Perception-range multiplier (1.0 baseline → wider): a harder hunter notices +
+    /// tracks the player from further out. Threaded to the FSM as [`AiTuning::sense`].
+    pub sense_mult: f32,
+    /// Suppressing-fire aggression 0..1 (0 baseline): a harder hunter opens fire while
+    /// still closing. Threaded to the FSM as [`AiTuning::suppress`].
+    pub suppress: f32,
+    /// Flanking intensity 0..1 (0 baseline): a harder hunter curves its approach onto
+    /// an offset bearing. Threaded to the FSM as [`AiTuning::flank`].
+    pub flank: f32,
+    /// Cover-usage intensity 0..1 (0 baseline): a harder hunter breaks LOS to cover +
+    /// peek-fires between bursts. Threaded to the FSM as [`AiTuning::cover`].
+    pub cover: f32,
+}
+
+/// The character-body catalog: every skinned body a hunter can wear, as
+/// `(display name, GLB filename under assets/enemies/characters)`. The Vec index is
+/// the **body id** stored on each [`EnemyInstance`]. All 44 GoldenEye characters ride
+/// the same 15-bone rig (verified: `Bone_1..Bone_15`, identical node order), so every
+/// clip + the aim overlay retargets onto any body — only the mesh geometry and the
+/// skeleton bind pose (bone lengths) differ per body, both handled per-body at load
+/// (see [`World::char_models`]). `russian-guard_karl` stays index 0: tests + the BUILD
+/// procedural preview default to body 0, and it's the original single-guard asset.
+pub(crate) const BODY_CATALOG: &[(&str, &str)] = &[
+    ("russian-guard_karl", "russian-guard_karl.glb"),
+    ("russian-guard_alan", "russian-guard_alan.glb"),
+    ("russian-guard_joe", "russian-guard_joe.glb"),
+    ("russian-guard_mark", "russian-guard_mark.glb"),
+    ("russian-guard_martin", "russian-guard_martin.glb"),
+    ("russian-guard_pete", "russian-guard_pete.glb"),
+    // russian-infantry (all 6 head variants) DISABLED 2026-07-26: their source GLBs
+    // ship with the waist mesh missing entirely (torso + hips are two disconnected
+    // segments — confirmed in Blender). It's an upstream extraction defect baked into
+    // the asset (3DS FPS copied these verbatim from the GoldenEye JS assets; no
+    // conversion step in any repo drops it), not our loader. Re-enable once the GLBs
+    // are patched. Other bodies may have the same flaw — flag + add here as found.
+    // ("russian-infantry_alan", "russian-infantry_alan.glb"),
+    // ("russian-infantry_joe", "russian-infantry_joe.glb"),
+    // ("russian-infantry_karl", "russian-infantry_karl.glb"),
+    // ("russian-infantry_mark", "russian-infantry_mark.glb"),
+    // ("russian-infantry_martin", "russian-infantry_martin.glb"),
+    // ("russian-infantry_pete", "russian-infantry_pete.glb"),
+    ("blue-guard_alan", "blue-guard_alan.glb"),
+    ("blue-guard_joe", "blue-guard_joe.glb"),
+    ("blue-guard_karl", "blue-guard_karl.glb"),
+    ("blue-guard_mark", "blue-guard_mark.glb"),
+    ("blue-guard_martin", "blue-guard_martin.glb"),
+    ("blue-guard_pete", "blue-guard_pete.glb"),
+    ("janus-marine_alan", "janus-marine_alan.glb"),
+    ("janus-marine_joe", "janus-marine_joe.glb"),
+    ("janus-marine_karl", "janus-marine_karl.glb"),
+    ("janus-marine_mark", "janus-marine_mark.glb"),
+    ("janus-marine_martin", "janus-marine_martin.glb"),
+    ("janus-marine_pete", "janus-marine_pete.glb"),
+    ("janus-special-forces_alan", "janus-special-forces_alan.glb"),
+    ("janus-special-forces_joe", "janus-special-forces_joe.glb"),
+    ("janus-special-forces_karl", "janus-special-forces_karl.glb"),
+    ("janus-special-forces_mark", "janus-special-forces_mark.glb"),
+    ("janus-special-forces_martin", "janus-special-forces_martin.glb"),
+    ("janus-special-forces_pete", "janus-special-forces_pete.glb"),
+    ("jungle-commando_alan", "jungle-commando_alan.glb"),
+    ("jungle-commando_joe", "jungle-commando_joe.glb"),
+    ("jungle-commando_karl", "jungle-commando_karl.glb"),
+    ("jungle-commando_mark", "jungle-commando_mark.glb"),
+    ("jungle-commando_martin", "jungle-commando_martin.glb"),
+    ("jungle-commando_pete", "jungle-commando_pete.glb"),
+    ("baron-samedi", "baron-samedi.glb"),
+    ("boris", "boris.glb"),
+    // jaws DISABLED 2026-07-26: the skinned character GLB ships with NO materials/
+    // textures (it has UVs but the material+images were dropped on export), so he
+    // renders solid white. Upstream export defect — same in 3DS FPS; the ONLY textured
+    // Jaws there is a non-skinned Aztec prop (objects/aztec_jaws.glb), so restoring the
+    // skin needs asset surgery. Re-enable once the character GLB is re-exported textured.
+    // ("jaws", "jaws.glb"),
+    ("mayday", "mayday.glb"),
+    ("natalya", "natalya.glb"),
+    ("ourumov", "ourumov.glb"),
+    ("trevelyan", "trevelyan.glb"),
+    ("valentin", "valentin.glb"),
+    ("xenia", "xenia.glb"),
+];
 
 // ─── Enemy spawn point (a FIXED world marker) ────────────────────────────────
 /// The hunters always flood in at this fixed world-space point (metres) — a
@@ -379,6 +521,47 @@ const SEARCH_POINT_COUNT: usize = 12;
 /// searching/investigating hunters toward the sound. Comfortably past the 12 m
 /// sight range so shooting while hidden genuinely gives you away.
 const GUNSHOT_HEARING_RANGE: f32 = 25.0;
+
+/// Footstep (movement) noise — the difficulty-scaled "sharper hearing" lever (#6).
+/// A moving player emits a much quieter ping than gunfire that pulls only *blind*
+/// (searching/investigating) hunters toward the sound. Below [`MOVE_NOISE_MIN_SPEED`]
+/// m/s you're effectively sneaking and make none; at a full run the audible radius
+/// reaches [`MOVE_NOISE_RANGE_MAX`] m — but scaled by the difficulty dial, so at
+/// level 0 the range is 0 (a baseline hunter is deaf to footsteps: vision-only).
+const MOVE_NOISE_MIN_SPEED: f32 = 2.5;
+const MOVE_NOISE_RANGE_MAX: f32 = 10.0;
+/// Player run speed (m/s) used to normalise footstep loudness (matches the
+/// character controller's `WALK_SPEED`); faster movement carries further.
+const PLAYER_RUN_SPEED: f32 = 6.4;
+
+// ─── Grenade flush (#5, difficulty-scaled) ──────────────────────────────────
+/// The player counts as "camping" while they stay within this radius (m) of the
+/// tracked anchor; stepping outside it resets the anchor + dwell timer.
+const CAMP_RADIUS: f32 = 2.5;
+/// Camp dwell (s) before a hunter lobs a grenade to flush the player, lerped by the
+/// difficulty dial: a patient wait at low difficulty, a fast flush at high. The whole
+/// behaviour is **off at difficulty 0** (no grenades ever).
+const CAMP_DWELL_MAX: f32 = 5.0;
+const CAMP_DWELL_MIN: f32 = 2.0;
+/// A hunter must be within this range (m) of the camp spot to have a plausible throw.
+const GRENADE_THROW_RANGE: f32 = 16.0;
+/// No grenade is lobbed if ANY living hunter is within this distance (m) of the camp
+/// spot — comfortably outside the ~4 m blast radius, so a lob never catches the
+/// thrower or a packmate. This also scopes the flush to its intent: grenades are for a
+/// camper the pack is *held away from* (behind cover / at range); when a hunter is
+/// close it just shoots instead.
+const GRENADE_SAFE_DIST: f32 = 6.5;
+/// Height (m above feet) a hunter releases the grenade from (chest/overhand).
+const GRENADE_THROW_Y: f32 = 1.2;
+/// Squad-wide cooldown (s) between grenade lobs.
+const GRENADE_COOLDOWN: f32 = 4.0;
+/// Clamp on the ballistic launch speed (m/s) of a lobbed grenade, so a very short or
+/// very long throw still arcs sensibly.
+const GRENADE_LOB_MIN: f32 = 5.0;
+const GRENADE_LOB_MAX: f32 = 16.0;
+/// The enemy grenade-throw SFX (reuses the hand-grenade toss sound).
+pub(crate) const GRENADE_THROW_SOUND: &str = "sounds/weapons/throw.wav";
+const GRENADE_THROW_VOL: f32 = 0.7;
 
 /// Load a weapon's `(gun, muzzle-flash)` CPU meshes from its config, resolving the
 /// asset-relative paths under `native/assets/weapons/`. Warn-not-panic: a failed
@@ -800,10 +983,16 @@ pub(crate) struct FaceInfo {
 /// One live hunter during the HUNT: its AI/movement [`Enemy`], its own animation
 /// mixer (cloned from the shared clip template so each hunter animates
 /// independently), the weapon it wields + whether it's dual-wielding, its hitscan
-/// capsule handle, and its per-hunter combat/feedback timers. All hunters share the
-/// single [`SkinnedModel`] geometry ([`World::char_model`]); only the pose differs.
+/// capsule handle, and its per-hunter combat/feedback timers. Each hunter wears one
+/// body from [`World::char_models`] (its [`Self::body`] id); the pose differs per
+/// hunter and the geometry differs per body.
 pub(crate) struct EnemyInstance {
     pub enemy: Enemy,
+    /// Which body this hunter wears — an index into [`World::char_models`] /
+    /// [`BODY_CATALOG`]. All bodies share the clip set + aim rig, so this only
+    /// selects the mesh + that body's skeleton (bind pose) for skinning, feet
+    /// seating, weapon attach, and blood-buffer sizing. Assigned at spawn.
+    pub body: usize,
     /// This hunter's crossfade mixer (own clock/pose). Clip layout matches the
     /// shared template: locomotion, per-class fire, hit set, death set.
     pub anim: AnimPlayer,
@@ -826,6 +1015,11 @@ pub(crate) struct EnemyInstance {
     pub fire_elapsed: Option<f32>,
     /// Muzzle-flash countdown (s); >0 → this hunter's muzzle(s) render.
     pub muzzle_timer: f32,
+    /// Seconds until this hunter may DAMAGE the player again — the hit-rate cap
+    /// ([`MAX_HIT_RATE`]) that stops a full-auto spray from being a one-hit kill. The
+    /// gun still visually fires at its own cadence; only how often a shot can *land*
+    /// is capped, so difficulty comes from accuracy / speed / evasion, not raw ROF.
+    pub damage_cooldown: f32,
     /// Per-vertex RGB blood color (flat, len = 3×model vertex count), white =
     /// clean. Each shot reddens the vertices near the impact (accumulating, so it
     /// builds up as persistent blood); uploaded to this hunter's instance color
@@ -895,32 +1089,56 @@ pub struct World {
     /// Baked nav grid; `Some` only in HUNT mode.
     nav: Option<NavWorld>,
     /// The live hunters (HUNT only) — one per [`ENEMY_ROSTER`] entry that found a
-    /// spawn cell. Each carries its own mixer/weapon/collider; all share
-    /// [`Self::char_model`] geometry. Empty in BUILD.
+    /// spawn cell. Each carries its own mixer/weapon/collider and wears a body from
+    /// [`Self::char_models`] (its `body` id). Empty in BUILD.
     enemies: Vec<EnemyInstance>,
     /// Whether a G→HUNT transition spawns the [`ENEMY_ROSTER`]. Defaults to `true`
     /// (so tests and the normal game get hunters); the app flips it off as a dev
     /// convenience while iterating on explosives (see `set_spawn_enemies`), so a
     /// hunt starts empty and you aren't gunned down before you can test.
     spawn_enemies: bool,
-    /// The shared skinned-character geometry (one GLB) rendered for every hunter.
-    /// `None` if the asset failed to load.
-    char_model: Option<SkinnedModel>,
+    /// Every loaded character body, indexed by body id ([`BODY_CATALOG`] order,
+    /// minus any that failed to load). Index 0 is `russian-guard_karl`. Each hunter
+    /// renders the body its `EnemyInstance::body` selects; the BUILD preview uses
+    /// body 0. Empty if no asset loaded.
+    char_models: Vec<SkinnedModel>,
     /// Pristine animation mixer over the full clip set (locomotion + per-class fire
     /// + hit + death), cloned once per spawned hunter so each animates on its own
-    /// clock. `None` if any clip failed to load.
+    /// clock. Built once against body 0's skeleton and shared by every body (the rig
+    /// is identical across all bodies; skinning uses each body's own skeleton at the
+    /// call site). `None` if any clip failed to load.
     char_anim_template: Option<AnimPlayer>,
     /// xorshift state for the hit/death/pain random picks (no `rand` dep).
     char_rng: u64,
-    /// World-space Y offset that seats the character's feet on the floor.
-    /// Computed from the **lowest skinned point of the actual idle pose** (the
-    /// bind-pose AABB can't be used — the bind pose is a splayed star with the
-    /// feet spread high, so seating by it leaves the standing pose sunk).
-    char_feet_offset: f32,
-    /// The resolved gun-arm chain + rest geometry for the shared skeleton, used to
-    /// build each hunter's procedural aim/recoil stack. `None` if the model/idle
-    /// clip failed to load or the skeleton has no arm chain.
-    enemy_arm: Option<EnemyArm>,
+    /// Difficulty dial, `0..=DIFFICULTY_MAX` (0 = original baseline). Cranked live with
+    /// the `=` / `-` keys; drives [`DiffParams`] for enemy lethality/health/evasion.
+    difficulty: u32,
+    /// How many hunters the next HUNT floods in (default [`ENEMY_COUNT`] = 1, "duel
+    /// mode"). A runtime field so tests can spawn a pack for multi-hunter behaviours.
+    wave_size: usize,
+    /// The player's pose (feet, yaw, pitch) captured when this HUNT began, so a
+    /// difficulty-change duel-reset ([`Self::restart_hunt`]) can drop the player back
+    /// at the start rather than wherever they'd wandered. `None` outside HUNT.
+    hunt_spawn: Option<(Vec3, f32, f32)>,
+    /// Whether a shot hunter plays a flinch/hurt animation (+ brief stun). **Off by
+    /// default** — the Perfect-Dark "sim" behaviour: take the damage (pain SFX + blood
+    /// accumulate) and keep fighting, so a hurt hunter never stops shooting or looks
+    /// like it's mid-flinch while firing. Kept as a flag so a future GoldenEye-faithful
+    /// mode can turn the authored hit reactions back on. Death animations are
+    /// unaffected (a kill always plays its death clip).
+    hit_reactions: bool,
+    /// Per-body world-space Y offset that seats that body's feet on the floor
+    /// (parallel to [`Self::char_models`]). Computed from the **lowest skinned point
+    /// of the actual idle pose** for each body (the bind-pose AABB can't be used —
+    /// the bind pose is a splayed star with the feet spread high, so seating by it
+    /// leaves the standing pose sunk). Bodies differ in height (e.g. Jaws), so this
+    /// is per-body.
+    char_feet_offset: Vec<f32>,
+    /// The resolved gun-arm chain + rest geometry per body (parallel to
+    /// [`Self::char_models`]), used to build each hunter's procedural aim/recoil
+    /// stack. Per-body because bind poses (bone lengths) differ. An entry is `None`
+    /// if that body's skeleton has no resolvable arm chain.
+    enemy_arm: Vec<Option<EnemyArm>>,
     /// Spike: the optional BUILD-phase procedural-anim preview character (`Y`).
     /// `None` unless the preview is toggled on. See [`world::spike_preview`].
     procedural_preview: Option<spike_preview::ProceduralPreview>,
@@ -991,6 +1209,16 @@ pub struct World {
     mines: Vec<crate::combat::Mine>,
     /// Explosives: live explosion VFX bursts, decayed each frame.
     blasts: Vec<Blast>,
+    // ─── Grenade flush (#5) ──
+    /// Where the player has been holding position — the camp anchor. Reset to the
+    /// player's spot whenever they leave [`CAMP_RADIUS`] of it; `camp_timer` counts how
+    /// long they've stayed. `None` until the first HUNT step / after a mode switch.
+    camp_anchor: Option<Vec3>,
+    /// Seconds the player has camped within [`CAMP_RADIUS`] of [`Self::camp_anchor`].
+    camp_timer: f32,
+    /// Squad-wide cooldown (s) after a grenade is lobbed, so the whole pack doesn't
+    /// bury a camper under a simultaneous volley.
+    grenade_cooldown: f32,
     /// GoldenEye free-aim crosshair offset in aim space (see `AIM_MAX_RANGE`).
     /// Moves while RMB is held (HUNT), springs back to center on release. Drives
     /// the crosshair position, the gun tilt, and the fire-ray direction. 0 = center.
@@ -1128,34 +1356,40 @@ impl World {
         // Spawn at the room's horizontal center, ~1.5 m up, looking toward −Z.
         let camera = FlyCamera::new(Vec3::new(3.0, 1.5, 3.0), 0.0, 0.0);
 
-        // B1: load the first skinned character (a warning, not a panic, if the
-        // asset is missing — the editor still runs without it).
-        let char_path = format!(
-            "{}/../../assets/enemies/characters/russian-guard_karl.glb",
-            env!("CARGO_MANIFEST_DIR")
-        );
-        let char_model = match gltf_skin::load(&char_path) {
-            Ok(m) => {
-                log::info!(
-                    "loaded character russian-guard_karl: {} verts, {} primitives, {} joints",
-                    m.vertices.len(),
-                    m.primitives.len(),
-                    m.skeleton.joint_count()
-                );
-                Some(m)
+        // Load every character body in the catalog (a warning, not a panic, per body
+        // if an asset is missing — the editor still runs without them). Index 0 is
+        // `russian-guard_karl`; any body that fails to load is skipped, so body ids
+        // stay contiguous over what actually loaded. All bodies ride the same rig, so
+        // one clip template + one aim rig-topology serves them all (below).
+        let mut char_models: Vec<SkinnedModel> = Vec::new();
+        for (name, file) in BODY_CATALOG {
+            let path = format!(
+                "{}/../../assets/enemies/characters/{file}",
+                env!("CARGO_MANIFEST_DIR")
+            );
+            match gltf_skin::load(&path) {
+                Ok(m) => {
+                    log::info!(
+                        "loaded character {name}: {} verts, {} primitives, {} joints",
+                        m.vertices.len(),
+                        m.primitives.len(),
+                        m.skeleton.joint_count()
+                    );
+                    char_models.push(m);
+                }
+                Err(e) => log::warn!("character {name} load failed: {e}"),
             }
-            Err(e) => {
-                log::warn!("character load failed: {e}");
-                None
-            }
-        };
+        }
+        log::info!("loaded {}/{} character bodies", char_models.len(), BODY_CATALOG.len());
 
-        // Load the clip set bound to the character's skeleton in a FIXED index
-        // order — locomotion 0–3, then one fire clip per weapon CLASS
-        // (rifle/pistol/dual, indices FIRE_*_IDX), then the hit set, then the death
-        // set (see CHAR_*_IDX) — into a template mixer. Each spawned hunter clones
-        // this template so it animates on its own clock; the BUILD demo clones it too.
-        let char_anim_template = char_model.as_ref().and_then(|m| {
+        // Load the clip set bound to body 0's skeleton in a FIXED index order —
+        // locomotion 0–3, then one fire clip per weapon CLASS (rifle/pistol/dual,
+        // indices FIRE_*_IDX), then the hit set, then the death set (see CHAR_*_IDX) —
+        // into a template mixer. The rig is identical across all bodies, so this one
+        // template drives every body; each spawned hunter clones it so it animates on
+        // its own clock, and the BUILD demo clones it too. Skinning always uses the
+        // hunter's OWN body skeleton, so per-body bone lengths are respected.
+        let char_anim_template = char_models.first().and_then(|m| {
             let mut files: Vec<&str> =
                 vec!["00-idle.glb", "28-walking.glb", "2A-jogging.glb", "29-running.glb"];
             files.push("01-fire-standing.glb"); // FIRE_RIFLE_IDX
@@ -1183,30 +1417,34 @@ impl World {
                 None
             }
         });
-        // Seat the feet: sample the idle across its loop, skin each pose on the
-        // CPU, and take the global lowest Y (the most-planted foot). Seating that
-        // at the floor keeps the feet grounded while the animation's own vertical
-        // motion still reads. Falls back to the bind-pose AABB with no clip.
-        let char_feet_offset = match (&char_model, char_anim_template.as_ref().and_then(|a| a.clip(0))) {
-            (Some(m), Some(idle)) => {
-                let samples = 24;
-                let mut min_y = f32::INFINITY;
-                for i in 0..samples {
-                    let t = idle.duration * i as f32 / samples as f32;
-                    let mats = idle.skinning_matrices(t, &m.skeleton);
-                    min_y = min_y.min(m.skinned_min_y(&mats));
+        // Per-body feet seating + gun-arm resolution: bind poses (bone lengths) differ
+        // between bodies, so both are computed for EACH body against its own skeleton.
+        // Feet: sample the idle across its loop, skin each pose on the CPU, and take
+        // the global lowest Y (the most-planted foot); seating that at the floor keeps
+        // the feet grounded while the animation's own vertical motion still reads.
+        // Falls back to the bind-pose AABB with no idle clip. Arm: resolve the gun-arm
+        // chain once per body; each hunter clones a fresh aim/recoil stack from its
+        // body's arm at spawn.
+        let idle_clip = char_anim_template.as_ref().and_then(|a| a.clip(0));
+        let mut char_feet_offset: Vec<f32> = Vec::with_capacity(char_models.len());
+        let mut enemy_arm: Vec<Option<EnemyArm>> = Vec::with_capacity(char_models.len());
+        for m in &char_models {
+            let feet = match idle_clip {
+                Some(idle) => {
+                    let samples = 24;
+                    let mut min_y = f32::INFINITY;
+                    for i in 0..samples {
+                        let t = idle.duration * i as f32 / samples as f32;
+                        let mats = idle.skinning_matrices(t, &m.skeleton);
+                        min_y = min_y.min(m.skinned_min_y(&mats));
+                    }
+                    -min_y * CHAR_SCALE
                 }
-                -min_y * CHAR_SCALE
-            }
-            (Some(m), _) => -m.bounds_min.y * CHAR_SCALE,
-            _ => 0.0,
-        };
-        // Resolve the gun-arm chain once (shared across hunters); each hunter clones
-        // a fresh aim/recoil stack from it at spawn.
-        let enemy_arm = match (&char_model, char_anim_template.as_ref().and_then(|a| a.clip(0))) {
-            (Some(m), Some(idle)) => EnemyArm::resolve(m, idle),
-            _ => None,
-        };
+                None => -m.bounds_min.y * CHAR_SCALE,
+            };
+            char_feet_offset.push(feet);
+            enemy_arm.push(idle_clip.and_then(|idle| EnemyArm::resolve(m, idle)));
+        }
 
         // Player Combat: build the full weapon inventory (JS `ALL_WEAPONS`) and
         // load the *active* weapon's gun + muzzle-flash meshes. The rest of the
@@ -1288,9 +1526,13 @@ impl World {
             nav: None,
             enemies: Vec::new(),
             spawn_enemies: true,
-            char_model,
+            char_models,
             char_anim_template,
             char_rng: 0x9E37_79B9_7F4A_7C15,
+            difficulty: 0,
+            wave_size: ENEMY_COUNT,
+            hunt_spawn: None,
+            hit_reactions: false, // Perfect-Dark sim style; flag for a future GE mode
             char_feet_offset,
             enemy_arm,
             procedural_preview: None,
@@ -1317,6 +1559,9 @@ impl World {
             projectiles: Vec::new(),
             mines: Vec::new(),
             blasts: Vec::new(),
+            camp_anchor: None,
+            camp_timer: 0.0,
+            grenade_cooldown: 0.0,
             aim_x: 0.0,
             aim_y: 0.0,
             aiming: false,
@@ -1363,6 +1608,87 @@ impl World {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
         }
+    }
+
+    /// The current difficulty level (`0..=DIFFICULTY_MAX`), for the HUD readout + tests.
+    pub fn difficulty(&self) -> u32 {
+        self.difficulty
+    }
+
+    /// Set the difficulty dial to an absolute `level` (clamped to `0..=DIFFICULTY_MAX`),
+    /// restarting the duel if mid-HUNT. Used to pin a fixed level at startup so the dial
+    /// doesn't have to be managed by hand; the `=`/`-` keys still nudge it after.
+    pub fn set_difficulty(&mut self, level: u32) {
+        let new = level.min(DIFFICULTY_MAX);
+        if new == self.difficulty {
+            return;
+        }
+        self.difficulty = new;
+        log::info!("DIFFICULTY set to {}/{}", self.difficulty, DIFFICULTY_MAX);
+        self.restart_hunt();
+    }
+
+    /// Set how many hunters the next HUNT spawns (default 1 — "duel mode"). Dev/test
+    /// knob; tests bump it to exercise multi-hunter separation/squad behaviour.
+    pub fn set_wave_size(&mut self, n: usize) {
+        self.wave_size = n;
+    }
+
+    /// Enable/disable the authored flinch/hurt animations on a shot hunter (default
+    /// OFF — see [`Self::hit_reactions`]). A future GoldenEye-faithful mode turns this
+    /// on; the current sim-style hunt leaves it off so hurt hunters keep fighting.
+    pub fn set_hit_reactions(&mut self, on: bool) {
+        self.hit_reactions = on;
+    }
+
+    /// The difficulty-derived tuning for the current level (see [`DiffParams`]). Linear
+    /// ramp from all-neutral at level 0 to brutal at [`DIFFICULTY_MAX`].
+    pub(crate) fn difficulty_params(&self) -> DiffParams {
+        let t = self.difficulty as f32 / DIFFICULTY_MAX as f32;
+        DiffParams {
+            accuracy_mult: 1.0 + 0.6 * t,  // 1.0 → 1.6 (capped at 1.0 hit chance in use)
+            falloff_ease: t,               // 0 → 1 (removes the distance penalty)
+            speed_mult: 1.0 + 0.5 * t,     // 1.0 → 1.5× (closes/repositions faster)
+            cooldown_mult: 1.0 - 0.85 * t, // 1.0 → 0.15× (near-continuous fire)
+            reaction_mult: 1.0 - 0.8 * t,  // 1.0 → 0.2× (near-instant engage)
+            health_mult: 1.0 + 3.0 * t,    // 1.0 → 4× (100 → 400 hp)
+            dodge: t,                      // 0 → 1 (reactive aim-dodge frequency)
+            sense_mult: 1.0 + 0.4 * t,     // 1.0 → 1.4× perception reach (sharper senses)
+            suppress: t,                   // 0 → 1 (fire while closing; band widens with t)
+            flank: t,                      // 0 → 1 (curve the approach off the direct line)
+            cover: t,                      // 0 → 1 (break LOS to cover + peek-fire)
+        }
+    }
+
+    /// The FSM-side difficulty knobs for the current level (reaction/cooldown/dodge),
+    /// built from [`Self::difficulty_params`] + the enemy baseline constants.
+    pub(crate) fn ai_tuning(&self) -> crate::enemy::AiTuning {
+        let dp = self.difficulty_params();
+        crate::enemy::AiTuning {
+            alert: crate::enemy::ALERT_DURATION * dp.reaction_mult,
+            cooldown: crate::enemy::COOLDOWN_DURATION * dp.cooldown_mult,
+            dodge: dp.dodge,
+            speed_mult: dp.speed_mult,
+            sense: dp.sense_mult,
+            suppress: dp.suppress,
+            flank: dp.flank,
+            cover: dp.cover,
+        }
+    }
+
+    /// Nudge the difficulty dial by `delta`, clamped to `0..=DIFFICULTY_MAX`, then
+    /// **restart the duel** ([`Self::restart_hunt`]) so the encounter begins fresh at
+    /// the new level — full player health, the player back at the hunt start, and the
+    /// enemy respawned with the new lethality/health/evasion. In BUILD there's no live
+    /// sim, so it just updates the dial for the next hunt. Logged for the console too.
+    pub fn change_difficulty(&mut self, delta: i32) {
+        let new = (self.difficulty as i32 + delta).clamp(0, DIFFICULTY_MAX as i32) as u32;
+        if new == self.difficulty {
+            return; // already at the floor/ceiling — nothing to change or reset
+        }
+        self.difficulty = new;
+        log::info!("DIFFICULTY → {}/{} — restarting the duel", self.difficulty, DIFFICULTY_MAX);
+        self.restart_hunt();
     }
 
     /// Enable/disable spawning the [`ENEMY_ROSTER`] on G→HUNT (dev convenience). Off

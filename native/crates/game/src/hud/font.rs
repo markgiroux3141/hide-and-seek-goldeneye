@@ -16,7 +16,7 @@ pub const PAD: u32 = 1;
 /// here; [`crate::hud::cell_index`] maps a `char` to it. Only the ammo counter's
 /// glyphs (digits + `/` + space) are atlased today; [`glyph`] also defines the
 /// uppercase letters used by past/future HUD strings, ready to add here if needed.
-pub const CHARSET: &str = "0123456789/ YOUDIEPRS";
+pub const CHARSET: &str = "0123456789/ YOUDIEPRSANG";
 
 /// Full atlas cell width = glyph + the transparent [`PAD`] column(s).
 pub const fn cell_width() -> u32 {
