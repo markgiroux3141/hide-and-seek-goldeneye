@@ -159,6 +159,9 @@ impl World {
                 // Player-visibility toggle (`N`): when invisible, hunters can't perceive
                 // the player and revert to searching (dev/observe aid for the head-scan).
                 let player_visible = !self.player_invisible;
+                // Wall-clearance radius applied per step (0 = off) so the wide model
+                // stops clipping walls; `integrate_move` reads it after the ORCA commit.
+                let wall_clear_r = if self.wall_clearance { WALL_CLEARANCE_RADIUS } else { 0.0 };
                 let mut fire_requests: Vec<usize> = Vec::new();
                 let mut needs_target: Vec<usize> = Vec::new();
                 let mut any_caught = false;
@@ -166,6 +169,8 @@ impl World {
                     // Apply the player-visibility toggle so an invisible player can't be
                     // perceived (all LOS/proximity checks in `update` fail).
                     inst.enemy.set_detectable(player_visible);
+                    // Arm the wall-clearance nudge for this step's movement commit.
+                    inst.enemy.set_wall_clearance_radius(wall_clear_r);
                     // Is THIS hunter mid fire burst? (the JS `enemyState === 'action'`
                     // proxy the attack→cooldown transition needs). Firing is a timer
                     // now, so the hunter can move + aim through it.

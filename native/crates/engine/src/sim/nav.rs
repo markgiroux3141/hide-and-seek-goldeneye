@@ -18,6 +18,10 @@ use crate::geometry::geom;
 pub const AGENT_HEIGHT_CELLS: i32 = 6;
 /// Max vertical step an agent climbs between adjacent cells (stairs rise 1 WT).
 const MAX_STEP: i32 = 1;
+/// Torso probe height (m above feet) for the wall-clearance nudge — samples wall
+/// solidity at body height rather than at the feet (near the floor). See
+/// [`NavWorld::wall_clearance_offset`].
+const WALL_PROBE_Y: f32 = 0.75;
 
 /// A* penalty for routing through an intact door — large enough to prefer an open
 /// detour, finite so a walled-in player is still reachable via breaching. JS
@@ -371,6 +375,62 @@ impl NavWorld {
         r
     }
 
+    /// A movement-time **wall-clearance** nudge: given a feet position `m` and the
+    /// agent's horizontal body `radius` (m), return an XZ offset that pushes the agent's
+    /// centre off any wall geometry its (wider-than-the-nav-line) body would otherwise
+    /// clip. Grid nav keeps only the *centre* on walkable ground — the step check is a
+    /// thin centre-line ray with no body width — so the model pokes through walls the
+    /// centre walks alongside; this restores the body's half-width of clearance.
+    ///
+    /// **Push, never block:** it only ever nudges *away* from solids, so two opposing
+    /// walls (a corridor / doorway narrower than `2·radius`) cancel to a centred pass —
+    /// an agent is never stopped from fitting through a door. The nudge is rejected if it
+    /// would land the centre inside a wall or off its floor, so it can't shove an agent
+    /// into geometry or off a ledge. Probes at torso height ([`WALL_PROBE_Y`]) in the 8
+    /// compass directions; the total nudge is capped at one `radius`.
+    pub fn wall_clearance_offset(&self, m: Vec3, radius: f32) -> Vec3 {
+        if radius <= 0.0 {
+            return Vec3::ZERO;
+        }
+        let y = m.y + WALL_PROBE_Y;
+        let steps = 3;
+        let mut push = Vec3::ZERO;
+        for (dx, dz) in [
+            (1, 0), (-1, 0), (0, 1), (0, -1),
+            (1, 1), (1, -1), (-1, 1), (-1, -1),
+        ] {
+            let inv_len = 1.0 / ((dx * dx + dz * dz) as f32).sqrt();
+            let dir = Vec3::new(dx as f32 * inv_len, 0.0, dz as f32 * inv_len);
+            // Nearest solid along this direction within `radius` → push back by the
+            // penetration depth (radius − hit distance).
+            for s in 1..=steps {
+                let dist = radius * s as f32 / steps as f32;
+                let p = m + dir * dist;
+                if self.is_solid_meters(p.x, y, p.z) {
+                    push -= dir * (radius - dist);
+                    break;
+                }
+            }
+        }
+        let plen = push.length();
+        if plen < 1e-4 {
+            return Vec3::ZERO;
+        }
+        // Cap the total nudge at one radius so a corner can't fling the agent.
+        let push = push * (plen.min(radius) / plen);
+        let cand = m + push;
+        // Reject a nudge that lands in a wall or off the current floor (never shove into
+        // geometry or over a ledge — a wall on one side + a drop on the other holds).
+        let tol = wt_to_m(1.0);
+        let grounded = self
+            .floor_height_at(cand.x, cand.z, m.y + tol)
+            .map_or(false, |fy| (fy - m.y).abs() <= tol);
+        if !grounded || self.is_solid_meters(cand.x, y, cand.z) {
+            return Vec3::ZERO;
+        }
+        push
+    }
+
     /// A* over standable cells (4-connected in x/z, ±MAX_STEP in y for stairs).
     /// Returns meters waypoints (feet positions) from start to goal, or `None`.
     /// Costs are scaled ×2 to stay integer (the only fractional term is the
@@ -646,6 +706,30 @@ mod tests {
             !nav.ground_path_clear(low, high),
             "a line across a cliff edge is not continuous ground"
         );
+    }
+
+    #[test]
+    fn wall_clearance_pushes_off_walls_but_not_in_the_open() {
+        let mut regions = room(); // 24×16×24 WT cavity → interior walls at x,z ≈ 0 and 6 m
+        let nav = bake(&mut regions, &[]).expect("bake");
+        let radius = 0.22;
+
+        // Deep in the open middle of the room → no wall within radius → no nudge.
+        let mid = Vec3::new(3.0, 0.1, 3.0);
+        assert!(
+            nav.wall_clearance_offset(mid, radius).length() < 1e-4,
+            "open floor should not be nudged"
+        );
+
+        // Hard against the −X wall (interior face at x≈0): the nudge must push in +X
+        // (away from the wall) and not move much in Z.
+        let by_wall = Vec3::new(0.05, 0.1, 3.0);
+        let off = nav.wall_clearance_offset(by_wall, radius);
+        assert!(off.x > 0.0, "should push away from the −X wall (+X), got {off:?}");
+        assert!(off.z.abs() < off.x + 1e-3, "push should be mostly along X");
+        // And the nudged point is off the wall (not shoved into geometry).
+        let moved = by_wall + off;
+        assert!(!nav.is_solid_meters(moved.x, moved.y + WALL_PROBE_Y, moved.z));
     }
 
     #[test]

@@ -198,6 +198,13 @@ const SEARCH_HALF_CONE: f32 = 70.0 * std::f32::consts::PI / 180.0; // ±70° per
 /// How fast the searching view axis sweeps (rad/s). A full circle every ~2.4 s — under
 /// the 3 s stall threshold — so a visible player is always caught within one sweep.
 const SEARCH_SWEEP_RATE: f32 = 2.6;
+/// Fraction of the computed wall-clearance nudge applied per step — soft, so it eases
+/// the body off walls over a few frames instead of a hard per-step shove that would
+/// overpower ORCA's queueing in a tight pinch (a full shove broke the doorway funnel).
+/// The steady-state clearance still reaches the full radius (penetration is re-probed
+/// each step, so it eases in exponentially).
+const WALL_CLEARANCE_STRENGTH: f32 = 0.4;
+
 /// Peak head-scan swing (rad, ~46°) a blindly-hunting hunter turns its head left↔right
 /// while its body faces its travel direction — the readable VISUAL analogue of the
 /// invisible 360° perception sweep above. Kept inside the head look-at cone
@@ -409,6 +416,12 @@ pub struct Enemy {
     /// the hunter can never see / keep the player and drops back to searching — letting
     /// you walk around and watch the search + head-scan behaviour. Defaults to `true`.
     detectable: bool,
+    /// Body half-width (m) for the movement-time wall-clearance nudge, or `0.0` to
+    /// disable it. Set by the `World` each step from its `wall_clearance` flag; grid nav
+    /// keeps only the hunter's CENTRE on walkable ground, so this keeps the wider model
+    /// from clipping into walls (see [`engine::sim::nav::NavWorld::wall_clearance_offset`]).
+    /// Defaults to `0.0`, so headless callers that don't set it are unaffected.
+    wall_clearance_radius: f32,
 }
 
 impl Enemy {
@@ -465,6 +478,7 @@ impl Enemy {
             evade_dir: 1.0,
             evade_cooldown: 0.0,
             detectable: true,
+            wall_clearance_radius: 0.0,
         }
     }
 
@@ -473,6 +487,12 @@ impl Enemy {
     /// reverts to searching. See [`Self::detectable`].
     pub fn set_detectable(&mut self, v: bool) {
         self.detectable = v;
+    }
+
+    /// Set the body half-width (m) for the wall-clearance nudge (`0.0` disables it).
+    /// See [`Self::wall_clearance_radius`].
+    pub fn set_wall_clearance_radius(&mut self, r: f32) {
+        self.wall_clearance_radius = r;
     }
 
     /// The point this hunter is currently sweeping toward in `Search` (so the
@@ -630,6 +650,33 @@ impl Enemy {
         if !self.try_step(planar, dt, nav) {
             let pref = self.desired_vel;
             self.try_step(pref, dt, nav);
+        }
+        // Wall-clearance: nudge the centre off any wall the (wider) body would clip.
+        // Push-not-block, so it never stops the hunter fitting through a doorway.
+        if self.wall_clearance_radius > 0.0 {
+            let mut off = nav.wall_clearance_offset(self.pos, self.wall_clearance_radius);
+            // Keep only the part of the nudge that doesn't OPPOSE intended travel, so it
+            // declutters the body laterally off a wall but never brakes a hunter driving
+            // forward into a doorway (a wall's front face would otherwise shove it back
+            // out — the pack-funnel regression the lab caught).
+            let dir = planar.normalize_or_zero();
+            if dir != Vec3::ZERO {
+                let along = off.dot(dir);
+                if along < 0.0 {
+                    off -= dir * along;
+                }
+            }
+            // Apply SOFTLY (a fraction per step) so it eases the body off walls over a
+            // few frames rather than hard-centring it — a full shove each step overpowers
+            // ORCA's queueing in a tight pinch (broke the doorway funnel; the steady
+            // state still converges to full clearance since the penetration is re-probed
+            // every step).
+            off *= WALL_CLEARANCE_STRENGTH;
+            if off.length_squared() > 1e-8 {
+                self.pos.x += off.x;
+                self.pos.z += off.z;
+                self.snap_to_floor(nav);
+            }
         }
         let actual = Vec3::new(self.pos.x - start.x, 0.0, self.pos.z - start.z);
         self.vel = if dt > 1e-6 { actual / dt } else { Vec3::ZERO };

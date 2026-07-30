@@ -374,6 +374,13 @@ pub(crate) const CHAR_HIT_START: usize = 7;
 /// on the smaller body. Total height ≈ 1.44 m.
 pub(crate) const ENEMY_RADIUS: f32 = 0.24; // 0.3 × 0.8
 pub(crate) const ENEMY_HALF_HEIGHT: f32 = 0.48; // 0.6 × 0.8
+/// Body half-width (m) the movement-time wall-clearance nudge keeps between a hunter's
+/// centre and wall geometry, so the wider-than-the-nav-line character model stops
+/// clipping into walls. A touch under [`ENEMY_RADIUS`] and, crucially, well under half
+/// the narrowest doorway (~0.5 m = 2 WT cells) — and the nudge only ever *pushes*
+/// (never blocks), so a doorway narrower than `2×` this still passes (centred). See
+/// [`engine::sim::nav::NavWorld::wall_clearance_offset`].
+pub(crate) const WALL_CLEARANCE_RADIUS: f32 = 0.2;
 /// Death fade duration (s) — JS `EnemyCharacter.FADE_DURATION`. The body fades
 /// its opacity 1→0 over this window after the lethal shot, then vanishes.
 pub(crate) const FADE_DURATION: f32 = 2.0;
@@ -1268,6 +1275,12 @@ pub struct World {
     /// baseline: when off, the model uses the raw locomotion pose seated at its root.
     /// Purely visual (enemy model only) — no perception/engagement effect.
     foot_ik: bool,
+    /// Whether hunters get a **wall-clearance** nudge each step so the wide character
+    /// model stops clipping into walls (grid nav only keeps the CENTRE on walkable
+    /// ground — no body width). **On by default.** A kill-switch / regression baseline.
+    /// Push-not-block, so it never stops a hunter fitting through a doorway; it slightly
+    /// adjusts positions (off walls) but never changes who/when a hunter shoots.
+    wall_clearance: bool,
     /// Per-body world-space Y offset that seats that body's feet on the floor
     /// (parallel to [`Self::char_models`]). Computed from the **lowest skinned point
     /// of the actual idle pose** for each body (the bind-pose AABB can't be used —
@@ -1683,6 +1696,7 @@ impl World {
             local_avoidance: true, // ORCA crowd steering on by default (kill-switch below)
             head_look: true, // procedural head look-at on by default (kill-switch below)
             foot_ik: true, // ground-adaptive foot IK + cadence on by default (kill-switch below)
+            wall_clearance: true, // wall-clearance nudge on by default (kill-switch below)
             char_feet_offset,
             enemy_arm,
             procedural_preview: None,
@@ -1825,6 +1839,17 @@ impl World {
     /// Whether foot IK is active (inspection / tests).
     pub fn foot_ik(&self) -> bool {
         self.foot_ik
+    }
+
+    /// Toggle the wall-clearance nudge (default ON — see [`Self::wall_clearance`]). Off,
+    /// hunters keep their raw nav positions (may clip walls with the wide model).
+    pub fn set_wall_clearance(&mut self, on: bool) {
+        self.wall_clearance = on;
+    }
+
+    /// Whether the wall-clearance nudge is active (inspection / tests).
+    pub fn wall_clearance(&self) -> bool {
+        self.wall_clearance
     }
 
     /// The difficulty-derived tuning for the current level (see [`DiffParams`]). Linear
