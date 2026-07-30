@@ -7,3 +7,4 @@
 pub mod avoidance;
 pub mod nav;
 pub mod physics;
+pub mod ragdoll;

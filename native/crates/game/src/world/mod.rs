@@ -32,6 +32,7 @@ use engine::render::mesh::{ColorVertex, ColoredMesh, CpuMesh, TexVertex, Texture
 use engine::sim::avoidance;
 use engine::sim::nav::{self, NavWorld};
 use engine::sim::physics::PhysicsWorld;
+use engine::sim::ragdoll::Ragdoll;
 use engine::skeletal::anim::AnimPlayer;
 use engine::skeletal::anim_set;
 use engine::skeletal::clip;
@@ -384,6 +385,34 @@ pub(crate) const WALL_CLEARANCE_RADIUS: f32 = 0.2;
 /// Death fade duration (s) — JS `EnemyCharacter.FADE_DURATION`. The body fades
 /// its opacity 1→0 over this window after the lethal shot, then vanishes.
 pub(crate) const FADE_DURATION: f32 = 2.0;
+/// Ragdoll knockback impulse magnitude (N·s) applied to the body nearest the impact
+/// on death. Bullets shove modestly (a jerk + spin); a blast flings harder. Tuned
+/// against the ~flesh-density limb masses in [`engine::sim::ragdoll`]. Eyeball in
+/// playtest — bump for a more violent throw, drop for a limper crumple.
+pub(crate) const RAGDOLL_BULLET_IMPULSE: f32 = 26.0;
+pub(crate) const RAGDOLL_BLAST_IMPULSE: f32 = 60.0;
+/// A ragdoll whose fastest body is slower than this (m/s) counts as settled → the
+/// corpse begins its fade. Small but non-zero so micro-jitter doesn't hold it open.
+pub(crate) const RAGDOLL_SETTLE_SPEED: f32 = 0.35;
+/// Hard cap (s) on how long a ragdoll simulates before the fade starts regardless of
+/// motion — a backstop so a corpse teetering on an edge can't tumble forever.
+pub(crate) const RAGDOLL_MAX_SETTLE: f32 = 6.0;
+
+/// Living-hit stagger (Phase 3, the partial active ragdoll). A non-lethal hit spawns a
+/// brief physics ragdoll blended INTO the running animation by a weight that peaks at
+/// [`REACTION_PEAK_WEIGHT`] and decays at [`REACTION_DECAY`] (1/τ) back to zero — a real
+/// physical reaction that cleanly returns to fighting. Torn down once the weight drops
+/// below [`REACTION_MIN_WEIGHT`]. Flat across all difficulties (the `ragdoll` flag is the
+/// only kill-switch); a re-hit while staggering re-kicks + restarts the decay.
+pub(crate) const REACTION_PEAK_WEIGHT: f32 = 0.6;
+pub(crate) const REACTION_DECAY: f32 = 7.0;
+pub(crate) const REACTION_MIN_WEIGHT: f32 = 0.03;
+/// Brief AI hitch (s) on a non-lethal hit — the hunter staggers, then resumes fighting.
+/// Kept short and covers most of the blend window so the (stunned → stationary) hunter's
+/// root stays put while the physical reaction plays out.
+pub(crate) const REACTION_STUN: f32 = 0.35;
+/// Living-hit knockback impulse (N·s) — lighter than a kill (a flinch, not a throw).
+pub(crate) const REACTION_IMPULSE: f32 = 14.0;
 /// Number of enemy pain vocalisations (`sounds/enemies/pain-1..26.wav`).
 pub(crate) const PAIN_COUNT: usize = 26;
 /// On-hit SFX volumes (JS `EnemyCharacter.onHit`): the pain vocal + the flesh
@@ -1165,6 +1194,37 @@ pub(crate) struct EnemyInstance {
     /// skinning matrices and the hand-bone weapon transform (so the gun follows
     /// the aimed arm). `None` until the first `advance_animation`.
     pub final_pose: Option<Pose>,
+    /// Active death ragdoll (`Some` once killed while the [`World::ragdoll`] flag is
+    /// on) — a chain of dynamic bodies that replaces the canned death clip. While set,
+    /// this hunter's pose + model transform come from the physics bodies (WORLD-space
+    /// skinning, identity model) instead of the animation stack; removed once the
+    /// corpse has faded out. `None` for a living hunter or the canned-death path.
+    pub ragdoll: Option<Ragdoll>,
+    /// Seconds the ragdoll has simulated — feeds the [`RAGDOLL_MAX_SETTLE`] backstop.
+    pub ragdoll_time: f32,
+    /// Active living-hit reaction (`Some` briefly after a non-lethal hit while the
+    /// [`World::ragdoll`] flag is on) — a transient physics ragdoll whose model-local
+    /// pose is blended into the animation by a decaying weight (the partial active
+    /// ragdoll). `None` for a hunter that isn't currently staggering.
+    pub reaction: Option<Reaction>,
+}
+
+/// A living-hit stagger: the transient physics ragdoll for a non-lethal reaction plus
+/// how long it's been decaying. The blend weight is a function of [`Self::elapsed`], so
+/// re-seeding `elapsed = 0` on a re-hit re-peaks the stagger.
+pub(crate) struct Reaction {
+    /// The physics ragdoll seeded from the hit pose (blended in, not a full takeover).
+    pub rag: Ragdoll,
+    /// Seconds since this reaction (re-)started — drives the decaying blend weight.
+    pub elapsed: f32,
+}
+
+impl Reaction {
+    /// Current blend weight (0..[`REACTION_PEAK_WEIGHT`]): peak at the hit instant,
+    /// decaying exponentially back to zero so the hunter returns to animation.
+    pub fn weight(&self) -> f32 {
+        REACTION_PEAK_WEIGHT * (-self.elapsed * REACTION_DECAY).exp()
+    }
 }
 
 /// A loaded enemy weapon's render assets: the gun mesh + optional muzzle-flash
@@ -1275,6 +1335,15 @@ pub struct World {
     /// baseline: when off, the model uses the raw locomotion pose seated at its root.
     /// Purely visual (enemy model only) — no perception/engagement effect.
     foot_ik: bool,
+    /// Whether a killed hunter becomes a **physics ragdoll** (a chain of dynamic
+    /// bodies seeded from its death pose + the killing shot's impulse, tumbling on the
+    /// real level geometry) instead of playing a canned death clip. **On by default.**
+    /// A kill-switch / regression baseline: when off, deaths play the authored death
+    /// animation + fade exactly as before. Visual only — it fires on death (the AI is
+    /// already gone), collides on its own [`GROUP_RAGDOLL`], and corpses are excluded
+    /// from perception LOS, so the difficulty-0 lethality/perception baseline is
+    /// unchanged either way.
+    ragdoll: bool,
     /// Whether hunters get a **wall-clearance** nudge each step so the wide character
     /// model stops clipping into walls (grid nav only keeps the CENTRE on walkable
     /// ground — no body width). **On by default.** A kill-switch / regression baseline.
@@ -1696,6 +1765,7 @@ impl World {
             local_avoidance: true, // ORCA crowd steering on by default (kill-switch below)
             head_look: true, // procedural head look-at on by default (kill-switch below)
             foot_ik: true, // ground-adaptive foot IK + cadence on by default (kill-switch below)
+            ragdoll: true, // physics ragdoll death on by default (kill-switch below)
             wall_clearance: true, // wall-clearance nudge on by default (kill-switch below)
             char_feet_offset,
             enemy_arm,
@@ -1839,6 +1909,17 @@ impl World {
     /// Whether foot IK is active (inspection / tests).
     pub fn foot_ik(&self) -> bool {
         self.foot_ik
+    }
+
+    /// Toggle physics-ragdoll death (default ON — see [`Self::ragdoll`]). Off, a killed
+    /// hunter plays the canned death clip + fade (pre-ragdoll baseline).
+    pub fn set_ragdoll(&mut self, on: bool) {
+        self.ragdoll = on;
+    }
+
+    /// Whether physics-ragdoll death is active (inspection / tests).
+    pub fn ragdoll(&self) -> bool {
+        self.ragdoll
     }
 
     /// Toggle the wall-clearance nudge (default ON — see [`Self::wall_clearance`]). Off,

@@ -6,8 +6,9 @@
 //! Also retains the Phase 0 [`smoke_test`] as a link/step sanity check.
 
 use std::collections::{HashMap, HashSet};
+use std::num::NonZeroUsize;
 
-use glam::Vec3;
+use glam::{Quat, Vec3};
 use rapier3d::control::{CharacterAutostep, CharacterLength, KinematicCharacterController};
 use rapier3d::prelude::*;
 
@@ -46,7 +47,51 @@ pub struct PhysicsWorld {
     dirty: bool,
     /// Kinematic character controller (stateless config; we own the capsule).
     character: KinematicCharacterController,
+
+    // ── Dynamics substrate (ragdoll) ──────────────────────────────────────────
+    // The world above is query-only: static colliders + kinematic capsules moved by
+    // hand, no forces. These fields add a real rigid-body solver that is stepped
+    // ONLY while ≥1 ragdoll body is live ([`Self::step_dynamics`] early-returns at
+    // `ragdoll_count == 0`), so the common HUNT frame pays nothing. Ragdoll dynamic
+    // bodies collide against the existing static level colliders for free.
+    gravity: Vector<f32>,
+    integration_parameters: IntegrationParameters,
+    physics_pipeline: PhysicsPipeline,
+    islands: IslandManager,
+    broad_phase: DefaultBroadPhase,
+    narrow_phase: NarrowPhase,
+    impulse_joints: ImpulseJointSet,
+    multibody_joints: MultibodyJointSet,
+    ccd_solver: CCDSolver,
+    /// Live ragdoll dynamic bodies. The dynamics step is skipped entirely when this
+    /// is empty (the query-only common case).
+    ragdoll_bodies: HashSet<RigidBodyHandle>,
+    /// Ragdoll colliders, excluded from perception line-of-sight so a corpse on the
+    /// floor can't newly block a hunter's sight of the player (keeps the difficulty-0
+    /// perception baseline intact). Hitscan still hits them (a shot into a corpse
+    /// sparks — harmless + realistic).
+    ragdoll_colliders: HashSet<ColliderHandle>,
 }
+
+/// Collision group for ragdoll bodies: they collide with the static world but NOT
+/// with one another (a corpse's own limbs, and separate corpses, don't fight — the
+/// standard stable ragdoll choice; slight limb interpenetration is acceptable).
+const GROUP_RAGDOLL: Group = Group::GROUP_2;
+/// Collision group for the hunters' hitscan capsules. Ragdoll bodies are filtered to
+/// NOT collide with it: a living-hit reaction ragdoll is seeded coincident with the
+/// hunter's own capsule, and without this exclusion the solver would explode them
+/// apart on frame 0. (A death corpse also then won't shove a live hunter — fine.)
+const GROUP_ENEMY: Group = Group::GROUP_3;
+
+/// Per-body velocity clamps applied every dynamics step so a solver spike can't fling a
+/// ragdoll limb "insanely fast" (the twitching). Caps linear (m/s) + angular (rad/s)
+/// speed — generous enough for a natural tumble, tight enough to kill the jitter.
+const RAGDOLL_MAX_LINVEL: f32 = 7.0;
+const RAGDOLL_MAX_ANGVEL: f32 = 10.0;
+/// Cone half-angle (rad) each ragdoll joint may swing on every axis (~52°). Turns the
+/// free ball joints into LIMITED ones so limbs can't fold through the body into a pile
+/// of goo, while still allowing a believably loose tumble.
+const RAGDOLL_JOINT_CONE: f32 = 0.9;
 
 impl Default for PhysicsWorld {
     fn default() -> Self {
@@ -69,6 +114,11 @@ impl PhysicsWorld {
         character.snap_to_ground = Some(CharacterLength::Absolute(0.25));
         character.max_slope_climb_angle = 50f32.to_radians();
 
+        // Stiffer joint solving so the ragdoll chain holds together (fewer iterations
+        // reads as rubbery/goo); only paid while a ragdoll is actually being stepped.
+        let mut integration_parameters = IntegrationParameters::default();
+        integration_parameters.num_solver_iterations = NonZeroUsize::new(8).unwrap();
+
         PhysicsWorld {
             colliders: ColliderSet::new(),
             bodies: RigidBodySet::new(),
@@ -79,6 +129,17 @@ impl PhysicsWorld {
             enemy_capsule_offset: 0.0,
             dirty: true,
             character,
+            gravity: vector![0.0, -9.81, 0.0],
+            integration_parameters,
+            physics_pipeline: PhysicsPipeline::new(),
+            islands: IslandManager::new(),
+            broad_phase: DefaultBroadPhase::new(),
+            narrow_phase: NarrowPhase::new(),
+            impulse_joints: ImpulseJointSet::new(),
+            multibody_joints: MultibodyJointSet::new(),
+            ccd_solver: CCDSolver::new(),
+            ragdoll_bodies: HashSet::new(),
+            ragdoll_colliders: HashSet::new(),
         }
     }
 
@@ -141,6 +202,9 @@ impl PhysicsWorld {
         let c = feet + Vec3::new(0.0, self.enemy_capsule_offset, 0.0);
         let collider = ColliderBuilder::capsule_y(half_height, radius)
             .translation(vector![c.x, c.y, c.z])
+            // Tag the group so ragdoll bodies can be filtered off it (see GROUP_ENEMY);
+            // player-move / hitscan queries use predicates, not groups, so unaffected.
+            .collision_groups(InteractionGroups::new(GROUP_ENEMY, Group::ALL))
             .build();
         let handle = self.colliders.insert(collider);
         self.enemy_colliders.insert(handle);
@@ -288,7 +352,13 @@ impl PhysicsWorld {
             vector![dir.x, dir.y, dir.z],
         );
         let enemy_colliders = &self.enemy_colliders;
-        let predicate = |handle: ColliderHandle, _: &Collider| !enemy_colliders.contains(&handle);
+        let ragdoll_colliders = &self.ragdoll_colliders;
+        // Skip both live hunter capsules (a packmate mustn't hide the player) AND
+        // ragdoll corpses (a body on the floor mustn't newly block sight — keeps the
+        // difficulty-0 perception baseline unchanged now that corpses are physical).
+        let predicate = |handle: ColliderHandle, _: &Collider| {
+            !enemy_colliders.contains(&handle) && !ragdoll_colliders.contains(&handle)
+        };
         let filter = QueryFilter::default().predicate(&predicate);
         let (handle, intersection) = self.query_pipeline.cast_ray_and_get_normal(
             &self.bodies,
@@ -344,6 +414,188 @@ impl PhysicsWorld {
         );
         let t = movement.translation;
         (Vec3::new(t.x, t.y, t.z), movement.grounded)
+    }
+
+    // ── Dynamics substrate (ragdoll) ──────────────────────────────────────────
+
+    /// Advance the rigid-body solver one step (`dt` seconds). A **no-op** while no
+    /// ragdoll body is live, so a normal HUNT frame pays nothing. When ragdolls are
+    /// active it integrates gravity + joints + contacts against the static level
+    /// colliders, moving the dynamic bodies in place. Call once per fixed step. Marks
+    /// the query pipeline dirty so a subsequent raycast sees the moved bodies.
+    pub fn step_dynamics(&mut self, dt: f32) {
+        if self.ragdoll_bodies.is_empty() {
+            return;
+        }
+        // Clamp BEFORE (caps the spawn impulse — a hit on a light bone would otherwise
+        // launch it "insanely fast") and AFTER (caps any in-step penetration spike before
+        // the pose read-back sees it) the integration.
+        self.clamp_ragdoll_velocities();
+        self.integration_parameters.dt = dt;
+        self.physics_pipeline.step(
+            &self.gravity,
+            &self.integration_parameters,
+            &mut self.islands,
+            &mut self.broad_phase,
+            &mut self.narrow_phase,
+            &mut self.bodies,
+            &mut self.colliders,
+            &mut self.impulse_joints,
+            &mut self.multibody_joints,
+            &mut self.ccd_solver,
+            None,
+            &(),
+            &(),
+        );
+        self.clamp_ragdoll_velocities();
+        self.dirty = true; // bodies moved → the acceleration structure is stale
+    }
+
+    /// Cap every ragdoll body's linear + angular speed to [`RAGDOLL_MAX_LINVEL`] /
+    /// [`RAGDOLL_MAX_ANGVEL`] — the anti-twitch clamp, applied each side of the step.
+    fn clamp_ragdoll_velocities(&mut self) {
+        for &h in &self.ragdoll_bodies {
+            if let Some(b) = self.bodies.get_mut(h) {
+                let lv = *b.linvel();
+                let l = lv.norm();
+                if l > RAGDOLL_MAX_LINVEL {
+                    b.set_linvel(lv * (RAGDOLL_MAX_LINVEL / l), false);
+                }
+                let av = *b.angvel();
+                let a = av.norm();
+                if a > RAGDOLL_MAX_ANGVEL {
+                    b.set_angvel(av * (RAGDOLL_MAX_ANGVEL / a), false);
+                }
+            }
+        }
+    }
+
+    /// Spawn one dynamic ragdoll capsule at world isometry (`rot`, `pos`), with the
+    /// capsule running between local endpoints `a`→`b` (body-frame metres) of `radius`.
+    /// The body has CCD on (so a hard impulse can't tunnel the floor) and mild damping
+    /// (so it settles). Ragdoll bodies never collide with each other ([`GROUP_RAGDOLL`]),
+    /// only the static world. Returns the body handle.
+    pub fn add_ragdoll_capsule(
+        &mut self,
+        rot: Quat,
+        pos: Vec3,
+        a: Vec3,
+        b: Vec3,
+        radius: f32,
+    ) -> RigidBodyHandle {
+        self.add_ragdoll_body(rot, pos, SharedShape::capsule(point![a.x, a.y, a.z], point![b.x, b.y, b.z], radius))
+    }
+
+    /// As [`Self::add_ragdoll_capsule`] but a ball (for leaf bones — head / hands /
+    /// feet — that have no child bone to span a capsule to).
+    pub fn add_ragdoll_ball(&mut self, rot: Quat, pos: Vec3, radius: f32) -> RigidBodyHandle {
+        self.add_ragdoll_body(rot, pos, SharedShape::ball(radius))
+    }
+
+    fn add_ragdoll_body(&mut self, rot: Quat, pos: Vec3, shape: SharedShape) -> RigidBodyHandle {
+        let (axis, angle) = rot.to_axis_angle();
+        let axisangle = axis * angle;
+        let body = RigidBodyBuilder::dynamic()
+            .translation(vector![pos.x, pos.y, pos.z])
+            .rotation(vector![axisangle.x, axisangle.y, axisangle.z])
+            .ccd_enabled(true)
+            .linear_damping(0.4)
+            .angular_damping(1.5) // heavy angular damping kills the residual limb twitch
+            .build();
+        let handle = self.bodies.insert(body);
+        let collider = ColliderBuilder::new(shape)
+            .density(1000.0) // ~flesh density → kg-scale limb masses, so impulses read naturally
+            .friction(0.8)
+            .restitution(0.0)
+            .collision_groups(InteractionGroups::new(
+                GROUP_RAGDOLL,
+                Group::ALL & !GROUP_RAGDOLL & !GROUP_ENEMY,
+            ))
+            .build();
+        let ch = self.colliders.insert_with_parent(collider, handle, &mut self.bodies);
+        self.ragdoll_bodies.insert(handle);
+        self.ragdoll_colliders.insert(ch);
+        self.dirty = true;
+        handle
+    }
+
+    /// Join two ragdoll bodies at the shared bone point with a **cone-limited** ball
+    /// joint: the three translations are locked and each rotation axis is clamped to
+    /// ±[`RAGDOLL_JOINT_CONE`], so limbs can't fold through the body into goo while still
+    /// tumbling loosely. `anchor1`/`anchor2` are that point in each body's local frame
+    /// (metres). Adjacent bodies don't collide ([`GROUP_RAGDOLL`]), so the joint alone
+    /// shapes the chain.
+    pub fn add_ragdoll_joint(
+        &mut self,
+        parent: RigidBodyHandle,
+        child: RigidBodyHandle,
+        anchor1: Vec3,
+        anchor2: Vec3,
+    ) {
+        let cone = RAGDOLL_JOINT_CONE;
+        let joint = GenericJointBuilder::new(JointAxesMask::LOCKED_SPHERICAL_AXES)
+            .local_anchor1(point![anchor1.x, anchor1.y, anchor1.z])
+            .local_anchor2(point![anchor2.x, anchor2.y, anchor2.z])
+            .limits(JointAxis::AngX, [-cone, cone])
+            .limits(JointAxis::AngY, [-cone, cone])
+            .limits(JointAxis::AngZ, [-cone, cone])
+            .build();
+        self.impulse_joints.insert(parent, child, joint, true);
+    }
+
+    /// Apply a one-shot impulse to a ragdoll body at a world point (the killing shot's
+    /// knockback / a blast's radial shove). Wakes the body.
+    pub fn apply_ragdoll_impulse(&mut self, handle: RigidBodyHandle, impulse: Vec3, at: Vec3) {
+        if let Some(b) = self.bodies.get_mut(handle) {
+            b.apply_impulse_at_point(vector![impulse.x, impulse.y, impulse.z], point![at.x, at.y, at.z], true);
+        }
+    }
+
+    /// The world isometry (rotation, translation in metres) of a ragdoll body — read
+    /// back each frame to drive the skinned pose. `None` if the handle is gone.
+    pub fn ragdoll_body_iso(&self, handle: RigidBodyHandle) -> Option<(Quat, Vec3)> {
+        let b = self.bodies.get(handle)?;
+        let t = b.translation();
+        let q = b.rotation().coords; // [i, j, k, w] → glam xyzw
+        Some((Quat::from_xyzw(q.x, q.y, q.z, q.w), Vec3::new(t.x, t.y, t.z)))
+    }
+
+    /// The largest linear speed (m/s) across `handles` — the settle test (a ragdoll
+    /// whose fastest body is near-still has come to rest and may start to fade). 0 if
+    /// none are live.
+    pub fn ragdoll_max_speed(&self, handles: &[RigidBodyHandle]) -> f32 {
+        handles
+            .iter()
+            .filter_map(|h| self.bodies.get(*h))
+            .map(|b| b.linvel().norm())
+            .fold(0.0, f32::max)
+    }
+
+    /// Remove one ragdoll body (its colliders + attached joints go with it). After
+    /// the last is removed [`Self::step_dynamics`] goes back to a no-op.
+    pub fn remove_ragdoll_body(&mut self, handle: RigidBodyHandle) {
+        if !self.ragdoll_bodies.remove(&handle) {
+            return;
+        }
+        if let Some(body) = self.bodies.get(handle) {
+            for ch in body.colliders().to_vec() {
+                self.ragdoll_colliders.remove(&ch);
+            }
+        }
+        self.bodies.remove(
+            handle,
+            &mut self.islands,
+            &mut self.colliders,
+            &mut self.impulse_joints,
+            &mut self.multibody_joints,
+            true,
+        );
+        self.dirty = true;
+    }
+
+    /// Count of live ragdoll bodies (test/inspection helper).
+    pub fn ragdoll_body_count(&self) -> usize {
+        self.ragdoll_bodies.len()
     }
 }
 
@@ -462,5 +714,68 @@ mod tests {
 
         p.clear_enemy_colliders();
         assert!(!p.is_enemy_collider(b), "cleared");
+    }
+
+    // ── Dynamics substrate (ragdoll) ──────────────────────────────────────────
+
+    /// With no ragdoll body live, [`PhysicsWorld::step_dynamics`] is a no-op — the
+    /// query-only common case pays nothing and never panics on the empty solver.
+    #[test]
+    fn step_dynamics_is_a_noop_without_ragdolls() {
+        let mut p = PhysicsWorld::new();
+        for _ in 0..10 {
+            p.step_dynamics(1.0 / 60.0);
+        }
+        assert_eq!(p.ragdoll_body_count(), 0);
+    }
+
+    /// A ragdoll body falls under gravity and comes to rest on a static level
+    /// collider — proving the dynamics step runs AND that ragdoll bodies collide with
+    /// the existing static world for free.
+    #[test]
+    fn ragdoll_body_falls_and_settles_on_static_ground() {
+        let mut p = PhysicsWorld::new();
+        // A static ground slab (top at y = 0), reusing the door-panel cuboid path.
+        p.add_door_collider(Vec3::new(-50.0, -1.0, -50.0), Vec3::new(50.0, 0.0, 50.0));
+        let r = 0.3;
+        let h = p.add_ragdoll_ball(Quat::IDENTITY, Vec3::new(0.0, 5.0, 0.0), r);
+        assert_eq!(p.ragdoll_body_count(), 1);
+        for _ in 0..300 {
+            p.step_dynamics(1.0 / 60.0);
+        }
+        let (_, pos) = p.ragdoll_body_iso(h).expect("body still live");
+        assert!(
+            (pos.y - r).abs() < 0.12,
+            "ball should rest on the ground (~{r}), got y={}",
+            pos.y
+        );
+        assert!(p.ragdoll_max_speed(&[h]) < 0.1, "ball should have settled to rest");
+    }
+
+    /// A spherical joint holds two ragdoll bodies at a fixed separation as they fall
+    /// together, and removing them empties the solver (the step returns to a no-op).
+    #[test]
+    fn ragdoll_joint_links_bodies_and_removal_clears_the_sim() {
+        let mut p = PhysicsWorld::new();
+        let parent = p.add_ragdoll_ball(Quat::IDENTITY, Vec3::new(0.0, 5.0, 0.0), 0.2);
+        let child = p.add_ragdoll_ball(Quat::IDENTITY, Vec3::new(0.0, 4.0, 0.0), 0.2);
+        // Shared point midway between them, expressed in each body's local frame.
+        p.add_ragdoll_joint(parent, child, Vec3::new(0.0, -0.5, 0.0), Vec3::new(0.0, 0.5, 0.0));
+        assert_eq!(p.ragdoll_body_count(), 2);
+        for _ in 0..120 {
+            p.step_dynamics(1.0 / 60.0);
+        }
+        let (_, pp) = p.ragdoll_body_iso(parent).unwrap();
+        let (_, cp) = p.ragdoll_body_iso(child).unwrap();
+        let sep = pp.distance(cp);
+        assert!(
+            (sep - 1.0).abs() < 0.25,
+            "the ball joint should hold the bodies ~1 m apart, got {sep}"
+        );
+        p.remove_ragdoll_body(parent);
+        p.remove_ragdoll_body(child);
+        assert_eq!(p.ragdoll_body_count(), 0);
+        // Empty again → stepping is a no-op.
+        p.step_dynamics(1.0 / 60.0);
     }
 }

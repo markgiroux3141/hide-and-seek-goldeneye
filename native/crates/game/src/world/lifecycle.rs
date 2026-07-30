@@ -322,6 +322,10 @@ impl World {
                         inst.enemy.assign_search_target(target);
                     }
                 }
+                // Advance any death ragdolls: step the rigid-body solver (a no-op with
+                // none live), then age each corpse toward its settle → fade → despawn.
+                self.physics.step_dynamics(dt);
+                self.advance_ragdolls(dt);
                 if any_caught && !self.caught {
                     self.caught = true;
                     log::info!("CAUGHT by a hunter!");
@@ -355,6 +359,7 @@ impl World {
         self.aiming = false;
         // A mode switch always ends any hunt: drop every hunter + its capsule, and
         // revive the BUILD demo model.
+        self.clear_ragdolls();
         self.physics.clear_enemy_colliders();
         self.enemies.clear();
         // Fresh player-combat state each mode switch (full health, no flash/HUD).
@@ -464,6 +469,7 @@ impl World {
         self.camp_timer = 0.0;
         self.grenade_cooldown = 0.0;
         // Despawn the current wave and re-flood it in at the current difficulty.
+        self.clear_ragdolls();
         self.physics.clear_enemy_colliders();
         self.enemies.clear();
         if self.spawn_enemies {
@@ -619,6 +625,9 @@ impl World {
                 anim_speed: 0.0,
                 render_yaw: None,
                 final_pose: None,
+                ragdoll: None,
+                ragdoll_time: 0.0,
+                reaction: None,
             });
             log::info!(
                 "hunter {i} flooded in at {spawn:?} as body {body} with {}{}",

@@ -892,7 +892,7 @@ impl World {
             let center_mass = alive_pos + Vec3::Y * ENEMY_CENTER_Y;
             let dmg = crate::combat::falloff_damage(&explosion, center_mass.distance(center));
             if dmg > 0.0 {
-                self.blast_hit_enemy(idx, dmg, center_mass);
+                self.blast_hit_enemy(idx, dmg, center_mass, center);
             }
         }
 
@@ -912,8 +912,7 @@ impl World {
     /// no hit zone, so it uses the torso hurt set. Mirrors the death/hurt tail of
     /// [`Self::hit_enemy`] without the per-vertex blood paint (the fireball is the
     /// feedback).
-    fn blast_hit_enemy(&mut self, idx: usize, dmg: f32, at: Vec3) {
-        let _ = at; // reserved for a future directional knockback/blood
+    fn blast_hit_enemy(&mut self, idx: usize, dmg: f32, at: Vec3, blast_center: Vec3) {
         let (died, collider) = match self.enemies.get_mut(idx) {
             Some(inst) if !inst.enemy.is_dead() => (inst.enemy.take_damage(dmg), inst.collider),
             _ => return,
@@ -926,13 +925,23 @@ impl World {
         }
 
         if died {
-            self.physics.remove_enemy_collider(collider);
-            let death_start = CHAR_HIT_START + anim_set::HIT_CLIPS.len();
-            let pick = self.rand_below(anim_set::DEATH_CLIPS.len());
-            if let Some(inst) = self.enemies.get_mut(idx) {
-                inst.anim.play_once(death_start + pick, 0.2, None, None);
-            }
+            // Radial knockback: shove the corpse away from the blast centre (lifted a
+            // little so it's flung, not scraped). `start_death` handles ragdoll vs clip.
+            let dir = (at - blast_center).normalize_or_zero();
+            let knock = (dir + Vec3::Y * 0.3).normalize_or_zero() * RAGDOLL_BLAST_IMPULSE;
+            self.start_death(idx, collider, at, knock);
             log::info!("HUNTER DOWN (blast, {dmg:.0} dmg)");
+        } else if self.ragdoll {
+            // Phase 3 default: a brief physics-ragdoll stagger (radial from the blast) +
+            // a short stun, blended into animation, then the hunter fights on.
+            let dir = (at - blast_center).normalize_or_zero();
+            let knock = (dir + Vec3::Y * 0.25).normalize_or_zero() * REACTION_IMPULSE;
+            self.spawn_reaction(idx, at, knock);
+            if let Some(inst) = self.enemies.get_mut(idx) {
+                inst.enemy.stun(REACTION_STUN);
+            }
+            let hp = self.enemies.get(idx).map(|i| i.enemy.health()).unwrap_or(0.0);
+            log::info!("hunter staggered by blast — {dmg:.0} dmg, {hp:.0} hp left");
         } else if self.hit_reactions {
             // GoldenEye-style flinch (opt-in — OFF by default, matching `hit_enemy`):
             // a non-lethal blast staggers with a torso hurt clip + brief stun. The
@@ -951,6 +960,91 @@ impl World {
             // Sim style (default): damage + pain SFX, no flinch/stun.
             let hp = self.enemies.get(idx).map(|i| i.enemy.health()).unwrap_or(0.0);
             log::info!("hunter caught in blast — {dmg:.0} dmg, {hp:.0} hp left (no flinch)");
+        }
+    }
+
+    /// Begin a hunter's death: drop its hitscan capsule, then either spawn a physics
+    /// ragdoll (the [`World::ragdoll`] flag, default on) seeded from its current pose +
+    /// the killing `impulse` at `impact`, or fall back to the canned death clip. Shared
+    /// by the bullet ([`Self::hit_enemy`]) and blast ([`Self::blast_hit_enemy`]) paths.
+    fn start_death(&mut self, idx: usize, collider: ColliderHandle, impact: Vec3, impulse: Vec3) {
+        // The corpse can't be shot: the capsule goes now, either way.
+        self.physics.remove_enemy_collider(collider);
+        if self.ragdoll {
+            self.spawn_ragdoll(idx, impact, impulse);
+        } else {
+            // Pre-ragdoll baseline: a random canned death one-shot that clamps + holds
+            // (no return target) while the body fades out (see `advance_animation`).
+            let death_start = CHAR_HIT_START + anim_set::HIT_CLIPS.len();
+            let pick = self.rand_below(anim_set::DEATH_CLIPS.len());
+            if let Some(inst) = self.enemies.get_mut(idx) {
+                inst.anim.play_once(death_start + pick, 0.2, None, None);
+            }
+        }
+    }
+
+    /// Seed a ragdoll for hunter `idx` from its CURRENT animated pose (so it starts
+    /// exactly where the live model was) with the `impulse` at world `impact`. Returns
+    /// the built ragdoll without storing it — the caller decides whether it's a death
+    /// takeover ([`Self::spawn_ragdoll`]) or a living-hit reaction ([`Self::spawn_reaction`]).
+    /// `None` if the hunter or its body model is gone.
+    fn build_ragdoll_for(&mut self, idx: usize, impact: Vec3, impulse: Vec3) -> Option<Ragdoll> {
+        // Seed inputs, gathered with only immutable, disjoint field borrows.
+        let (body, feet, yaw) = match self.enemies.get(idx) {
+            Some(i) => (i.body, i.enemy.pos, i.yaw()),
+            None => return None,
+        };
+        let feet_off = self.body_feet_offset(body);
+        let m = self.char_models.get(body)?;
+        let sk = &m.skeleton;
+        // Model-space bone globals of the current pose (post-stack if it exists).
+        let model_globals = match self.enemies[idx].final_pose.as_ref() {
+            Some(p) => p.joint_global_transforms(sk),
+            None => self.enemies[idx].anim.joint_global_transforms(sk),
+        };
+        // World bone transforms = char_transform · model_global (metres, scale folded in).
+        let char_mat = crate::world::hunt::char_transform_raw(feet, yaw, feet_off);
+        let world_bone: Vec<Mat4> = model_globals.iter().map(|g| char_mat * *g).collect();
+        // Build in the sim (disjoint fields: &mut physics + &char_models via `sk`).
+        Some(Ragdoll::build(&mut self.physics, sk, &world_bone, CHAR_SCALE, impulse, impact))
+    }
+
+    /// Death takeover: build the corpse ragdoll and store it on the instance. From here
+    /// [`Self::advance_ragdolls`] + [`Self::character_instances`] drive and draw it. Any
+    /// in-flight living reaction on this hunter is torn down first (death supersedes it).
+    fn spawn_ragdoll(&mut self, idx: usize, impact: Vec3, impulse: Vec3) {
+        if let Some(r) = self.enemies.get_mut(idx).and_then(|i| i.reaction.take()) {
+            r.rag.remove(&mut self.physics);
+        }
+        if let Some(rag) = self.build_ragdoll_for(idx, impact, impulse) {
+            if let Some(inst) = self.enemies.get_mut(idx) {
+                inst.ragdoll = Some(rag);
+            }
+        }
+    }
+
+    /// Living-hit stagger (Phase 3): a non-lethal hit spawns a brief physics ragdoll
+    /// that's BLENDED into the running animation ([`Self::advance_animation`]) by a
+    /// decaying weight, then torn down. A re-hit while still staggering just re-kicks the
+    /// existing ragdoll and restarts its decay (no rebuild — avoids body churn under fire).
+    fn spawn_reaction(&mut self, idx: usize, impact: Vec3, impulse: Vec3) {
+        let already = self.enemies.get(idx).is_some_and(|i| i.reaction.is_some());
+        if already {
+            // Re-kick the live reaction (scoped shared borrow), then re-peak its decay.
+            if let Some(inst) = self.enemies.get(idx) {
+                if let Some(r) = inst.reaction.as_ref() {
+                    r.rag.kick(&mut self.physics, impulse, impact);
+                }
+            }
+            if let Some(r) = self.enemies.get_mut(idx).and_then(|i| i.reaction.as_mut()) {
+                r.elapsed = 0.0;
+            }
+            return;
+        }
+        if let Some(rag) = self.build_ragdoll_for(idx, impact, impulse) {
+            if let Some(inst) = self.enemies.get_mut(idx) {
+                inst.reaction = Some(Reaction { rag, elapsed: 0.0 });
+            }
         }
     }
 
@@ -1003,16 +1097,32 @@ impl World {
         }
 
         if died {
-            // Remove the capsule now; the body stays visible (opacity 1) until the
-            // death animation finishes, then fades (see `advance_animation`).
-            self.physics.remove_enemy_collider(collider);
-            let death_start = CHAR_HIT_START + anim_set::HIT_CLIPS.len();
-            let pick = self.rand_below(anim_set::DEATH_CLIPS.len());
+            // The killing shot's knockback: from the player's eye toward the impact
+            // (with a slight lift so the corpse arcs rather than slides). `start_death`
+            // drops the capsule and spawns a physics ragdoll (flag on) or the canned
+            // death clip (off).
+            let eye = self.character.as_ref().map(|c| c.eye());
+            let dir = eye
+                .map(|e| (hit_point - e).normalize_or_zero())
+                .unwrap_or(Vec3::Y);
+            let knock = (dir + Vec3::Y * 0.25).normalize_or_zero() * RAGDOLL_BULLET_IMPULSE;
+            self.start_death(idx, collider, hit_point, knock);
+            log::info!("HUNTER DOWN ({zone:?}, {dmg:.0} dmg)");
+        } else if self.ragdoll {
+            // Phase 3 default: a brief physics-ragdoll stagger blended into the run-and-
+            // gun animation + a short stun, then the hunter resumes fighting. Flat across
+            // difficulties (the `ragdoll` flag is the kill-switch). Knock from the shot line.
+            let eye = self.character.as_ref().map(|c| c.eye());
+            let dir = eye
+                .map(|e| (hit_point - e).normalize_or_zero())
+                .unwrap_or(Vec3::Y);
+            let knock = (dir + Vec3::Y * 0.2).normalize_or_zero() * REACTION_IMPULSE;
+            self.spawn_reaction(idx, hit_point, knock);
             if let Some(inst) = self.enemies.get_mut(idx) {
-                // No return target → the death pose clamps and holds while it fades.
-                inst.anim.play_once(death_start + pick, 0.2, None, None);
+                inst.enemy.stun(REACTION_STUN);
             }
-            log::info!("HUNTER DOWN ({zone:?}, {dmg:.0} dmg — {})", anim_set::DEATH_CLIPS[pick]);
+            let hp = self.enemies.get(idx).map(|i| i.enemy.health()).unwrap_or(0.0);
+            log::info!("hunter staggered — {zone:?} {dmg:.0} dmg, {hp:.0} hp left");
         } else if self.hit_reactions {
             // GoldenEye-style flinch (opt-in — off by default): play a zone-appropriate
             // hurt clip + a brief stun. The pain SFX + blood above already read the hit;

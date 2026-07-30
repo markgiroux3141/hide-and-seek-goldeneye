@@ -474,6 +474,7 @@ use super::editing::find_room_brushes;
     fn hits_flinch_only_when_hit_reactions_enabled() {
         let mut world = World::new();
         world.weapon_index = 0; // PP7, 25 dmg — non-lethal on a 100-hp hunter
+        world.set_ragdoll(false); // isolate the canned-flinch path (ragdoll would supersede it)
         world.initial_meshes();
         world.toggle_mode(); // HUNT: spawn one hunter
         assert!(!world.enemies.is_empty(), "hunter spawned");
@@ -523,6 +524,7 @@ use super::editing::find_room_brushes;
     fn four_shots_kill_the_hunter_then_it_fades_out() {
         let mut world = World::new();
         world.weapon_index = 0; // pin PP7 (25 dmg hitscan); the default start weapon is dev-set elsewhere
+        world.set_ragdoll(false); // this test covers the canned death-clip + fade path
         world.initial_meshes();
         world.toggle_mode(); // HUNT: bake nav + spawn hunter roster
         assert!(!world.enemies.is_empty(), "hunters spawned");
@@ -566,6 +568,142 @@ use super::editing::find_room_brushes;
         assert!(
             world.character_instances()[0].3 <= 1e-3,
             "faded to invisible after the animation"
+        );
+    }
+
+    /// Ragdoll death (default ON): the lethal shot spawns a physics ragdoll instead of
+    /// a canned death clip — a body per bone enters the sim, the mixer plays NO death
+    /// one-shot, the corpse renders with an identity model transform (WORLD-space
+    /// skinning), and after it settles + fades the ragdoll tears itself out of the sim.
+    #[test]
+    fn ragdoll_death_replaces_the_clip_then_settles_and_despawns() {
+        let mut world = World::new();
+        world.weapon_index = 0; // PP7, 25 dmg hitscan
+        assert!(world.ragdoll(), "ragdoll death is on by default");
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT: bake nav + spawn the (single) hunter
+        assert!(!world.enemies.is_empty(), "hunter spawned");
+        // One animation frame so the death seed reads a real posed skeleton.
+        world.advance_animation(1.0 / 60.0);
+
+        let torso = {
+            let p = world.enemies[0].enemy.pos;
+            Vec3::new(p.x, p.y + 0.8, p.z)
+        };
+        for _ in 0..4 {
+            world.hit_enemy(0, torso); // 4×25 = 100 → dead
+        }
+        assert!(world.enemies[0].enemy.is_dead(), "dead after 4 PP7 shots");
+        assert!(world.enemies[0].ragdoll.is_some(), "death spawned a ragdoll");
+        assert!(
+            !world.enemies[0].anim.is_playing_oneshot(),
+            "the ragdoll replaces the canned death one-shot"
+        );
+        assert!(
+            world.physics.ragdoll_body_count() >= 11,
+            "the corpse's bones entered the dynamics sim (got {})",
+            world.physics.ragdoll_body_count()
+        );
+
+        // The corpse draws with an identity model transform (its bones are already in
+        // world space) and full opacity while it's still settling.
+        let insts = world.character_instances();
+        assert!(!insts.is_empty(), "the corpse still renders");
+        let (_, model, _, opacity, _) = insts[0];
+        assert!(
+            (model - Mat4::IDENTITY).to_cols_array().iter().all(|v| v.abs() < 1e-6),
+            "a ragdolling corpse uses an identity model transform"
+        );
+        assert!((opacity - 1.0).abs() < 1e-3, "opaque while settling");
+
+        // Run the sim out: the corpse settles, fades, and its bodies leave the sim.
+        let input = InputState::default();
+        for _ in 0..1200 {
+            world.fixed_step(1.0 / 120.0, &input);
+        }
+        assert!(
+            world.enemies[0].ragdoll.is_none(),
+            "the settled + faded corpse tore down its ragdoll"
+        );
+        assert_eq!(world.physics.ragdoll_body_count(), 0, "no ragdoll bodies leak");
+    }
+
+    /// Living-hit stagger (Phase 3, default ON): a NON-lethal hit spawns a brief physics
+    /// reaction (blended into animation, not a death takeover) + a short stun, and after
+    /// its blend decays the reaction tears itself down — the hunter survives and is back
+    /// to pure animation with no leaked bodies.
+    #[test]
+    fn nonlethal_hit_staggers_then_blends_back() {
+        let mut world = World::new();
+        world.weapon_index = 0; // PP7, 25 dmg — non-lethal on a 100-hp hunter
+        assert!(world.ragdoll(), "ragdoll feature on by default");
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT
+        world.advance_animation(1.0 / 60.0); // seed the pose the reaction reads
+
+        let torso = {
+            let p = world.enemies[0].enemy.pos;
+            Vec3::new(p.x, p.y + 0.8, p.z)
+        };
+        world.hit_enemy(0, torso);
+        assert!(!world.enemies[0].enemy.is_dead(), "one PP7 shot is non-lethal");
+        assert!(world.enemies[0].reaction.is_some(), "a living reaction spawned");
+        assert!(world.enemies[0].ragdoll.is_none(), "it's a reaction, not a death ragdoll");
+        assert!(world.physics.ragdoll_body_count() > 0, "reaction bodies entered the sim");
+
+        // Blend it out: run ~1 s (past the decay window). The reaction tears down and no
+        // bodies leak; the hunter is alive and back to animation.
+        let input = InputState::default();
+        for _ in 0..120 {
+            world.fixed_step(1.0 / 120.0, &input);
+        }
+        assert!(world.enemies[0].reaction.is_none(), "the stagger blended out + tore down");
+        assert_eq!(world.physics.ragdoll_body_count(), 0, "no reaction bodies leak");
+        assert!(!world.enemies[0].enemy.is_dead(), "still alive after a non-lethal stagger");
+    }
+
+    /// With the ragdoll feature off, a non-lethal hit spawns NO physics reaction (falls
+    /// back to the sim / canned-flinch paths) — the kill-switch restores the baseline.
+    #[test]
+    fn nonlethal_hit_no_physics_reaction_when_ragdoll_off() {
+        let mut world = World::new();
+        world.weapon_index = 0;
+        world.set_ragdoll(false);
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT
+        world.advance_animation(1.0 / 60.0);
+        let torso = {
+            let p = world.enemies[0].enemy.pos;
+            Vec3::new(p.x, p.y + 0.8, p.z)
+        };
+        world.hit_enemy(0, torso);
+        assert!(!world.enemies[0].enemy.is_dead());
+        assert!(world.enemies[0].reaction.is_none(), "ragdoll off → no physics reaction");
+        assert_eq!(world.physics.ragdoll_body_count(), 0, "no ragdoll bodies with the feature off");
+    }
+
+    /// Ragdoll bodies never leak across a hunt: a mode switch back to BUILD (or a duel
+    /// reset) tears down every live corpse's bodies.
+    #[test]
+    fn ragdoll_bodies_are_cleared_on_mode_switch() {
+        let mut world = World::new();
+        world.weapon_index = 0;
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT
+        world.advance_animation(1.0 / 60.0);
+        let torso = {
+            let p = world.enemies[0].enemy.pos;
+            Vec3::new(p.x, p.y + 0.8, p.z)
+        };
+        for _ in 0..4 {
+            world.hit_enemy(0, torso);
+        }
+        assert!(world.physics.ragdoll_body_count() > 0, "a corpse is ragdolling");
+        world.toggle_mode(); // back to BUILD — must drop the ragdoll bodies
+        assert_eq!(
+            world.physics.ragdoll_body_count(),
+            0,
+            "ragdoll bodies are cleared on the way out of HUNT"
         );
     }
 

@@ -261,8 +261,16 @@ impl World {
         let feet_offs = &self.char_feet_offset;
         let arms = &self.enemy_arm;
         let nav = self.nav.as_ref();
+        // Physics (read-only here) — the source for the living-hit reaction blend.
+        let physics = &self.physics;
 
         for inst in &mut self.enemies {
+            // A ragdolling corpse is driven entirely by the physics bodies (see
+            // `character_instances`); skip the whole animation stack for it. Its fade +
+            // teardown are handled by `advance_ragdolls` off the fixed step.
+            if inst.ragdoll.is_some() {
+                continue;
+            }
             // Low-pass the AI's per-step speed → a continuous locomotion speed that
             // drives the blend layer, so the gait eases smoothly (no band thresholds).
             inst.anim_speed +=
@@ -435,10 +443,91 @@ impl World {
                     );
                 }
             }
+
+            // Living-hit stagger: blend the transient physics ragdoll's model-local
+            // pose INTO the animated pose by its decaying weight — a real physical
+            // reaction that eases back to the run-and-gun animation as the weight → 0.
+            if let Some(reaction) = inst.reaction.as_ref() {
+                let w = reaction.weight().clamp(0.0, 1.0);
+                if w > 1e-3 {
+                    let char_inv =
+                        char_transform_raw(inst.enemy.pos, inst.yaw(), feet_off).inverse();
+                    let rp = reaction.rag.model_local_pose(physics, sk, char_inv);
+                    for b in 0..pose.joint_count().min(rp.joint_count()) {
+                        pose.t[b] = pose.t[b].lerp(rp.t[b], w);
+                        pose.r[b] = pose.r[b].slerp(rp.r[b], w);
+                        pose.s[b] = pose.s[b].lerp(rp.s[b], w);
+                    }
+                }
+            }
             inst.final_pose = Some(pose);
         }
 
         self.log_anim_debug();
+    }
+
+    /// Advance every active death ragdoll one fixed step: age it, and once it has
+    /// settled (its fastest body slower than [`RAGDOLL_SETTLE_SPEED`]) or hit the
+    /// [`RAGDOLL_MAX_SETTLE`] backstop, begin the opacity fade; when a corpse has fully
+    /// faded, tear its bodies out of the physics sim. The rigid-body solver itself is
+    /// stepped separately ([`PhysicsWorld::step_dynamics`]); this only drives the corpse
+    /// lifecycle. No-op when no hunter is ragdolling. Index-based so the `&mut physics`
+    /// teardown doesn't clash with the enemy-roster borrow.
+    pub(crate) fn advance_ragdolls(&mut self, dt: f32) {
+        for i in 0..self.enemies.len() {
+            if self.enemies[i].ragdoll.is_none() {
+                continue;
+            }
+            self.enemies[i].ragdoll_time += dt;
+            let speed = self.enemies[i]
+                .ragdoll
+                .as_ref()
+                .map(|r| r.max_speed(&self.physics))
+                .unwrap_or(0.0);
+            if speed < RAGDOLL_SETTLE_SPEED || self.enemies[i].ragdoll_time >= RAGDOLL_MAX_SETTLE {
+                let t = self.enemies[i].fade.get_or_insert(0.0);
+                *t = (*t + dt).min(FADE_DURATION);
+            }
+            if self.enemies[i].fade.is_some_and(|t| t >= FADE_DURATION) {
+                if let Some(rag) = self.enemies[i].ragdoll.take() {
+                    rag.remove(&mut self.physics);
+                }
+            }
+        }
+        // Living-hit reactions: age each, and once the blend has decayed to nothing,
+        // tear its bodies out of the sim so the hunter is back to pure animation.
+        for i in 0..self.enemies.len() {
+            if self.enemies[i].reaction.is_none() {
+                continue;
+            }
+            if let Some(r) = self.enemies[i].reaction.as_mut() {
+                r.elapsed += dt;
+            }
+            let done = self.enemies[i]
+                .reaction
+                .as_ref()
+                .map_or(true, |r| r.weight() < REACTION_MIN_WEIGHT);
+            if done {
+                if let Some(r) = self.enemies[i].reaction.take() {
+                    r.rag.remove(&mut self.physics);
+                }
+            }
+        }
+    }
+
+    /// Remove every live ragdoll's bodies from the physics sim before the enemy roster
+    /// is dropped (the [`Ragdoll`] structs don't clean up on `Drop`) — both death
+    /// corpses and in-flight living reactions. Called on any hunt teardown so ragdoll
+    /// bodies never leak into the next HUNT.
+    pub(crate) fn clear_ragdolls(&mut self) {
+        for i in 0..self.enemies.len() {
+            if let Some(rag) = self.enemies[i].ragdoll.take() {
+                rag.remove(&mut self.physics);
+            }
+            if let Some(r) = self.enemies[i].reaction.take() {
+                r.rag.remove(&mut self.physics);
+            }
+        }
     }
 
     /// `ANIM_DEBUG=1`: dump the nearest engaged hunter's per-frame state so
@@ -566,6 +655,13 @@ impl World {
             .iter()
             .filter_map(|inst| {
                 let m = self.char_models.get(inst.body)?;
+                // A ragdolling corpse: its bones are placed by the physics bodies, so
+                // the skinning matrices are WORLD-space and the model transform is the
+                // identity (the scale is folded into the read-back). See `Ragdoll`.
+                if let Some(rag) = inst.ragdoll.as_ref() {
+                    let joints = rag.skinning_matrices(&self.physics, &m.skeleton);
+                    return Some((inst.body, Mat4::IDENTITY, joints, inst.opacity(), inst.blood.as_slice()));
+                }
                 // Prefer the procedural post-pass pose (aim + recoil); fall back to
                 // the raw mixer pose on the first frame before it's computed.
                 let joints = match inst.final_pose.as_ref() {
