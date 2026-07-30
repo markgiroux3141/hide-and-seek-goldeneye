@@ -654,6 +654,59 @@ fn orca_a_converging_pack_rings_the_player_without_stacking() {
     assert!(mon.violations_of("overlap").is_empty(), "hunters stacked converging on the player");
 }
 
+// ─── Utility-AI decision layer (roadmap #4) ──────────────────────────────────
+
+/// The utility layer (default ON) engages a visible player, fires, and HOLDS a standoff
+/// — it never runs the player down to point-blank. (Regression for the scoring tie where
+/// `Chase`+inertia matched `Attack` and the hunter closed to point-blank, firing, forever
+/// instead of planting at its standoff.) Open room, so there's no cover cycle to pull it
+/// in — pure standoff behaviour.
+#[test]
+fn utility_engages_holds_standoff_and_fires() {
+    let mut arena = TestArena::build([60.0, 16.0, 60.0], &[], 1, Vec3::new(7.5, 0.0, 4.0));
+    assert!(arena.world.utility_ai(), "utility AI is on by default");
+    arena.place_hunter(0, 7.5, 11.0); // ~7 m — a rifle's standoff band
+    let mut mon = JankMonitor::new(1);
+    let dt = 1.0 / 60.0;
+    let mut min_dist = f32::MAX;
+    for _ in 0..1200 {
+        arena.step(dt);
+        mon.sample(&mut arena.world, dt);
+        let d = arena.world.enemies[0]
+            .enemy
+            .pos
+            .distance(arena.world.player_pos().unwrap());
+        min_dist = min_dist.min(d);
+    }
+    mon.report();
+    assert!(mon.ever_fired[0], "a utility hunter engages + fires");
+    assert!(mon.violations_of("stall").is_empty(), "utility hunter stalled");
+    assert!(mon.violations_of("illegal_y").is_empty(), "utility hunter clipped geometry");
+    assert!(
+        min_dist > 2.0,
+        "utility hunter holds a standoff, not point-blank (min {min_dist:.2} m)"
+    );
+}
+
+/// The `utility_ai` kill-switch drops back to the legacy FSM, which still engages + fires
+/// — so the pre-utility baseline is one setter away (A/B + regression safety).
+#[test]
+fn utility_kill_switch_runs_the_fsm() {
+    let mut arena = TestArena::build([60.0, 16.0, 60.0], &[], 1, Vec3::new(7.5, 0.0, 4.0));
+    arena.world.set_utility_ai(false);
+    assert!(!arena.world.utility_ai(), "kill-switch disables the utility layer");
+    arena.place_hunter(0, 7.5, 11.0);
+    let mut mon = JankMonitor::new(1);
+    let dt = 1.0 / 60.0;
+    for _ in 0..900 {
+        arena.step(dt);
+        mon.sample(&mut arena.world, dt);
+    }
+    mon.report();
+    assert!(mon.ever_fired[0], "the FSM kill-switch still engages + fires");
+    assert!(mon.violations_of("stall").is_empty(), "FSM hunter stalled");
+}
+
 // ─── Tracked defect repros (the lab caught these; un-ignore each when fixing) ────
 
 /// FIXED 2026-07-27: a hunter with a clear line-of-sight to the player at engage

@@ -162,6 +162,9 @@ impl World {
                 // Wall-clearance radius applied per step (0 = off) so the wide model
                 // stops clipping walls; `integrate_move` reads it after the ORCA commit.
                 let wall_clear_r = if self.wall_clearance { WALL_CLEARANCE_RADIUS } else { 0.0 };
+                // Utility-AI decision layer on/off, applied per hunter below (like the
+                // detectable + wall-clearance toggles) so it can be A/B'd against the FSM.
+                let utility_on = self.utility_ai;
                 let mut fire_requests: Vec<usize> = Vec::new();
                 let mut needs_target: Vec<usize> = Vec::new();
                 let mut any_caught = false;
@@ -171,6 +174,8 @@ impl World {
                     inst.enemy.set_detectable(player_visible);
                     // Arm the wall-clearance nudge for this step's movement commit.
                     inst.enemy.set_wall_clearance_radius(wall_clear_r);
+                    // Select the decision layer (utility vs legacy FSM) for this step.
+                    inst.enemy.set_utility(utility_on);
                     // Is THIS hunter mid fire burst? (the JS `enemyState === 'action'`
                     // proxy the attack→cooldown transition needs). Firing is a timer
                     // now, so the hunter can move + aim through it.

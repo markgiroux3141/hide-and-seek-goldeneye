@@ -1350,6 +1350,12 @@ pub struct World {
     /// Push-not-block, so it never stops a hunter fitting through a doorway; it slightly
     /// adjusts positions (off walls) but never changes who/when a hunter shoots.
     wall_clearance: bool,
+    /// Whether hunters use the **utility-AI decision layer** (roadmap #4) — a scored
+    /// behaviour selector that replaces the hand-coded FSM transitions, making the six
+    /// behaviours emergent + composable. **On by default.** A kill-switch / regression
+    /// baseline: when off, each hunter runs the legacy FSM (`Enemy::update`'s match).
+    /// Reuses every tuned movement/perception primitive — only the *decision* changes.
+    utility_ai: bool,
     /// Per-body world-space Y offset that seats that body's feet on the floor
     /// (parallel to [`Self::char_models`]). Computed from the **lowest skinned point
     /// of the actual idle pose** for each body (the bind-pose AABB can't be used —
@@ -1767,6 +1773,7 @@ impl World {
             foot_ik: true, // ground-adaptive foot IK + cadence on by default (kill-switch below)
             ragdoll: true, // physics ragdoll death on by default (kill-switch below)
             wall_clearance: true, // wall-clearance nudge on by default (kill-switch below)
+            utility_ai: true, // utility-AI decision layer on by default (kill-switch below)
             char_feet_offset,
             enemy_arm,
             procedural_preview: None,
@@ -1920,6 +1927,17 @@ impl World {
     /// Whether physics-ragdoll death is active (inspection / tests).
     pub fn ragdoll(&self) -> bool {
         self.ragdoll
+    }
+
+    /// Toggle the utility-AI decision layer (default ON — see [`Self::utility_ai`]). Off,
+    /// hunters run the legacy hand-coded FSM (pre-utility baseline / kill-switch).
+    pub fn set_utility_ai(&mut self, on: bool) {
+        self.utility_ai = on;
+    }
+
+    /// Whether the utility-AI decision layer is active (inspection / tests).
+    pub fn utility_ai(&self) -> bool {
+        self.utility_ai
     }
 
     /// Toggle the wall-clearance nudge (default ON — see [`Self::wall_clearance`]). Off,

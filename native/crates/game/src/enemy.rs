@@ -300,6 +300,15 @@ const SCAN_TURN_RATE: f32 = 1.6;
 /// damage 25 → 4 shots to kill.
 pub const ENEMY_HEALTH: f32 = 100.0;
 
+/// Utility-AI belief memory (s) — how long after last seeing the player a hunter stays
+/// "engaged" (pursuing the last-known) before the belief decays to investigate/search.
+/// The modern equivalent of the FSM's structural persistence (roadmap #4).
+const ENGAGE_MEMORY: f32 = 5.0;
+/// Anti-thrash inertia bonus added to the CURRENT behaviour's utility score, so a
+/// near-tie at a band boundary sticks instead of flip-flopping (decision hysteresis —
+/// the utility-layer analogue of the FSM's standoff/LOS-grace debouncing).
+const UTIL_INERTIA: f32 = 0.2;
+
 pub struct Enemy {
     /// Feet position, meters.
     pub pos: Vec3,
@@ -422,6 +431,23 @@ pub struct Enemy {
     /// from clipping into walls (see [`engine::sim::nav::NavWorld::wall_clearance_offset`]).
     /// Defaults to `0.0`, so headless callers that don't set it are unaffected.
     wall_clearance_radius: f32,
+
+    // ─── Utility-AI decision layer (roadmap #4) ──
+    /// When set, [`Self::update`] picks the behaviour each tick with a scored selector
+    /// ([`Self::util_step`]) instead of the hand-coded FSM transitions. The `World` sets
+    /// it each step from its `utility_ai` flag; the FSM is the kill-switch (`false`).
+    /// Defaults `false` so headless `Enemy` unit tests keep the FSM unless they opt in.
+    utility: bool,
+    /// Seconds since the player was last perceived (0 = seeing now). Drives the utility
+    /// belief memory ([`ENGAGE_MEMORY`]). Large until the first sighting.
+    since_seen: f32,
+    /// Whether the post-acquisition reaction delay ([`AiTuning::alert`]) has been served
+    /// for the current engagement (so `Alert` only scores high until it elapses). Reset
+    /// when the engagement belief lapses.
+    alert_served: bool,
+    /// Utility edge flag: a fire burst just ended this tick, so next tick's scorer
+    /// initiates the between-bursts move (break to cover if desired, else reposition).
+    post_burst: bool,
 }
 
 impl Enemy {
@@ -479,6 +505,10 @@ impl Enemy {
             evade_cooldown: 0.0,
             detectable: true,
             wall_clearance_radius: 0.0,
+            utility: false,
+            since_seen: 1e6,
+            alert_served: false,
+            post_burst: false,
         }
     }
 
@@ -487,6 +517,12 @@ impl Enemy {
     /// reverts to searching. See [`Self::detectable`].
     pub fn set_detectable(&mut self, v: bool) {
         self.detectable = v;
+    }
+
+    /// Enable/disable the utility-AI decision layer (roadmap #4). The `World` sets this
+    /// each step from its `utility_ai` flag; `false` runs the legacy FSM (kill-switch).
+    pub fn set_utility(&mut self, on: bool) {
+        self.utility = on;
     }
 
     /// Set the body half-width (m) for the wall-clearance nudge (`0.0` disables it).
@@ -884,6 +920,14 @@ impl Enemy {
         let perceived = self.perceives(player_feet, has_los, tuning.sense, look, half_cone);
         if perceived {
             self.last_known = Some(player_feet);
+            self.since_seen = 0.0;
+        } else {
+            self.since_seen += dt;
+        }
+        // Utility belief lapse: once the player's been lost past the memory window, a
+        // fresh acquisition re-serves the alert reaction delay (harmless to the FSM path).
+        if self.since_seen >= ENGAGE_MEMORY {
+            self.alert_served = false;
         }
 
         // Reactive aim-sense evasion: decay the timers, and if the player draws a bead
@@ -909,6 +953,20 @@ impl Enemy {
         }
 
         let mut step = EnemyStep::default();
+        // Utility-AI decision layer (roadmap #4, default ON via the World flag): a scored
+        // behaviour selector replaces the hand-coded FSM transitions below. The FSM is
+        // kept verbatim as the `utility == false` kill-switch.
+        if self.utility {
+            self.util_step(
+                &mut step, dt, player_feet, standoff, attack_range, tuning, nav,
+                physics, fire_anim, self_collider, perceived,
+            );
+            step.caught = {
+                let horiz = self.dist_to(player_feet);
+                horiz < CATCH_DIST && (player_feet.y - self.pos.y).abs() < CATCH_VERT
+            };
+            return step;
+        }
         match self.state {
             AiState::Idle => {
                 // Unaware and with nowhere assigned to search — the `World` will give
@@ -1226,6 +1284,404 @@ impl Enemy {
             horiz < CATCH_DIST && (player_feet.y - self.pos.y).abs() < CATCH_VERT
         };
         step
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Utility-AI decision layer (roadmap #4). A scored behaviour selector replaces
+    // the FSM's special-cased transitions: each tick every candidate behaviour is
+    // scored from the context, the winner is committed (with inertia so it doesn't
+    // thrash), and it executes via the SAME movement/fire/cover helpers the FSM uses.
+    // The six behaviours are now composable scored options — a 7th is a new score
+    // entry, not another flag threaded through `update`. The sequential combat sub-
+    // cycle (TakeCover→Peek, Cooldown reposition) runs as a COMMITTED behaviour that
+    // completes and hands back to the scorer.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// The fire-burst lifecycle pump (shared with the FSM's inline version): request a
+    /// burst when idle, latch its start, and detect its completion. Returns `true` on the
+    /// tick a burst just ended.
+    fn pump_fire(&mut self, fire_anim: bool, step: &mut EnemyStep) -> bool {
+        if !fire_anim && !self.is_attacking {
+            self.is_attacking = true;
+            self.fire_started = false;
+            step.want_fire = true;
+        }
+        if self.is_attacking && !self.fire_started && fire_anim {
+            self.fire_started = true;
+        }
+        if self.is_attacking && self.fire_started && !fire_anim {
+            self.is_attacking = false;
+            return true;
+        }
+        false
+    }
+
+    /// Utility score for candidate behaviour `s` in the current context (higher = more
+    /// desirable). These reproduce the FSM's logic as continuous, composable scores;
+    /// `util_choose` adds inertia + picks the max. `los_hold` is LOS debounced by the
+    /// attack grace so a corner-seam flicker doesn't drop the fight.
+    fn util_score(
+        &self,
+        s: AiState,
+        perceived: bool,
+        engaged: bool,
+        dist: f32,
+        los_hold: bool,
+        firing: bool,
+        attack_range: f32,
+        tuning: AiTuning,
+    ) -> f32 {
+        match s {
+            // Baseline floor — only wins when nothing else applies (blind, nowhere to go).
+            AiState::Idle => 0.1,
+            AiState::Search => {
+                if !engaged && !perceived && self.last_known.is_none() {
+                    0.6
+                } else {
+                    0.0
+                }
+            }
+            AiState::Investigate => {
+                if !engaged && !perceived && self.last_known.is_some() {
+                    0.7
+                } else {
+                    0.0
+                }
+            }
+            // Serve the acquisition reaction delay before pressing the attack.
+            AiState::Alert => {
+                if (perceived || engaged) && !self.alert_served {
+                    1.2
+                } else {
+                    0.0
+                }
+            }
+            // Close on / pursue the last-known once the alert is served. Always a decent
+            // option while engaged; Attack outscores it when in range with eyes on.
+            AiState::Chase => {
+                if (perceived || engaged) && self.alert_served {
+                    0.7
+                } else {
+                    0.0
+                }
+            }
+            // Plant + fire: high inside the standoff band with LOS; held out to 1.3× once
+            // already attacking (the exit hysteresis) so the player must clearly break off.
+            AiState::Attack => {
+                if self.alert_served && los_hold {
+                    if dist <= attack_range {
+                        // Don't INITIATE the plant mid-suppress-burst (mirror the FSM's
+                        // `!fire_anim` Chase→Attack gate): keep closing + suppressing while
+                        // a burst is in flight, so the pack pushes through chokepoints
+                        // instead of stopping to shoot the instant it's barely in range.
+                        if firing && self.state != AiState::Attack {
+                            0.0
+                        } else {
+                            // Clearly beats Chase(0.7)+inertia so a closing hunter hands off
+                            // to the standoff hold (else it runs the player to point-blank).
+                            1.0
+                        }
+                    } else if dist <= attack_range * 1.3 && self.state == AiState::Attack {
+                        0.9 // exit hysteresis: hold out to 1.3× once already attacking
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                }
+            }
+            // Between-bursts moves — only viable on the post-burst edge. Break to cover if
+            // hurt or cover-tuned; otherwise reposition. (Peek is reached only from the
+            // committed cover cycle, never scored fresh.)
+            AiState::TakeCover => {
+                if self.post_burst
+                    && tuning.cover > 0.0
+                    && (self.is_hurt() || tuning.cover >= COVER_UNHURT_MIN)
+                {
+                    1.5
+                } else {
+                    0.0
+                }
+            }
+            AiState::Cooldown => {
+                if self.post_burst {
+                    1.3
+                } else {
+                    0.0
+                }
+            }
+            AiState::Peek => 0.0,
+        }
+    }
+
+    /// Pick the highest-scoring behaviour, with an inertia bonus to the current one so a
+    /// near-tie at a band boundary sticks (decision hysteresis).
+    fn util_choose(
+        &self,
+        perceived: bool,
+        engaged: bool,
+        dist: f32,
+        los_hold: bool,
+        firing: bool,
+        attack_range: f32,
+        tuning: AiTuning,
+    ) -> AiState {
+        const CANDIDATES: [AiState; 8] = [
+            AiState::Idle,
+            AiState::Search,
+            AiState::Investigate,
+            AiState::Alert,
+            AiState::Chase,
+            AiState::Attack,
+            AiState::TakeCover,
+            AiState::Cooldown,
+        ];
+        let mut best = (AiState::Idle, f32::MIN);
+        for s in CANDIDATES {
+            let mut sc = self.util_score(s, perceived, engaged, dist, los_hold, firing, attack_range, tuning);
+            if s == self.state {
+                sc += UTIL_INERTIA;
+            }
+            if sc > best.1 {
+                best = (s, sc);
+            }
+        }
+        best.0
+    }
+
+    /// Enter-hook for a behaviour change: sample cover / pick a reposition / reset the
+    /// per-behaviour timers, mirroring the FSM's state-entry side effects. Sets
+    /// `self.state` to the chosen behaviour (or to `Cooldown` if a cover break found no
+    /// cover — the FSM's fallback).
+    fn util_enter(
+        &mut self,
+        next: AiState,
+        player_feet: Vec3,
+        standoff: f32,
+        nav: &NavWorld,
+        physics: &mut PhysicsWorld,
+        self_collider: ColliderHandle,
+    ) {
+        self.state = next;
+        match next {
+            AiState::Alert => {
+                self.alert_timer = 0.0;
+                self.path.clear();
+            }
+            AiState::Chase => self.chase_timer = 0.0,
+            AiState::Attack => self.enter_attack(),
+            AiState::Investigate => self.scan_timer = 0.0,
+            AiState::TakeCover => {
+                match self.sample_cover_cell(self.pos, player_feet, nav, physics, self_collider, false) {
+                    Some(spot) => {
+                        self.cover_target = Some(spot);
+                        self.peek_target = None;
+                        self.cover_timer = 0.0;
+                    }
+                    None => {
+                        // No cover → the FSM's fallback: flip the weave + open reposition.
+                        self.strafe_dir = -self.strafe_dir;
+                        self.enter_cooldown_reposition(player_feet, standoff, nav, physics, self_collider);
+                    }
+                }
+            }
+            AiState::Cooldown => {
+                self.strafe_dir = -self.strafe_dir;
+                self.enter_cooldown_reposition(player_feet, standoff, nav, physics, self_collider);
+            }
+            _ => {}
+        }
+    }
+
+    /// One utility tick: score → commit (with inertia) → enter-hook on a change →
+    /// execute via the shared helpers. See the section header above.
+    #[allow(clippy::too_many_arguments)]
+    fn util_step(
+        &mut self,
+        step: &mut EnemyStep,
+        dt: f32,
+        player_feet: Vec3,
+        standoff: f32,
+        attack_range: f32,
+        tuning: AiTuning,
+        nav: &NavWorld,
+        physics: &mut PhysicsWorld,
+        fire_anim: bool,
+        self_collider: ColliderHandle,
+        perceived: bool,
+    ) {
+        let dist = self.dist_to(player_feet);
+        let has_los = self.detectable && perception_los(physics, self.pos, player_feet);
+        // Debounced LOS for the attack hysteresis (a one-frame flicker mustn't drop it).
+        if has_los {
+            self.attack_los_lost = 0.0;
+        } else {
+            self.attack_los_lost += dt;
+        }
+        let los_hold = has_los || self.attack_los_lost < ATTACK_LOS_GRACE;
+        // Belief: "engaged" while a fresh-enough last-known is held.
+        let engaged = self.last_known.is_some() && self.since_seen < ENGAGE_MEMORY;
+        // A burst in flight (suppress or attack) — gates the plant-initiation so a
+        // closing hunter keeps advancing while it fires (mirrors the FSM).
+        let firing = fire_anim || self.is_attacking;
+
+        // The sequential combat sub-cycle is COMMITTED once entered — it runs to
+        // completion in its executor and hands back to the scorer — so the scorer only
+        // governs the reactive choice + INITIATING the between-bursts move (post_burst).
+        let committed = matches!(
+            self.state,
+            AiState::TakeCover | AiState::Peek | AiState::Cooldown
+        ) && !self.post_burst;
+        let next = if committed {
+            self.state
+        } else {
+            self.util_choose(perceived, engaged, dist, los_hold, firing, attack_range, tuning)
+        };
+        if next != self.state {
+            self.util_enter(next, player_feet, standoff, nav, physics, self_collider);
+        }
+        self.post_burst = false; // consume the edge (may be re-armed by Attack below)
+
+        // ── Execute the committed behaviour (`self.state`, which `util_enter` may have
+        // redirected TakeCover→Cooldown). Movement/fire come from the shared helpers.
+        match self.state {
+            AiState::Idle => {
+                if !perceived {
+                    step.needs_search_target = true;
+                }
+            }
+            AiState::Search => match self.search_target {
+                Some(t) => {
+                    if self.move_toward(dt, t, nav, SPEED_SEARCH) {
+                        self.search_target = None;
+                        step.needs_search_target = true;
+                    }
+                }
+                None => step.needs_search_target = true,
+            },
+            AiState::Investigate => match self.last_known {
+                Some(t) if self.dist_to(t) > ARRIVE_DIST => {
+                    self.move_toward(dt, t, nav, SPEED_SEARCH);
+                }
+                _ => {
+                    self.scan_timer += dt;
+                    self.sweep_heading(dt);
+                    if self.scan_timer >= INVESTIGATE_SCAN_DURATION {
+                        self.last_known = None;
+                        self.search_target = None;
+                        step.needs_search_target = true;
+                    }
+                }
+            },
+            AiState::Alert => {
+                self.face(player_feet);
+                self.alert_timer += dt;
+                if self.alert_timer >= tuning.alert {
+                    self.alert_served = true;
+                }
+            }
+            AiState::Chase => {
+                // Suppressing fire while closing (difficulty-gated), then advance along
+                // the (optionally flanked) bearing toward the last-known spot.
+                let suppress_range = attack_range + SUPPRESS_BAND * tuning.suppress;
+                let firing = fire_anim || self.is_attacking;
+                if tuning.suppress > 0.0 && has_los && dist <= suppress_range {
+                    self.pump_fire(fire_anim, step); // Chase bursts just cycle (no reposition)
+                }
+                let chase_speed = if firing { SPEED_ADVANCE } else { SPEED_CHASE };
+                let base = self.last_known.unwrap_or(player_feet);
+                let flank_angle = FLANK_MAX_ANGLE * tuning.flank * self.flank_dir;
+                let target = flank_point(base, self.pos, flank_angle);
+                self.move_toward(dt, target, nav, chase_speed * tuning.speed_mult);
+            }
+            AiState::Attack => {
+                // Standoff in/out/hold with a hysteresis dead-band, reactive evade, and
+                // the fire pump; a finished burst arms `post_burst` so next tick's scorer
+                // breaks to cover / repositions.
+                if self.holding {
+                    if !(standoff - STANDOFF_HYST..=standoff + STANDOFF_HYST).contains(&dist) {
+                        self.holding = false;
+                    }
+                } else if dist > standoff {
+                    self.move_toward(dt, player_feet, nav, SPEED_ADVANCE * tuning.speed_mult);
+                } else if dist < standoff - STANDOFF_HYST {
+                    self.back_off(dt, player_feet, nav, SPEED_ADVANCE * tuning.speed_mult);
+                } else {
+                    self.holding = true;
+                }
+                if self.evade_burst > 0.0 {
+                    self.evade_step(dt, player_feet, nav);
+                }
+                self.face(player_feet);
+                if self.pump_fire(fire_anim, step) {
+                    self.post_burst = true;
+                }
+            }
+            AiState::Cooldown => {
+                self.cooldown_timer += dt;
+                let arrived = match self.reposition_target {
+                    Some(t) => self.move_toward(dt, t, nav, REPOSITION_SPEED * tuning.speed_mult),
+                    None => {
+                        self.face(player_feet);
+                        true
+                    }
+                };
+                if arrived || self.cooldown_timer >= tuning.cooldown {
+                    self.reposition_target = None;
+                    self.face(player_feet);
+                    // Leave the committed set → the scorer re-evaluates next tick.
+                    self.state = AiState::Chase;
+                }
+            }
+            AiState::TakeCover => {
+                let arrived = match self.cover_target {
+                    Some(t) => self.move_toward(dt, t, nav, SPEED_ADVANCE * tuning.speed_mult),
+                    None => true,
+                };
+                let hidden = !(self.detectable && perception_los(physics, self.pos, player_feet));
+                if arrived || hidden {
+                    self.face(player_feet);
+                    self.cover_timer += dt;
+                    let dwell = COVER_DWELL_LO + (COVER_DWELL_HI - COVER_DWELL_LO) * tuning.cover;
+                    if self.cover_timer >= dwell {
+                        let base = self.cover_target.unwrap_or(self.pos);
+                        self.peek_target =
+                            self.sample_cover_cell(base, player_feet, nav, physics, self_collider, true);
+                        if self.peek_target.is_some() {
+                            self.state = AiState::Peek;
+                            self.is_attacking = false;
+                            self.fire_started = false;
+                        } else {
+                            // Nothing to peek to → leave the cycle; the scorer re-decides.
+                            self.state = AiState::Chase;
+                        }
+                    }
+                }
+            }
+            AiState::Peek => {
+                let arrived = match self.peek_target {
+                    Some(t) => self.move_toward(dt, t, nav, SPEED_ADVANCE * tuning.speed_mult),
+                    None => true,
+                };
+                let los = self.detectable && perception_los(physics, self.pos, player_feet);
+                if arrived {
+                    if self.evade_burst > 0.0 {
+                        self.evade_step(dt, player_feet, nav);
+                    }
+                    self.face(player_feet);
+                    if los {
+                        if self.pump_fire(fire_anim, step) {
+                            self.duck_to_cover(player_feet, nav, physics, self_collider);
+                        }
+                    } else {
+                        // Popped out but they're gone → leave the cycle; scorer re-decides.
+                        self.state = AiState::Chase;
+                        self.is_attacking = false;
+                        self.holding = false;
+                    }
+                }
+            }
+        }
     }
 
     /// Begin the reaction delay after acquiring the player.
