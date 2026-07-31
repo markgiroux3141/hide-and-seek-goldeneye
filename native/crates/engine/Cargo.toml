@@ -22,3 +22,7 @@ log = { workspace = true }
 env_logger = { workspace = true }
 kira = { workspace = true }
 gilrs = { workspace = true }
+# egui painter (render layer): tessellated UI → wgpu draw calls. The game app owns
+# the egui Context + winit event translation; the engine just paints its output.
+egui = { workspace = true }
+egui-wgpu = { workspace = true }

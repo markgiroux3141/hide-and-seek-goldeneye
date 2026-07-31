@@ -1417,6 +1417,16 @@ pub struct World {
     /// per `config::WEAPONS` entry, each keeping its own ammo/reload state so a
     /// swap resumes where you left off. `Q` / N64 `A` cycles [`weapon_index`].
     weapons: Vec<Weapon>,
+    /// Ownership flag per [`weapons`] entry (same length/order as `config::WEAPONS`).
+    /// The player starts owning only the PP7; the BUILD-phase shop flips these true
+    /// as weapons are bought. Cycling (`Q` / N64 `A`) steps only through owned
+    /// weapons — see [`combat::World::begin_weapon_switch`] / `next_owned`. The
+    /// `weapons` Vec always holds all entries so per-weapon ammo state persists
+    /// whether or not the weapon is currently owned.
+    owned: Vec<bool>,
+    /// The player's unified credit wallet (earned from kills, spent in the shop).
+    /// Session-only for now — see [`crate::economy`].
+    economy: crate::economy::Economy,
     /// Index of the active weapon in [`weapons`] (JS `currentSlotIndex`).
     weapon_index: usize,
     /// Weapon-switch animation state (JS `WeaponSystem.cycleWeapon`). `switching`
@@ -1690,12 +1700,15 @@ impl World {
             .iter()
             .map(|&cfg| Weapon::new(cfg))
             .collect();
-        // Start on the PP7 (the default sidearm). Cycle (Q / N64 A) reaches the rest
-        // of the arsenal — rifles, the grenades, the mines, the Detonator.
+        // Start on the PP7 (the default sidearm) — and, now that there's an economy,
+        // start *owning only* the PP7. The rest of the arsenal is bought from the
+        // BUILD-phase shop; cycling (Q / N64 A) reaches only what you own.
         let weapon_index = crate::combat::config::WEAPONS
             .iter()
             .position(|w| w.name == "PP7")
             .unwrap_or(0);
+        let mut owned = vec![false; weapons.len()];
+        owned[weapon_index] = true;
         let (gun_model, muzzle_model) = load_weapon_models(weapons[weapon_index].config());
 
         // P5: the GoldenEye radial health HUD graphic (processed once into angle/
@@ -1791,6 +1804,8 @@ impl World {
             muzzle_model,
             enemy_weapon_lib,
             weapons,
+            owned,
+            economy: crate::economy::Economy::new(0),
             weapon_index,
             switching: false,
             switch_target: 0,

@@ -571,6 +571,112 @@ use super::editing::find_room_brushes;
         );
     }
 
+    /// Economy: the player starts owning only the PP7, and weapon-cycling is gated by
+    /// ownership — with a single owned weapon a switch is a no-op, but marking another
+    /// owned makes the cycle target it.
+    #[test]
+    fn starts_owning_only_pp7_and_cycle_is_ownership_gated() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT (weapon switching only runs in HUNT)
+
+        let pp7 = crate::combat::config::WEAPONS
+            .iter()
+            .position(|w| w.name == "PP7")
+            .unwrap();
+        assert_eq!(world.owned.iter().filter(|&&o| o).count(), 1, "exactly one weapon owned");
+        assert!(world.owns_weapon(pp7), "and it's the PP7");
+
+        // Only the PP7 is owned → nothing to switch to.
+        world.begin_weapon_switch();
+        assert!(!world.switching, "a lone owned weapon can't cycle");
+        assert_eq!(world.weapon_index, pp7, "still on the PP7");
+
+        // Acquire a second weapon → the cycle now targets it.
+        let other = (pp7 + 5) % world.owned.len();
+        world.owned[other] = true;
+        world.begin_weapon_switch();
+        assert!(world.switching, "a switch begins once a second weapon is owned");
+        assert_eq!(world.switch_target, other, "cycle targets the newly-owned weapon");
+    }
+
+    /// Economy: defeating a hunter grants exactly one kill bounty. Credits start at
+    /// zero and rise by `KILL_BOUNTY` on the lethal shot (the single `start_death`
+    /// funnel), not on the earlier non-lethal hits.
+    #[test]
+    fn killing_a_hunter_awards_credits() {
+        let mut world = World::new();
+        world.weapon_index = 0; // PP7, 25 dmg — four torso hits kill a 100-hp hunter
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT: spawn the hunter roster
+        assert!(!world.enemies.is_empty(), "hunter spawned");
+        assert_eq!(world.credits(), 0, "wallet starts empty");
+
+        let torso = {
+            let p = world.enemies[0].enemy.pos;
+            Vec3::new(p.x, p.y + 0.8, p.z)
+        };
+        // Three non-lethal hits pay nothing.
+        for _ in 0..3 {
+            world.hit_enemy(0, torso);
+            assert_eq!(world.credits(), 0, "no bounty while the hunter lives");
+        }
+        // The lethal (fourth) hit pays exactly one bounty.
+        world.hit_enemy(0, torso);
+        assert!(world.enemies[0].enemy.is_dead(), "dead after 4 PP7 shots");
+        assert_eq!(world.credits(), crate::economy::KILL_BOUNTY, "one kill = one bounty");
+    }
+
+    /// Shop: an affordable weapon buy deducts its price, marks it owned (so it joins
+    /// the cycle), can't be repeated, and an ammo buy tops up the reserve.
+    #[test]
+    fn shop_buys_weapon_then_ammo() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.economy.earn(2000); // give the player a budget
+
+        let shotgun = crate::combat::config::WEAPONS
+            .iter()
+            .position(|w| w.name == "Shotgun")
+            .unwrap();
+        assert!(!world.owns_weapon(shotgun), "shotgun not owned at start");
+
+        let price = crate::shop::weapon_price("Shotgun");
+        let before = world.credits();
+        assert!(world.buy_weapon(shotgun), "affordable buy succeeds");
+        assert!(world.owns_weapon(shotgun), "now owned");
+        assert_eq!(world.credits(), before - price, "exact price deducted");
+
+        // Re-buying an owned weapon is a no-op (no double charge).
+        let bal = world.credits();
+        assert!(!world.buy_weapon(shotgun), "can't re-buy an owned weapon");
+        assert_eq!(world.credits(), bal, "declined re-buy costs nothing");
+
+        // Ammo buy adds AMMO_MAGS_PER_BUY magazines to the reserve.
+        let (_, r0) = world.weapon_ammo(shotgun).unwrap();
+        assert!(world.buy_ammo(shotgun), "ammo buy succeeds");
+        let (_, r1) = world.weapon_ammo(shotgun).unwrap();
+        let mag = crate::combat::config::WEAPONS[shotgun].magazine_size;
+        assert_eq!(r1, r0 + mag * crate::shop::AMMO_MAGS_PER_BUY, "reserve topped up");
+    }
+
+    /// Shop: a broke player can't buy — the purchase is a no-op and ammo for an
+    /// unowned weapon is refused outright.
+    #[test]
+    fn shop_declines_when_broke_or_unowned() {
+        let mut world = World::new();
+        world.initial_meshes();
+        assert_eq!(world.credits(), 0, "wallet starts empty");
+
+        let gg = crate::combat::config::WEAPONS
+            .iter()
+            .position(|w| w.name == "Golden Gun")
+            .unwrap();
+        assert!(!world.buy_weapon(gg), "broke → weapon buy declined");
+        assert!(!world.owns_weapon(gg), "still not owned");
+        assert!(!world.buy_ammo(gg), "no ammo for an unowned weapon");
+    }
+
     /// Ragdoll death (default ON): the lethal shot spawns a physics ragdoll instead of
     /// a canned death clip — a body per bone enters the sim, the mixer plays NO death
     /// one-shot, the corpse renders with an identity model transform (WORLD-space

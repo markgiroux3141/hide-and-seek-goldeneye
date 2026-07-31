@@ -22,6 +22,10 @@ env_logger = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# egui UI: the Context (builds the shop/inventory panels) + egui-winit (translates
+# winit events into egui input). The painter (egui-wgpu) lives in the engine.
+egui = { workspace = true }
+egui-winit = { workspace = true }
 
 [dev-dependencies]
 # Used by the gun_strip tests to re-walk a stripped GLB through the SAME glTF

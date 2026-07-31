@@ -126,6 +126,11 @@ impl Weapon {
         self.reserve
     }
 
+    /// Add `rounds` to the reserve pool (a shop ammo purchase). Saturates.
+    pub fn add_reserve(&mut self, rounds: u32) {
+        self.reserve = self.reserve.saturating_add(rounds);
+    }
+
     /// Whether a reload is currently in progress (drives the HUD "RELOADING" text).
     pub fn is_reloading(&self) -> bool {
         self.reloading

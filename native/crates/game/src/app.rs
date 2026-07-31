@@ -20,7 +20,7 @@ use winit::window::{CursorGrabMode, Window, WindowId};
 
 use engine::platform::frame::FrameClock;
 use engine::platform::input::InputState;
-use engine::render::renderer::Renderer;
+use engine::render::renderer::{EguiFrame, Renderer};
 use crate::gamepad::N64Pad;
 use crate::world::{World, PUSH_PULL_STEP};
 
@@ -31,6 +31,66 @@ use crate::world::{World, PUSH_PULL_STEP};
 const SIM_HZ: f32 = 120.0;
 const MAX_SUBSTEPS: u32 = 8;
 const MAX_FPS: u32 = 240;
+
+/// A purchase the shop UI requested this frame, collected during the egui pass and
+/// applied to the `World` afterwards (the UI closure can't hold a `&mut World`).
+enum ShopAction {
+    /// Buy the weapon at this `config::WEAPONS` index.
+    Weapon(usize),
+    /// Buy an ammo refill for the weapon at this index.
+    Ammo(usize),
+}
+
+// ─── Shop palette (GoldenEye gold-on-black spy-terminal look) ──────────────────
+/// Signature gold accent — headings, borders, buy buttons, selection.
+const SHOP_GOLD: egui::Color32 = egui::Color32::from_rgb(224, 184, 74);
+/// A muted gold for section headers / secondary accents.
+const SHOP_GOLD_DIM: egui::Color32 = egui::Color32::from_rgb(150, 122, 60);
+/// Primary readable body text.
+const SHOP_TEXT: egui::Color32 = egui::Color32::from_rgb(222, 222, 228);
+/// Dimmed text — unaffordable prices / disabled hints.
+const SHOP_DIM: egui::Color32 = egui::Color32::from_rgb(110, 110, 118);
+
+/// Apply the shop's gold-on-black theme to the egui context (once at startup). Only
+/// egui (the menus) is affected — the in-world bitmap HUD is untouched.
+fn apply_shop_theme(ctx: &egui::Context) {
+    use egui::{Color32, FontFamily, FontId, Stroke, TextStyle};
+    let bg = Color32::from_rgb(14, 15, 18);
+    let bg_light = Color32::from_rgb(30, 32, 38);
+    let bg_hover = Color32::from_rgb(46, 48, 55);
+
+    let mut v = egui::Visuals::dark();
+    v.override_text_color = Some(SHOP_TEXT);
+    v.window_fill = bg;
+    v.panel_fill = bg;
+    v.window_stroke = Stroke::new(1.0, SHOP_GOLD);
+    v.hyperlink_color = SHOP_GOLD;
+    v.selection.bg_fill = SHOP_GOLD.linear_multiply(0.35);
+    v.selection.stroke = Stroke::new(1.0, SHOP_GOLD);
+    v.widgets.noninteractive.bg_fill = bg;
+    v.widgets.inactive.bg_fill = bg_light;
+    v.widgets.inactive.weak_bg_fill = bg_light;
+    v.widgets.inactive.fg_stroke = Stroke::new(1.0, SHOP_TEXT);
+    v.widgets.hovered.bg_fill = bg_hover;
+    v.widgets.hovered.weak_bg_fill = bg_hover;
+    v.widgets.hovered.fg_stroke = Stroke::new(1.0, SHOP_GOLD);
+    v.widgets.active.bg_fill = SHOP_GOLD;
+    v.widgets.active.fg_stroke = Stroke::new(1.0, Color32::BLACK);
+    ctx.set_visuals(v);
+
+    ctx.style_mut(|s| {
+        s.spacing.item_spacing = egui::vec2(8.0, 8.0);
+        s.spacing.button_padding = egui::vec2(10.0, 5.0);
+        s.text_styles
+            .insert(TextStyle::Heading, FontId::new(24.0, FontFamily::Proportional));
+        s.text_styles
+            .insert(TextStyle::Body, FontId::new(15.0, FontFamily::Proportional));
+        s.text_styles
+            .insert(TextStyle::Button, FontId::new(15.0, FontFamily::Proportional));
+        s.text_styles
+            .insert(TextStyle::Small, FontId::new(12.0, FontFamily::Proportional));
+    });
+}
 
 struct App {
     window: Option<Arc<Window>>,
@@ -50,6 +110,25 @@ struct App {
     /// re-baked + re-uploaded when they change. `-1` forces the first upload.
     last_hud_health: f32,
     last_hud_armor: f32,
+    /// egui immediate-mode UI context (the shop / inventory panels). Persistent
+    /// across frames (holds widget + layout state).
+    egui_ctx: egui::Context,
+    /// egui ↔ winit event translation + per-frame input gathering. `None` until the
+    /// window exists (created in `resumed`, needs the window for DPI + viewport).
+    egui_state: Option<egui_winit::State>,
+    /// Whether the shop/inventory menu is open (centered egui panel). Toggled by the
+    /// N64 **Start** button or the **M** key.
+    shop_open: bool,
+    /// The weapon index highlighted in the shop list — drives the left preview pane
+    /// (its rotating 3D model + stats). Defaults to the first weapon.
+    shop_selected: usize,
+    /// Turntable spin angle (radians) for the shop's 3D weapon preview; advances
+    /// while the shop is open.
+    shop_preview_angle: f32,
+    /// Pointer-lock state captured when the shop opened, restored when it closes —
+    /// so opening the menu frees the cursor and closing hands control back exactly
+    /// as it was (grabbed in gameplay, free in the editor).
+    lock_before_shop: bool,
 }
 
 impl App {
@@ -66,6 +145,12 @@ impl App {
             fps_worst_ms: 0.0,
             last_hud_health: -1.0,
             last_hud_armor: -1.0,
+            egui_ctx: egui::Context::default(),
+            egui_state: None,
+            shop_open: false,
+            shop_selected: 0,
+            shop_preview_angle: 0.0,
+            lock_before_shop: false,
         }
     }
 }
@@ -177,6 +262,287 @@ impl App {
             self.refresh_highlight();
         }
     }
+
+    /// Toggle the shop/inventory menu. Opening it frees the cursor (so the panel is
+    /// clickable) after remembering the current lock state; closing restores that
+    /// state, handing control back to gameplay/editor exactly as it was.
+    fn toggle_shop(&mut self) {
+        self.shop_open = !self.shop_open;
+        if self.shop_open {
+            self.lock_before_shop = self.input.pointer_locked;
+            self.set_pointer_lock(false);
+        } else {
+            self.set_pointer_lock(self.lock_before_shop);
+        }
+    }
+
+    /// Build this frame's egui UI (the shop/inventory menu) and tessellate it into an
+    /// [`EguiFrame`] for the renderer to paint. Returns `None` before the window/egui
+    /// state exist.
+    ///
+    /// Buys are collected into a list *during* the UI pass and applied to the `World`
+    /// afterwards, because the egui closure can't also hold a `&mut World`. State the
+    /// UI reads (credits, ownership, ammo, prices) is snapshotted up front for the
+    /// same reason.
+    fn build_egui_frame(&mut self) -> Option<EguiFrame> {
+        let window = self.window.as_ref()?;
+        let state = self.egui_state.as_mut()?;
+        let raw_input = state.take_egui_input(window);
+
+        let shop_open = self.shop_open;
+        let credits = self.world.as_ref().map(|w| w.credits()).unwrap_or(0);
+        // egui handle to the offscreen 3D weapon preview (rendered below in the render
+        // block). Read here so the closure can draw it as an image.
+        let preview_tex = self.renderer.as_ref().map(|r| r.weapon_preview_texture_id());
+        // Snapshot each weapon's shop state so the closure needs no `World` borrow.
+        let rows: Vec<ShopRow> = match (shop_open, self.world.as_ref()) {
+            (true, Some(world)) => (0..world.weapon_count())
+                .map(|i| {
+                    let name = crate::combat::config::WEAPONS[i].name;
+                    ShopRow {
+                        idx: i,
+                        name,
+                        price: crate::shop::weapon_price(name),
+                        ammo_price: crate::shop::ammo_price(name),
+                        owned: world.owns_weapon(i),
+                        reserve: world.weapon_ammo(i).map(|(_, r)| r).unwrap_or(0),
+                        active: world.active_weapon_index() == i,
+                    }
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        let selected = self.shop_selected.min(rows.len().saturating_sub(1));
+        let mut actions: Vec<ShopAction> = Vec::new();
+        let mut new_selected: Option<usize> = None;
+        let mut close = false;
+
+        let full_output = self.egui_ctx.run(raw_input, |ctx| {
+            if !shop_open {
+                return; // menu closed → empty UI this frame
+            }
+            // Centered, fixed menu panel (anchored so it stays centered on resize;
+            // no OS-style title bar — we draw our own gold header).
+            egui::Window::new("SHOP")
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .title_bar(false)
+                .collapsible(false)
+                .resizable(false)
+                // A fixed, centered box — without this the scrolling weapon list
+                // grabs the whole window height and stretches the panel down-screen.
+                .fixed_size(egui::vec2(600.0, 400.0))
+                .show(ctx, |ui| {
+                    // Header: gold title + right-aligned credit balance.
+                    ui.horizontal(|ui| {
+                        ui.heading(egui::RichText::new("ARMORY").color(SHOP_GOLD).strong());
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.heading(
+                                egui::RichText::new(format!("${credits}")).color(SHOP_GOLD),
+                            );
+                            ui.label(egui::RichText::new("CREDITS").small().color(SHOP_DIM));
+                        });
+                    });
+                    ui.separator();
+
+                    ui.horizontal_top(|ui| {
+                        // ── Left: preview pane (stats now; 3D model soon) ──
+                        ui.vertical(|ui| {
+                            ui.set_width(190.0);
+                            let sel = &crate::combat::config::WEAPONS[selected];
+                            ui.group(|ui| {
+                                ui.set_min_size(egui::vec2(174.0, 174.0));
+                                ui.vertical_centered(|ui| match preview_tex {
+                                    Some(tex) => {
+                                        ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                                            tex,
+                                            egui::vec2(168.0, 168.0),
+                                        )));
+                                    }
+                                    None => {
+                                        ui.add_space(70.0);
+                                        ui.label(
+                                            egui::RichText::new("3D PREVIEW")
+                                                .color(SHOP_GOLD_DIM)
+                                                .strong(),
+                                        );
+                                    }
+                                });
+                            });
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new(sel.name).color(SHOP_GOLD).strong());
+                            let kind = if sel.automatic { "AUTO" } else { "SEMI" };
+                            ui.label(format!("DMG    {}", sel.damage as i32));
+                            ui.label(format!("RANGE  {} m", sel.range as i32));
+                            ui.label(format!("MAG    {}", sel.magazine_size));
+                            ui.label(format!("TYPE   {kind}"));
+                        });
+
+                        ui.separator();
+
+                        // ── Right: categorized, scrollable weapon list ──
+                        ui.vertical(|ui| {
+                            egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                                ui.set_width(320.0);
+                                let mut cur_cat = "";
+                                for row in &rows {
+                                    let cat = crate::shop::weapon_category(row.name);
+                                    if cat != cur_cat {
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            egui::RichText::new(cat)
+                                                .small()
+                                                .strong()
+                                                .color(SHOP_GOLD_DIM),
+                                        );
+                                        cur_cat = cat;
+                                    }
+                                    ui.horizontal(|ui| {
+                                        // Selectable name (▶ marks the equipped weapon).
+                                        let name = if row.active {
+                                            format!("▶ {}", row.name)
+                                        } else {
+                                            row.name.to_string()
+                                        };
+                                        if ui
+                                            .selectable_label(row.idx == selected, name)
+                                            .clicked()
+                                        {
+                                            new_selected = Some(row.idx);
+                                        }
+                                        // Right-aligned status + action.
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                if row.owned {
+                                                    let afford = credits >= row.ammo_price;
+                                                    if ui
+                                                        .add_enabled(
+                                                            afford,
+                                                            egui::Button::new("+Ammo"),
+                                                        )
+                                                        .on_hover_text(format!(
+                                                            "{} rounds · ${}",
+                                                            crate::combat::config::WEAPONS
+                                                                [row.idx]
+                                                                .magazine_size
+                                                                * crate::shop::AMMO_MAGS_PER_BUY,
+                                                            row.ammo_price
+                                                        ))
+                                                        .clicked()
+                                                    {
+                                                        actions.push(ShopAction::Ammo(row.idx));
+                                                    }
+                                                    let tag = if row.active {
+                                                        "EQUIPPED"
+                                                    } else {
+                                                        "OWNED"
+                                                    };
+                                                    ui.label(
+                                                        egui::RichText::new(tag)
+                                                            .small()
+                                                            .color(SHOP_GOLD),
+                                                    );
+                                                    ui.label(
+                                                        egui::RichText::new(format!(
+                                                            "x{}",
+                                                            row.reserve
+                                                        ))
+                                                        .small()
+                                                        .color(SHOP_DIM),
+                                                    );
+                                                } else {
+                                                    let afford = credits >= row.price;
+                                                    let buy = egui::Button::new(
+                                                        egui::RichText::new("BUY")
+                                                            .color(egui::Color32::BLACK),
+                                                    )
+                                                    .fill(if afford {
+                                                        SHOP_GOLD
+                                                    } else {
+                                                        SHOP_DIM
+                                                    });
+                                                    if ui.add_enabled(afford, buy).clicked() {
+                                                        actions.push(ShopAction::Weapon(row.idx));
+                                                    }
+                                                    ui.label(
+                                                        egui::RichText::new(format!(
+                                                            "${}",
+                                                            row.price
+                                                        ))
+                                                        .color(if afford {
+                                                            SHOP_TEXT
+                                                        } else {
+                                                            SHOP_DIM
+                                                        }),
+                                                    );
+                                                }
+                                            },
+                                        );
+                                    });
+                                }
+                            });
+                        });
+                    });
+
+                    ui.separator();
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("CLOSE").clicked() {
+                            close = true;
+                        }
+                        ui.label(
+                            egui::RichText::new("Start / M to close")
+                                .small()
+                                .color(SHOP_DIM),
+                        );
+                    });
+                });
+        });
+
+        state.handle_platform_output(window, full_output.platform_output);
+        let paint_jobs = self
+            .egui_ctx
+            .tessellate(full_output.shapes, full_output.pixels_per_point);
+        let frame = EguiFrame {
+            textures_delta: full_output.textures_delta,
+            paint_jobs,
+            pixels_per_point: full_output.pixels_per_point,
+        };
+
+        // Deferred until here — these borrow the `World` / all of `self`, which can't
+        // happen while the `state` (`&mut self.egui_state`) borrow above is live.
+        if let Some(sel) = new_selected {
+            self.shop_selected = sel;
+        }
+        if let Some(world) = self.world.as_mut() {
+            for action in &actions {
+                match *action {
+                    ShopAction::Weapon(i) => {
+                        world.buy_weapon(i);
+                    }
+                    ShopAction::Ammo(i) => {
+                        world.buy_ammo(i);
+                    }
+                }
+            }
+        }
+        if close {
+            self.toggle_shop();
+        }
+        Some(frame)
+    }
+}
+
+/// A snapshot of one weapon's shop state for a frame's UI (avoids borrowing the
+/// `World` inside the egui closure).
+struct ShopRow {
+    idx: usize,
+    name: &'static str,
+    price: u32,
+    ammo_price: u32,
+    owned: bool,
+    reserve: u32,
+    active: bool,
 }
 
 /// Map a number-row / numpad digit key to its '1'..'9' char (for scheme keys).
@@ -220,6 +586,18 @@ impl ApplicationHandler for App {
             .with_inner_size(winit::dpi::LogicalSize::new(1600.0, 900.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let mut renderer = pollster::block_on(Renderer::new(window.clone()));
+
+        // egui input/event bridge — needs the window (DPI + viewport). The painter
+        // lives in the renderer; this half gathers input + translates winit events.
+        self.egui_state = Some(egui_winit::State::new(
+            self.egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &*window,
+            None, // native pixels-per-point: let egui read it from the window
+            None, // theme: follow the system
+            None, // max texture side: egui default
+        ));
+        apply_shop_theme(&self.egui_ctx);
 
         // Build the world, upload its initial region meshes.
         let mut world = World::new();
@@ -289,7 +667,7 @@ impl ApplicationHandler for App {
             world.attach_audio(audio);
         }
         log::info!(
-            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  F1-F8=load level slot  Ctrl+F1-F8=save level slot  Y=proc-anim preview(Z=fire)  I=invincible  N=invisible  G=HUNT  [HUNT: click=fire  RMB=aim  R=reload  Q=weapon  F=detonate mines]"
+            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  F1-F8=load level slot  Ctrl+F1-F8=save level slot  Y=proc-anim preview(Z=fire)  I=invincible  N=invisible  G=HUNT  M=shop menu (N64 Start)  [HUNT: click=fire  RMB=aim  R=reload  Q=weapon  F=detonate mines]"
         );
 
         window.request_redraw();
@@ -310,6 +688,18 @@ impl ApplicationHandler for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        // Let egui see every event first (it needs cursor-move/click/scroll/keys for
+        // the menus). `consumed` is true when a UI panel handled the event — we then
+        // skip the game's own handling of that input so a click on the shop doesn't
+        // also fire/select in the world behind it.
+        let egui_consumed = if let (Some(state), Some(window)) =
+            (self.egui_state.as_mut(), self.window.as_ref())
+        {
+            state.on_window_event(window, &event).consumed
+        } else {
+            false
+        };
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
 
@@ -324,6 +714,10 @@ impl ApplicationHandler for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                // A click egui handled (on a panel) never reaches the world.
+                if egui_consumed {
+                    return;
+                }
                 // Record the held state (combat reads it each frame for firing).
                 let pressed = state == ElementState::Pressed;
                 self.input.set_mouse_left(pressed);
@@ -376,6 +770,11 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
+                // egui ate the scroll (e.g. a scrollable shop list) → don't also size
+                // the editor selection.
+                if egui_consumed {
+                    return;
+                }
                 // Scroll sizes the selection sub-rect: plain = U (width),
                 // Shift+scroll = V (height). Scroll up grows, down shrinks
                 // (JS main.js wheel handler). BUILD, grabbed, with a face selected.
@@ -413,6 +812,11 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
+                // egui has keyboard focus (e.g. typing in a UI field) → don't route
+                // the key to gameplay/authoring.
+                if egui_consumed {
+                    return;
+                }
                 let PhysicalKey::Code(code) = event.physical_key else {
                     return;
                 };
@@ -432,6 +836,11 @@ impl ApplicationHandler for App {
                 let fixed_dt = self.clock.fixed_dt();
                 let steps = self.clock.take_fixed_steps();
 
+                // Spin the shop's 3D weapon preview while the menu is open (~1 turn / 9s).
+                if self.shop_open {
+                    self.shop_preview_angle += dt * 0.7;
+                }
+
                 // USB-N64 gamepad: poll + apply the solitaire scheme. This injects
                 // held buttons + analog move into `input` and drives HUNT look/aim
                 // directly, so it runs before mouse-look (which the pad supersedes
@@ -445,9 +854,8 @@ impl ApplicationHandler for App {
                     // Drop straight into gameplay — no mouse click needed to grab.
                     self.set_pointer_lock(true);
                 }
-                if pad_actions.pause {
-                    let locked = self.input.pointer_locked;
-                    self.set_pointer_lock(!locked);
+                if pad_actions.menu {
+                    self.toggle_shop();
                 }
                 if pad_actions.reload {
                     if let Some(world) = self.world.as_mut() {
@@ -539,6 +947,10 @@ impl ApplicationHandler for App {
                         r.set_highlight(mesh.as_ref());
                     }
                 }
+                // Build this frame's egui menus before the render borrow block (it
+                // needs its own &mut self), then hand the tessellated UI to render().
+                let egui_frame = self.build_egui_frame();
+
                 if let (Some(world), Some(renderer)) =
                     (self.world.as_ref(), self.renderer.as_mut())
                 {
@@ -608,8 +1020,18 @@ impl ApplicationHandler for App {
                     renderer.set_stair_ghost(world.stair_preview_mesh().as_ref());
                     // Platform gizmo — `None` unless a platform is selected in BUILD.
                     renderer.set_gizmo_mesh(world.gizmo_mesh().as_ref());
+                    // Shop open → render the selected gun into the offscreen preview
+                    // texture (submitted before the main frame, whose egui pass samples
+                    // it) so the panel shows a live rotating 3D model.
+                    if self.shop_open {
+                        let sel = self
+                            .shop_selected
+                            .min(crate::combat::config::WEAPONS.len() - 1);
+                        let name = crate::combat::config::WEAPONS[sel].name;
+                        renderer.render_weapon_preview(name, self.shop_preview_angle);
+                    }
                     let view_proj = world.view_proj(renderer.aspect());
-                    renderer.render(view_proj);
+                    renderer.render(view_proj, egui_frame);
                 }
 
                 // Frame-time telemetry, logged once per second.
@@ -676,6 +1098,13 @@ impl App {
             if !handled {
                 self.set_pointer_lock(false);
             }
+            return;
+        }
+        // M toggles the shop/inventory menu (keyboard counterpart of the N64 Start
+        // button). Handled early — before the pointer-lock gate — so it works in
+        // gameplay (grabbed) and in the editor (free) alike.
+        if code == KeyCode::KeyM {
+            self.toggle_shop();
             return;
         }
         // Backslash toggles the checkerboard "grid" view vs the textured view

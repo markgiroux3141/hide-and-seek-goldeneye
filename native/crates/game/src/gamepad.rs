@@ -67,8 +67,9 @@ pub struct PadActions {
     /// A+B pressed together this frame — detonate all live remote mines (HUNT). Takes
     /// the place of a separate Detonator weapon slot.
     pub detonate: bool,
-    /// Start pressed this frame — toggle pause (release/grab the cursor).
-    pub pause: bool,
+    /// Start pressed this frame — toggle the shop/inventory menu (which frees the
+    /// cursor while open, then restores it on close).
+    pub menu: bool,
     /// The pad drove movement/look/aim/fire this frame (stick deflected or a
     /// held control pressed). The app suppresses mouse-look while this is true so a
     /// *connected-but-idle* pad doesn't fight the keyboard/mouse — when it's false,
@@ -257,7 +258,7 @@ impl N64Pad {
         actions.detonate = both && !self.prev_both;
         actions.reload = reload && !self.prev_reload && !both;
         actions.cycle = cycle && !self.prev_cycle && !both;
-        actions.pause = start && !self.prev_start;
+        actions.menu = start && !self.prev_start;
         self.prev_reload = reload;
         self.prev_cycle = cycle;
         self.prev_start = start;

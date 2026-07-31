@@ -28,6 +28,14 @@ kira = "0.12"
 # to wire the USB N64 controller (GoldenEye "solitaire" scheme). Windows backend is
 # XInput-based — see crates/engine/src/platform/gamepad.rs for the mapping caveat.
 gilrs = "0.11"
+# Immediate-mode UI (egui) for in-game menus — the shop + inventory panels. 0.31
+# is the release that targets wgpu 24 + winit 0.30 (our locked stack). `egui` +
+# `egui-wgpu` (the painter) live in the engine's render layer; `egui-winit` (event
+# translation) lives in the game app alongside the winit loop. The in-world HUD
+# (ammo/health/credits) stays on the bitmap font — egui is menus only.
+egui = "0.31"
+egui-wgpu = "0.31"
+egui-winit = "0.31"
 
 # Local crates.
 csg = { path = "crates/csg" }

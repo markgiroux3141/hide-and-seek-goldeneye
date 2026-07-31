@@ -200,6 +200,8 @@ impl World {
             );
             // Live difficulty-dial readout along the top edge (`=` / `-` to change).
             q.extend(crate::hud::danger_quads(self.difficulty, DIFFICULTY_MAX, aspect));
+            // Credit balance (top-left) — money earned from kills, spent in the shop.
+            q.extend(crate::hud::credits_quads(self.economy.credits(), aspect));
             Some(q)
         }
     }
@@ -211,6 +213,88 @@ impl World {
         if self.mode == Mode::Hunt {
             self.weapon_mut().request_reload();
         }
+    }
+
+    /// The player's current credit balance (HUD readout + shop affordability).
+    pub fn credits(&self) -> u32 {
+        self.economy.credits()
+    }
+
+    /// Whether the player owns the weapon at `idx` in `config::WEAPONS`.
+    pub fn owns_weapon(&self, idx: usize) -> bool {
+        self.owned.get(idx).copied().unwrap_or(false)
+    }
+
+    /// Number of weapons in the arsenal (the shop list length; = `config::WEAPONS`).
+    pub fn weapon_count(&self) -> usize {
+        self.weapons.len()
+    }
+
+    /// Index of the currently-equipped weapon (so the shop can mark it).
+    pub fn active_weapon_index(&self) -> usize {
+        self.weapon_index
+    }
+
+    /// `(magazine, reserve)` for weapon `idx`, or `None` if out of range — the shop's
+    /// ammo readout.
+    pub fn weapon_ammo(&self, idx: usize) -> Option<(u32, u32)> {
+        self.weapons.get(idx).map(|w| (w.magazine(), w.reserve()))
+    }
+
+    /// Buy weapon `idx` from the shop: spend its [`crate::shop`] price and mark it
+    /// owned (so it enters the `Q` cycle). Returns `false` — a no-op — if the index
+    /// is invalid, the weapon is already owned, or the player can't afford it.
+    pub fn buy_weapon(&mut self, idx: usize) -> bool {
+        if idx >= self.owned.len() || self.owned[idx] {
+            return false;
+        }
+        let name = crate::combat::config::WEAPONS[idx].name;
+        let price = crate::shop::weapon_price(name);
+        if self.economy.try_spend(price) {
+            self.owned[idx] = true;
+            log::info!(
+                "bought {name} for ${price} — balance {}",
+                self.economy.credits()
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Buy an ammo refill ([`crate::shop::AMMO_MAGS_PER_BUY`] magazines) for weapon
+    /// `idx`. Must own the weapon. Returns `false` if invalid, unowned, or
+    /// unaffordable.
+    pub fn buy_ammo(&mut self, idx: usize) -> bool {
+        if idx >= self.weapons.len() || !self.owned.get(idx).copied().unwrap_or(false) {
+            return false;
+        }
+        let cfg = crate::combat::config::WEAPONS[idx];
+        let price = crate::shop::ammo_price(cfg.name);
+        if self.economy.try_spend(price) {
+            let rounds = cfg.magazine_size * crate::shop::AMMO_MAGS_PER_BUY;
+            self.weapons[idx].add_reserve(rounds);
+            log::info!(
+                "bought {rounds} rounds for {} (${price}) — balance {}",
+                cfg.name,
+                self.economy.credits()
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Grant the kill bounty for a defeated hunter. The single funnel for combat
+    /// income, so future bounty scaling (by archetype / difficulty) stays in one
+    /// place. Called from [`Self::start_death`] — the one death choke-point.
+    fn award_kill(&mut self) {
+        self.economy.earn(crate::economy::KILL_BOUNTY);
+        log::info!(
+            "+{} credits (hunter down) — balance {}",
+            crate::economy::KILL_BOUNTY,
+            self.economy.credits()
+        );
     }
 
     /// The active weapon (JS `WeaponSystem.slot`) — the inventory entry
@@ -230,14 +314,29 @@ impl World {
     /// (its ammo is preserved). The app polls [`Self::take_models_dirty`] to know
     /// when to re-upload the swapped gun/muzzle meshes.
     pub fn begin_weapon_switch(&mut self) {
-        if self.mode != Mode::Hunt || self.weapons.len() < 2 || self.switching {
+        if self.mode != Mode::Hunt || self.switching {
             return;
         }
+        // Only cycle to weapons the player actually owns. With just the PP7 (or any
+        // single owned weapon) there's nothing to switch to.
+        let Some(target) = self.next_owned(self.weapon_index) else {
+            return;
+        };
         self.weapon_mut().cancel_reload();
         self.switching = true;
-        self.switch_target = (self.weapon_index + 1) % self.weapons.len();
+        self.switch_target = target;
         self.switch_timer = 0.0;
         self.switch_swapped = false;
+    }
+
+    /// The next **owned** weapon index after `from`, scanning forward through the
+    /// inventory with wraparound; `None` when the player owns fewer than two weapons
+    /// (nothing else to switch to). Drives [`Self::begin_weapon_switch`].
+    fn next_owned(&self, from: usize) -> Option<usize> {
+        let n = self.weapons.len();
+        (1..n)
+            .map(|step| (from + step) % n)
+            .find(|&i| self.owned[i])
     }
 
     /// Drain the "weapon meshes changed" flag (a switch swapped the active gun's
@@ -968,6 +1067,10 @@ impl World {
     /// the killing `impulse` at `impact`, or fall back to the canned death clip. Shared
     /// by the bullet ([`Self::hit_enemy`]) and blast ([`Self::blast_hit_enemy`]) paths.
     fn start_death(&mut self, idx: usize, collider: ColliderHandle, impact: Vec3, impulse: Vec3) {
+        // A hunter just went down — pay the kill bounty. Every enemy death funnels
+        // through here (bullet + blast paths both call it), so this is the one place
+        // combat income is granted.
+        self.award_kill();
         // The corpse can't be shot: the capsule goes now, either way.
         self.physics.remove_enemy_collider(collider);
         if self.ragdoll {

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use glam::Mat4;
+use glam::{Mat4, Vec3};
 use wgpu::util::DeviceExt;
 use winit::window::Window;
 
@@ -19,6 +19,10 @@ use crate::skeletal::gltf_skin::SkinnedModel;
 use crate::render::textures;
 
 const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// Edge length (texels) of the square offscreen texture the shop's rotating weapon
+/// preview renders into. Sampled by egui as an image in the shop panel.
+const PREVIEW_SIZE: u32 = 320;
 
 /// Max joints in the skinned-character uniform. The GoldenEye skeleton is 15
 /// bones; 16 leaves headroom and keeps the array 16-aligned. Must match
@@ -117,6 +121,11 @@ struct GpuWeaponMesh {
     index_buf: wgpu::Buffer,
     primitives: Vec<GpuPrimitive>,
     _textures: Vec<wgpu::Texture>,
+    /// Model-space bounding-sphere centre + radius (from the source vertices), used
+    /// to frame the gun in the shop's turntable preview regardless of its native
+    /// GoldenEye-units scale (the guns are ~1000× metres). Unused by the in-game draw.
+    center: Vec3,
+    radius: f32,
 }
 
 /// A pooled clip-matrix uniform (`view_proj · world`) + its bind group, reused
@@ -154,6 +163,19 @@ struct TexturedRegion {
     groups: Vec<ZoneGroup>,
 }
 
+/// One frame of tessellated egui output, produced by the game app (which owns the
+/// egui `Context` + `egui_winit::State`) and handed to [`Renderer::render`] to paint
+/// over the game. Bundling it here keeps egui's platform/UI half in the app and the
+/// GPU/painter half in the engine.
+pub struct EguiFrame {
+    /// Textures egui created / updated / freed this frame (font atlas, images).
+    pub textures_delta: egui::TexturesDelta,
+    /// The clipped triangle meshes to draw, already tessellated at `pixels_per_point`.
+    pub paint_jobs: Vec<egui::ClippedPrimitive>,
+    /// Points → physical-pixels scale (DPI); drives the egui screen descriptor.
+    pub pixels_per_point: f32,
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -170,6 +192,23 @@ pub struct Renderer {
     /// groups that reuse it (e.g. the viewmodel's clip matrix).
     camera_layout: wgpu::BindGroupLayout,
     depth_view: wgpu::TextureView,
+
+    /// egui painter (menus: the shop + inventory panels). The game app owns the
+    /// egui `Context` + winit event translation and hands us its tessellated output
+    /// each frame via [`EguiFrame`]; this paints it in a final overlay pass. `None`
+    /// when no UI is up. See [`Renderer::render`].
+    egui_renderer: egui_wgpu::Renderer,
+
+    // ── Shop weapon preview: an offscreen turntable render of the selected gun,
+    // sampled by egui as an image in the shop panel (see `render_weapon_preview`).
+    /// Offscreen color target the gun renders into (sampled by egui).
+    preview_color_view: wgpu::TextureView,
+    /// Its depth buffer (own size, separate from the main frame's).
+    preview_depth_view: wgpu::TextureView,
+    /// The turntable MVP uniform + bind group (rewritten each preview frame).
+    preview_clip: GpuClip,
+    /// egui's handle to the preview color target, handed to the shop's `Image`.
+    preview_tex_id: egui::TextureId,
 
     /// One classified, per-zone-grouped GPU mesh per CSG region (+ the reserved
     /// structures mesh), replaced in place on every edit.
@@ -1396,6 +1435,55 @@ impl Renderer {
 
         let depth_view = create_depth(&device, config.width, config.height);
 
+        // egui painter — targets the swapchain color format, no depth (menus draw
+        // flat on top), single-sampled, no dithering. Textures/buffers are uploaded
+        // per frame in `render` from the app's tessellated UI.
+        let mut egui_renderer = egui_wgpu::Renderer::new(&device, config.format, None, 1, false);
+
+        // Shop weapon-preview offscreen target: a square color texture (same format as
+        // the swapchain so it reuses the viewmodel pipeline) + its own depth, plus a
+        // turntable MVP uniform. Registered with egui so the shop can draw it as an
+        // image. `make_clip` is a `&self` method, so build the clip inline here.
+        let preview_color = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("weapon-preview-color"),
+            size: wgpu::Extent3d {
+                width: PREVIEW_SIZE,
+                height: PREVIEW_SIZE,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: config.format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let preview_color_view = preview_color.create_view(&wgpu::TextureViewDescriptor::default());
+        let preview_depth_view = create_depth(&device, PREVIEW_SIZE, PREVIEW_SIZE);
+        let preview_clip = {
+            let clip_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("weapon-preview-clip"),
+                contents: bytemuck::cast_slice(&[CameraUniform {
+                    view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+            let clip_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("weapon-preview-clip"),
+                layout: &camera_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: clip_buf.as_entire_binding(),
+                }],
+            });
+            GpuClip { clip_buf, clip_bind }
+        };
+        let preview_tex_id = egui_renderer.register_native_texture(
+            &device,
+            &preview_color_view,
+            wgpu::FilterMode::Linear,
+        );
+
         Renderer {
             surface,
             device,
@@ -1407,6 +1495,11 @@ impl Renderer {
             camera_bind_group,
             camera_layout,
             depth_view,
+            egui_renderer,
+            preview_color_view,
+            preview_depth_view,
+            preview_clip,
+            preview_tex_id,
             regions: HashMap::new(),
             materials,
             _material_keepalive: material_keepalive,
@@ -1722,11 +1815,31 @@ impl Renderer {
             })
             .collect();
 
+        // Bounding sphere (from the source vertices) so the preview can frame any
+        // gun regardless of its raw scale.
+        let (center, radius) = {
+            let mut min = Vec3::splat(f32::INFINITY);
+            let mut max = Vec3::splat(f32::NEG_INFINITY);
+            for v in &model.vertices {
+                let p = Vec3::from_array(v.pos);
+                min = min.min(p);
+                max = max.max(p);
+            }
+            if model.vertices.is_empty() {
+                (Vec3::ZERO, 1.0)
+            } else {
+                let c = (min + max) * 0.5;
+                ((c), (max - c).length().max(1e-3))
+            }
+        };
+
         GpuWeaponMesh {
             vertex_buf,
             index_buf,
             primitives,
             _textures: textures,
+            center,
+            radius,
         }
     }
 
@@ -1775,6 +1888,89 @@ impl Renderer {
     /// [`Renderer::set_muzzle_transform`] (only while a shot's flash is active).
     pub fn upload_muzzle(&mut self, model: &TexturedModel) {
         self.muzzle = Some(self.build_gpu_viewmodel(model, "muzzle-flash"));
+    }
+
+    /// egui's texture handle for the weapon-preview image (handed to the shop's
+    /// `Image` widget). Stable for the renderer's lifetime.
+    pub fn weapon_preview_texture_id(&self) -> egui::TextureId {
+        self.preview_tex_id
+    }
+
+    /// Render the weapon named `key` into the offscreen preview texture: framed by
+    /// its bounding sphere and spun `angle` radians about the vertical axis (a
+    /// turntable), lit by the same unlit/matcap viewmodel pipeline. Clears to a dark
+    /// display background first, so an unknown weapon just shows an empty case. Call
+    /// each frame the shop is open, **before** [`Self::render`] paints the egui pass
+    /// that samples this texture.
+    pub fn render_weapon_preview(&mut self, key: &str, angle: f32) {
+        // Frame any gun regardless of its native GoldenEye-units scale: translate its
+        // bounding-sphere centre to the origin, scale the sphere to unit radius, spin
+        // about Y, and view from a slightly raised camera (the turntable tilt).
+        let (center, radius) = self
+            .enemy_weapon_meshes
+            .get(key)
+            .map(|m| (m.center, m.radius))
+            .unwrap_or((Vec3::ZERO, 1.0));
+        let model = Mat4::from_rotation_y(angle)
+            * Mat4::from_scale(Vec3::splat(1.0 / radius))
+            * Mat4::from_translation(-center);
+        let view = Mat4::look_at_rh(Vec3::new(0.0, 1.05, 3.0), Vec3::ZERO, Vec3::Y);
+        let proj = Mat4::perspective_rh(38f32.to_radians(), 1.0, 0.05, 100.0);
+        let clip = proj * view * model;
+        self.queue.write_buffer(
+            &self.preview_clip.clip_buf,
+            0,
+            bytemuck::cast_slice(&[CameraUniform {
+                view_proj: clip.to_cols_array_2d(),
+            }]),
+        );
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("weapon-preview-encoder"),
+            });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("weapon-preview-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.preview_color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        // Opaque dark "display case" background (avoids egui alpha
+                        // compositing fringes and reads as a product display).
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.05,
+                            g: 0.055,
+                            b: 0.065,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.preview_depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            if let Some(mesh) = self.enemy_weapon_meshes.get(key) {
+                rp.set_pipeline(&self.viewmodel_pipeline);
+                rp.set_bind_group(0, &self.preview_clip.clip_bind, &[]);
+                rp.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
+                rp.set_index_buffer(mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                for p in &mesh.primitives {
+                    rp.set_bind_group(1, &p.tex_bind, &[]);
+                    rp.draw_indexed(p.index_start..(p.index_start + p.index_count), 0, 0..1);
+                }
+            }
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
     }
 
     /// Set the gun's overlay clip transform (`projection · viewmodel`) for this
@@ -2191,7 +2387,7 @@ impl Renderer {
         );
     }
 
-    pub fn render(&mut self, view_proj: Mat4) {
+    pub fn render(&mut self, view_proj: Mat4, egui: Option<EguiFrame>) {
         self.queue.write_buffer(
             &self.camera_buf,
             0,
@@ -2501,6 +2697,53 @@ impl Renderer {
                 rp.draw(0..*count, 0..1);
             }
         }
+
+        // ── egui pass: menus (shop / inventory) on top of everything, when the app
+        // handed us a UI frame this frame. Upload the frame's texture deltas + vertex/
+        // index buffers, then paint into the swapchain view (color loaded, no depth).
+        if let Some(egui) = egui {
+            let screen = egui_wgpu::ScreenDescriptor {
+                size_in_pixels: [self.config.width, self.config.height],
+                pixels_per_point: egui.pixels_per_point,
+            };
+            for (id, delta) in &egui.textures_delta.set {
+                self.egui_renderer
+                    .update_texture(&self.device, &self.queue, *id, delta);
+            }
+            self.egui_renderer.update_buffers(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &egui.paint_jobs,
+                &screen,
+            );
+            {
+                let mut rp = encoder
+                    .begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("egui-pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &view_tex,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    })
+                    // egui-wgpu's `render` wants a `RenderPass<'static>`; drop the
+                    // encoder-borrow lifetime (the pass still ends at scope exit).
+                    .forget_lifetime();
+                self.egui_renderer.render(&mut rp, &egui.paint_jobs, &screen);
+            }
+            // Free textures egui dropped this frame (after the pass that used them).
+            for id in &egui.textures_delta.free {
+                self.egui_renderer.free_texture(id);
+            }
+        }
+
         self.queue.submit(std::iter::once(encoder.finish()));
         frame.present();
     }

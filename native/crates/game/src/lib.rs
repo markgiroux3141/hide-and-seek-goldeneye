@@ -9,10 +9,12 @@
 pub mod app;
 pub mod character;
 pub mod combat;
+pub mod economy;
 pub mod enemy;
 pub mod gamepad;
 pub mod hud;
 pub mod levelgen;
+pub mod shop;
 pub mod world;
 
 /// Launch the game: open the window and run the event loop.
