@@ -126,6 +126,20 @@ impl World {
         self.prop_gizmo_drag = None;
     }
 
+    /// Delete the selected prop (panel Delete button / Del key): despawn its authored
+    /// entity and clear the selection. Records an undo checkpoint, so the delete is
+    /// undoable (the snapshot restores the removed entity). No-op if nothing is
+    /// selected. BUILD-only in practice (object mode is a BUILD panel).
+    pub fn delete_selected_prop(&mut self) {
+        let Some(e) = self.selected_prop else {
+            return;
+        };
+        self.record_undo();
+        self.ecs.despawn_authored(e);
+        self.selected_prop = None;
+        self.prop_gizmo_drag = None;
+    }
+
     fn prop_transform(&self, e: hecs::Entity) -> Option<crate::ecs::Transform> {
         self.ecs.world().entity(e).ok()?.get::<&crate::ecs::Transform>().map(|r| *r)
     }
@@ -134,9 +148,10 @@ impl World {
         self.ecs.world().entity(e).ok()?.get::<&crate::ecs::Renderable>().map(|r| r.mesh)
     }
 
-    /// World AABB (yaw ignored — good enough for click-selection) of a placed prop,
-    /// from its registered model bounds + transform (base at `pos`, centred).
-    fn prop_world_aabb(&self, e: hecs::Entity) -> Option<(Vec3, Vec3)> {
+    /// World AABB (yaw ignored — good enough for click-selection + the HUNT collider
+    /// bake) of a placed prop, from its registered model bounds + transform (base at
+    /// `pos`, centred).
+    pub(crate) fn prop_world_aabb(&self, e: hecs::Entity) -> Option<(Vec3, Vec3)> {
         let t = self.prop_transform(e)?;
         let mesh = self.prop_mesh_id(e)?;
         let (min, max) = self.prop_bounds.get(&mesh).copied()?;

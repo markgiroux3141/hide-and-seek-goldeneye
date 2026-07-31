@@ -712,6 +712,9 @@ impl World {
                     self.hit_enemy(i, hit.point);
                 }
             }
+            Some(hit) if self.physics.is_prop_collider(hit.collider) => {
+                self.hit_prop(hit.collider, hit.point);
+            }
             Some(hit) => {
                 // World geometry: nudge the marker just off the surface (z-fighting).
                 self.sparks.push(Spark {
@@ -727,6 +730,72 @@ impl World {
                 );
             }
             None => log::info!("shot — no hit within {range:.0} m"),
+        }
+    }
+
+    /// Route a player shot into a destructible prop (Milestone 3): deduct the weapon's
+    /// per-shot damage from the prop's [`crate::ecs::Health`] (which darkens it via
+    /// [`Self::prop_draws`]), and once its health hits zero mark it
+    /// [`crate::ecs::Destroyed`] and [`Self::detonate`] its catalog blast at its centre
+    /// — reusing the whole explosive VFX/SFX/falloff path, so the blast damages nearby
+    /// hunters + the player. A spark marks the impact either way.
+    ///
+    /// GoldenEye-faithful: a destroyed prop is **not** removed — the charred husk stays
+    /// in place, still solid (its collider is kept), just inert. Re-shooting the husk
+    /// only sparks; it can't be re-damaged or blow a second time.
+    fn hit_prop(&mut self, collider: ColliderHandle, point: Vec3) {
+        // Impact spark for hit feedback (same as the world-geometry arm).
+        self.sparks.push(Spark { pos: point, ttl: SPARK_TTL });
+        let Some(&entity) = self.prop_colliders.get(&collider) else {
+            return; // stale handle — the spark is enough
+        };
+        // A spent husk (already blown): shots just spark off it — no re-damage/re-blast.
+        let spent = self
+            .ecs
+            .world()
+            .entity(entity)
+            .ok()
+            .is_some_and(|e| e.get::<&crate::ecs::Destroyed>().is_some());
+        if spent {
+            return;
+        }
+        let dmg = self.weapon().config().damage;
+        let died = match self
+            .ecs
+            .world_mut()
+            .query_one_mut::<&mut crate::ecs::Health>(entity)
+        {
+            Ok(hp) => {
+                hp.hp -= dmg;
+                hp.hp <= 0.0
+            }
+            Err(_) => false, // no Health (shouldn't happen for a mapped prop)
+        };
+        if !died {
+            return; // still standing — the darker tint is the feedback
+        }
+        // Destroyed: resolve its catalog blast + world centre. The collider + draw stay
+        // (the husk remains); we only mark it spent so it can't blow again, then blow it.
+        let mesh = self
+            .ecs
+            .world()
+            .entity(entity)
+            .ok()
+            .and_then(|e| e.get::<&crate::ecs::Renderable>().map(|r| r.mesh));
+        let blast = mesh
+            .and_then(crate::props::def)
+            .and_then(|d| d.destructible)
+            .map(|d| d.blast);
+        let center = self
+            .prop_world_aabb(entity)
+            .map(|(min, max)| (min + max) * 0.5)
+            .unwrap_or(point);
+        let _ = self.ecs.world_mut().insert_one(entity, crate::ecs::Destroyed);
+        if let Some(blast) = blast {
+            self.detonate(center, blast);
+            log::info!("prop {mesh:?} destroyed → charred husk + blast r={:.1} m", blast.radius);
+        } else {
+            log::info!("prop {mesh:?} destroyed → charred husk");
         }
     }
 

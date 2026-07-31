@@ -40,6 +40,30 @@ pub struct TexturedModel {
     pub images: Vec<TexImage>,
 }
 
+impl TexturedModel {
+    /// Concatenate `other` into `self`, rebasing its indices, primitive ranges, and
+    /// image references so the combined result draws as one model. Used to consolidate
+    /// a GoldenEye **primary + secondary** pair — the same object split into an OPAQUE
+    /// primary GLB and an alpha-cutout (`alphaMode = MASK`) secondary GLB (glass,
+    /// chain-link, grates) — into a single prop, so the caller never sees the split.
+    /// The two keep their own textures (props aren't atlased); the cutout renders via
+    /// the prop shader's alpha `discard`, which is a no-op on the opaque primary.
+    pub fn append(&mut self, other: TexturedModel) {
+        let v_off = self.vertices.len() as u32;
+        let i_off = self.indices.len() as u32;
+        let img_off = self.images.len();
+        self.vertices.extend(other.vertices);
+        self.images.extend(other.images);
+        self.indices.extend(other.indices.into_iter().map(|i| i + v_off));
+        for mut p in other.primitives {
+            p.index_start += i_off;
+            p.image = p.image.map(|x| x + img_off);
+            p.emissive = p.emissive.map(|x| x + img_off);
+            self.primitives.push(p);
+        }
+    }
+}
+
 /// Load a GLB into a [`TexturedModel`], keeping only primitives whose glTF
 /// material name passes `keep` (a nameless material is offered as `""`). Pass
 /// `|_| true` to keep everything. Node transforms are baked into positions

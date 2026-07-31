@@ -54,12 +54,66 @@ pub struct Renderable {
 /// this enum is just the stable key that persists in the level file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MeshId {
+    /// The inert door-mechanics scaffold entity (not a catalog prop). The placeable
+    /// door *props* below (e.g. [`MeshId::MetalDoor`]) are static scenery for now.
     Door,
+    // ── Destructible ──
     WoodenCrate,
     ExplosiveBarrel,
+    MetalCrate,
+    AmmoCrate,
+    CardboardCrate,
+    GasCan,
+    // ── Furniture ──
     FilingCabinet,
     Bookshelf,
     HeavyWoodenTable,
+    WoodenTable,
+    BlackTable,
+    BlackChair,
+    BlueChair,
+    Locker,
+    MetalSafe,
+    MetalCrateStack,
+    Divider,
+    ChainlinkFence,
+    MetalGrate,
+    GreyTable,
+    // ── Electronics ──
+    Console,
+    Console1,
+    Mainframe,
+    Tv,
+    Tv1,
+    Keyboard,
+    Radio,
+    RackDevice,
+    WallDisplay,
+    SecurityCamera,
+    SentryGun,
+    // ── Clutter ──
+    TrashCans,
+    Barricade,
+    Beaker,
+    Book,
+    Calculator,
+    Alarm,
+    Lamp,
+    TestTubes,
+    BodyArmour,
+    // ── Doors (static props; mechanics later) ──
+    MetalDoor,
+    MetalDoor2,
+    BrownSlidingDoor,
+    BlastDoor,
+    WoodenDoor,
+    ElevatorDoor,
+    GreyDoor,
+    BigMetalDoor,
+    BathroomDoor,
+    JailDoor,
+    MetalSafeDoor,
+    GlassDoor,
 }
 
 /// Hit points for anything damageable. Props will use this once the damage system
@@ -76,6 +130,14 @@ impl Health {
         Health { hp: max, max }
     }
 }
+
+/// Transient "this prop has been blown up" marker (Milestone 3). Added at the moment
+/// a destructible prop's [`Health`] reaches zero and stripped when HUNT ends, so the
+/// authored prop returns intact in BUILD. **Not persisted** (no [`super::persist::ComponentData`]
+/// arm): a destroyed crate is a runtime-only state, never part of the saved level. A
+/// destroyed prop is skipped by the render draw list and has no collider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Destroyed;
 
 /// Marker + parameters for something the player can "use" (a door, a terminal).
 /// The interaction input + resolution are future work; this reserves the shape so

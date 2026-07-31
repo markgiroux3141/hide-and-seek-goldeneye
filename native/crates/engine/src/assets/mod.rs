@@ -5,4 +5,5 @@
 //! in [`crate::render::textures`].
 
 pub mod gltf_load;
+pub mod obj_model;
 pub mod textured_model;

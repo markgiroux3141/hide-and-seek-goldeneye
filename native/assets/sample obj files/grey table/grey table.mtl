@@ -1,0 +1,32 @@
+newmtl m0CullBothClampSClampT
+Kd 1.000000 1.000000 1.000000
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd01D4.bmp
+
+newmtl m1CullBothClampSClampT
+Kd 0.749020 0.749020 0.749020
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd01D2.bmp
+
+newmtl m2CullBothClampSClampT
+Kd 0.266667 0.266667 0.266667
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd01D2.bmp
+
+newmtl m3CullBoth
+Kd 0.270588 0.270588 0.270588
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd01CD.bmp
+

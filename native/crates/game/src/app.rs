@@ -394,6 +394,7 @@ impl App {
         let mut new_prop_selected: Option<usize> = None;
         let mut close_props = false;
         let mut ground_prop = false;
+        let mut delete_prop = false;
         let mut go_neutral = false;
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
@@ -657,14 +658,22 @@ impl App {
                             ui.label(format!("Gizmo: {gizmo_label}  (T switches)"));
                             ui.label(
                                 egui::RichText::new(
-                                    "drag handles · Ctrl = snap · Shift+D = duplicate · RMB = look",
+                                    "drag handles · Ctrl = snap · Shift+D = duplicate · Del = delete · RMB = look",
                                 )
                                 .small()
                                 .color(SHOP_DIM),
                             );
-                            if ui.button("Ground").clicked() {
-                                ground_prop = true;
-                            }
+                            ui.horizontal(|ui| {
+                                if ui.button("Ground").clicked() {
+                                    ground_prop = true;
+                                }
+                                if ui
+                                    .button(egui::RichText::new("Delete").color(egui::Color32::from_rgb(230, 90, 90)))
+                                    .clicked()
+                                {
+                                    delete_prop = true;
+                                }
+                            });
                         }
                         ui.separator();
                         ui.label(
@@ -722,6 +731,11 @@ impl App {
         if ground_prop {
             if let Some(world) = self.world.as_mut() {
                 world.ground_selected_prop();
+            }
+        }
+        if delete_prop {
+            if let Some(world) = self.world.as_mut() {
+                world.delete_selected_prop();
             }
         }
         if go_neutral {
@@ -880,8 +894,20 @@ impl ApplicationHandler for App {
         // meshes load through the same path as the guns.
         for def in crate::props::CATALOG {
             let path = format!("{}/../../assets/props/{}", env!("CARGO_MANIFEST_DIR"), def.glb);
-            match crate::combat::load_gun(&path) {
-                Ok(model) => {
+            match crate::props::load_prop_model(&path) {
+                Ok(mut model) => {
+                    // Consolidate the alpha-cutout "secondary" half (glass/chain-link/
+                    // grates) onto the opaque primary, so the prop is one merged mesh.
+                    if let Some(sec) = crate::props::secondary_glb(def.mesh) {
+                        let spath =
+                            format!("{}/../../assets/props/{}", env!("CARGO_MANIFEST_DIR"), sec);
+                        match crate::props::load_prop_model(&spath) {
+                            Ok(secondary) => model.append(secondary),
+                            Err(e) => {
+                                log::warn!("prop '{}' secondary '{sec}' load failed: {e}", def.name)
+                            }
+                        }
+                    }
                     let (min, max) = model_aabb(&model);
                     world.register_prop_bounds(def.mesh, min, max);
                     renderer.upload_prop(def.key, &model);
@@ -1480,6 +1506,13 @@ impl App {
             {
                 if let Some(w) = self.world.as_mut() {
                     w.duplicate_selected_prop();
+                }
+                return;
+            }
+            // Delete / Backspace removes the selected prop (matches the panel button).
+            if code == KeyCode::Delete || code == KeyCode::Backspace {
+                if let Some(w) = self.world.as_mut() {
+                    w.delete_selected_prop();
                 }
                 return;
             }

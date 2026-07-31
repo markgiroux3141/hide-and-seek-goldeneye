@@ -34,6 +34,13 @@ pub struct PhysicsWorld {
     /// Door panel colliders, indexed to match the nav door overlay. `None` after
     /// a breach removes one. Cleared on return to BUILD.
     door_colliders: Vec<Option<ColliderHandle>>,
+    /// Destructible-prop colliders (Milestone 3): a static cuboid per placed
+    /// destructible prop, baked at BUILD→HUNT so player shots + player movement hit
+    /// it, and removed as each prop is destroyed. Default groups (like the region /
+    /// door colliders), so the player's hitscan + move query see them for free.
+    /// Excluded from perception line-of-sight (below) so adding cover never shifts
+    /// the hunter-perception baseline. Emptied on return to BUILD.
+    prop_colliders: HashSet<ColliderHandle>,
     /// The hunters' capsule colliders (Track A) — bare colliders repositioned each
     /// fixed step so hitscan can hit an enemy. One per live hunter, keyed by handle;
     /// emptied outside HUNT and each entry removed as its hunter dies. All are
@@ -125,6 +132,7 @@ impl PhysicsWorld {
             query_pipeline: QueryPipeline::new(),
             region_colliders: HashMap::new(),
             door_colliders: Vec::new(),
+            prop_colliders: HashSet::new(),
             enemy_colliders: HashSet::new(),
             enemy_capsule_offset: 0.0,
             dirty: true,
@@ -182,6 +190,49 @@ impl PhysicsWorld {
                 self.colliders
                     .remove(handle, &mut IslandManager::new(), &mut self.bodies, false);
             }
+        }
+        self.dirty = true;
+    }
+
+    // ── Destructible prop colliders (Milestone 3) ─────────────────────────────
+
+    /// Insert a static cuboid collider (metres AABB) for a destructible prop and
+    /// return its handle. Default collision groups — so the player's hitscan (default
+    /// filter) and move-and-slide both see it — mirroring the door-panel cuboid path.
+    /// The caller maps the handle back to its prop entity. Baked at BUILD→HUNT.
+    pub fn add_prop_collider(&mut self, min: Vec3, max: Vec3) -> ColliderHandle {
+        let center = (min + max) * 0.5;
+        let half = (max - min) * 0.5;
+        let collider = ColliderBuilder::cuboid(half.x.max(1e-3), half.y.max(1e-3), half.z.max(1e-3))
+            .translation(vector![center.x, center.y, center.z])
+            .build();
+        let handle = self.colliders.insert(collider);
+        self.prop_colliders.insert(handle);
+        self.dirty = true;
+        handle
+    }
+
+    /// Remove one prop collider (the prop was destroyed). After this a shot passes
+    /// through where it stood. No-op if the handle isn't a live prop collider.
+    pub fn remove_prop_collider(&mut self, handle: ColliderHandle) {
+        if self.prop_colliders.remove(&handle) {
+            self.colliders
+                .remove(handle, &mut IslandManager::new(), &mut self.bodies, false);
+            self.dirty = true;
+        }
+    }
+
+    /// Whether `handle` is a live destructible-prop collider (so hitscan can route a
+    /// shot into a prop instead of sparking off it as world geometry).
+    pub fn is_prop_collider(&self, handle: ColliderHandle) -> bool {
+        self.prop_colliders.contains(&handle)
+    }
+
+    /// Remove every prop collider (on return to BUILD).
+    pub fn clear_prop_colliders(&mut self) {
+        for handle in self.prop_colliders.drain().collect::<Vec<_>>() {
+            self.colliders
+                .remove(handle, &mut IslandManager::new(), &mut self.bodies, false);
         }
         self.dirty = true;
     }
@@ -353,11 +404,16 @@ impl PhysicsWorld {
         );
         let enemy_colliders = &self.enemy_colliders;
         let ragdoll_colliders = &self.ragdoll_colliders;
-        // Skip both live hunter capsules (a packmate mustn't hide the player) AND
-        // ragdoll corpses (a body on the floor mustn't newly block sight — keeps the
-        // difficulty-0 perception baseline unchanged now that corpses are physical).
+        let prop_colliders = &self.prop_colliders;
+        // Skip live hunter capsules (a packmate mustn't hide the player), ragdoll
+        // corpses (a body on the floor mustn't newly block sight), AND destructible
+        // props (a placed crate is physical for shots/movement but is deliberately NOT
+        // a new sight-blocker) — all to keep the difficulty-0 perception baseline
+        // unchanged. World geometry (walls/floors) still blocks sight.
         let predicate = |handle: ColliderHandle, _: &Collider| {
-            !enemy_colliders.contains(&handle) && !ragdoll_colliders.contains(&handle)
+            !enemy_colliders.contains(&handle)
+                && !ragdoll_colliders.contains(&handle)
+                && !prop_colliders.contains(&handle)
         };
         let filter = QueryFilter::default().predicate(&predicate);
         let (handle, intersection) = self.query_pipeline.cast_ray_and_get_normal(
@@ -714,6 +770,36 @@ mod tests {
 
         p.clear_enemy_colliders();
         assert!(!p.is_enemy_collider(b), "cleared");
+    }
+
+    /// A destructible-prop collider is hittable by a default-filter ray (so player
+    /// hitscan lands on it), reports its own handle, and vanishes from queries once
+    /// removed — and `clear` empties the lot.
+    #[test]
+    fn prop_collider_is_hittable_and_removable() {
+        let mut p = PhysicsWorld::new();
+        // A unit cube centred at the origin.
+        let h = p.add_prop_collider(Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.5, 0.5, 0.5));
+        assert!(p.is_prop_collider(h));
+
+        let hit = p
+            .raycast(Vec3::new(0.0, 0.0, -3.0), Vec3::Z, 100.0)
+            .expect("ray should hit the prop cube");
+        assert_eq!(hit.collider, h, "hit reports the prop collider");
+
+        p.remove_prop_collider(h);
+        assert!(!p.is_prop_collider(h));
+        assert!(
+            p.raycast(Vec3::new(0.0, 0.0, -3.0), Vec3::Z, 100.0).is_none(),
+            "the removed prop cube is unhittable"
+        );
+
+        // Clear drops every remaining prop collider.
+        let a = p.add_prop_collider(Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.5, 0.5, 0.5));
+        let b = p.add_prop_collider(Vec3::new(9.5, -0.5, -0.5), Vec3::new(10.5, 0.5, 0.5));
+        assert!(p.is_prop_collider(a) && p.is_prop_collider(b));
+        p.clear_prop_colliders();
+        assert!(!p.is_prop_collider(a) && !p.is_prop_collider(b), "cleared");
     }
 
     // ── Dynamics substrate (ragdoll) ──────────────────────────────────────────

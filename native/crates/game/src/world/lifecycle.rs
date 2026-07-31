@@ -408,7 +408,11 @@ impl World {
                 // Bake the nav grid from the frozen geometry (once), seal the spawn
                 // door, and flood the hunter wave in through it.
                 let t0 = Instant::now();
-                let structure_solids = self.structure_solid_boxes();
+                let mut structure_solids = self.structure_solid_boxes();
+                // Placed props are solid to grid-navving enemies too: block their
+                // footprint cells so hunters path around crates/furniture (enemies
+                // ignore physics colliders — see the nav-vs-physics split).
+                structure_solids.extend(self.prop_solid_boxes());
                 match nav::bake(&mut self.regions, &structure_solids) {
                     Some(nav) => {
                         let bake_ms = t0.elapsed().as_secs_f32() * 1000.0;
@@ -428,6 +432,10 @@ impl World {
                     }
                     None => log::warn!("nav bake produced no grid"),
                 }
+
+                // Make destructible props solid + shootable for the hunt (colliders
+                // + transient Health baked from the authored entities).
+                self.spawn_prop_colliders();
 
                 self.mode = Mode::Hunt;
                 log::info!("→ HUNT (spawned at {feet:?})");
@@ -454,6 +462,9 @@ impl World {
                 self.grenade_cooldown = 0.0;
                 self.physics.clear_door_colliders();
                 self.doors.clear();
+                // Drop prop colliders + strip the transient prop combat state, so a
+                // crate blown up this hunt returns intact to the authored level.
+                self.clear_prop_colliders();
                 self.mode = Mode::Build;
                 log::info!("→ BUILD");
             }

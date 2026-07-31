@@ -1572,6 +1572,11 @@ pub struct World {
     /// is drawn and drag-editable. A runtime handle — cleared on load/undo (the ECS
     /// respawns entities). See `world::tools::prop_gizmo`.
     selected_prop: Option<hecs::Entity>,
+    /// Live destructible-prop colliders → their prop entity (Milestone 3). Baked at
+    /// BUILD→HUNT from every authored destructible prop; a hitscan hit on one of these
+    /// handles routes damage to the mapped entity. An entry is removed as its prop is
+    /// destroyed, and the whole map is cleared on return to BUILD. HUNT-only.
+    prop_colliders: std::collections::HashMap<ColliderHandle, hecs::Entity>,
     /// Which prop gizmo is active (Translate / Rotate); cycled with Tab.
     prop_gizmo_mode: PropGizmoMode,
     /// The in-progress prop gizmo drag, if any.
@@ -1905,6 +1910,7 @@ impl World {
             prop_preview_pos: None,
             prop_bounds: std::collections::HashMap::new(),
             selected_prop: None,
+            prop_colliders: std::collections::HashMap::new(),
             prop_gizmo_mode: PropGizmoMode::Translate,
             prop_gizmo_drag: None,
             mouse_ray: None,

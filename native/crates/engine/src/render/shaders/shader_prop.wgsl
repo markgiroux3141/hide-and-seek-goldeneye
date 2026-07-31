@@ -37,8 +37,20 @@ fn vs_main(
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
+    let texel = textureSample(tex, samp, in.uv);
+    // The prop pipeline alpha-blends, so a texel's alpha is its real opacity. Props
+    // carry two kinds of transparency, both handled by that blend:
+    //   • cutout (chain-link, grates): alpha is 0 or 1 — the 0s must vanish;
+    //   • translucent (GoldenEye "secondary" glass/screens): alpha ≈ 0.5-ish — must
+    //     show what's behind.
+    // Only *fully* transparent texels are discarded (culls cutout holes + saves the
+    // blend); everything else keeps its alpha and blends. Opaque props (alpha 1) are
+    // untouched.
+    if texel.a < 0.02 {
+        discard;
+    }
     // Texel × baked vertex color × per-instance tint. Tint white = untouched; a
     // darkened tint dims the whole prop (the shot-damage feedback in Milestone 3).
-    let base = textureSample(tex, samp, in.uv) * in.color;
+    let base = texel * in.color;
     return vec4<f32>(base.rgb * u.tint.rgb, base.a * u.tint.a);
 }

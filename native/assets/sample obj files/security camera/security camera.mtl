@@ -1,0 +1,88 @@
+newmtl m0
+Kd 0.776471 0.776471 0.776471
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd00F7.bmp
+
+newmtl m1
+Kd 1.000000 1.000000 1.000000
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd01FF.bmp
+
+newmtl m2
+Kd 0.776471 0.776471 0.776471
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd01FF.bmp
+
+newmtl m3
+Kd 0.447059 0.447059 0.447059
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd01FF.bmp
+
+newmtl m4
+Kd 0.909804 0.909804 0.909804
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd0358.bmp
+
+newmtl m5CullBoth
+Kd 1.000000 1.000000 1.000000
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd00F7.bmp
+
+newmtl m6CullBoth
+Kd 0.447059 0.447059 0.447059
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd00F7.bmp
+
+newmtl m7CullBoth
+Kd 0.447059 0.447059 0.447059
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd01FF.bmp
+
+newmtl m8CullBoth
+Kd 0.211765 0.211765 0.211765
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd05EA.bmp
+
+newmtl m9CullBoth
+Kd 1.000000 1.000000 1.000000
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd0109.bmp
+
+newmtl m10CullBothEnvMappingClampSClampTTexScaleS0.052735TexScaleT0.052735
+Kd 0.278431 0.250980 0.325490
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd028E.bmp
+

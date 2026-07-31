@@ -25,7 +25,9 @@ pub mod systems;
 #[cfg(test)]
 mod tests;
 
-pub use components::{Door, DoorState, Health, Interactable, MeshId, OpeningType, Renderable, Transform};
+pub use components::{
+    Destroyed, Door, DoorState, Health, Interactable, MeshId, OpeningType, Renderable, Transform,
+};
 pub use persist::{ComponentData, EntityData};
 pub use systems::{Command, SystemCtx};
 
@@ -122,6 +124,16 @@ impl Ecs {
         };
         let id = self.alloc_id();
         Some(self.spawn_authored(&EntityData { id, components }))
+    }
+
+    /// Despawn one authored entity, dropping it from the world **and** the id map (so a
+    /// later [`Self::resolve`] of its [`AuthoredId`] correctly returns `None`). Used by
+    /// the editor's delete. No-op if the handle is already gone.
+    pub fn despawn_authored(&mut self, entity: Entity) {
+        if let Ok(id) = self.world.get::<&AuthoredId>(entity).map(|r| *r) {
+            self.id_map.remove(&id);
+        }
+        let _ = self.world.despawn(entity);
     }
 
     /// Serialize every authored entity to its plain-data form for the level file.

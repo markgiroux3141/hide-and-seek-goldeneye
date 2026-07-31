@@ -4,7 +4,17 @@
 //! entity instead of a brush. Catalog: [`crate::props`]; entity model: [`crate::ecs`].
 
 use super::super::*;
-use crate::ecs::{ComponentData, EntityData, MeshId};
+use crate::ecs::{ComponentData, Destroyed, EntityData, Health, MeshId, Renderable, Transform};
+
+/// How dark a *living* destructible prop tints at zero health, just before it blows —
+/// a near (but not fully) black so the darkening reads as "taking damage." Full health
+/// = no tint (white); the shade lerps between the two by the health fraction.
+const PROP_DARKEN_FLOOR: f32 = 0.25;
+
+/// The shade of a **destroyed** prop's charred husk (GoldenEye leaves the darkened
+/// remains in place). Deep near-black so a blown prop reads unmistakably as spent,
+/// well below the living damage floor.
+const PROP_DESTROYED_SHADE: f32 = 0.05;
 
 impl World {
     /// Whether the prop-placement tool is armed (the app draws its ghost + routes a
@@ -130,23 +140,252 @@ impl World {
     }
 
     /// This frame's prop draw list for the renderer: `(catalog key, view_proj·world,
-    /// tint)` per placed prop. Tint is white in Milestone 1 (the darken-on-hit uses
-    /// it in Milestone 3). Non-prop `Renderable`s (e.g. a door) are skipped.
+    /// tint)` per placed prop. A destructible prop that has taken hits darkens toward
+    /// [`PROP_DARKEN_FLOOR`] by its health fraction (the shoot-feedback); a
+    /// [`Destroyed`] prop stays drawn as a charred husk ([`PROP_DESTROYED_SHADE`], the
+    /// GoldenEye "darkened remains"). Non-prop `Renderable`s (e.g. a door) are skipped.
     pub fn prop_draws(&self, aspect: f32) -> Vec<(&'static str, Mat4, [f32; 4])> {
         let vp = self.view_proj(aspect);
         let mut out = Vec::new();
-        for (t, r) in self
+        for (t, r, hp, destroyed) in self
             .ecs
             .world()
-            .query::<(&crate::ecs::Transform, &crate::ecs::Renderable)>()
+            .query::<(&Transform, &Renderable, Option<&Health>, Option<&Destroyed>)>()
             .iter()
         {
             let Some(def) = crate::props::def(r.mesh) else {
                 continue;
             };
             let model = self.prop_model_matrix(r.mesh, t.pos, t.rot, t.scale);
-            out.push((def.key, vp * model, [1.0, 1.0, 1.0, 1.0]));
+            let tint = if destroyed.is_some() {
+                // Blown — the darkened husk stays in place.
+                [PROP_DESTROYED_SHADE, PROP_DESTROYED_SHADE, PROP_DESTROYED_SHADE, 1.0]
+            } else {
+                match hp {
+                    // Full health → white (no-op); as hp drops the shade lerps toward
+                    // the near-black floor, so a battered crate darkens before it blows.
+                    Some(h) if h.max > 0.0 => {
+                        let frac = (h.hp / h.max).clamp(0.0, 1.0);
+                        let s = PROP_DARKEN_FLOOR + (1.0 - PROP_DARKEN_FLOOR) * frac;
+                        [s, s, s, 1.0]
+                    }
+                    _ => [1.0, 1.0, 1.0, 1.0],
+                }
+            };
+            out.push((def.key, vp * model, tint));
         }
         out
+    }
+
+    /// Bake a static collider for every authored **destructible** prop and attach its
+    /// transient [`Health`] (Milestone 3), called at BUILD→HUNT. The collider makes the
+    /// prop solid to player shots + movement; the handle→entity map lets a hitscan hit
+    /// route damage to the prop. Health is HUNT-only combat state (from the catalog),
+    /// stripped again by [`Self::clear_prop_colliders`] so the authored prop returns
+    /// intact in BUILD. Furniture (no `destructible`) is left as a pure visual.
+    pub(crate) fn spawn_prop_colliders(&mut self) {
+        // Collect (entity, health) first so the query borrow is released before we
+        // mutate the world (add colliders + insert Health).
+        let mut targets: Vec<(hecs::Entity, f32)> = Vec::new();
+        for (e, r) in self.ecs.world().query::<(hecs::Entity, &Renderable)>().iter() {
+            if let Some(d) = crate::props::def(r.mesh).and_then(|d| d.destructible) {
+                targets.push((e, d.health));
+            }
+        }
+        for (e, health) in targets {
+            let Some((min, max)) = self.prop_world_aabb(e) else {
+                continue; // no registered bounds (headless) — skip
+            };
+            let handle = self.physics.add_prop_collider(min, max);
+            self.prop_colliders.insert(handle, e);
+            let _ = self.ecs.world_mut().insert_one(e, Health::full(health));
+        }
+    }
+
+    /// Solid boxes (WT `[x, y, z, w, h, d]`, the nav voxelizer's units) for every
+    /// placed prop, so the HUNT nav bake blocks their footprint and the grid-navving
+    /// hunters path **around** them. Enemies move on the nav grid and ignore physics
+    /// colliders (see the nav-vs-physics split), so prop collision for enemies lives
+    /// here, not in the collider — fed alongside `structure_solid_boxes` into
+    /// `nav::bake`. A destroyed husk keeps its footprint (its remains still block,
+    /// consistent with its kept collider). Empty when bounds weren't registered
+    /// (headless levelgen has no GLBs) → props simply don't affect that nav.
+    pub(crate) fn prop_solid_boxes(&self) -> Vec<[f32; 6]> {
+        let s = WORLD_SCALE;
+        // Snapshot the prop entities first (query borrow) before calling the
+        // `&self`-borrowing `prop_world_aabb` per entity.
+        let entities: Vec<hecs::Entity> = self
+            .ecs
+            .world()
+            .query::<(hecs::Entity, &Renderable)>()
+            .iter()
+            .filter(|(_, r)| crate::props::def(r.mesh).is_some())
+            .map(|(e, _)| e)
+            .collect();
+        let mut out = Vec::new();
+        for e in entities {
+            if let Some((min, max)) = self.prop_world_aabb(e) {
+                out.push([
+                    min.x / s,
+                    min.y / s,
+                    min.z / s,
+                    (max.x - min.x) / s,
+                    (max.y - min.y) / s,
+                    (max.z - min.z) / s,
+                ]);
+            }
+        }
+        out
+    }
+
+    /// Tear down all prop colliders + strip the transient HUNT combat state
+    /// ([`Health`] + [`Destroyed`]) from every authored prop, called when leaving
+    /// HUNT. After this the authored props are back to their pristine, save-clean form
+    /// (a crate blown up in HUNT reappears in BUILD).
+    pub(crate) fn clear_prop_colliders(&mut self) {
+        self.physics.clear_prop_colliders();
+        self.prop_colliders.clear();
+        let props: Vec<hecs::Entity> = self
+            .ecs
+            .world()
+            .query::<(hecs::Entity, &Renderable)>()
+            .iter()
+            .map(|(e, _)| e)
+            .collect();
+        for e in props {
+            let _ = self.ecs.world_mut().remove_one::<Health>(e);
+            let _ = self.ecs.world_mut().remove_one::<Destroyed>(e);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Author a prop entity at `pos` with a unit-cube model bounds registered, via the
+    /// real placement path. Leaves the tool disarmed.
+    fn place_prop(world: &mut World, mesh: MeshId, pos: Vec3) {
+        world.register_prop_bounds(mesh, Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 1.0, 0.5));
+        world.prop_tool = Some(mesh);
+        world.prop_preview_pos = Some(pos);
+        assert!(world.confirm_prop_placement(), "prop should place");
+        world.cancel_prop_placement();
+    }
+
+    /// Count authored entities carrying a given component.
+    fn count<T: hecs::Component>(world: &World) -> usize {
+        world.ecs.world().query::<&T>().iter().count()
+    }
+
+    /// The bake gives a collider + full Health to a destructible prop and nothing to
+    /// furniture; leaving HUNT strips that transient state back off.
+    #[test]
+    fn bake_arms_destructibles_only_and_teardown_restores_them() {
+        let mut world = World::new();
+        place_prop(&mut world, MeshId::WoodenCrate, Vec3::new(0.0, 0.0, 0.0));
+        place_prop(&mut world, MeshId::HeavyWoodenTable, Vec3::new(5.0, 0.0, 0.0));
+
+        world.spawn_prop_colliders();
+        // Only the crate is destructible → exactly one collider + one Health.
+        assert_eq!(world.prop_colliders.len(), 1, "one prop collider (the crate)");
+        assert_eq!(count::<Health>(&world), 1, "only the crate carries Health");
+
+        world.clear_prop_colliders();
+        assert!(world.prop_colliders.is_empty(), "colliders torn down");
+        assert_eq!(count::<Health>(&world), 0, "transient Health stripped");
+        assert_eq!(count::<Destroyed>(&world), 0, "no lingering Destroyed marker");
+    }
+
+    /// A damaged (but not dead) crate darkens in the draw list; a destroyed one stays
+    /// drawn as a charred husk (GoldenEye leaves the remains in place).
+    #[test]
+    fn damaged_crate_darkens_and_destroyed_crate_remains_as_husk() {
+        let mut world = World::new();
+        place_prop(&mut world, MeshId::WoodenCrate, Vec3::new(0.0, 0.0, 0.0));
+        world.spawn_prop_colliders();
+        let e = *world.prop_colliders.values().next().unwrap();
+
+        // Full health → white.
+        let full = world.prop_draws(1.0);
+        assert_eq!(full.len(), 1);
+        assert_eq!(full[0].2, [1.0, 1.0, 1.0, 1.0], "undamaged crate is untinted");
+
+        // Half health → darkened (but not below the floor).
+        world
+            .ecs
+            .world_mut()
+            .query_one_mut::<&mut Health>(e)
+            .unwrap()
+            .hp = 30.0; // crate max is 60
+        let hurt = world.prop_draws(1.0);
+        let shade = hurt[0].2[0];
+        assert!(shade < 1.0 && shade >= PROP_DARKEN_FLOOR, "darkened, got {shade}");
+
+        // Destroyed → still drawn, but as the charred husk shade.
+        world.ecs.world_mut().insert_one(e, Destroyed).unwrap();
+        let dead = world.prop_draws(1.0);
+        assert_eq!(dead.len(), 1, "destroyed crate remains in the draw list");
+        assert_eq!(
+            dead[0].2,
+            [PROP_DESTROYED_SHADE, PROP_DESTROYED_SHADE, PROP_DESTROYED_SHADE, 1.0],
+            "husk uses the destroyed shade"
+        );
+    }
+
+    /// Deleting the selected prop despawns it (and clears the selection), and undo
+    /// brings it back.
+    #[test]
+    fn delete_removes_selected_prop_and_undo_restores_it() {
+        let mut world = World::new();
+        place_prop(&mut world, MeshId::WoodenCrate, Vec3::new(0.0, 0.0, 0.0));
+        place_prop(&mut world, MeshId::HeavyWoodenTable, Vec3::new(5.0, 0.0, 0.0));
+        assert_eq!(count::<Renderable>(&world), 2);
+
+        // Select one and delete it.
+        let e = world
+            .ecs
+            .world()
+            .query::<(hecs::Entity, &Renderable)>()
+            .iter()
+            .next()
+            .map(|(e, _)| e)
+            .unwrap();
+        world.selected_prop = Some(e);
+        world.delete_selected_prop();
+        assert_eq!(count::<Renderable>(&world), 1, "the selected prop is gone");
+        assert!(world.selected_prop().is_none(), "selection cleared after delete");
+
+        world.undo();
+        assert_eq!(count::<Renderable>(&world), 2, "undo restores the deleted prop");
+    }
+
+    /// A placed prop's footprint is baked solid into the nav grid, so grid-navving
+    /// hunters treat it as an obstacle and route around it (they ignore the physics
+    /// collider entirely).
+    #[test]
+    fn placed_prop_blocks_the_nav_grid() {
+        let mut world = World::new(); // 24×16×24 WT cavity, floor at y=0 (6 m across)
+        world.initial_meshes();
+        // Drop a crate on the room floor at metres (3, 0, 3) — near the room centre.
+        place_prop(&mut world, MeshId::WoodenCrate, Vec3::new(3.0, 0.0, 3.0));
+
+        let props = world.prop_solid_boxes();
+        assert!(!props.is_empty(), "the crate produced a solid box for nav");
+
+        let mut regions = std::mem::take(&mut world.regions);
+        // Just above the floor at the crate's spot is open air without the prop…
+        let open = nav::bake(&mut regions, &[]).expect("bake");
+        assert!(
+            !open.is_solid_meters(3.0, 0.1, 3.0),
+            "the spot is walkable air before the prop blocks it"
+        );
+        // …and feeding the prop footprint marks that cell solid (enemies path around).
+        let blocked = nav::bake(&mut regions, &props).expect("bake with prop solids");
+        assert!(
+            blocked.is_solid_meters(3.0, 0.1, 3.0),
+            "the crate blocks its nav cell"
+        );
+        world.regions = regions;
     }
 }
