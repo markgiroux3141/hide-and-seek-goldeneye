@@ -25,6 +25,8 @@ impl World {
             self.opening_preview = None;
             self.clear_platform_state();
             self.selected = None;
+            self.prop_tool = None;
+            self.prop_preview_pos = None;
             self.place_tool = Some(kind);
         }
     }

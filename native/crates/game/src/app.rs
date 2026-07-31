@@ -129,6 +129,22 @@ struct App {
     /// so opening the menu frees the cursor and closing hands control back exactly
     /// as it was (grabbed in gameplay, free in the editor).
     lock_before_shop: bool,
+    /// Whether the left object-placement panel is open (BUILD authoring). Toggled by
+    /// the **O** key. Frees the cursor while open (like the shop) so its list is
+    /// clickable and you can aim the placement crosshair at the floor.
+    props_open: bool,
+    /// Catalog index of the prop selected in the panel (drives the 3D preview + arms
+    /// placement), or `None` if nothing is selected.
+    props_selected: Option<usize>,
+    /// Turntable spin (radians) for the panel's 3D prop preview; advances while open.
+    props_preview_angle: f32,
+    /// Pointer-lock state captured when the object panel opened, restored on close
+    /// (mirrors [`Self::lock_before_shop`]).
+    lock_before_props: bool,
+    /// Last known mouse-cursor position (physical pixels), tracked from
+    /// `CursorMoved`. Used to unproject a world pick ray for prop placement while the
+    /// object panel has the cursor free.
+    cursor_pos: (f32, f32),
 }
 
 impl App {
@@ -151,6 +167,11 @@ impl App {
             shop_selected: 0,
             shop_preview_angle: 0.0,
             lock_before_shop: false,
+            props_open: false,
+            props_selected: None,
+            props_preview_angle: 0.0,
+            lock_before_props: false,
+            cursor_pos: (0.0, 0.0),
         }
     }
 }
@@ -276,6 +297,51 @@ impl App {
         }
     }
 
+    /// Toggle the left object-placement panel (BUILD). Opening frees the cursor (so
+    /// its list is clickable and you can aim the floor crosshair); closing restores
+    /// the prior lock, disarms any armed prop, and clears the selection.
+    fn toggle_props(&mut self) {
+        self.props_open = !self.props_open;
+        if self.props_open {
+            self.lock_before_props = self.input.pointer_locked;
+            self.set_pointer_lock(false);
+        } else {
+            self.set_pointer_lock(self.lock_before_props);
+            if let Some(w) = self.world.as_mut() {
+                w.cancel_prop_placement();
+                w.deselect_prop();
+            }
+            self.props_selected = None;
+        }
+    }
+
+    /// Unproject the current mouse-cursor position into a world pick ray
+    /// `(origin, dir)` using the active view-projection. `None` before the window /
+    /// world / renderer exist or if the window has zero area. Drives prop placement:
+    /// the object panel frees the cursor, so props are mouse-picked onto the floor
+    /// rather than aimed with the (frozen) camera crosshair.
+    fn mouse_world_ray(&self) -> Option<(glam::Vec3, glam::Vec3)> {
+        let window = self.window.as_ref()?;
+        let world = self.world.as_ref()?;
+        let renderer = self.renderer.as_ref()?;
+        let size = window.inner_size();
+        if size.width == 0 || size.height == 0 {
+            return None;
+        }
+        let (mx, my) = self.cursor_pos;
+        // Pixels → NDC (wgpu clip: x,y in [-1,1] with y up; z near=0, far=1).
+        let nx = 2.0 * mx / size.width as f32 - 1.0;
+        let ny = 1.0 - 2.0 * my / size.height as f32;
+        let inv = world.view_proj(renderer.aspect()).inverse();
+        let unproject = |z: f32| {
+            let p = inv * glam::Vec4::new(nx, ny, z, 1.0);
+            p.truncate() / p.w
+        };
+        let near = unproject(0.0);
+        let dir = (unproject(1.0) - near).normalize_or_zero();
+        (dir != glam::Vec3::ZERO).then_some((near, dir))
+    }
+
     /// Build this frame's egui UI (the shop/inventory menu) and tessellate it into an
     /// [`EguiFrame`] for the renderer to paint. Returns `None` before the window/egui
     /// state exist.
@@ -318,10 +384,20 @@ impl App {
         let mut new_selected: Option<usize> = None;
         let mut close = false;
 
+        // Object-placement panel snapshot + deferred outputs (same borrow discipline
+        // as the shop: read state up front, collect the pick/close, apply after).
+        let props_open = self.props_open;
+        let prop_sel = self.props_selected;
+        let prop_selected = self.world.as_ref().map(|w| w.selected_prop().is_some()).unwrap_or(false);
+        let placing_prop = self.world.as_ref().map(|w| w.is_placing_prop()).unwrap_or(false);
+        let gizmo_label = self.world.as_ref().map(|w| w.prop_gizmo_label()).unwrap_or("Move");
+        let mut new_prop_selected: Option<usize> = None;
+        let mut close_props = false;
+        let mut ground_prop = false;
+        let mut go_neutral = false;
+
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
-            if !shop_open {
-                return; // menu closed → empty UI this frame
-            }
+            if shop_open {
             // Centered, fixed menu panel (anchored so it stays centered on resize;
             // no OS-style title bar — we draw our own gold header).
             egui::Window::new("SHOP")
@@ -497,6 +573,110 @@ impl App {
                         );
                     });
                 });
+            } // end if shop_open
+
+            if props_open {
+                egui::SidePanel::left("objects_panel")
+                    .resizable(false)
+                    .default_width(224.0)
+                    .show(ctx, |ui| {
+                        ui.add_space(4.0);
+                        ui.heading(egui::RichText::new("OBJECTS").color(SHOP_GOLD).strong());
+                        ui.separator();
+                        // Live 3D turntable of the selected prop (same offscreen
+                        // preview target the shop uses; rendered in the render block).
+                        if let Some(def) = prop_sel.and_then(|i| crate::props::CATALOG.get(i)) {
+                            ui.group(|ui| {
+                                ui.set_min_size(egui::vec2(196.0, 196.0));
+                                ui.vertical_centered(|ui| match preview_tex {
+                                    Some(tex) => {
+                                        ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                                            tex,
+                                            egui::vec2(188.0, 188.0),
+                                        )));
+                                    }
+                                    None => {
+                                        ui.add_space(84.0);
+                                        ui.label(
+                                            egui::RichText::new("3D PREVIEW")
+                                                .color(SHOP_GOLD_DIM)
+                                                .strong(),
+                                        );
+                                    }
+                                });
+                            });
+                            ui.add_space(4.0);
+                            ui.label(egui::RichText::new(def.name).color(SHOP_GOLD).strong());
+                        }
+                        // Leave placement / clear selection so clicks select existing
+                        // props (also the Q / Esc key).
+                        if placing_prop || prop_selected {
+                            let label = if placing_prop {
+                                "Stop placing (Q)"
+                            } else {
+                                "Deselect (Q)"
+                            };
+                            if ui.button(label).clicked() {
+                                go_neutral = true;
+                            }
+                        }
+                        ui.add_space(6.0);
+                        // Palette: catalog grouped by category; click to arm placement.
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            ui.set_width(206.0);
+                            for &cat in crate::props::PropCategory::ALL {
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new(cat.label())
+                                        .small()
+                                        .strong()
+                                        .color(SHOP_GOLD_DIM),
+                                );
+                                for (i, def) in crate::props::CATALOG.iter().enumerate() {
+                                    if def.category != cat {
+                                        continue;
+                                    }
+                                    if ui
+                                        .selectable_label(prop_sel == Some(i), def.name)
+                                        .clicked()
+                                    {
+                                        new_prop_selected = Some(i);
+                                    }
+                                }
+                            }
+                        });
+                        // Edit controls for the selected prop (Esc to deselect).
+                        if prop_selected {
+                            ui.separator();
+                            ui.label(
+                                egui::RichText::new("SELECTED")
+                                    .small()
+                                    .strong()
+                                    .color(SHOP_GOLD_DIM),
+                            );
+                            ui.label(format!("Gizmo: {gizmo_label}  (T switches)"));
+                            ui.label(
+                                egui::RichText::new(
+                                    "drag handles · Ctrl = snap · Shift+D = duplicate · RMB = look",
+                                )
+                                .small()
+                                .color(SHOP_DIM),
+                            );
+                            if ui.button("Ground").clicked() {
+                                ground_prop = true;
+                            }
+                        }
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new("Click floor to place · click a prop to edit · O closes")
+                                .small()
+                                .color(SHOP_DIM),
+                        );
+                        if ui.button("CLOSE").clicked() {
+                            close_props = true;
+                        }
+                    });
+            }
         });
 
         state.handle_platform_output(window, full_output.platform_output);
@@ -529,7 +709,49 @@ impl App {
         if close {
             self.toggle_shop();
         }
+        // Object panel: apply the selection (arms placement of that prop on the
+        // World) + the close, after the `state` borrow ends.
+        if let Some(sel) = new_prop_selected {
+            self.props_selected = Some(sel);
+            if let (Some(world), Some(def)) =
+                (self.world.as_mut(), crate::props::CATALOG.get(sel))
+            {
+                world.arm_prop_placement(def.mesh);
+            }
+        }
+        if ground_prop {
+            if let Some(world) = self.world.as_mut() {
+                world.ground_selected_prop();
+            }
+        }
+        if go_neutral {
+            if let Some(world) = self.world.as_mut() {
+                world.cancel_prop_placement();
+                world.deselect_prop();
+            }
+        }
+        if close_props {
+            self.toggle_props();
+        }
         Some(frame)
+    }
+}
+
+/// Model-space AABB `(min, max)` of a textured model, from its raw vertices — used
+/// to anchor/ground a placed prop (and, later, to size its collider). Zero box for
+/// an empty model.
+fn model_aabb(model: &engine::assets::textured_model::TexturedModel) -> (glam::Vec3, glam::Vec3) {
+    let mut min = glam::Vec3::splat(f32::INFINITY);
+    let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
+    for v in &model.vertices {
+        let p = glam::Vec3::from_array(v.pos);
+        min = min.min(p);
+        max = max.max(p);
+    }
+    if model.vertices.is_empty() {
+        (glam::Vec3::ZERO, glam::Vec3::ZERO)
+    } else {
+        (min, max)
     }
 }
 
@@ -652,6 +874,22 @@ impl ApplicationHandler for App {
                 renderer.upload_enemy_muzzle(w.name, muzzle);
             }
         }
+        // Object palette: load each prop GLB once → upload to the renderer's prop
+        // channel (keyed by catalog key) and register its model-space AABB on the
+        // World (drives the placement ghost + ground/centre anchor). Textured static
+        // meshes load through the same path as the guns.
+        for def in crate::props::CATALOG {
+            let path = format!("{}/../../assets/props/{}", env!("CARGO_MANIFEST_DIR"), def.glb);
+            match crate::combat::load_gun(&path) {
+                Ok(model) => {
+                    let (min, max) = model_aabb(&model);
+                    world.register_prop_bounds(def.mesh, min, max);
+                    renderer.upload_prop(def.key, &model);
+                    log::info!("loaded prop {} ({} verts)", def.name, model.vertices.len());
+                }
+                Err(e) => log::warn!("prop '{}' load failed: {e}", def.name),
+            }
+        }
         // Player Combat P3: upload the code-defined HUD glyph atlas once (the ammo
         // counter's bitmap font); the per-frame text quads are set below.
         let (hw, hh, hpx) = crate::hud::atlas_rgba();
@@ -709,6 +947,12 @@ impl ApplicationHandler for App {
                 }
             }
 
+            // Track the cursor (physical pixels) for prop mouse-picking. egui already
+            // saw this event above; we just record the latest position.
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor_pos = (position.x as f32, position.y as f32);
+            }
+
             WindowEvent::MouseInput {
                 state,
                 button: MouseButton::Left,
@@ -722,7 +966,45 @@ impl ApplicationHandler for App {
                 let pressed = state == ElementState::Pressed;
                 self.input.set_mouse_left(pressed);
                 if !pressed {
-                    return; // release: state recorded, nothing else to do
+                    // Release ends any in-progress prop gizmo drag.
+                    if let Some(w) = self.world.as_mut() {
+                        w.end_prop_gizmo_drag();
+                    }
+                    return;
+                }
+                // Object palette: while a prop is armed, a left-click drops it at the
+                // crosshair floor hit. Handled before the pointer-lock re-grab so it
+                // works with the cursor free (the panel frees it).
+                if self.world.as_ref().map(|w| w.is_placing_prop()).unwrap_or(false) {
+                    // Refresh the pick at the click position, then drop the prop there.
+                    if let Some((o, d)) = self.mouse_world_ray() {
+                        if let Some(world) = self.world.as_mut() {
+                            world.update_prop_preview(o, d);
+                            world.confirm_prop_placement();
+                        }
+                    }
+                    return;
+                }
+                // Object mode (panel open, free cursor, not RMB-looking): grab a gizmo
+                // handle on the selected prop, else select the prop under the cursor.
+                // Never grabs the cursor here — RMB owns looking.
+                if self.props_open
+                    && self.world.as_ref().map(|w| w.is_build()).unwrap_or(false)
+                    && !self.input.pointer_locked
+                {
+                    if let Some((o, d)) = self.mouse_world_ray() {
+                        if let Some(w) = self.world.as_mut() {
+                            if !w.start_prop_gizmo_drag(o, d) {
+                                w.select_prop_at(o, d);
+                            }
+                        }
+                    }
+                    return;
+                }
+                // In object mode we never fall through to the editor's face-select
+                // (e.g. an LMB click while RMB-looking) — objects own the input here.
+                if self.props_open {
+                    return;
                 }
                 if !self.input.pointer_locked {
                     self.set_pointer_lock(true);
@@ -766,7 +1048,15 @@ impl ApplicationHandler for App {
                 button: MouseButton::Right,
                 ..
             } => {
-                self.input.set_mouse_right(state == ElementState::Pressed);
+                let pressed = state == ElementState::Pressed;
+                self.input.set_mouse_right(pressed);
+                // Object mode (BUILD, panel open): hold RMB to mouse-look. Grabbing
+                // hides+centres the cursor and enables the raw-motion camera look
+                // (the free cursor otherwise drives the panel + gizmo); releasing
+                // frees it again. In HUNT, RMB stays the free-aim modifier (unchanged).
+                if self.props_open && self.world.as_ref().map(|w| w.is_build()).unwrap_or(false) {
+                    self.set_pointer_lock(pressed);
+                }
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
@@ -839,6 +1129,10 @@ impl ApplicationHandler for App {
                 // Spin the shop's 3D weapon preview while the menu is open (~1 turn / 9s).
                 if self.shop_open {
                     self.shop_preview_angle += dt * 0.7;
+                }
+                // Same for the object panel's prop turntable.
+                if self.props_open {
+                    self.props_preview_angle += dt * 0.7;
                 }
 
                 // USB-N64 gamepad: poll + apply the solitaire scheme. This injects
@@ -920,7 +1214,29 @@ impl ApplicationHandler for App {
                 // Per-frame highlight in BUILD while grabbed: the door ghost, or
                 // the crosshair-tracked selection sub-rect (camera look was
                 // applied above this frame).
-                if self.input.pointer_locked
+                // Object-palette ghost: the floor box tracks the crosshair whether or
+                // not the cursor is grabbed (the panel frees it), so you can aim a
+                // placement while picking from the list. Takes priority over the
+                // grabbed-only editor highlights.
+                let prop_placing = self
+                    .world
+                    .as_ref()
+                    .map(|w| w.is_build() && w.is_placing_prop())
+                    .unwrap_or(false);
+                if prop_placing {
+                    let ray = self.mouse_world_ray();
+                    let mesh = ray
+                        .and_then(|(o, d)| self.world.as_mut().and_then(|w| w.update_prop_preview(o, d)));
+                    if let Some(r) = self.renderer.as_mut() {
+                        r.set_highlight(mesh.as_ref());
+                    }
+                } else if self.props_open {
+                    // Object mode (not placing): no editor face highlight at all — the
+                    // gizmo is the only overlay. Clear any stale highlight.
+                    if let Some(r) = self.renderer.as_mut() {
+                        r.set_highlight(None);
+                    }
+                } else if self.input.pointer_locked
                     && self.world.as_ref().map(|w| w.is_build()).unwrap_or(false)
                 {
                     let opening = self.world.as_ref().map(|w| w.is_opening_arming()).unwrap_or(false);
@@ -947,6 +1263,18 @@ impl ApplicationHandler for App {
                         r.set_highlight(mesh.as_ref());
                     }
                 }
+                // Object mode: push this frame's cursor ray + snap modifier (Ctrl) to
+                // the world (prop gizmo pick/hover/drag read them) and advance any
+                // active gizmo drag.
+                if let Some((o, d)) = self.mouse_world_ray() {
+                    let snap = self.input.key_down(KeyCode::ControlLeft)
+                        || self.input.key_down(KeyCode::ControlRight);
+                    if let Some(w) = self.world.as_mut() {
+                        w.set_mouse_ray(o, d);
+                        w.set_gizmo_snap(snap);
+                        w.update_prop_gizmo_drag();
+                    }
+                }
                 // Build this frame's egui menus before the render borrow block (it
                 // needs its own &mut self), then hand the tessellated UI to render().
                 let egui_frame = self.build_egui_frame();
@@ -968,6 +1296,9 @@ impl ApplicationHandler for App {
                     // for a dual-wielder). Empty lists when nothing is shown.
                     renderer.set_enemy_weapon_draws(&world.enemy_weapon_draws(aspect));
                     renderer.set_enemy_muzzle_draws(&world.enemy_muzzle_draws(aspect));
+                    // Placed props (the object palette): world-space textured draws,
+                    // one per authored prop entity (white tint in M1).
+                    renderer.set_prop_draws(&world.prop_draws(aspect));
                     // Crosshair: BUILD shows the small white editor cross (while
                     // grabbed, so it marks the face-pick centre); HUNT shows the
                     // GoldenEye reticle only while aiming, and nothing otherwise.
@@ -1029,6 +1360,15 @@ impl ApplicationHandler for App {
                             .min(crate::combat::config::WEAPONS.len() - 1);
                         let name = crate::combat::config::WEAPONS[sel].name;
                         renderer.render_weapon_preview(name, self.shop_preview_angle);
+                    }
+                    // Object panel open → render the selected prop into the same
+                    // offscreen preview texture (the panel samples it as an image).
+                    if self.props_open {
+                        if let Some(def) =
+                            self.props_selected.and_then(|i| crate::props::CATALOG.get(i))
+                        {
+                            renderer.render_prop_preview(def.key, self.props_preview_angle);
+                        }
                     }
                     let view_proj = world.view_proj(renderer.aspect());
                     renderer.render(view_proj, egui_frame);
@@ -1106,6 +1446,43 @@ impl App {
         if code == KeyCode::KeyM {
             self.toggle_shop();
             return;
+        }
+        // O toggles the left object-placement panel (BUILD authoring). Early, like
+        // the shop, so it works whether the cursor is grabbed or free.
+        if code == KeyCode::KeyO {
+            self.toggle_props();
+            return;
+        }
+        // Object-mode edit keys (only while the panel is open):
+        //   T    → cycle the prop gizmo (Move ↔ Rotate)
+        //   Esc  → disarm placement + deselect the current prop
+        if self.props_open {
+            if code == KeyCode::KeyT {
+                if let Some(w) = self.world.as_mut() {
+                    w.cycle_prop_gizmo();
+                }
+                return;
+            }
+            // Q / Esc → neutral: stop placing AND deselect, so clicks select existing
+            // props (no need to leave + re-enter object mode).
+            if code == KeyCode::Escape || code == KeyCode::KeyQ {
+                if let Some(w) = self.world.as_mut() {
+                    w.cancel_prop_placement();
+                    w.deselect_prop();
+                }
+                return;
+            }
+            // Shift+D duplicates the selected prop (Blender-style). D still feeds
+            // fly-cam strafe via the input state; this only adds the copy action.
+            if code == KeyCode::KeyD
+                && (self.input.key_down(KeyCode::ShiftLeft)
+                    || self.input.key_down(KeyCode::ShiftRight))
+            {
+                if let Some(w) = self.world.as_mut() {
+                    w.duplicate_selected_prop();
+                }
+                return;
+            }
         }
         // Backslash toggles the checkerboard "grid" view vs the textured view
         // (JS `toggle_view`). Works whether or not the cursor is grabbed.

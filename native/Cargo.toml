@@ -24,6 +24,11 @@ log = "0.4"
 # decodes wav (SFX) + mp3 (music) via symphonia. Default features already include
 # the cpal backend + wav + mp3, so no feature list is needed.
 kira = "0.12"
+# Entity-component storage (hecs): a fast, minimal archetypal ECS — storage +
+# queries only, no scheduler/app-model, so it embeds cleanly into our bespoke
+# fixed-step loop. Lives in the `game` crate (all components are game-domain);
+# the `engine` toolkit stays entity-free. See crates/game/src/ecs/.
+hecs = "0.11"
 # Gamepad input (gilrs): cross-platform pad enumeration + button/axis events, used
 # to wire the USB N64 controller (GoldenEye "solitaire" scheme). Windows backend is
 # XInput-based — see crates/engine/src/platform/gamepad.rs for the mapping caveat.

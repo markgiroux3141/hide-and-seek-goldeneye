@@ -23,7 +23,11 @@ use super::*;
 
 /// On-disk format version. Bump when a change can't be absorbed by
 /// `#[serde(default)]` alone; `load_level` can then migrate older files.
-const LEVEL_FORMAT_VERSION: u32 = 1;
+///
+/// v2 (2026-07-31): added authored `entities` (the ECS prop layer). The new field
+/// is `#[serde(default)]`, so v1 files still load — an old file simply has no
+/// entities. Bumped so a v2 writer is distinguishable in the version tag.
+const LEVEL_FORMAT_VERSION: u32 = 2;
 
 /// One CSG region's authored data (the shell is derived, so it isn't stored —
 /// `refresh_shell` recomputes it on load).
@@ -49,6 +53,10 @@ struct LevelFile {
     platforms: Vec<Platform>,
     #[serde(default)]
     stair_runs: Vec<StairRun>,
+    /// Authored ECS entities (props). `#[serde(default)]` keeps v1 files loading
+    /// with an empty set. See [`crate::ecs`].
+    #[serde(default)]
+    entities: Vec<crate::ecs::EntityData>,
     next_brush_id: u32,
     next_platform_id: u32,
     next_run_id: u32,
@@ -90,6 +98,7 @@ impl World {
                 .collect(),
             platforms: self.platforms.clone(),
             stair_runs: self.stair_runs.clone(),
+            entities: self.ecs.save_authored(),
             next_brush_id: self.next_brush_id,
             next_platform_id: self.next_platform_id,
             next_run_id: self.next_run_id,
@@ -170,6 +179,11 @@ impl World {
         // when the level has no platforms/stair-runs, which clears any leftover).
         meshes.push(self.rebuild_structures());
 
+        // Restore the authored ECS entities (props). A load fully replaces the
+        // authored set; derived per-entity runtime state (colliders, nav overlays,
+        // meshes) is re-established at HUNT bake, mirroring how geometry is derived.
+        self.ecs.load_authored(&file.entities);
+
         log::info!(
             "loaded level {} — {} region(s), {} platform(s), {} stair-run(s)",
             path.display(),
@@ -205,6 +219,10 @@ impl World {
         self.opening_tool = None;
         self.opening_preview = None;
         self.place_tool = None;
+        self.prop_tool = None;
+        self.prop_preview_pos = None;
+        self.selected_prop = None;
+        self.prop_gizmo_drag = None;
         self.platform_phase = None;
         self.selected_platform = None;
         self.selected_run = None;
@@ -275,6 +293,41 @@ mod tests {
         assert_eq!(loaded.next_brush_id, 3, "brush allocator preserved");
         assert_eq!(loaded.next_platform_id, 2, "platform allocator preserved");
 
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A placed prop (an authored ECS entity: Transform + Renderable) survives the
+    /// full save → load round-trip through the level file, alongside the geometry.
+    #[test]
+    fn save_load_round_trips_placed_props() {
+        use crate::ecs::{ComponentData, EntityData, MeshId};
+
+        let mut world = World::new();
+        let id = world.ecs.alloc_id();
+        world.ecs.spawn_authored(&EntityData {
+            id,
+            components: vec![
+                ComponentData::Transform {
+                    pos: [2.0, 0.0, 3.0],
+                    rot: Quat::IDENTITY.to_array(),
+                    scale: [1.0, 1.0, 1.0],
+                },
+                ComponentData::Renderable { mesh: MeshId::WoodenCrate },
+            ],
+        });
+
+        let path = std::env::temp_dir().join("bah_props_roundtrip.json");
+        world.save_level(&path).expect("save");
+
+        let mut loaded = World::new();
+        loaded.load_level(&path).expect("load");
+
+        let props = loaded.ecs.save_authored();
+        assert_eq!(props.len(), 1, "the placed prop must round-trip");
+        let has_crate = props[0].components.iter().any(|c| {
+            matches!(c, ComponentData::Renderable { mesh: MeshId::WoodenCrate })
+        });
+        assert!(has_crate, "the prop keeps its mesh id");
         let _ = std::fs::remove_file(&path);
     }
 

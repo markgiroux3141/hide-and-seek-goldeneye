@@ -136,6 +136,26 @@ struct GpuClip {
     clip_bind: wgpu::BindGroup,
 }
 
+/// Per-draw uniform for a placed prop: the clip matrix (`view_proj · world`) plus a
+/// per-instance `tint` (rgba, multiplied over the texel — white = untouched). The
+/// tint carries the Milestone-3 "darken when shot" darkening; it is always white in
+/// Milestone 1. Its own layout (vs [`GpuClip`]'s) because the fragment stage reads
+/// the tint, so the uniform must be VERTEX+FRAGMENT visible.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct PropUniform {
+    view_proj: [[f32; 4]; 4],
+    tint: [f32; 4],
+}
+
+/// A pooled [`PropUniform`] buffer + its bind group, reused frame-to-frame so a
+/// variable number of prop draws each get their own transform + tint without
+/// reallocating (mirrors [`GpuClip`] pooling for the enemy-weapon channel).
+struct GpuPropSlot {
+    buf: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+}
+
 /// A GPU-resident weapon viewmodel (the first-person gun): shared vertex/index
 /// buffers split into per-texture primitives, plus a clip-matrix uniform
 /// (rewritten each frame as the gun's overlay transform animates). Drawn in the
@@ -210,6 +230,24 @@ pub struct Renderer {
     /// egui's handle to the preview color target, handed to the shop's `Image`.
     preview_tex_id: egui::TextureId,
 
+    // ── Placeable props (the object palette). A generic textured-static-mesh
+    // channel: distinct meshes keyed by catalog key, each drawn at N per-instance
+    // transforms with a per-instance tint. Mirrors the enemy-weapon channel + adds
+    // the tint uniform. See `upload_prop` / `set_prop_draws`.
+    /// group(0) uniform layout for [`PropUniform`] (clip + tint), VERTEX+FRAGMENT.
+    prop_uniform_layout: wgpu::BindGroupLayout,
+    /// Depth-tested world pipeline for props (shader_prop.wgsl).
+    prop_pipeline: wgpu::RenderPipeline,
+    /// Uploaded prop meshes, keyed by catalog key.
+    prop_meshes: HashMap<&'static str, GpuWeaponMesh>,
+    /// Pooled per-draw uniforms, grown to the draw count each frame.
+    prop_slots: Vec<GpuPropSlot>,
+    /// This frame's prop draw list: `(slot index, mesh key)`.
+    prop_draws: Vec<(usize, &'static str)>,
+    /// The prop-preview turntable uniform (reuses the shared offscreen preview
+    /// target + `preview_tex_id`; only one palette/shop preview renders per frame).
+    prop_preview_slot: GpuPropSlot,
+
     /// One classified, per-zone-grouped GPU mesh per CSG region (+ the reserved
     /// structures mesh), replaced in place on every edit.
     regions: HashMap<u32, TexturedRegion>,
@@ -243,6 +281,10 @@ pub struct Renderer {
     char_tex_layout: wgpu::BindGroupLayout,
     char_uniform_layout: wgpu::BindGroupLayout,
     char_sampler: wgpu::Sampler,
+    /// REPEAT-wrapping sampler for placed props (many prop textures tile; the
+    /// clamp `char_sampler` smears their edge texels). Nearest, like `char_sampler`,
+    /// to keep the crisp N64 look.
+    prop_sampler: wgpu::Sampler,
     /// One GPU mesh per character body id (uploaded once at startup, [`BODY_CATALOG`]
     /// order), and a reused pool of per-instance pose uniforms — `character_instance_
     /// count` of them are drawn this frame (one per hunter, or the single BUILD demo),
@@ -814,6 +856,19 @@ impl Renderer {
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..Default::default()
         });
+        // Prop sampler: REPEAT so tiling prop textures wrap instead of smearing their
+        // edge texel (shelves/cabinets/tables), and LINEAR filtering for a smooth
+        // look (props read better smoothed than the crisp-Nearest N64 weapons/chars).
+        let prop_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("prop-sampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         let skinned_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("skinned-shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shader_skinned.wgsl").into()),
@@ -900,6 +955,72 @@ impl Renderer {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 cull_mode: None, // weapon materials are doubleSided
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // ── Prop pipeline: placeable props (crate/barrel/furniture). Same textured
+        // unlit look as the viewmodel, but group(0) is a PropUniform (clip + tint,
+        // VERTEX+FRAGMENT visible) instead of the bare clip matrix, and it's drawn
+        // in the depth-tested world pass (props are scene geometry, not an overlay).
+        let prop_uniform_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("prop-uniform-bgl"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let prop_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("prop-shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shader_prop.wgsl").into()),
+        });
+        let prop_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("prop-layout"),
+                bind_group_layouts: &[&prop_uniform_layout, &viewmodel_tex_layout],
+                push_constant_ranges: &[],
+            });
+        let prop_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("prop-pipeline"),
+            layout: Some(&prop_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &prop_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[TexVertex::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &prop_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    // Alpha-blend so a tint.a < 1 can ghost a prop later; at tint.a
+                    // == 1 (the normal case) this is an opaque write.
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None, // GLB winding varies; don't cull
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -1478,6 +1599,27 @@ impl Renderer {
             });
             GpuClip { clip_buf, clip_bind }
         };
+        // Prop-preview turntable uniform (clip + white tint), rewritten each preview
+        // frame by `render_prop_preview`; renders into the same offscreen target.
+        let prop_preview_slot = {
+            let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("prop-preview-uniform"),
+                contents: bytemuck::cast_slice(&[PropUniform {
+                    view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                    tint: [1.0, 1.0, 1.0, 1.0],
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+            let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("prop-preview-uniform"),
+                layout: &prop_uniform_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf.as_entire_binding(),
+                }],
+            });
+            GpuPropSlot { buf, bind }
+        };
         let preview_tex_id = egui_renderer.register_native_texture(
             &device,
             &preview_color_view,
@@ -1500,6 +1642,12 @@ impl Renderer {
             preview_depth_view,
             preview_clip,
             preview_tex_id,
+            prop_uniform_layout,
+            prop_pipeline,
+            prop_meshes: HashMap::new(),
+            prop_slots: Vec::new(),
+            prop_draws: Vec::new(),
+            prop_preview_slot,
             regions: HashMap::new(),
             materials,
             _material_keepalive: material_keepalive,
@@ -1515,6 +1663,7 @@ impl Renderer {
             char_tex_layout,
             char_uniform_layout,
             char_sampler,
+            prop_sampler,
             character_meshes: Vec::new(),
             character_instances: Vec::new(),
             character_instance_count: 0,
@@ -1755,7 +1904,12 @@ impl Renderer {
     /// buffers, one GPU texture per referenced image (+ white/black fallbacks), and
     /// per-primitive texture bind groups (base color + sampler + emissive). No clip
     /// uniform — see [`Renderer::make_clip`].
-    fn build_weapon_mesh(&self, model: &TexturedModel, label: &str) -> GpuWeaponMesh {
+    fn build_weapon_mesh(
+        &self,
+        model: &TexturedModel,
+        label: &str,
+        sampler: &wgpu::Sampler,
+    ) -> GpuWeaponMesh {
         let vertex_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some(label),
             contents: bytemuck::cast_slice(&model.vertices),
@@ -1799,7 +1953,7 @@ impl Renderer {
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&self.char_sampler),
+                            resource: wgpu::BindingResource::Sampler(sampler),
                         },
                         wgpu::BindGroupEntry {
                             binding: 2,
@@ -1865,7 +2019,7 @@ impl Renderer {
     }
 
     fn build_gpu_viewmodel(&self, model: &TexturedModel, label: &str) -> GpuViewModel {
-        let mesh = self.build_weapon_mesh(model, label);
+        let mesh = self.build_weapon_mesh(model, label, &self.char_sampler);
         let clip = self.make_clip(label);
         GpuViewModel {
             vertex_buf: mesh.vertex_buf,
@@ -2013,18 +2167,143 @@ impl Renderer {
         }
     }
 
+    // ── Placeable props (the object palette) ────────────────────────────────
+
+    /// Add one prop mesh to the render library, keyed by its catalog key. Call once
+    /// per catalog entry at startup; draw any number of instances per frame via
+    /// [`Renderer::set_prop_draws`].
+    pub fn upload_prop(&mut self, key: &'static str, model: &TexturedModel) {
+        // Props use the REPEAT sampler (many prop textures tile — a clamp sampler
+        // smears the edge texel into black bars on shelves/cabinets/tables).
+        let mesh = self.build_weapon_mesh(model, "prop", &self.prop_sampler);
+        self.prop_meshes.insert(key, mesh);
+    }
+
+    /// Set this frame's prop draw list: `(key, view_proj · world, tint rgba)` per
+    /// placed prop. Grows the pooled uniform slots, writes each, and records the draw
+    /// list; a draw for an unknown key is skipped in the pass.
+    pub fn set_prop_draws(&mut self, draws: &[(&'static str, Mat4, [f32; 4])]) {
+        while self.prop_slots.len() < draws.len() {
+            let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("prop-uniform"),
+                contents: bytemuck::cast_slice(&[PropUniform {
+                    view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+                    tint: [1.0, 1.0, 1.0, 1.0],
+                }]),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            });
+            let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("prop-uniform"),
+                layout: &self.prop_uniform_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buf.as_entire_binding(),
+                }],
+            });
+            self.prop_slots.push(GpuPropSlot { buf, bind });
+        }
+        self.prop_draws.clear();
+        for (i, (key, clip, tint)) in draws.iter().enumerate() {
+            self.queue.write_buffer(
+                &self.prop_slots[i].buf,
+                0,
+                bytemuck::cast_slice(&[PropUniform {
+                    view_proj: clip.to_cols_array_2d(),
+                    tint: *tint,
+                }]),
+            );
+            self.prop_draws.push((i, key));
+        }
+    }
+
+    /// egui's texture handle for the prop-preview image. Shares the offscreen target
+    /// with the weapon preview (only one panel previews per frame).
+    pub fn prop_preview_texture_id(&self) -> egui::TextureId {
+        self.preview_tex_id
+    }
+
+    /// Render prop `key` into the offscreen preview texture as a turntable spun
+    /// `angle` radians, framed by its bounding sphere. Mirrors
+    /// [`Self::render_weapon_preview`] but uses the prop pipeline (white tint). Call
+    /// each frame the palette is open, before [`Self::render`].
+    pub fn render_prop_preview(&mut self, key: &str, angle: f32) {
+        let (center, radius) = self
+            .prop_meshes
+            .get(key)
+            .map(|m| (m.center, m.radius))
+            .unwrap_or((Vec3::ZERO, 1.0));
+        let model = Mat4::from_rotation_y(angle)
+            * Mat4::from_scale(Vec3::splat(1.0 / radius))
+            * Mat4::from_translation(-center);
+        let view = Mat4::look_at_rh(Vec3::new(0.0, 1.05, 3.0), Vec3::ZERO, Vec3::Y);
+        let proj = Mat4::perspective_rh(38f32.to_radians(), 1.0, 0.05, 100.0);
+        let clip = proj * view * model;
+        self.queue.write_buffer(
+            &self.prop_preview_slot.buf,
+            0,
+            bytemuck::cast_slice(&[PropUniform {
+                view_proj: clip.to_cols_array_2d(),
+                tint: [1.0, 1.0, 1.0, 1.0],
+            }]),
+        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("prop-preview-encoder"),
+            });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("prop-preview-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.preview_color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.05,
+                            g: 0.055,
+                            b: 0.065,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.preview_depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            if let Some(mesh) = self.prop_meshes.get(key) {
+                rp.set_pipeline(&self.prop_pipeline);
+                rp.set_bind_group(0, &self.prop_preview_slot.bind, &[]);
+                rp.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
+                rp.set_index_buffer(mesh.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                for p in &mesh.primitives {
+                    rp.set_bind_group(1, &p.tex_bind, &[]);
+                    rp.draw_indexed(p.index_start..(p.index_start + p.index_count), 0, 0..1);
+                }
+            }
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
     /// Add one enemy weapon's gun mesh to the render library, keyed by weapon name
     /// (A3, arsenal). Call once per arsenal weapon at startup; draw any number of
     /// them per frame via [`Renderer::set_enemy_weapon_draws`].
     pub fn upload_enemy_weapon(&mut self, key: &'static str, model: &TexturedModel) {
-        let mesh = self.build_weapon_mesh(model, "enemy-gun");
+        let mesh = self.build_weapon_mesh(model, "enemy-gun", &self.char_sampler);
         self.enemy_weapon_meshes.insert(key, mesh);
     }
 
     /// Add one enemy weapon's muzzle-flash mesh to the render library, keyed by
     /// weapon name. Drawn per frame via [`Renderer::set_enemy_muzzle_draws`].
     pub fn upload_enemy_muzzle(&mut self, key: &'static str, model: &TexturedModel) {
-        let mesh = self.build_weapon_mesh(model, "enemy-muzzle");
+        let mesh = self.build_weapon_mesh(model, "enemy-muzzle", &self.char_sampler);
         self.enemy_muzzle_meshes.insert(key, mesh);
     }
 
@@ -2532,6 +2811,24 @@ impl Renderer {
                 };
                 rp.set_pipeline(&self.viewmodel_pipeline);
                 rp.set_bind_group(0, &clip.clip_bind, &[]);
+                rp.set_vertex_buffer(0, w.vertex_buf.slice(..));
+                rp.set_index_buffer(w.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                for p in &w.primitives {
+                    rp.set_bind_group(1, &p.tex_bind, &[]);
+                    rp.draw_indexed(p.index_start..(p.index_start + p.index_count), 0, 0..1);
+                }
+            }
+            // 2.35) Placed props (crate/barrel/furniture) — world-space, depth-tested
+            // vs the scene. One draw per placed instance, mesh looked up by key, with
+            // a per-instance tint (white here; the darken-on-hit uses it in M3).
+            for (slot_idx, key) in &self.prop_draws {
+                let (Some(w), Some(slot)) =
+                    (self.prop_meshes.get(key), self.prop_slots.get(*slot_idx))
+                else {
+                    continue;
+                };
+                rp.set_pipeline(&self.prop_pipeline);
+                rp.set_bind_group(0, &slot.bind, &[]);
                 rp.set_vertex_buffer(0, w.vertex_buf.slice(..));
                 rp.set_index_buffer(w.index_buf.slice(..), wgpu::IndexFormat::Uint32);
                 for p in &w.primitives {

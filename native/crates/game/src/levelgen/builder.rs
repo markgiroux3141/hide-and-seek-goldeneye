@@ -90,6 +90,8 @@ pub struct BuiltLevel {
     pub platforms: Vec<Platform>,
     pub stair_runs: Vec<StairRun>,
     pub spawn: Vec3, // WT-meters (matches World::spawn_point)
+    /// Authored ECS entities (props) placed in the level. See [`crate::ecs`].
+    pub entities: Vec<crate::ecs::EntityData>,
     pub rooms: Vec<RoomLabel>,
     /// Author-intended room connections (a, b) — the analyzer verifies each is
     /// actually walkable in the baked nav grid.
@@ -118,6 +120,7 @@ pub struct LevelBuilder {
     pillars: Vec<PendingPillar>,
     platforms: Vec<Platform>,
     stair_runs: Vec<StairRun>,
+    entities: Vec<crate::ecs::EntityData>,
     rooms: Vec<RoomLabel>,
     edges: Vec<(RoomId, RoomId)>,
     spawn: Vec3,
@@ -143,6 +146,7 @@ impl LevelBuilder {
             pillars: Vec::new(),
             platforms: Vec::new(),
             stair_runs: Vec::new(),
+            entities: Vec::new(),
             rooms: Vec::new(),
             edges: Vec::new(),
             spawn: Vec3::new(0.75, 0.1, 0.75),
@@ -498,6 +502,14 @@ impl LevelBuilder {
         self.spawn = Vec3::new(x * s, y * s, z * s);
     }
 
+    /// Author a placed ECS entity (prop). Scaffold seam — mirrors how `window` /
+    /// `pillar` push a plain record. The entity's [`crate::ecs::AuthoredId`] must be
+    /// unique within the level; the caller assigns it (typically monotonically). A
+    /// typed helper per prop kind (e.g. `door(...)`) lands with the door task.
+    pub fn entity(&mut self, data: crate::ecs::EntityData) {
+        self.entities.push(data);
+    }
+
     pub fn finish(mut self) -> BuiltLevel {
         // Append pillars LAST (after every subtract carve) so nothing eats them.
         for p in &self.pillars {
@@ -512,6 +524,7 @@ impl LevelBuilder {
             stairs: self.stairs,
             platforms: self.platforms,
             stair_runs: self.stair_runs,
+            entities: self.entities,
             spawn: self.spawn,
             rooms: self.rooms,
             edges: self.edges,

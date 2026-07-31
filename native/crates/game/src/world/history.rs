@@ -37,6 +37,9 @@ pub(crate) struct LevelSnapshot {
     regions: Vec<RegionSnapshot>,
     platforms: Vec<Platform>,
     stair_runs: Vec<StairRun>,
+    /// Authored ECS props (their plain-data form — the same [`crate::ecs::EntityData`]
+    /// the level file stores), so undo/redo covers placement like any other edit.
+    entities: Vec<crate::ecs::EntityData>,
     spawn_point: Vec3,
     next_brush_id: u32,
     next_platform_id: u32,
@@ -57,6 +60,7 @@ impl World {
                 .collect(),
             platforms: self.platforms.clone(),
             stair_runs: self.stair_runs.clone(),
+            entities: self.ecs.save_authored(),
             spawn_point: self.spawn_point,
             next_brush_id: self.next_brush_id,
             next_platform_id: self.next_platform_id,
@@ -148,6 +152,7 @@ impl World {
         }
         self.platforms = snap.platforms;
         self.stair_runs = snap.stair_runs;
+        self.ecs.load_authored(&snap.entities);
         self.spawn_point = snap.spawn_point;
         self.next_brush_id = snap.next_brush_id;
         self.next_platform_id = snap.next_platform_id;

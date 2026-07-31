@@ -5,4 +5,6 @@ mod gizmo;
 mod opening;
 mod placement;
 mod platform;
+mod prop;
+mod prop_gizmo;
 mod stairs;

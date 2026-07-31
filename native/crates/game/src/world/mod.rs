@@ -1044,6 +1044,38 @@ pub(crate) struct GizmoDrag {
     accumulated: f32,
 }
 
+/// Which prop gizmo is active (object mode). One shown at a time, cycled with Tab.
+/// Scale is a later addition; props are uniform-scaled for now.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PropGizmoMode {
+    Translate,
+    Rotate,
+}
+
+/// A translate axis for the prop move gizmo.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PropAxis {
+    X,
+    Y,
+    Z,
+}
+
+/// An in-progress prop gizmo drag. Unlike the platform gizmo (look-relative mouse
+/// deltas), this is driven by the absolute mouse ray each frame: a **fixed** axis
+/// line / rotation plane through `pivot` (captured at drag start so the object
+/// doesn't chase its own moving gizmo), plus the object's start transform and the
+/// grab reference (axis param for translate, plane angle for rotate).
+#[derive(Clone, Copy)]
+pub(crate) struct PropGizmoDrag {
+    mode: PropGizmoMode,
+    axis: PropAxis,
+    entity: hecs::Entity,
+    pivot: Vec3,
+    start_pos: Vec3,
+    start_yaw: f32,
+    grab_ref: f32,
+}
+
 /// A resolved opening placement (from the crosshair) — enough to draw the ghost
 /// preview and to cut it. `position` is the face-plane WT coord on `axis`;
 /// `(u0, v0)` is the opening's min corner on the two in-plane axes; `(w, h)` its
@@ -1271,6 +1303,11 @@ pub struct World {
     pub camera: FlyCamera,
     pub physics: PhysicsWorld,
     pub mode: Mode,
+    /// The entity-component layer (hecs): authored props today, and a home for
+    /// runtime actors as they migrate off the god-struct. Present in both modes;
+    /// gameplay systems only tick during HUNT (see [`Self::fixed_step`]). Authored
+    /// entities persist via the level file (see `world::persist`). See [`crate::ecs`].
+    ecs: crate::ecs::Ecs,
     /// The player capsule; `Some` only in HUNT mode.
     character: Option<CharacterController>,
     /// Baked nav grid; `Some` only in HUNT mode.
@@ -1520,6 +1557,31 @@ pub struct World {
     /// Additive-brush placement tool (pillar / brace), if armed. Mutually
     /// exclusive with the opening tools.
     place_tool: Option<PlaceKind>,
+    /// Prop-placement tool (the object palette): the [`crate::ecs::MeshId`] armed for
+    /// placement, if any. While set, a floor ghost tracks the crosshair and a
+    /// left-click drops the prop as an authored ECS entity. See `world::tools::prop`.
+    prop_tool: Option<crate::ecs::MeshId>,
+    /// The grounded metric floor point the prop ghost currently previews (recomputed
+    /// each frame while `prop_tool` is armed); what a confirm places the prop at.
+    prop_preview_pos: Option<Vec3>,
+    /// Model-space AABB `(min, max)` per prop mesh, registered by the app once the
+    /// GLBs load. Drives the render/ghost anchor (base-to-floor, horizontally
+    /// centred) and, later, prop pick/collision. Empty in headless callers.
+    prop_bounds: std::collections::HashMap<crate::ecs::MeshId, (Vec3, Vec3)>,
+    /// The prop currently selected for editing (object mode), or `None`. Its gizmo
+    /// is drawn and drag-editable. A runtime handle — cleared on load/undo (the ECS
+    /// respawns entities). See `world::tools::prop_gizmo`.
+    selected_prop: Option<hecs::Entity>,
+    /// Which prop gizmo is active (Translate / Rotate); cycled with Tab.
+    prop_gizmo_mode: PropGizmoMode,
+    /// The in-progress prop gizmo drag, if any.
+    prop_gizmo_drag: Option<PropGizmoDrag>,
+    /// This frame's mouse world ray `(origin, dir)`, pushed by the app from the free
+    /// cursor's unprojection; the prop gizmo pick/hover/drag read it.
+    mouse_ray: Option<(Vec3, Vec3)>,
+    /// Whether gizmo drags snap to a grid/angle increment this frame (Ctrl held);
+    /// pushed by the app. `false` = continuous. See `world::tools::prop_gizmo`.
+    gizmo_snap: bool,
     /// Pillar cross-section (square) in WT; scroll-adjustable while armed.
     pillar_size: f32,
     /// Brace dimensions in WT: `brace_width` along the wall, `brace_depth` the
@@ -1770,6 +1832,7 @@ impl World {
             camera,
             physics: PhysicsWorld::new(),
             mode: Mode::Build,
+            ecs: crate::ecs::Ecs::new(),
             character: None,
             nav: None,
             enemies: Vec::new(),
@@ -1838,6 +1901,14 @@ impl World {
             hole_w: HOLE_WIDTH,
             hole_h: HOLE_HEIGHT,
             place_tool: None,
+            prop_tool: None,
+            prop_preview_pos: None,
+            prop_bounds: std::collections::HashMap::new(),
+            selected_prop: None,
+            prop_gizmo_mode: PropGizmoMode::Translate,
+            prop_gizmo_drag: None,
+            mouse_ray: None,
+            gizmo_snap: false,
             pillar_size: PILLAR_SIZE,
             brace_width: BRACE_DIM,
             brace_depth: BRACE_DIM,

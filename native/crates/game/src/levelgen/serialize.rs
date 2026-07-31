@@ -27,6 +27,7 @@ struct LevelFile {
     regions: Vec<RegionData>,
     platforms: Vec<Platform>,
     stair_runs: Vec<StairRun>,
+    entities: Vec<crate::ecs::EntityData>,
     next_brush_id: u32,
     next_platform_id: u32,
     next_run_id: u32,
@@ -42,7 +43,8 @@ fn slot_path(slot: u8) -> PathBuf {
 /// Write `built` as a playable level slot; returns the path written.
 pub fn write_slot(built: &BuiltLevel, slot: u8) -> io::Result<PathBuf> {
     let file = LevelFile {
-        version: 1,
+        // v2: carries the authored `entities` list (see `world::persist`).
+        version: 2,
         spawn_point: built.spawn.to_array(),
         regions: vec![RegionData {
             id: 0,
@@ -51,6 +53,7 @@ pub fn write_slot(built: &BuiltLevel, slot: u8) -> io::Result<PathBuf> {
         }],
         platforms: built.platforms.clone(),
         stair_runs: built.stair_runs.clone(),
+        entities: built.entities.clone(),
         next_brush_id: built.next_brush_id,
         next_platform_id: built.next_platform_id,
         next_run_id: built.next_run_id,

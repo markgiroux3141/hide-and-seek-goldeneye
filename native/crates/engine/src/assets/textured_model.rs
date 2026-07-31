@@ -133,17 +133,30 @@ fn visit_node(
                 Some(c) => c.into_rgba_f32().collect(),
                 None => vec![[1.0, 1.0, 1.0, 1.0]; positions.len()],
             };
+            // Material base-color FACTOR (glTF `pbrMetallicRoughness.baseColorFactor`,
+            // default white). Many GoldenEye props ship a GRAYSCALE base texture and
+            // carry their real colour here (e.g. the wooden crate's brown factor over
+            // a gray wood-grain texture); ignoring it renders them black-and-white.
+            // Fold it into the vertex colour so `texel × colour` reproduces the
+            // authored surface colour. Weapons default to white here → no change.
+            let factor = prim.material().pbr_metallic_roughness().base_color_factor();
 
             let base = out.vertices.len() as u32;
             for i in 0..positions.len() {
                 let wp = world.transform_point3(Vec3::from(positions[i]));
                 let n = normals.get(i).copied().unwrap_or([0.0, 1.0, 0.0]);
                 let wn = normal_mat.transform_vector3(Vec3::from(n)).normalize_or_zero();
+                let c = colors.get(i).copied().unwrap_or([1.0, 1.0, 1.0, 1.0]);
                 out.vertices.push(TexVertex {
                     pos: wp.to_array(),
                     normal: wn.to_array(),
                     uv: uvs.get(i).copied().unwrap_or([0.0, 0.0]),
-                    color: colors.get(i).copied().unwrap_or([1.0, 1.0, 1.0, 1.0]),
+                    color: [
+                        c[0] * factor[0],
+                        c[1] * factor[1],
+                        c[2] * factor[2],
+                        c[3] * factor[3],
+                    ],
                 });
             }
 

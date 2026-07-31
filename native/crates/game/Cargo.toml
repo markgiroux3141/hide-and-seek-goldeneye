@@ -17,6 +17,8 @@ glam = { workspace = true }
 winit = { workspace = true }
 pollster = { workspace = true }
 rapier3d = { workspace = true }
+# Entity-component storage — the game's `ecs` module (components + systems).
+hecs = { workspace = true }
 image = { workspace = true }
 env_logger = { workspace = true }
 log = { workspace = true }

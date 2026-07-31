@@ -146,6 +146,22 @@ impl World {
                 // The player's crosshair line, for the hunters' reactive aim-dodge.
                 let aim_origin = c.eye();
                 let aim_dir = c.forward();
+                // ── ECS systems tick (scaffold seam) ──────────────────────────
+                // Runs before the hunter FSM so any nav-overlay a system sets this
+                // step (e.g. a door's live pathing cost) is visible when hunters
+                // path below. Built from disjoint borrows of `nav`/`physics`, so it
+                // coexists with the enemy loop's borrows of those fields. Inert this
+                // pass (empty system list); the door/prop systems land on this seam.
+                {
+                    let mut ctx = crate::ecs::SystemCtx {
+                        dt,
+                        player_feet: feet,
+                        nav: self.nav.as_mut(),
+                        physics: &mut self.physics,
+                        commands: Vec::new(),
+                    };
+                    self.ecs.run_systems(&mut ctx);
+                }
                 // Advance each hunter's perception FSM. Take the roster out so it
                 // isn't borrowed while each FSM needs `&self.nav` + `&mut self.physics`
                 // (the LOS raycast). Fire requests are collected + applied after the

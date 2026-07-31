@@ -179,6 +179,10 @@ impl World {
         if self.mode != Mode::Build {
             return None;
         }
+        // Object mode: a selected prop's gizmo takes over the shared gizmo channel.
+        if let Some(m) = self.prop_gizmo_mesh() {
+            return Some(m);
+        }
         let parts = self.gizmo_parts();
         if parts.is_empty() {
             return None;

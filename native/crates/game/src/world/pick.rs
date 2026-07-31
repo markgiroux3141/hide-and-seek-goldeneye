@@ -80,6 +80,13 @@ impl World {
     pub(crate) fn pick_face_hit(&mut self) -> Option<(Selection, Vec3)> {
         let origin = self.camera.pos;
         let dir = self.camera.forward();
+        self.pick_face_hit_from(origin, dir)
+    }
+
+    /// Like [`pick_face_hit`](Self::pick_face_hit) but casts an explicit ray instead
+    /// of the crosshair — used by the prop tool, which picks the floor under the free
+    /// mouse cursor (the panel frees the cursor, so there's no crosshair to aim).
+    pub(crate) fn pick_face_hit_from(&mut self, origin: Vec3, dir: Vec3) -> Option<(Selection, Vec3)> {
         let hit = self.physics.raycast(origin, dir, 100.0)?;
 
         // Dominant axis of the surface normal.

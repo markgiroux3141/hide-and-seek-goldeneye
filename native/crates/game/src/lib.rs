@@ -9,11 +9,13 @@
 pub mod app;
 pub mod character;
 pub mod combat;
+pub mod ecs;
 pub mod economy;
 pub mod enemy;
 pub mod gamepad;
 pub mod hud;
 pub mod levelgen;
+pub mod props;
 pub mod shop;
 pub mod world;
 
