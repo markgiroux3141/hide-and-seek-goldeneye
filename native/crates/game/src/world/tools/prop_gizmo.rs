@@ -162,13 +162,39 @@ impl World {
     }
 
     /// The gizmo origin for a prop — its mid-height above the base, so arrows/ring
-    /// sit around the object rather than at the floor. `None` without bounds.
+    /// sit around the object rather than at the floor. `None` without bounds. A
+    /// light has no mesh bounds: its gizmo sits at the light position itself.
     fn prop_gizmo_origin(&self, e: hecs::Entity) -> Option<Vec3> {
+        if self.entity_is_light(e) {
+            return self.prop_transform(e).map(|t| t.pos);
+        }
         let t = self.prop_transform(e)?;
         let mesh = self.prop_mesh_id(e)?;
         let (min, max) = self.prop_bounds.get(&mesh).copied()?;
         let half_h = (max.y - min.y) * 0.5 * t.scale.y;
         Some(t.pos + Vec3::new(0.0, half_h, 0.0))
+    }
+
+    /// The click-pick AABB for a selectable authored entity: a prop's world bounds,
+    /// or a small synthetic box around a light (which has no mesh). `None` if the
+    /// entity is neither (or a prop without registered bounds).
+    fn select_aabb(&self, e: hecs::Entity) -> Option<(Vec3, Vec3)> {
+        if self.entity_is_light(e) {
+            let p = self.prop_transform(e)?.pos;
+            let h = Vec3::splat(super::light::LIGHT_MARKER_HALF * 1.7);
+            return Some((p - h, p + h));
+        }
+        self.prop_world_aabb(e)
+    }
+
+    /// The gizmo mode to actually drive for `e`: lights are translate-only (no
+    /// rotate/scale), so they ignore the cycled `prop_gizmo_mode`.
+    fn effective_gizmo_mode(&self, e: hecs::Entity) -> PropGizmoMode {
+        if self.entity_is_light(e) {
+            PropGizmoMode::Translate
+        } else {
+            self.prop_gizmo_mode
+        }
     }
 
     /// Translate-arrow AABBs `(axis, min, max)` around `origin` (metres).
@@ -222,16 +248,18 @@ impl World {
         if self.mode != Mode::Build {
             return false;
         }
+        // Every authored entity with a Transform is a selection candidate; the pick
+        // box distinguishes props (mesh bounds) from lights (a synthetic box).
         let ents: Vec<hecs::Entity> = self
             .ecs
             .world()
-            .query::<(hecs::Entity, &crate::ecs::Transform, &crate::ecs::Renderable)>()
+            .query::<(hecs::Entity, &crate::ecs::Transform)>()
             .iter()
-            .map(|(e, _, _)| e)
+            .map(|(e, _)| e)
             .collect();
         let mut best: Option<(f32, hecs::Entity)> = None;
         for e in ents {
-            if let Some((min, max)) = self.prop_world_aabb(e) {
+            if let Some((min, max)) = self.select_aabb(e) {
                 if let Some(t) = ray_aabb(origin, dir, min, max) {
                     if best.map(|(bt, _)| t < bt).unwrap_or(true) {
                         best = Some((t, e));
@@ -253,7 +281,7 @@ impl World {
         let (Some(t), Some(origin)) = (self.prop_transform(e), self.prop_gizmo_origin(e)) else {
             return false;
         };
-        match self.prop_gizmo_mode {
+        match self.effective_gizmo_mode(e) {
             PropGizmoMode::Translate => {
                 let Some(axis) = self.translate_pick(origin, o, d) else {
                     return false;
@@ -386,7 +414,7 @@ impl World {
         let mut idx = Vec::new();
         let bright = |c: [f32; 3]| [(c[0] * 1.5).min(1.0), (c[1] * 1.5).min(1.0), (c[2] * 1.5).min(1.0)];
 
-        match self.prop_gizmo_mode {
+        match self.effective_gizmo_mode(e) {
             PropGizmoMode::Translate => {
                 let hover = self
                     .prop_gizmo_drag

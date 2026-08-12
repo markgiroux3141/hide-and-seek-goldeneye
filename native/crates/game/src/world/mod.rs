@@ -1308,6 +1308,10 @@ pub struct World {
     /// gameplay systems only tick during HUNT (see [`Self::fixed_step`]). Authored
     /// entities persist via the level file (see `world::persist`). See [`crate::ecs`].
     ecs: crate::ecs::Ecs,
+    /// Level-wide ambient fill light (colour + strength). A global, not an entity —
+    /// ambient has no position. Persisted in the level file; edited in the OBJECTS
+    /// panel's LEVEL LIGHTING section. See [`crate::ecs::AmbientSettings`].
+    ambient: crate::ecs::AmbientSettings,
     /// The player capsule; `Some` only in HUNT mode.
     character: Option<CharacterController>,
     /// Baked nav grid; `Some` only in HUNT mode.
@@ -1581,6 +1585,13 @@ pub struct World {
     prop_gizmo_mode: PropGizmoMode,
     /// The in-progress prop gizmo drag, if any.
     prop_gizmo_drag: Option<PropGizmoDrag>,
+    /// Point-light placement tool armed (the OBJECTS panel's Place Light), BUILD only.
+    /// While set, a marker ghost tracks the cursor floor-pick and a left-click authors
+    /// a light entity. Mutually exclusive with prop placement. See `world::tools::light`.
+    light_tool: bool,
+    /// The metric point the light-placement ghost currently previews (floor pick +
+    /// fixed height); what a confirm places the light at.
+    light_preview_pos: Option<Vec3>,
     /// This frame's mouse world ray `(origin, dir)`, pushed by the app from the free
     /// cursor's unprojection; the prop gizmo pick/hover/drag read it.
     mouse_ray: Option<(Vec3, Vec3)>,
@@ -1838,6 +1849,7 @@ impl World {
             physics: PhysicsWorld::new(),
             mode: Mode::Build,
             ecs: crate::ecs::Ecs::new(),
+            ambient: crate::ecs::AmbientSettings::default(),
             character: None,
             nav: None,
             enemies: Vec::new(),
@@ -1912,6 +1924,8 @@ impl World {
             selected_prop: None,
             prop_colliders: std::collections::HashMap::new(),
             prop_gizmo_mode: PropGizmoMode::Translate,
+            light_tool: false,
+            light_preview_pos: None,
             prop_gizmo_drag: None,
             mouse_ray: None,
             gizmo_snap: false,

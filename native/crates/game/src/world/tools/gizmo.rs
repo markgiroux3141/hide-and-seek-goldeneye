@@ -179,25 +179,32 @@ impl World {
         if self.mode != Mode::Build {
             return None;
         }
-        // Object mode: a selected prop's gizmo takes over the shared gizmo channel.
-        if let Some(m) = self.prop_gizmo_mesh() {
-            return Some(m);
-        }
-        let parts = self.gizmo_parts();
-        if parts.is_empty() {
-            return None;
-        }
-        let active = self.gizmo_drag.map(|d| d.handle).or_else(|| self.gizmo_pick());
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
-        for (h, min, max, rgb) in parts {
-            let col = if Some(h) == active {
-                [(rgb[0] * 1.5).min(1.0), (rgb[1] * 1.5).min(1.0), (rgb[2] * 1.5).min(1.0)]
-            } else {
-                rgb
-            };
-            push_colored_box(&mut vertices, &mut indices, min, max, col);
+        // Always-visible point-light markers (small colour-tinted cubes), so lights
+        // can be seen + clicked in BUILD even when not selected.
+        self.push_light_markers(&mut vertices, &mut indices);
+        // Object mode: a selected prop's (or light's) gizmo handles overlay the rest.
+        if let Some(m) = self.prop_gizmo_mesh() {
+            let base = vertices.len() as u32;
+            vertices.extend(m.vertices);
+            indices.extend(m.indices.into_iter().map(|i| i + base));
+        } else {
+            // Otherwise the platform move/scale gizmo, when a platform is selected.
+            let active = self.gizmo_drag.map(|d| d.handle).or_else(|| self.gizmo_pick());
+            for (h, min, max, rgb) in self.gizmo_parts() {
+                let col = if Some(h) == active {
+                    [(rgb[0] * 1.5).min(1.0), (rgb[1] * 1.5).min(1.0), (rgb[2] * 1.5).min(1.0)]
+                } else {
+                    rgb
+                };
+                push_colored_box(&mut vertices, &mut indices, min, max, col);
+            }
         }
-        Some(ColoredMesh { vertices, indices })
+        if vertices.is_empty() {
+            None
+        } else {
+            Some(ColoredMesh { vertices, indices })
+        }
     }
 }

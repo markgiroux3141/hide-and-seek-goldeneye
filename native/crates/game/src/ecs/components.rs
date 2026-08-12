@@ -116,6 +116,47 @@ pub enum MeshId {
     GlassDoor,
 }
 
+/// A placed omnidirectional point light. Authored in BUILD; drives the real
+/// lighting pass. A light entity is just [`Transform`] + `PointLight` — no
+/// [`Renderable`] (lights have no mesh; a build-mode billboard marker stands in for
+/// selection/picking). Persisted like any other authored component, so lights ride
+/// the level file's `entities` collection with props.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PointLight {
+    /// Linear-RGB colour, 0..1 per channel (white = neutral).
+    pub color: Vec3,
+    /// Brightness multiplier — scales this light's contribution before attenuation.
+    pub intensity: f32,
+    /// Falloff radius in metres; the contribution fades to ~zero at this distance.
+    pub range: f32,
+}
+
+impl Default for PointLight {
+    fn default() -> Self {
+        PointLight { color: Vec3::ONE, intensity: 1.0, range: 8.0 }
+    }
+}
+
+/// Level-wide ambient fill. **Not a component** — a single global carried on the
+/// level (and its file), since ambient light has no position. `level` scales
+/// `color` into a flat term added to every lit surface so shadowed areas aren't
+/// pure black. Serialized directly into the level file (see `world::persist`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AmbientSettings {
+    /// Linear-RGB ambient colour, 0..1 per channel.
+    pub color: [f32; 3],
+    /// Ambient strength, 0 (black) .. 1 (full `color`).
+    pub level: f32,
+}
+
+impl Default for AmbientSettings {
+    fn default() -> Self {
+        // A dim neutral fill: lit areas read clearly while unlit corners stay dark
+        // enough that placed lights matter. Authorable per level.
+        AmbientSettings { color: [1.0, 1.0, 1.0], level: 0.15 }
+    }
+}
+
 /// Hit points for anything damageable. Props will use this once the damage system
 /// exists; enemies keep their own `health` field until they migrate. Data only.
 #[derive(Clone, Copy, Debug, PartialEq)]

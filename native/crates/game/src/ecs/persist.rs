@@ -35,6 +35,7 @@ pub enum ComponentData {
     Interactable { radius: f32 },
     Door { opening_type: OpeningType },
     Renderable { mesh: MeshId },
+    PointLight { color: [f32; 3], intensity: f32, range: f32 },
 }
 
 /// Spawn one authored entity into `world` from its data, returning the live handle.
@@ -70,6 +71,9 @@ fn fold_one(b: &mut EntityBuilder, c: &ComponentData) {
         }
         ComponentData::Renderable { mesh } => {
             b.add(Renderable { mesh: *mesh });
+        }
+        ComponentData::PointLight { color, intensity, range } => {
+            b.add(PointLight { color: Vec3::from(*color), intensity: *intensity, range: *range });
         }
     }
 }
@@ -112,6 +116,13 @@ pub(crate) fn extract(eref: &EntityRef<'_>) -> Vec<ComponentData> {
     }
     if let Some(r) = eref.get::<&Renderable>() {
         cs.push(ComponentData::Renderable { mesh: r.mesh });
+    }
+    if let Some(l) = eref.get::<&PointLight>() {
+        cs.push(ComponentData::PointLight {
+            color: l.color.to_array(),
+            intensity: l.intensity,
+            range: l.range,
+        });
     }
     if let Some(i) = eref.get::<&Interactable>() {
         cs.push(ComponentData::Interactable { radius: i.radius });

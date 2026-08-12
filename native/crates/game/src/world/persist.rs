@@ -27,7 +27,12 @@ use super::*;
 /// v2 (2026-07-31): added authored `entities` (the ECS prop layer). The new field
 /// is `#[serde(default)]`, so v1 files still load — an old file simply has no
 /// entities. Bumped so a v2 writer is distinguishable in the version tag.
-const LEVEL_FORMAT_VERSION: u32 = 2;
+///
+/// v3 (2026-07-31): added level lighting — point lights ride the existing
+/// `entities` collection (a light entity is `Transform` + `PointLight`, no schema
+/// change), plus a new `#[serde(default)] ambient` global. Both defaults keep v1/v2
+/// files loading unchanged (no lights, default ambient).
+const LEVEL_FORMAT_VERSION: u32 = 3;
 
 /// One CSG region's authored data (the shell is derived, so it isn't stored —
 /// `refresh_shell` recomputes it on load).
@@ -57,6 +62,10 @@ struct LevelFile {
     /// with an empty set. See [`crate::ecs`].
     #[serde(default)]
     entities: Vec<crate::ecs::EntityData>,
+    /// Level-wide ambient fill (colour + strength). `#[serde(default)]` keeps v1/v2
+    /// files loading with the neutral default. See [`crate::ecs::AmbientSettings`].
+    #[serde(default)]
+    ambient: crate::ecs::AmbientSettings,
     next_brush_id: u32,
     next_platform_id: u32,
     next_run_id: u32,
@@ -99,6 +108,7 @@ impl World {
             platforms: self.platforms.clone(),
             stair_runs: self.stair_runs.clone(),
             entities: self.ecs.save_authored(),
+            ambient: self.ambient,
             next_brush_id: self.next_brush_id,
             next_platform_id: self.next_platform_id,
             next_run_id: self.next_run_id,
@@ -159,6 +169,7 @@ impl World {
         self.platforms = file.platforms;
         self.stair_runs = file.stair_runs;
         self.spawn_point = Vec3::from(file.spawn_point);
+        self.ambient = file.ambient;
 
         // Restore allocators, but never below one-past the max id actually
         // present — a hand-edited file with a stale counter can't then hand out
@@ -223,6 +234,8 @@ impl World {
         self.prop_preview_pos = None;
         self.selected_prop = None;
         self.prop_gizmo_drag = None;
+        self.light_tool = false;
+        self.light_preview_pos = None;
         self.platform_phase = None;
         self.selected_platform = None;
         self.selected_run = None;
@@ -328,6 +341,51 @@ mod tests {
             matches!(c, ComponentData::Renderable { mesh: MeshId::WoodenCrate })
         });
         assert!(has_crate, "the prop keeps its mesh id");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A placed point light (an authored entity: Transform + PointLight, no
+    /// Renderable) survives the full save → load round-trip, and the level-wide
+    /// ambient fill round-trips alongside it.
+    #[test]
+    fn save_load_round_trips_lights_and_ambient() {
+        use crate::ecs::{AmbientSettings, ComponentData, EntityData, PointLight};
+
+        let mut world = World::new();
+        let id = world.ecs.alloc_id();
+        world.ecs.spawn_authored(&EntityData {
+            id,
+            components: vec![
+                ComponentData::Transform {
+                    pos: [1.0, 2.5, -3.0],
+                    rot: Quat::IDENTITY.to_array(),
+                    scale: [1.0, 1.0, 1.0],
+                },
+                ComponentData::PointLight { color: [1.0, 0.4, 0.1], intensity: 3.0, range: 12.0 },
+            ],
+        });
+        world.set_ambient(AmbientSettings { color: [0.2, 0.3, 0.5], level: 0.4 });
+
+        let path = std::env::temp_dir().join("bah_lights_roundtrip.json");
+        world.save_level(&path).expect("save");
+
+        let mut loaded = World::new();
+        loaded.load_level(&path).expect("load");
+
+        // The light entity round-trips with its params intact…
+        let lights = loaded.light_draws();
+        assert_eq!(lights.len(), 1, "the placed light must round-trip");
+        let (pos, color, intensity, range, _shadow) = lights[0];
+        assert_eq!(pos.to_array(), [1.0, 2.5, -3.0]);
+        assert_eq!(color, [1.0, 0.4, 0.1]);
+        assert_eq!(intensity, 3.0);
+        assert_eq!(range, 12.0);
+        // …and it is NOT a prop (no Renderable), so it stays out of the prop draw list.
+        assert!(loaded.prop_draws(1.0).is_empty(), "a light is not drawn as a prop");
+        // Ambient round-trips.
+        let amb = loaded.ambient();
+        assert_eq!(amb.color, [0.2, 0.3, 0.5]);
+        assert_eq!(amb.level, 0.4);
         let _ = std::fs::remove_file(&path);
     }
 

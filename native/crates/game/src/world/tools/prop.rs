@@ -40,6 +40,8 @@ impl World {
         self.place_tool = None;
         self.clear_platform_state();
         self.selected = None;
+        self.light_tool = false;
+        self.light_preview_pos = None;
         self.prop_tool = Some(mesh);
         self.prop_preview_pos = None;
     }
@@ -144,8 +146,11 @@ impl World {
     /// [`PROP_DARKEN_FLOOR`] by its health fraction (the shoot-feedback); a
     /// [`Destroyed`] prop stays drawn as a charred husk ([`PROP_DESTROYED_SHADE`], the
     /// GoldenEye "darkened remains"). Non-prop `Renderable`s (e.g. a door) are skipped.
-    pub fn prop_draws(&self, aspect: f32) -> Vec<(&'static str, Mat4, [f32; 4])> {
-        let vp = self.view_proj(aspect);
+    /// Per-prop `(key, model→world, tint)`. The renderer combines each world matrix
+    /// with the shared camera clip matrix (and uses the world matrix for lighting), so
+    /// this returns the raw world transform — `aspect` is no longer needed but is kept
+    /// for call-site symmetry with the other draw-list getters.
+    pub fn prop_draws(&self, _aspect: f32) -> Vec<(&'static str, Mat4, [f32; 4])> {
         let mut out = Vec::new();
         for (t, r, hp, destroyed) in self
             .ecs
@@ -172,7 +177,7 @@ impl World {
                     _ => [1.0, 1.0, 1.0, 1.0],
                 }
             };
-            out.push((def.key, vp * model, tint));
+            out.push((def.key, model, tint));
         }
         out
     }

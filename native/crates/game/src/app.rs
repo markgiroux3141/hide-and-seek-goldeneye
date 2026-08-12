@@ -41,6 +41,40 @@ enum ShopAction {
     Ammo(usize),
 }
 
+/// A section of the left authoring panel (the OBJECTS/LIGHTING menu), cycled with
+/// the `◄ ►` arrows around the title. Circular — advancing past the last wraps to
+/// the first. Add a variant + an `ALL` entry to grow the menu.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PanelTab {
+    Objects,
+    Lighting,
+}
+
+impl PanelTab {
+    /// Every tab, in display order (also the cycle order).
+    const ALL: [PanelTab; 2] = [PanelTab::Objects, PanelTab::Lighting];
+
+    /// The header title for this tab.
+    fn title(self) -> &'static str {
+        match self {
+            PanelTab::Objects => "OBJECTS",
+            PanelTab::Lighting => "LIGHTING",
+        }
+    }
+
+    /// The next tab (wraps to the first after the last).
+    fn next(self) -> Self {
+        let i = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
+        Self::ALL[(i + 1) % Self::ALL.len()]
+    }
+
+    /// The previous tab (wraps to the last before the first).
+    fn prev(self) -> Self {
+        let i = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
+        Self::ALL[(i + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+}
+
 // ─── Shop palette (GoldenEye gold-on-black spy-terminal look) ──────────────────
 /// Signature gold accent — headings, borders, buy buttons, selection.
 const SHOP_GOLD: egui::Color32 = egui::Color32::from_rgb(224, 184, 74);
@@ -145,6 +179,13 @@ struct App {
     /// `CursorMoved`. Used to unproject a world pick ray for prop placement while the
     /// object panel has the cursor free.
     cursor_pos: (f32, f32),
+    /// BUILD-mode preference: show real point lighting (`true`) vs the legacy flat
+    /// look (`false`). Toggled by the **L** key / the OBJECTS panel checkbox. HUNT
+    /// ignores this — it forces real lighting whenever the level has any light.
+    build_real_lighting: bool,
+    /// Which section of the left authoring panel is showing (Objects / Lighting),
+    /// cycled by the `◄ ►` arrows in its header.
+    panel_tab: PanelTab,
 }
 
 impl App {
@@ -172,6 +213,8 @@ impl App {
             props_preview_angle: 0.0,
             lock_before_props: false,
             cursor_pos: (0.0, 0.0),
+            build_real_lighting: true,
+            panel_tab: PanelTab::Objects,
         }
     }
 }
@@ -309,6 +352,7 @@ impl App {
             self.set_pointer_lock(self.lock_before_props);
             if let Some(w) = self.world.as_mut() {
                 w.cancel_prop_placement();
+                w.cancel_light_placement();
                 w.deselect_prop();
             }
             self.props_selected = None;
@@ -396,6 +440,25 @@ impl App {
         let mut ground_prop = false;
         let mut delete_prop = false;
         let mut go_neutral = false;
+
+        // Lighting panel snapshot + edit buffers. The selected light's params (if the
+        // selection is a light), the level ambient, and the placement/toggle states
+        // are read up front; widgets mutate local buffers that are applied after the
+        // `state` borrow ends (same discipline as the prop controls above).
+        let selected_light = self.world.as_ref().and_then(|w| w.selected_light());
+        let placing_light = self.world.as_ref().map(|w| w.is_placing_light()).unwrap_or(false);
+        let ambient = self.world.as_ref().map(|w| w.ambient()).unwrap_or_default();
+        let mut amb_color = ambient.color;
+        let mut amb_level = ambient.level;
+        let mut ambient_edited = false;
+        let (mut light_color, mut light_intensity, mut light_range) =
+            selected_light.unwrap_or(([1.0, 1.0, 1.0], 1.0, 8.0));
+        let mut light_edited = false;
+        let mut toggle_light_place = false;
+        let mut real_lighting_ui = self.build_real_lighting;
+        let mut set_real_lighting: Option<bool> = None;
+        let panel_tab = self.panel_tab;
+        let mut new_tab: Option<PanelTab> = None;
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
             if shop_open {
@@ -582,75 +645,67 @@ impl App {
                     .default_width(224.0)
                     .show(ctx, |ui| {
                         ui.add_space(4.0);
-                        ui.heading(egui::RichText::new("OBJECTS").color(SHOP_GOLD).strong());
-                        ui.separator();
-                        // Live 3D turntable of the selected prop (same offscreen
-                        // preview target the shop uses; rendered in the render block).
-                        if let Some(def) = prop_sel.and_then(|i| crate::props::CATALOG.get(i)) {
-                            ui.group(|ui| {
-                                ui.set_min_size(egui::vec2(196.0, 196.0));
-                                ui.vertical_centered(|ui| match preview_tex {
-                                    Some(tex) => {
-                                        ui.add(egui::Image::new(egui::load::SizedTexture::new(
-                                            tex,
-                                            egui::vec2(188.0, 188.0),
-                                        )));
-                                    }
-                                    None => {
-                                        ui.add_space(84.0);
-                                        ui.label(
-                                            egui::RichText::new("3D PREVIEW")
-                                                .color(SHOP_GOLD_DIM)
-                                                .strong(),
-                                        );
-                                    }
-                                });
-                            });
-                            ui.add_space(4.0);
-                            ui.label(egui::RichText::new(def.name).color(SHOP_GOLD).strong());
-                        }
-                        // Leave placement / clear selection so clicks select existing
-                        // props (also the Q / Esc key).
-                        if placing_prop || prop_selected {
-                            let label = if placing_prop {
-                                "Stop placing (Q)"
-                            } else {
-                                "Deselect (Q)"
-                            };
-                            if ui.button(label).clicked() {
-                                go_neutral = true;
+                        // ── Tabbed header: ◀ TITLE ▶ cycles the panel section (Objects
+                        // / Lighting), wrapping around at either end.
+                        ui.horizontal(|ui| {
+                            if ui.button(egui::RichText::new("◀").color(SHOP_GOLD).strong()).clicked() {
+                                new_tab = Some(panel_tab.prev());
                             }
-                        }
-                        ui.add_space(6.0);
-                        // Palette: catalog grouped by category; click to arm placement.
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            ui.set_width(206.0);
-                            for &cat in crate::props::PropCategory::ALL {
-                                ui.add_space(4.0);
-                                ui.label(
-                                    egui::RichText::new(cat.label())
-                                        .small()
-                                        .strong()
-                                        .color(SHOP_GOLD_DIM),
-                                );
-                                for (i, def) in crate::props::CATALOG.iter().enumerate() {
-                                    if def.category != cat {
-                                        continue;
+                            ui.add_space(6.0);
+                            ui.heading(egui::RichText::new(panel_tab.title()).color(SHOP_GOLD).strong());
+                            ui.with_layout(
+                                egui::Layout::right_to_left(egui::Align::Center),
+                                |ui| {
+                                    if ui.button(egui::RichText::new("▶").color(SHOP_GOLD).strong()).clicked() {
+                                        new_tab = Some(panel_tab.next());
                                     }
-                                    if ui
-                                        .selectable_label(prop_sel == Some(i), def.name)
-                                        .clicked()
-                                    {
-                                        new_prop_selected = Some(i);
-                                    }
-                                }
-                            }
+                                },
+                            );
                         });
-                        // Edit controls for the selected prop (Esc to deselect).
-                        if prop_selected {
-                            ui.separator();
+                        ui.separator();
+
+                        // ── Common: the current selection's editor (a light or a prop),
+                        // shown on any tab so a click in the 3D view is always editable.
+                        if selected_light.is_some() {
                             ui.label(
-                                egui::RichText::new("SELECTED")
+                                egui::RichText::new("SELECTED LIGHT")
+                                    .small()
+                                    .strong()
+                                    .color(SHOP_GOLD_DIM),
+                            );
+                            ui.horizontal(|ui| {
+                                ui.label("Colour");
+                                if ui.color_edit_button_rgb(&mut light_color).changed() {
+                                    light_edited = true;
+                                }
+                            });
+                            if ui
+                                .add(egui::Slider::new(&mut light_intensity, 0.0..=8.0).text("intensity"))
+                                .changed()
+                            {
+                                light_edited = true;
+                            }
+                            if ui
+                                .add(egui::Slider::new(&mut light_range, 0.5..=40.0).text("range m"))
+                                .changed()
+                            {
+                                light_edited = true;
+                            }
+                            ui.label(
+                                egui::RichText::new("drag the green Y arrow to raise · Del = delete")
+                                    .small()
+                                    .color(SHOP_DIM),
+                            );
+                            if ui
+                                .button(egui::RichText::new("Delete").color(egui::Color32::from_rgb(230, 90, 90)))
+                                .clicked()
+                            {
+                                delete_prop = true;
+                            }
+                            ui.separator();
+                        } else if prop_selected {
+                            ui.label(
+                                egui::RichText::new("SELECTED PROP")
                                     .small()
                                     .strong()
                                     .color(SHOP_GOLD_DIM),
@@ -674,15 +729,122 @@ impl App {
                                     delete_prop = true;
                                 }
                             });
+                            ui.separator();
+                        }
+
+                        // Leave placement / clear selection so clicks select existing
+                        // objects (also the Q / Esc key).
+                        if placing_prop || placing_light || prop_selected {
+                            let label = if placing_prop || placing_light {
+                                "Stop placing (Q)"
+                            } else {
+                                "Deselect (Q)"
+                            };
+                            if ui.button(label).clicked() {
+                                go_neutral = true;
+                            }
+                        }
+                        if ui.button("CLOSE (O)").clicked() {
+                            close_props = true;
                         }
                         ui.separator();
-                        ui.label(
-                            egui::RichText::new("Click floor to place · click a prop to edit · O closes")
-                                .small()
-                                .color(SHOP_DIM),
-                        );
-                        if ui.button("CLOSE").clicked() {
-                            close_props = true;
+
+                        // ── Per-tab content.
+                        match panel_tab {
+                            PanelTab::Lighting => {
+                                if ui
+                                    .selectable_label(placing_light, "+ Place Point Light")
+                                    .clicked()
+                                {
+                                    toggle_light_place = true;
+                                }
+                                ui.label(
+                                    egui::RichText::new("click the floor to drop a light")
+                                        .small()
+                                        .color(SHOP_DIM),
+                                );
+                                ui.add_space(4.0);
+                                if ui
+                                    .checkbox(&mut real_lighting_ui, "Real lighting (L)")
+                                    .changed()
+                                {
+                                    set_real_lighting = Some(real_lighting_ui);
+                                }
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new("AMBIENT (whole level)")
+                                        .small()
+                                        .strong()
+                                        .color(SHOP_GOLD_DIM),
+                                );
+                                ui.horizontal(|ui| {
+                                    ui.label("Colour");
+                                    if ui.color_edit_button_rgb(&mut amb_color).changed() {
+                                        ambient_edited = true;
+                                    }
+                                });
+                                if ui
+                                    .add(egui::Slider::new(&mut amb_level, 0.0..=1.0).text("level"))
+                                    .changed()
+                                {
+                                    ambient_edited = true;
+                                }
+                            }
+                            PanelTab::Objects => {
+                                // A 3D turntable of the highlighted catalog prop, above
+                                // the (scrolling) list.
+                                ui.label(
+                                    egui::RichText::new("PLACE PROP — click floor to drop")
+                                        .small()
+                                        .strong()
+                                        .color(SHOP_GOLD_DIM),
+                                );
+                                if let Some(def) = prop_sel.and_then(|i| crate::props::CATALOG.get(i)) {
+                                    ui.group(|ui| {
+                                        ui.set_min_size(egui::vec2(196.0, 132.0));
+                                        ui.vertical_centered(|ui| match preview_tex {
+                                            Some(tex) => {
+                                                ui.add(egui::Image::new(egui::load::SizedTexture::new(
+                                                    tex,
+                                                    egui::vec2(128.0, 128.0),
+                                                )));
+                                            }
+                                            None => {
+                                                ui.add_space(54.0);
+                                                ui.label(
+                                                    egui::RichText::new("3D PREVIEW")
+                                                        .color(SHOP_GOLD_DIM)
+                                                        .strong(),
+                                                );
+                                            }
+                                        });
+                                    });
+                                    ui.label(egui::RichText::new(def.name).color(SHOP_GOLD).strong());
+                                }
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    ui.set_width(206.0);
+                                    for &cat in crate::props::PropCategory::ALL {
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            egui::RichText::new(cat.label())
+                                                .small()
+                                                .strong()
+                                                .color(SHOP_GOLD_DIM),
+                                        );
+                                        for (i, def) in crate::props::CATALOG.iter().enumerate() {
+                                            if def.category != cat {
+                                                continue;
+                                            }
+                                            if ui
+                                                .selectable_label(prop_sel == Some(i), def.name)
+                                                .clicked()
+                                            {
+                                                new_prop_selected = Some(i);
+                                            }
+                                        }
+                                    }
+                                });
+                            }
                         }
                     });
             }
@@ -741,7 +903,31 @@ impl App {
         if go_neutral {
             if let Some(world) = self.world.as_mut() {
                 world.cancel_prop_placement();
+                world.cancel_light_placement();
                 world.deselect_prop();
+            }
+        }
+        // Lighting edits (arm/disarm light placement, flat/real preference, ambient,
+        // selected-light params) — applied after the `state` borrow ends.
+        if toggle_light_place {
+            if let Some(world) = self.world.as_mut() {
+                world.arm_light_placement();
+            }
+        }
+        if let Some(real) = set_real_lighting {
+            self.build_real_lighting = real;
+        }
+        if let Some(tab) = new_tab {
+            self.panel_tab = tab;
+        }
+        if ambient_edited {
+            if let Some(world) = self.world.as_mut() {
+                world.set_ambient(crate::ecs::AmbientSettings { color: amb_color, level: amb_level });
+            }
+        }
+        if light_edited {
+            if let Some(world) = self.world.as_mut() {
+                world.set_selected_light(light_color, light_intensity, light_range);
             }
         }
         if close_props {
@@ -1011,6 +1197,16 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
+                // Light placement: same free-cursor click-to-drop as props.
+                if self.world.as_ref().map(|w| w.is_placing_light()).unwrap_or(false) {
+                    if let Some((o, d)) = self.mouse_world_ray() {
+                        if let Some(world) = self.world.as_mut() {
+                            world.update_light_preview(o, d);
+                            world.confirm_light_placement();
+                        }
+                    }
+                    return;
+                }
                 // Object mode (panel open, free cursor, not RMB-looking): grab a gizmo
                 // handle on the selected prop, else select the prop under the cursor.
                 // Never grabs the cursor here — RMB owns looking.
@@ -1249,10 +1445,23 @@ impl ApplicationHandler for App {
                     .as_ref()
                     .map(|w| w.is_build() && w.is_placing_prop())
                     .unwrap_or(false);
+                let light_placing = self
+                    .world
+                    .as_ref()
+                    .map(|w| w.is_build() && w.is_placing_light())
+                    .unwrap_or(false);
                 if prop_placing {
                     let ray = self.mouse_world_ray();
                     let mesh = ray
                         .and_then(|(o, d)| self.world.as_mut().and_then(|w| w.update_prop_preview(o, d)));
+                    if let Some(r) = self.renderer.as_mut() {
+                        r.set_highlight(mesh.as_ref());
+                    }
+                } else if light_placing {
+                    // Light-placement ghost: a marker cube at the floor-pick + height.
+                    let ray = self.mouse_world_ray();
+                    let mesh = ray
+                        .and_then(|(o, d)| self.world.as_mut().and_then(|w| w.update_light_preview(o, d)));
                     if let Some(r) = self.renderer.as_mut() {
                         r.set_highlight(mesh.as_ref());
                     }
@@ -1323,8 +1532,10 @@ impl ApplicationHandler for App {
                     renderer.set_enemy_weapon_draws(&world.enemy_weapon_draws(aspect));
                     renderer.set_enemy_muzzle_draws(&world.enemy_muzzle_draws(aspect));
                     // Placed props (the object palette): world-space textured draws,
-                    // one per authored prop entity (white tint in M1).
-                    renderer.set_prop_draws(&world.prop_draws(aspect));
+                    // one per authored prop entity (white tint in M1). The renderer
+                    // combines each world matrix with this frame's clip matrix and
+                    // lights the prop in world space.
+                    renderer.set_prop_draws(world.view_proj(aspect), &world.prop_draws(aspect));
                     // Crosshair: BUILD shows the small white editor cross (while
                     // grabbed, so it marks the face-pick centre); HUNT shows the
                     // GoldenEye reticle only while aiming, and nothing otherwise.
@@ -1396,6 +1607,28 @@ impl ApplicationHandler for App {
                             renderer.render_prop_preview(def.key, self.props_preview_angle);
                         }
                     }
+                    // Scene lighting: authored point lights + level ambient. BUILD
+                    // follows the flat/real toggle; HUNT forces real lighting whenever
+                    // the level has any light (else falls back to flat).
+                    let has_lights = world.has_lights();
+                    let real_lighting = if world.is_build() {
+                        self.build_real_lighting && has_lights
+                    } else {
+                        has_lights
+                    };
+                    let amb = world.ambient();
+                    // Shadow casters (the most influential lights) only when real
+                    // lighting is on; flat mode renders no shadow cubes.
+                    if real_lighting {
+                        renderer.set_shadow_casters(&world.shadow_casters());
+                    } else {
+                        renderer.set_shadow_casters(&[]);
+                    }
+                    renderer.set_lighting(
+                        &world.light_draws(),
+                        (amb.color, amb.level),
+                        real_lighting,
+                    );
                     let view_proj = world.view_proj(renderer.aspect());
                     renderer.render(view_proj, egui_frame);
                 }
@@ -1494,6 +1727,7 @@ impl App {
             if code == KeyCode::Escape || code == KeyCode::KeyQ {
                 if let Some(w) = self.world.as_mut() {
                     w.cancel_prop_placement();
+                    w.cancel_light_placement();
                     w.deselect_prop();
                 }
                 return;
@@ -1525,6 +1759,16 @@ impl App {
                 r.set_grid_mode(grid);
                 log::info!("view: {}", if grid { "grid" } else { "textured" });
             }
+            return;
+        }
+        // L toggles real point lighting vs the flat legacy look. This is a BUILD
+        // preference — HUNT always shows real lighting when the level has any light.
+        if code == KeyCode::KeyL {
+            self.build_real_lighting = !self.build_real_lighting;
+            log::info!(
+                "lighting: {}",
+                if self.build_real_lighting { "real" } else { "flat" }
+            );
             return;
         }
         // Level save/load quick-slots (works grabbed or not, like the grid

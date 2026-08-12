@@ -2,6 +2,7 @@
 //! `impl World` methods (arm / query / preview / scroll / confirm / cancel).
 
 mod gizmo;
+mod light;
 mod opening;
 mod placement;
 mod platform;
