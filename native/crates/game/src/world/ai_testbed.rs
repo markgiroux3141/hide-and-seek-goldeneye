@@ -134,6 +134,44 @@ impl TestArena {
         self.world.fixed_step(dt, &input);
         self.world.enemy_combat_step(dt);
     }
+
+    /// Like [`Self::build`], but every hunter runs the **Perfect Dark simulant
+    /// model** at the given tier (see [`super::pd_lab`]). The lab has to be enabled
+    /// before `toggle_mode`, because that is what spawns the wave.
+    ///
+    /// The player is left *vulnerable* here, unlike `build` — measuring how much
+    /// damage a tier lands is the whole point of these scenarios — so callers must
+    /// keep runs short enough or heal between them.
+    fn build_pd(
+        size: [f32; 3],
+        obstacles: &[[f32; 6]],
+        wave: usize,
+        player_m: Vec3,
+        tier: crate::pdsim::difficulty::BotDifficulty,
+    ) -> Self {
+        let mut world = World::new();
+        let mut region = Region::new(0);
+        region
+            .brushes
+            .push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, size[0], size[1], size[2]));
+        for (k, o) in obstacles.iter().enumerate() {
+            region
+                .brushes
+                .push(Brush::new(2 + k as u32, Op::Add, o[0], o[1], o[2], o[3], o[4], o[5]));
+        }
+        world.regions = vec![region];
+        world.set_difficulty(DIFFICULTY_MAX);
+        world.enable_pd_lab(super::pd_lab::PdLabConfig {
+            count: wave,
+            difficulty: Some(tier),
+            bot_type: crate::pdsim::personality::BotType::General,
+        });
+        world.camera.pos = Vec3::new(player_m.x, player_m.y.max(1.5), player_m.z);
+        world.initial_meshes();
+        world.toggle_mode();
+        let floor_y = world.player_pos().map(|p| p.y).unwrap_or(0.0);
+        Self { world, floor_y }
+    }
 }
 
 /// Per-enemy behavioral trace + defect flags across a run.
@@ -742,5 +780,179 @@ fn a_crowded_pack_settles_without_grinding_in_place() {
     assert!(
         mon.violations_of("walk_in_place").is_empty(),
         "a hunter's legs moved but it barely travelled (walk-in-place)"
+    );
+}
+
+// ─── PD simulant lab scenarios ───────────────────────────────────────────────
+//
+// These are the ones that matter for judging the port, because they measure the
+// property the whole model exists to produce: **accuracy that emerges from where
+// the barrel is pointing**, with no hit roll anywhere in the chain.
+//
+// If the zeroing model were broken — the aim error stuck at zero, or the tier
+// table read wrong — `emit_pd_shot` would still fire, still raycast, and still
+// deal damage. Nothing would fail except the *shape* of the outcome. So these
+// scenarios assert the shape.
+
+/// A dead-simple duel: player and one simulant in an empty box at a fixed range,
+/// with the player standing still in plain sight. Returns how long the simulant
+/// took to kill the player, or `None` if it failed to inside `secs`.
+///
+/// Time-to-kill rather than damage-in-a-window, because the player only has 100
+/// HP: any tier competent enough to empty that pool inside the window looks
+/// identical to any other, and the measurement silently stops discriminating.
+fn pd_time_to_kill(tier: crate::pdsim::difficulty::BotDifficulty, secs: f32) -> Option<f32> {
+    // 40 WT (10 m) apart in a 60 WT box: far enough that a couple of degrees of
+    // aim error is the difference between a hit and a miss, close enough to be
+    // well inside every weapon's range.
+    let mut arena = TestArena::build_pd([60.0, 16.0, 60.0], &[], 1, Vec3::new(7.5, 0.0, 2.5), tier);
+    arena.set_player(7.5, 2.5);
+    arena.place_hunter(0, 7.5, 12.5);
+    let dt = 1.0 / 60.0;
+    for i in 0..(secs / dt) as usize {
+        // Hold the player still and in the open — no dodging, no cover. Any
+        // difference between tiers is then purely the aim model.
+        arena.set_player(7.5, 2.5);
+        arena.step(dt);
+        if arena.world.is_player_dead() {
+            return Some(i as f32 * dt);
+        }
+    }
+    None
+}
+
+/// **The headline claim.** PD simulants never roll a hit chance, yet difficulty
+/// still has to mean something. If the zeroing model works, a DarkSim (zero aim
+/// error, no reaction delay) must kill a stationary target in the open far faster
+/// than a MeatSim (up to ~30° of wander, a 1.5 s reaction) — purely because its
+/// gun is actually pointed at the player.
+#[test]
+fn pd_accuracy_emerges_from_aim_rather_than_a_dice_roll() {
+    use crate::pdsim::difficulty::BotDifficulty;
+    const WINDOW: f32 = 30.0;
+    let dark = pd_time_to_kill(BotDifficulty::Dark, WINDOW);
+    let meat = pd_time_to_kill(BotDifficulty::Meat, WINDOW);
+    println!("PD time-to-kill: dark {dark:?}, meat {meat:?}");
+
+    let dark = dark.expect("a DarkSim must kill a stationary target in the open");
+    match meat {
+        // A MeatSim failing to land a kill at all inside 30 s is the strongest
+        // possible version of this result.
+        None => {}
+        Some(meat) => assert!(
+            meat > dark * 2.0,
+            "difficulty must separate on aim alone: dark killed in {dark:.1}s, meat in {meat:.1}s"
+        ),
+    }
+}
+
+/// The reaction delay has to be real, not cosmetic. A MeatSim waits 1.5 s between
+/// seeing you and shooting; a DarkSim waits none. Measure when the first shot
+/// leaves the barrel.
+#[test]
+fn pd_reaction_delay_gates_the_first_shot() {
+    use crate::pdsim::difficulty::BotDifficulty;
+
+    let first_shot = |tier| {
+        let mut arena =
+            TestArena::build_pd([60.0, 16.0, 60.0], &[], 1, Vec3::new(7.5, 0.0, 2.5), tier);
+        arena.set_player(7.5, 2.5);
+        arena.place_hunter(0, 7.5, 9.0);
+        let dt = 1.0 / 60.0;
+        for i in 0..(5.0 / dt) as usize {
+            arena.set_player(7.5, 2.5);
+            arena.step(dt);
+            if arena.world.enemies.first().is_some_and(|e| e.fire_elapsed.is_some()) {
+                return Some(i as f32 * dt);
+            }
+        }
+        None
+    };
+
+    let dark = first_shot(BotDifficulty::Dark).expect("a DarkSim must open fire within 5 s");
+    let meat = first_shot(BotDifficulty::Meat).expect("a MeatSim must open fire within 5 s");
+    println!("first shot: dark at {dark:.2}s, meat at {meat:.2}s");
+    // A MeatSim owes a 1.5 s reaction; a DarkSim owes none, so it fires as soon as
+    // it has swung round to face. Note the two costs *overlap* — the shoot-delay
+    // clock runs while the body is still turning — so the gap between them is less
+    // than the full 1.5 s. Assert each against what it actually owes.
+    let owed = BotDifficulty::Meat.tuning().shoot_delay;
+    assert!(
+        meat >= owed - 1.0 / 60.0,
+        "a MeatSim fired at {meat:.2}s, before its {owed:.2}s reaction was served"
+    );
+    assert!(dark < owed * 0.75, "a DarkSim should not wait a MeatSim's reaction (fired at {dark:.2}s)");
+}
+
+/// A simulant's body yaw must actually carry the aim error — that is what makes
+/// the model legible on screen and what `emit_pd_shot` fires along. A MeatSim
+/// tracking a stationary target should be visibly off it much of the time; a
+/// DarkSim should be locked on.
+#[test]
+fn pd_body_yaw_carries_the_aim_error() {
+    use crate::pdsim::difficulty::BotDifficulty;
+
+    let worst_error = |tier| {
+        let mut arena =
+            TestArena::build_pd([60.0, 16.0, 60.0], &[], 1, Vec3::new(7.5, 0.0, 2.5), tier);
+        arena.set_player(7.5, 2.5);
+        arena.place_hunter(0, 7.5, 9.0);
+        let dt = 1.0 / 60.0;
+        let mut worst = 0.0f32;
+        for i in 0..(8.0 / dt) as usize {
+            arena.set_player(7.5, 2.5);
+            arena.step(dt);
+            // Ignore the opening second, while it is still swinging round to face.
+            if i as f32 * dt > 1.0 {
+                if let Some(d) = arena.world.pd_debug().first() {
+                    worst = worst.max(d.aim_error_deg.abs());
+                }
+            }
+        }
+        worst
+    };
+
+    let meat = worst_error(BotDifficulty::Meat);
+    let dark = worst_error(BotDifficulty::Dark);
+    println!("worst aim error: meat {meat:.1}deg, dark {dark:.2}deg");
+    assert!(meat > 5.0, "a MeatSim should wander well off target, got {meat:.1}deg");
+    assert!(dark < 0.01, "a DarkSim should never leave the target, got {dark:.3}deg");
+}
+
+/// A PeaceSim must never pull the trigger, however lethal its tier. This is the
+/// personality axis proving it is genuinely orthogonal to difficulty: a Dark
+/// PeaceSim is a perfect shot that refuses to shoot.
+#[test]
+fn pd_a_dark_pacifist_never_fires() {
+    let mut world = World::new();
+    let mut region = Region::new(0);
+    region.brushes.push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 60.0, 16.0, 60.0));
+    world.regions = vec![region];
+    world.set_difficulty(DIFFICULTY_MAX);
+    world.enable_pd_lab(super::pd_lab::PdLabConfig {
+        count: 1,
+        difficulty: Some(crate::pdsim::difficulty::BotDifficulty::Dark),
+        bot_type: crate::pdsim::personality::BotType::Peace,
+    });
+    world.camera.pos = Vec3::new(7.5, 1.5, 2.5);
+    world.initial_meshes();
+    world.toggle_mode();
+    let floor_y = world.player_pos().map(|p| p.y).unwrap_or(0.0);
+    if let Some(inst) = world.enemies.get_mut(0) {
+        inst.enemy.pos = Vec3::new(7.5, floor_y, 9.0);
+        let c = inst.collider;
+        world.physics.update_enemy_collider(c, inst.enemy.pos);
+    }
+    let start = world.player_health();
+    let dt = 1.0 / 60.0;
+    let input = InputState::default();
+    for _ in 0..(8.0 / dt) as usize {
+        world.fixed_step(dt, &input);
+        world.enemy_combat_step(dt);
+    }
+    assert_eq!(
+        world.player_health(),
+        start,
+        "a PeaceSim landed damage — the personality veto is not reaching the trigger"
     );
 }

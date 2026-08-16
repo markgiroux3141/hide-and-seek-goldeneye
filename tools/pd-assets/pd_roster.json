@@ -1,0 +1,40 @@
+{
+  "_comment": [
+    "The Perfect Dark bodies + clips the game ships, for `pd_gltf.py batch`.",
+    "Run from the repo root:",
+    "  python tools/pd-assets/pd_gltf.py batch tools/pd-assets/pd_roster.json native/assets/enemies/pd",
+    "",
+    "Clip choices are what Perfect Dark itself plays, not a guess: `chr_action_go_to_position`",
+    "(game/chraction.c:5890-5990) selects ANIM_0028/ANIM_0018 to walk, ANIM_RUNNING_TWOHANDGUN",
+    "to jog and ANIM_0029 to run for a human carrying a two-handed weapon.",
+    "",
+    "`clip_rig` only supplies bone names and rest offsets. Every chr on the shared 15-bone rig",
+    "yields the same names, which is all the engine binds against, so one export drives them all.",
+    "",
+    "A character is `body` or `[body, head]`. Only a51guard, dd_shock and elvis have a head",
+    "built in; the other 62 carry a HEADSPOT and need one naming a `head*.bin`. PD mixes heads",
+    "and bodies freely (g_HeadsAndBodies), so these pairings are a choice, not a derivation.",
+    "",
+    "TEXTURES: four bodies (a51guard, dd_shock, elvis, testchr) store their textures inline in",
+    "the model file; everything else indexes the compressed global pool, decoded by pd_tex.py.",
+    "Both paths work, so any of the 65 shared-rig bodies can be exported fully textured. The",
+    "handful of pool textures still on PD's non-zlib codec fall back to the debug palette per",
+    "affected triangle, which is why the odd small patch may read flat."
+  ],
+  "characters": {
+    "pd_joanna": ["dark_frock", "headdark_frock"],
+    "pd_a51guard": "a51guard",
+    "pd_elvis": "elvis",
+    "pd_ddshock": "dd_shock",
+    "pd_cassandra": ["cassandra", "headcassandra"],
+    "pd_mrblonde": ["mrblonde", "headmrblonde"]
+  },
+  "clips": {
+    "pd-idle": "ANIM_TWO_GUN_HOLD",
+    "pd-walking": "ANIM_0028",
+    "pd-jogging": "ANIM_RUNNING_TWOHANDGUN",
+    "pd-running": "ANIM_0029"
+  },
+  "clip_rig": "a51guard",
+  "fps": 30
+}

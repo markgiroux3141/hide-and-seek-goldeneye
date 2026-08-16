@@ -24,3 +24,12 @@ native/levels/slot*.json
 
 # Large regenerable procedural-anim debug dump (not a shared artifact).
 anim_log.txt
+
+# Third-party N64 decompilations kept as a local read-only reference for asset
+# ripping + AI study. Each is its own upstream git repo under its own licence;
+# re-clone with the commands in reference/README.md rather than committing them.
+reference/
+
+# Python bytecode from the asset tools.
+__pycache__/
+*.pyc

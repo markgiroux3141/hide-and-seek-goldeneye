@@ -181,6 +181,8 @@ impl World {
                 // Utility-AI decision layer on/off, applied per hunter below (like the
                 // detectable + wall-clearance toggles) so it can be A/B'd against the FSM.
                 let utility_on = self.utility_ai;
+                // Difficulty dial as a fraction, for the PD simulant tier lookup.
+                let dial_frac = self.difficulty_frac();
                 let mut fire_requests: Vec<usize> = Vec::new();
                 let mut needs_target: Vec<usize> = Vec::new();
                 let mut any_caught = false;
@@ -228,10 +230,54 @@ impl World {
                         ),
                         None => crate::enemy::EnemyStep::default(),
                     };
+                    // ── PD simulant layer (PD_LAB only) ──
+                    // Runs AFTER the FSM so the FSM still owns movement, and the
+                    // simulant only overrides where the weapon points and whether
+                    // it fires. The sight check is a raw LOS ray of its own rather
+                    // than the FSM's cone-gated perception — PD bots do the same,
+                    // and borrowing the cone rule would give the aim model a
+                    // perception contract it was never tuned against.
+                    let mut pd_fire = None;
+                    if let (Some(sim), Some(cfg)) = (inst.pdsim.as_mut(), self.pd_lab) {
+                        let visible = player_visible
+                            && crate::enemy::line_of_sight(
+                                &mut self.physics,
+                                inst.enemy.pos,
+                                feet,
+                                inst.collider,
+                            );
+                        let (out, dbg) = pd_lab::step_simulant(
+                            sim,
+                            dt,
+                            inst.enemy.pos,
+                            feet,
+                            visible,
+                            (self.player_health / PLAYER_MAX_HEALTH).clamp(0.0, 1.0),
+                            true, // the player always carries a gun in this game
+                            dial_frac,
+                            cfg.difficulty.is_none(),
+                        );
+                        // The simulant's yaw IS the rendered facing: the aim error
+                        // must be visible on the body, or none of this reads.
+                        inst.render_yaw = Some(out.yaw);
+                        inst.pd_debug = Some(dbg);
+                        pd_fire = Some(out.want_fire);
+                    }
+
                     // (The FSM no longer moves `pos` — it only decides a preferred
                     // velocity. Movement is committed after the loop by the local-
                     // avoidance stage, which resyncs every hunter's capsule then.)
-                    if step.want_fire {
+                    //
+                    // Under the PD model the trigger decision belongs to the
+                    // simulant, not the FSM: a simulant opens fire while still
+                    // converging, which the FSM's "entered Attack" gate suppresses.
+                    // The FSM's own `want_fire` is a rising edge, so the PD path has
+                    // to debounce against the live burst itself.
+                    let wants_fire = match pd_fire {
+                        Some(pd) => pd && inst.fire_elapsed.is_none(),
+                        None => step.want_fire,
+                    };
+                    if wants_fire {
                         fire_requests.push(i);
                     }
                     if step.needs_search_target {
@@ -528,7 +574,10 @@ impl World {
         // search FSM takes over immediately; if in view they engage, which is right).
         let watch = self.player_pos().unwrap_or(self.spawn_point);
         // How many distinct bodies loaded — hunters spread across the catalog below.
-        let body_count = self.char_models.len();
+        // GoldenEye bodies only: the Perfect Dark bodies loaded after them have no
+        // fire/hit/death clips, and this template's fixed clip layout assumes the GE
+        // rig's bind orientation (see `PD_BODY_CATALOG`).
+        let body_count = self.ge_body_count;
         // Difficulty survivability: each hunter spawns with scaled health.
         let spawn_hp = crate::enemy::ENEMY_HEALTH * self.difficulty_params().health_mult;
         // Gait clips for the continuous locomotion blend (fixed template layout:
@@ -660,6 +709,19 @@ impl World {
                 ragdoll: None,
                 ragdoll_time: 0.0,
                 reaction: None,
+                // PD lab only: attach the simulant model. Each gets a distinct seed
+                // so same-tier simulants still wander their aim individually —
+                // that per-bot variation is the point of randomising the
+                // convergence rate rather than the shot outcome.
+                pdsim: self.pd_lab.map(|cfg| {
+                    crate::pdsim::Simulant::new(
+                        cfg.difficulty
+                            .unwrap_or_else(|| pd_lab::tier_for_dial_frac(self.difficulty_frac())),
+                        cfg.bot_type,
+                        0xA5A5_0000_u64 ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+                    )
+                }),
+                pd_debug: None,
             });
             log::info!(
                 "hunter {i} flooded in at {spawn:?} as body {body} with {}{}",

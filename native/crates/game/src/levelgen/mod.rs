@@ -11,8 +11,8 @@
 
 pub mod analyze;
 pub mod builder;
-mod designs;
-mod serialize;
+pub mod designs;
+pub mod serialize;
 
 use engine::geometry::csg_runtime::Region;
 use engine::geometry::structures;
@@ -39,6 +39,7 @@ pub fn run() {
         "linear" => designs::linear(),
         "showcase" => designs::showcase(),
         "grand" => designs::grand(),
+        "pd_lab" => designs::pd_lab(),
         other => {
             eprintln!("unknown LEVELGEN_DESIGN='{other}', using 'facility'");
             designs::facility()

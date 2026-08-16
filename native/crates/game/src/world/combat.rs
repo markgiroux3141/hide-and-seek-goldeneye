@@ -1418,6 +1418,15 @@ impl World {
         if let Some(audio) = self.audio.as_mut() {
             audio.play(weapon.fire_sound, ENEMY_FIRE_VOL);
         }
+        // ── PD simulant: a real shot down a real barrel ──
+        // No hit roll. The bullet leaves along the body yaw the zeroing model
+        // produced, and connects only if that yaw actually points at the player.
+        // Every "accuracy" behaviour is emergent from where the barrel is.
+        if self.enemies.get(idx).is_some_and(|i| i.pdsim.is_some()) {
+            self.emit_pd_shot(idx, epos, ppos, collider, weapon);
+            return;
+        }
+
         // Walls (and other hunters) block the shot (re-checked per shot).
         if !crate::enemy::line_of_sight(&mut self.physics, epos, ppos, collider) {
             return;
@@ -1444,6 +1453,78 @@ impl World {
                 inst.damage_cooldown = 1.0 / MAX_HIT_RATE;
             }
         }
+    }
+
+    /// One shot from a **PD simulant** — a genuine hitscan, no probability roll.
+    ///
+    /// This is the payoff of the whole zeroing port. The bullet leaves along the
+    /// body yaw the model produced (which carries its live aim error), and lands
+    /// only if that yaw was actually pointing at the player. A simulant that is
+    /// mid-convergence, or that was just forced to swing across the room, misses
+    /// because its gun is genuinely pointing somewhere else — not because a
+    /// `rand()` said so.
+    ///
+    /// The test is analytic rather than a second raycast: project the player onto
+    /// the shot line and compare the perpendicular miss distance against a torso
+    /// radius. That is exactly a ray-versus-vertical-cylinder test, and it avoids
+    /// adding a player collider the physics world does not currently carry.
+    ///
+    /// Only yaw carries error, matching PD: `bot_update_zero_angle` produces a
+    /// horizontal `zeroangle` and the vertical aim is handled separately by
+    /// `chr_calculate_aimend` pointing at the target's body. So a simulant's
+    /// misses are always to the side, never high or low — which is also why they
+    /// read as "swinging past you" rather than "spraying wildly".
+    fn emit_pd_shot(
+        &mut self,
+        idx: usize,
+        epos: Vec3,
+        ppos: Vec3,
+        collider: ColliderHandle,
+        weapon: EnemyWeaponDef,
+    ) {
+        // Walls (and other hunters) block the shot regardless of aim.
+        if !crate::enemy::line_of_sight(&mut self.physics, epos, ppos, collider) {
+            return;
+        }
+        let Some(yaw) = self.enemies.get(idx).and_then(|i| i.pdsim.as_ref()).map(|s| s.yaw) else {
+            return;
+        };
+        let to_player = Vec3::new(ppos.x - epos.x, 0.0, ppos.z - epos.z);
+        let dist = to_player.length();
+        if dist < 1e-3 {
+            return;
+        }
+        // Same yaw convention as the rendered model: yaw 0 faces +Z.
+        let shot_dir = Vec3::new(yaw.sin(), 0.0, yaw.cos());
+        // Perpendicular distance from the player's centre line to the shot line.
+        let along = to_player.dot(shot_dir);
+        if along <= 0.0 {
+            return; // pointing away entirely
+        }
+        let miss = (to_player - shot_dir * along).length();
+        if miss > PD_TORSO_RADIUS {
+            return;
+        }
+        // Beyond the weapon's stated range the round simply doesn't carry.
+        if dist > weapon.range {
+            return;
+        }
+        // NOTE: [`MAX_HIT_RATE`] deliberately does **not** apply here.
+        //
+        // That cap exists because our normal hunters roll for hits, so a fast
+        // weapon would otherwise delete the player in a burst — it is an
+        // artificial lethality limiter bolted on top of an artificial accuracy
+        // model. The zeroing model replaces both: how often a simulant lands a
+        // shot is already governed by where its barrel is, and re-imposing the cap
+        // would clip the top of exactly the range the difficulty table is supposed
+        // to express (a DarkSim and a HardSim would both saturate it and become
+        // indistinguishable).
+        //
+        // The consequence is real and intended: a well-zeroed high-tier simulant
+        // with an automatic weapon kills very fast. That is what a DarkSim does in
+        // Perfect Dark. If the lab turns out to need a ceiling for playability,
+        // it belongs on the *weapon*, not on a global damage throttle.
+        self.take_player_damage(weapon.damage);
     }
 
     /// Apply `dmg` to the player (JS `Actor.takeDamage`: armor-first, then health)

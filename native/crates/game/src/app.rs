@@ -423,6 +423,15 @@ impl App {
             _ => Vec::new(),
         };
 
+        // PD simulant lab overlay: snapshot each simulant's live model state (same
+        // borrow discipline as the shop — read up front, the closure gets values).
+        let pd_debug: Vec<crate::world::pd_lab::PdDebug> = self
+            .world
+            .as_ref()
+            .filter(|w| w.pd_lab_active())
+            .map(|w| w.pd_debug())
+            .unwrap_or_default();
+
         let selected = self.shop_selected.min(rows.len().saturating_sub(1));
         let mut actions: Vec<ShopAction> = Vec::new();
         let mut new_selected: Option<usize> = None;
@@ -848,6 +857,7 @@ impl App {
                         }
                     });
             }
+            draw_pd_lab_overlay(ctx, &pd_debug);
         });
 
         state.handle_platform_output(window, full_output.platform_output);
@@ -955,6 +965,104 @@ fn model_aabb(model: &engine::assets::textured_model::TexturedModel) -> (glam::V
     }
 }
 
+/// Draw the **PD simulant lab** telemetry panel (`PD_LAB=1` only).
+///
+/// The zeroing model is invisible without this: from outside, a simulant that is
+/// half-converged and one that is fully converged look identical until the shots
+/// land somewhere. The two rows that matter are ZERO (how far the convergence has
+/// got) and AIM ERR (where the barrel actually is, in degrees) — watch AIM ERR
+/// swing through zero and back as the bot overshoots, and watch ZERO collapse the
+/// moment you break line of sight or make it turn.
+fn draw_pd_lab_overlay(ctx: &egui::Context, sims: &[crate::world::pd_lab::PdDebug]) {
+    if sims.is_empty() {
+        return;
+    }
+    egui::Window::new("PD SIMULANT LAB")
+        .anchor(egui::Align2::LEFT_TOP, egui::vec2(12.0, 12.0))
+        .title_bar(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            ui.label(egui::RichText::new("PD SIMULANT LAB").color(SHOP_GOLD).strong());
+            for (i, s) in sims.iter().enumerate() {
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!("#{i}  {}  ·  {}", s.tier.name(), s.bot_type.name()))
+                        .color(SHOP_GOLD_DIM)
+                        .strong(),
+                );
+
+                // Zeroing progress: full bar = aim has converged as far as this
+                // tier ever converges.
+                ui.add(
+                    egui::ProgressBar::new(s.zero_progress)
+                        .desired_width(220.0)
+                        .text(format!("ZERO {:.0}%", s.zero_progress * 100.0)),
+                );
+
+                // Reaction clock against the tier's requirement. Reaching 100% is
+                // what unlocks the trigger, not the zero bar above it.
+                let react = if s.shoot_delay_needed > 0.0 {
+                    (s.shoot_delay / s.shoot_delay_needed).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                ui.add(
+                    egui::ProgressBar::new(react)
+                        .desired_width(220.0)
+                        .text(format!("REACT {:.2}s / {:.2}s", s.shoot_delay, s.shoot_delay_needed)),
+                );
+
+                // The number to actually watch. Signed, so you can see the aim
+                // cross the target rather than creep onto it.
+                let err = s.aim_error_deg;
+                let err_color = if err.abs() < 2.0 {
+                    egui::Color32::from_rgb(120, 220, 120)
+                } else if err.abs() < 8.0 {
+                    SHOP_GOLD
+                } else {
+                    egui::Color32::from_rgb(220, 110, 90)
+                };
+                ui.label(
+                    egui::RichText::new(format!("AIM ERR  {err:+6.2}°"))
+                        .color(err_color)
+                        .monospace()
+                        .strong(),
+                );
+
+                ui.label(
+                    egui::RichText::new(format!(
+                        "dist {:5.1} m   speed x{:.2}",
+                        s.distance, s.speed_mult
+                    ))
+                    .color(SHOP_TEXT)
+                    .monospace(),
+                );
+
+                let target = match (s.has_target, s.sticky) {
+                    (false, _) => "no target",
+                    (true, true) => "target (held)",
+                    (true, false) => "target (acquired)",
+                };
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(target).color(SHOP_DIM).monospace());
+                    if s.firing {
+                        ui.label(
+                            egui::RichText::new("FIRING")
+                                .color(egui::Color32::from_rgb(240, 90, 70))
+                                .strong(),
+                        );
+                    }
+                });
+            }
+            ui.separator();
+            ui.label(
+                egui::RichText::new("= / -  difficulty tier    N  invisible    I  invincible")
+                    .color(SHOP_DIM)
+                    .small(),
+            );
+        });
+}
+
 /// A snapshot of one weapon's shop state for a frame's UI (avoids borrowing the
 /// `World` inside the egui closure).
 struct ShopRow {
@@ -1033,6 +1141,20 @@ impl ApplicationHandler for App {
         world.set_wave_size(crate::world::PLAYTEST_WAVE_SIZE);
         for rm in world.initial_meshes() {
             renderer.set_region_textured(rm.id, &rm.mesh);
+        }
+        // PD simulant lab (`PD_LAB=1`): bake the bare lab room in-process, load it,
+        // and switch every hunter onto the Perfect Dark bot model. See
+        // `world::pd_lab` for what that swaps out. Press G to start the hunt.
+        if let Some(cfg) = crate::world::pd_lab::PdLabConfig::from_env() {
+            match world.load_built_level(&crate::levelgen::designs::pd_lab()) {
+                Ok(meshes) => {
+                    for rm in &meshes {
+                        renderer.set_region_textured(rm.id, &rm.mesh);
+                    }
+                    world.enable_pd_lab(cfg);
+                }
+                Err(e) => log::error!("PD_LAB: could not build the lab room: {e}"),
+            }
         }
         // Optional: boot straight into a saved level slot (`LOAD_SLOT=N`), so a
         // generated level can be explored immediately without pressing F-keys.

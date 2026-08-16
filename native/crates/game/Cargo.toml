@@ -6,6 +6,11 @@ edition = "2021"
 # BUILD & HIDE — the game. Owns the authored world, weapons, enemy/player
 # controllers, and the winit event loop; consumes `engine` as a library
 # (one-way dependency). `src/lib.rs` is the crate; the bin is a thin launcher.
+#
+# `default-run` so a bare `cargo run` launches the game. Without it cargo refuses
+# to choose between this and the `strip_hands` asset tool in `src/bin/`.
+default-run = "build-and-hide"
+
 [[bin]]
 name = "build-and-hide"
 path = "src/main.rs"

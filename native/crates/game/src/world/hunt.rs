@@ -152,6 +152,13 @@ impl EnemyInstance {
     /// so a snappy heading flip becomes a believable turn instead of a per-frame spin.
     /// First call snaps (no history to ease from). Call once per rendered frame.
     pub(crate) fn advance_facing(&mut self, dt: f32) {
+        // A PD simulant owns its own facing: the sim step already wrote
+        // `render_yaw`, turn-rate-limited at PD's ~212 deg/s and carrying the live
+        // aim error. Easing it toward the FSM heading here would smear away
+        // exactly the thing the lab exists to show.
+        if self.pdsim.is_some() {
+            return;
+        }
         let target = self.raw_yaw();
         let cur = match self.render_yaw {
             Some(y) => y,
@@ -241,6 +248,11 @@ impl World {
     /// nav/AI-driven [`Enemy`] (the model is purely visual); a fire/hit/death one-shot
     /// isn't stomped. No-op in BUILD (nothing animated there).
     pub fn advance_animation(&mut self, dt: f32) {
+        // The PD lab lineup runs in both phases — it's scenery, visible while
+        // authoring as well as hunting, exactly as the preview props were.
+        if let Some(showcase) = self.pd_showcase.as_mut() {
+            showcase.advance(dt, &self.pd_clips);
+        }
         if self.is_build() {
             // Spike: the BUILD-phase procedural-anim preview (if toggled on).
             self.advance_procedural_preview(dt);
@@ -638,20 +650,32 @@ impl World {
         if self.char_models.is_empty() {
             return Vec::new();
         }
+        // The PD lab lineup, drawn in both phases. Clean bodies, so the empty blood
+        // slice leaves the renderer's white init alone (as the BUILD preview does).
+        let mut pd: Vec<(usize, Mat4, Vec<Mat4>, f32, &[f32])> = Vec::new();
+        if let Some(showcase) = self.pd_showcase.as_ref() {
+            pd.extend(
+                showcase
+                    .instances(&self.char_models, &self.pd_clips)
+                    .map(|(body, feet, yaw, joints)| {
+                        (body, self.char_transform(feet, yaw, body), joints, 1.0, &[][..])
+                    }),
+            );
+        }
         // Spike: in BUILD the only character is the optional procedural preview (body 0).
         if self.is_build() {
-            return match self.procedural_preview.as_ref() {
-                Some(p) => vec![(
+            if let Some(p) = self.procedural_preview.as_ref() {
+                pd.push((
                     0,
                     self.char_transform(p.feet, p.yaw, 0),
                     p.joints.clone(),
                     1.0,
                     p.blood.as_slice(),
-                )],
-                None => Vec::new(),
-            };
+                ));
+            }
+            return pd;
         }
-        self.enemies
+        pd.extend(self.enemies
             .iter()
             .filter_map(|inst| {
                 let m = self.char_models.get(inst.body)?;
@@ -670,8 +694,8 @@ impl World {
                 };
                 let model = self.char_transform(inst.enemy.pos, inst.yaw(), inst.body);
                 Some((inst.body, model, joints, inst.opacity(), inst.blood.as_slice()))
-            })
-            .collect()
+            }));
+        pd
     }
 
     /// A hunter's joint global transforms for bone attachment (weapon), from its

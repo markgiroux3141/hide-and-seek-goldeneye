@@ -148,7 +148,64 @@ impl World {
                 LEVEL_FORMAT_VERSION
             );
         }
+        let meshes = self.apply_level(file);
+        log::info!(
+            "loaded level {} — {} region(s), {} platform(s), {} stair-run(s)",
+            path.display(),
+            self.regions.len(),
+            self.platforms.len(),
+            self.stair_runs.len()
+        );
+        Ok(meshes)
+    }
 
+    /// Load a level built in-process by the [`levelgen`](crate::levelgen) builder,
+    /// without a round trip through `levels/slotN.json`.
+    ///
+    /// Same path as [`load_level`](Self::load_level) — identical re-partition,
+    /// re-bake and entity restore — just fed from memory. Used by the PD simulant
+    /// lab, which bakes its arena at boot rather than shipping a slot file that a
+    /// fresh clone would have to regenerate.
+    pub fn load_built_level(
+        &mut self,
+        built: &crate::levelgen::builder::BuiltLevel,
+    ) -> io::Result<Vec<RegionMesh>> {
+        if self.mode != Mode::Build {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "cannot load a level during HUNT — return to BUILD first",
+            ));
+        }
+        let file = LevelFile {
+            version: LEVEL_FORMAT_VERSION,
+            spawn_point: built.spawn.to_array(),
+            regions: vec![RegionData {
+                id: 0,
+                brushes: built.brushes.clone(),
+                stairs: built.stairs.clone(),
+            }],
+            platforms: built.platforms.clone(),
+            stair_runs: built.stair_runs.clone(),
+            entities: built.entities.clone(),
+            ambient: crate::ecs::AmbientSettings::default(),
+            next_brush_id: built.next_brush_id,
+            next_platform_id: built.next_platform_id,
+            next_run_id: built.next_run_id,
+        };
+        let meshes = self.apply_level(file);
+        log::info!(
+            "loaded in-process level — {} region(s), {} platform(s), {} stair-run(s)",
+            self.regions.len(),
+            self.platforms.len(),
+            self.stair_runs.len()
+        );
+        Ok(meshes)
+    }
+
+    /// Install a parsed [`LevelFile`] into the world: re-partition the brushes into
+    /// connected regions, re-bake their meshes/colliders, and restore the authored
+    /// entity set. Shared by the on-disk and in-memory load paths.
+    fn apply_level(&mut self, file: LevelFile) -> Vec<RegionMesh> {
         // Region ids present before this load, so we can clear any that vanish.
         let old_ids: Vec<u32> = self.regions.iter().map(|r| r.id).collect();
 
@@ -195,14 +252,7 @@ impl World {
         // meshes) is re-established at HUNT bake, mirroring how geometry is derived.
         self.ecs.load_authored(&file.entities);
 
-        log::info!(
-            "loaded level {} — {} region(s), {} platform(s), {} stair-run(s)",
-            path.display(),
-            self.regions.len(),
-            self.platforms.len(),
-            self.stair_runs.len()
-        );
-        Ok(meshes)
+        meshes
     }
 
     /// Save to numbered quick-slot `slot`, returning the path written (for the
@@ -349,7 +399,7 @@ mod tests {
     /// ambient fill round-trips alongside it.
     #[test]
     fn save_load_round_trips_lights_and_ambient() {
-        use crate::ecs::{AmbientSettings, ComponentData, EntityData, PointLight};
+        use crate::ecs::{AmbientSettings, ComponentData, EntityData};
 
         let mut world = World::new();
         let id = world.ecs.alloc_id();

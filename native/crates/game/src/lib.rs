@@ -15,6 +15,7 @@ pub mod enemy;
 pub mod gamepad;
 pub mod hud;
 pub mod levelgen;
+pub mod pdsim;
 pub mod props;
 pub mod shop;
 pub mod world;

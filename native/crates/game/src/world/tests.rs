@@ -255,13 +255,128 @@ use super::editing::find_room_brushes;
             .as_ref()
             .and_then(|a| a.clip(0))
             .expect("idle clip loaded");
-        for (i, m) in world.char_models.iter().enumerate() {
+        // Only the GoldenEye bodies: the Perfect Dark family loaded after them carries
+        // extra blend joints and its own clips (see `PD_BODY_CATALOG`), and is covered
+        // by `pd_bodies_load_skinned_and_animated` below.
+        for (i, m) in world.char_models[..world.ge_body_count].iter().enumerate() {
             assert_eq!(m.skeleton.joint_count(), 15, "body {i} on the 15-bone rig");
             let mats = idle.skinning_matrices(0.0, &m.skeleton);
             assert_eq!(mats.len(), 15, "body {i} skins to 15 joints");
             assert!(
                 mats.iter().all(|mm| mm.to_cols_array().iter().all(|f| f.is_finite())),
                 "body {i} skinning matrices are finite"
+            );
+        }
+    }
+
+    /// The Perfect Dark import, end to end through the engine's own pipeline: each PD
+    /// body loads as a skinned model, carries the GoldenEye bone *names* (so the
+    /// weapon/head/foot systems address it unchanged), every PD clip binds to it by
+    /// name, and posing it produces a human-sized standing figure.
+    ///
+    /// The height assertion is the one that matters. PD model units are millimetres
+    /// and the exporter converts them to the engine's character units so `CHAR_SCALE`
+    /// lands them at life size; a scale slip anywhere in that chain puts a speck or a
+    /// tower in the level, and every other check here would still pass.
+    #[test]
+    fn pd_bodies_load_skinned_and_animated() {
+        let world = World::new();
+        let pd = &world.char_models[world.ge_body_count..];
+        if pd.is_empty() || world.pd_clips.is_empty() {
+            eprintln!("skipping: PD assets not loaded");
+            return;
+        }
+        assert_eq!(world.pd_clips.len(), super::PD_CLIPS.len(), "every PD clip loaded");
+
+        // Every PD body must expose the SAME joint names, because one clip export
+        // drives them all and `clip.rs` binds channels by name. This is not a
+        // formality: PD puts its blend matrices on different bones per character
+        // (51 use elbows + knees, `elvis` uses shoulders + hips), so a rig that
+        // only declared the blends a body happens to use left `elvis`'s hip blend
+        // geometry unrotated — a flat fin at the hip — while the clip's unmatched
+        // blend channels landed on arbitrary joints via the node-index fallback.
+        // Neither showed up in a channel count; both are obvious on screen.
+        let expected: Vec<String> = (1..=15)
+            .map(|i| format!("Bone_{i}"))
+            .chain((1..=15).map(|i| format!("Blend_{i}")))
+            .collect();
+        for (i, m) in pd.iter().enumerate() {
+            assert_eq!(
+                m.skeleton.names, expected,
+                "PD body {i} has a different joint-name set — one clip cannot drive them all"
+            );
+        }
+
+        for (i, m) in pd.iter().enumerate() {
+            let sk = &m.skeleton;
+            // The GE bone roles the game addresses by name (weapon hand, head, feet).
+            for bone in ["Bone_1", "Bone_2", "Bone_3", "Bone_8", "Bone_9", "Bone_14", "Bone_15"] {
+                assert!(sk.index_of(bone).is_some(), "PD body {i} has no {bone}");
+            }
+            assert!(!m.vertices.is_empty(), "PD body {i} has skinned geometry");
+            for v in &m.vertices {
+                for &j in &v.joints {
+                    assert!((j as usize) < sk.joint_count(), "PD body {i} joint {j} out of range");
+                }
+            }
+            for (c, name) in world.pd_clips.iter().zip(super::PD_CLIPS) {
+                assert_eq!(
+                    c.bound_channels(),
+                    sk.joint_count(),
+                    "PD clip {name} binds every joint of body {i} by name"
+                );
+                let mats = c.skinning_matrices(0.0, sk);
+                assert!(
+                    mats.iter().all(|mm| mm.to_cols_array().iter().all(|f| f.is_finite())),
+                    "PD body {i} + {name} skins finite"
+                );
+            }
+            // Posed by its own idle, the body is a person-sized standing figure.
+            let idle = &world.pd_clips[0];
+            let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for k in 0..12 {
+                let mats = idle.skinning_matrices(idle.duration * k as f32 / 12.0, sk);
+                for v in &m.vertices {
+                    let mut y = 0.0;
+                    for t in 0..4 {
+                        if v.weights[t] != 0.0 {
+                            y += v.weights[t]
+                                * mats[v.joints[t] as usize]
+                                    .transform_point3(glam::Vec3::from(v.pos))
+                                    .y;
+                        }
+                    }
+                    lo = lo.min(y);
+                    hi = hi.max(y);
+                }
+            }
+            let height = (hi - lo) * CHAR_SCALE;
+            assert!(
+                (0.9..=2.1).contains(&height),
+                "PD body {i} stands {height:.2} m tall — expected a person",
+            );
+        }
+    }
+
+    /// A hunter never spawns wearing a Perfect Dark body: the PD family has no
+    /// fire/hit/death clips, and the shared template's rotations are authored against
+    /// the GoldenEye bind pose, so a PD-bodied hunter would be posed confidently wrong.
+    #[test]
+    fn hunters_never_wear_a_pd_body() {
+        let mut world = World::new();
+        world.set_wave_size(8);
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT: spawn the wave
+        if world.enemies.is_empty() || world.ge_body_count == world.char_models.len() {
+            eprintln!("skipping: no hunters spawned / no PD bodies loaded");
+            return;
+        }
+        for inst in &world.enemies {
+            assert!(
+                inst.body < world.ge_body_count,
+                "hunter wears body {} — that's a PD body (GE bodies are 0..{})",
+                inst.body,
+                world.ge_body_count
             );
         }
     }

@@ -7,6 +7,48 @@ use engine::geometry::structures::Edge;
 
 use super::builder::{BuiltLevel, LevelBuilder, RoomId};
 
+/// **PD simulant lab** — the arena for `PD_LAB=1` (see `world::pd_lab`).
+///
+/// Deliberately boring geometry, because the point is to watch one behaviour in
+/// isolation. What it needs, and why:
+///
+/// * **One open room**, so nothing about nav or level layout can be blamed for
+///   what the aim does.
+/// * **Long diagonal sightlines**, so you can stand still at range and watch the
+///   aim converge — the whole zeroing model is invisible at knife range.
+/// * **Four pillars off the centre line**, so you can break line of sight on
+///   demand. Breaking LOS is what drains the zero timer, and forcing the simulant
+///   to swing between pillars is what exercises the turn-unzero feedback. Placed
+///   off-centre so the diagonal stays open; strafing behind one and back out is
+///   the single most informative thing you can do in here.
+/// * **Spawns at opposite corners**, ~13 m apart — just outside the 12 m
+///   detection range, so every run starts with a clean acquisition rather than
+///   already engaged.
+pub fn pd_lab() -> BuiltLevel {
+    let mut b = LevelBuilder::new();
+    const SIZE: f32 = 18.0;
+    // 12 WT = 3 m of headroom. The analyzer flags anything under 8 WT as cramped,
+    // and a low ceiling in an open room reads as a corridor.
+    let room = b.room("pd_lab", 0.0, 0.0, SIZE, SIZE, 0.0, 12.0);
+
+    // Two pillars either side of the corner-to-corner diagonal, symmetric about
+    // it. Every one clears the `z = x` line by more than its own width, so the
+    // spawn-to-spawn sightline stays open — you can always back onto the diagonal
+    // for a clean look at the aim, then strafe one pillar off it to break LOS.
+    for (x, z) in [(3.5, 8.0), (8.0, 13.0), (8.0, 3.5), (13.0, 8.0)] {
+        b.pillar_in(room, x, z, 1.5);
+    }
+
+    // The Perfect Dark character lineup that used to stand here as static props is
+    // now real skinned, animated characters — see `world::pd_lab::PdShowcase`, which
+    // places them itself so they can be posed per frame rather than baked into the
+    // level as scenery.
+
+    // Player far corner; hunters flood in at the fixed spawn marker near (3, 3).
+    b.spawn_wt(14.0, 0.5, 14.0);
+    b.finish()
+}
+
 /// Minimal pipeline check: two rooms, an open doorway, one overlook platform +
 /// stair, a spawn. Exists to prove build→bake→report→slot end to end.
 pub fn smoke() -> BuiltLevel {
