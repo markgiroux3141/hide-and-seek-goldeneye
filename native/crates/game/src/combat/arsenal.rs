@@ -242,14 +242,28 @@ const PD_VIEW_SCALE: f32 = 0.0007;
 /// PD's authored viewmodel placement, as our view-space offset.
 ///
 /// `weapondef.posx/posy/posz` is where PD hangs the gun in the first-person view,
-/// in centimetres, with +x right, +y up and **+z forward**. Our view space is
-/// +x right, +y up, **−z forward**, so z negates. This is the authored
-/// replacement for the `weapon-config.json` numbers, for PD guns only.
+/// in centimetres. **PD's z runs the same way ours does — negative is forward** —
+/// so it is used directly, with no sign flip.
+///
+/// This was wrong first time round and the bug was invisible in every test: I
+/// assumed PD used +z forward and negated it, which put every gun ~0.24 m
+/// *behind* the eye, so the whole arsenal fired but drew nothing. Two facts settle
+/// the convention, neither of them a guess:
+///
+/// * `bgun_update_hand_pos` (`bondgun.c:7413`) assigns `sp274.z = weapondef->posz`
+///   directly into the view-space offset — no negation anywhere on the path.
+/// * PD hardcodes the detonator's offset in the same block as
+///   `{6.5, -16.5, -16.0}`, and the detonator is unmistakably *in front of* the
+///   camera. Its z is negative.
+///
+/// Our GoldenEye entries agree independently: every tuned `model_offset.z` in
+/// [`super::config`] is negative, and the PP7's total reach is −0.20 m against
+/// this Falcon 2's −0.238 m.
 fn view_offset(w: &PdWeapon) -> Vec3 {
     Vec3::new(
         w.view.posx * PD_CM_TO_M,
         w.view.posy * PD_CM_TO_M,
-        -w.view.posz * PD_CM_TO_M,
+        w.view.posz * PD_CM_TO_M,
     )
 }
 
@@ -534,6 +548,76 @@ mod tests {
         }
     }
 
+    /// Every PD gun sits **in front of** the camera.
+    ///
+    /// Regression for the bug that made the whole arsenal invisible: `posz` was
+    /// negated on the assumption PD used +z forward, which put every gun ~0.24 m
+    /// behind the eye. It fired, made noise, dealt damage, and drew nothing — and
+    /// no existing test looked at the sign, because "is the offset finite" passes
+    /// just as happily either way.
+    #[test]
+    fn every_pd_gun_sits_in_front_of_the_camera() {
+        for w in Arsenal::PerfectDark.weapons() {
+            let z = w.model_offset.z + w.pivot_offset.z;
+            assert!(
+                z < 0.0,
+                "{} is placed at z={z} — behind the eye, so it would be invisible",
+                w.name
+            );
+            // And within arm's reach: a gun 2 m out is a different kind of wrong.
+            assert!(z > -1.5, "{} is {z} m away — too far to be held", w.name);
+            // Not buried in the camera either.
+            assert!(
+                w.model_offset.y > -1.0 && w.model_offset.y < 1.0,
+                "{} vertical placement {} is off-screen",
+                w.name,
+                w.model_offset.y
+            );
+        }
+    }
+
+    /// The reach of a bridged PD gun is comparable to the hand-tuned GoldenEye
+    /// ones. A sanity band rather than a tight bound — but a placement off by a
+    /// factor of ten (a unit slip) would land outside it, and that is the failure
+    /// mode worth catching automatically rather than on screen.
+    #[test]
+    fn pd_placement_is_in_the_same_range_as_the_tuned_goldeneye_guns() {
+        let ge_reach: Vec<f32> = config::WEAPONS
+            .iter()
+            .map(|w| -(w.model_offset.z + w.pivot_offset.z))
+            .collect();
+        let ge_max = ge_reach.iter().cloned().fold(0.0f32, f32::max);
+        for w in Arsenal::PerfectDark.weapons() {
+            let reach = -(w.model_offset.z + w.pivot_offset.z);
+            assert!(
+                reach > 0.02 && reach < ge_max * 3.0,
+                "{}'s reach {reach} m is nowhere near the GoldenEye range (max {ge_max} m)",
+                w.name
+            );
+        }
+    }
+
+    /// A hunter holds the THIRD-PERSON model, and it is a different file from the
+    /// player's. Regression for shipping the first-person mesh to the enemy — the
+    /// documented two-models-per-gun trap.
+    #[test]
+    fn a_hunter_holds_the_third_person_model() {
+        for w in Arsenal::PerfectDark.weapons() {
+            let def = super::super::enemy_def_for(w);
+            let pd = pd_weapon_for(w.name).unwrap();
+            assert_eq!(def.gun_path, pd.tp_glb, "{} should hold its chr* model", w.name);
+            assert_ne!(
+                def.gun_path, w.gun_path,
+                "{}: the hunter and the player must not share one mesh",
+                w.name
+            );
+            assert!(def.gun_path.ends_with("-tp.glb"), "{}: {}", w.name, def.gun_path);
+        }
+        // A GoldenEye weapon keeps the single mesh it has.
+        let ge = super::super::enemy_def_for(&config::KF7);
+        assert_eq!(ge.gun_path, config::KF7.gun_path);
+    }
+
     /// The damage conversion survives the bridge: a PD pistol still kills a 100 HP
     /// hunter in four shots, which is the whole point of `PD_DAMAGE_TO_HP`.
     #[test]
@@ -731,6 +815,50 @@ mod tests {
             }
         }
         assert_eq!(authored, 16, "16 of the 33 author a CHRGUNFIRE muzzle");
+    }
+
+    /// Every arsenal has a hunter roster whose weapons **exist in that arsenal**.
+    ///
+    /// Regression for hunters spawning empty-handed under `ARSENAL=pd`:
+    /// `ENEMY_ROSTER` names GoldenEye weapons as consts, the enemy weapon library
+    /// is built from the live arsenal, so every lookup missed and no hunter had a
+    /// gun mesh. Nothing failed loudly — they just held air.
+    #[test]
+    fn every_arsenals_roster_resolves_within_it() {
+        for arsenal in [Arsenal::GoldenEye, Arsenal::PerfectDark, Arsenal::Both] {
+            let roster = crate::world::enemy_roster_for(arsenal);
+            assert!(!roster.is_empty(), "{arsenal:?} has no hunter roster");
+            let names: Vec<&str> = arsenal.weapons().iter().map(|w| w.name).collect();
+            for (w, _dual) in &roster {
+                assert!(
+                    names.contains(&w.name),
+                    "{arsenal:?}: roster names {:?}, which is not in that arsenal — \
+                     the hunter would hold nothing",
+                    w.name
+                );
+            }
+        }
+    }
+
+    /// The PD roster covers the same animation classes as the GoldenEye one, so a
+    /// single hunt still exercises rifle / pistol / dual-rifle / dual-pistol rather
+    /// than six of the same pose.
+    #[test]
+    fn the_pd_roster_covers_every_animation_class() {
+        use super::super::EnemyWeaponClass;
+        let roster = crate::world::enemy_roster_for(Arsenal::PerfectDark);
+        let classes: Vec<(EnemyWeaponClass, bool)> = roster
+            .iter()
+            .map(|(w, dual)| (super::super::enemy_def_for(w).class, *dual))
+            .collect();
+        for want in [
+            (EnemyWeaponClass::Rifle, false),
+            (EnemyWeaponClass::Pistol, false),
+            (EnemyWeaponClass::Rifle, true),
+            (EnemyWeaponClass::Pistol, true),
+        ] {
+            assert!(classes.contains(&want), "the PD roster is missing {want:?}");
+        }
     }
 
     /// The AI's function choice comes out of PD's bands, and reads the way the

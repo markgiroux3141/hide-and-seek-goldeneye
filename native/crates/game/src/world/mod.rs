@@ -516,6 +516,45 @@ pub(crate) const ENEMY_ROSTER: &[(crate::combat::config::WeaponStats, bool)] = &
     (crate::combat::config::SHOTGUN, false), // two-handed
 ];
 
+/// The Perfect Dark counterpart of [`ENEMY_ROSTER`], covering the same animation
+/// classes so one hunt still exercises rifle / pistol / dual-rifle / dual-pistol.
+///
+/// Needed because [`ENEMY_ROSTER`] names GoldenEye weapons as `const`s, and the
+/// enemy weapon library is built from the **live** arsenal — so under `ARSENAL=pd`
+/// none of those names resolved and every hunter spawned holding nothing at all.
+/// Weapons are looked up by name rather than listed as consts, because the PD table
+/// is generated and cannot be referenced from a `const` here.
+fn pd_enemy_roster() -> Vec<(crate::combat::config::WeaponStats, bool)> {
+    // (PD name, dual-wield?) — chosen to mirror the GoldenEye roster's classes.
+    const PICKS: &[(&str, bool)] = &[
+        ("AR34", false),        // two-handed rifle
+        ("Falcon 2", false),    // one-handed pistol
+        ("RC-P120", true),      // dual-wield rifle (akimbo)
+        ("Falcon 2", true),     // dual-wield pistols
+        ("K7 Avenger", false),  // two-handed rifle
+        ("Shotgun (PD)", false), // two-handed
+    ];
+    let arsenal = crate::combat::arsenal::pd_arsenal();
+    PICKS
+        .iter()
+        .filter_map(|(name, dual)| {
+            arsenal.iter().find(|w| w.name == *name).map(|w| (*w, *dual))
+        })
+        .collect()
+}
+
+/// The hunter roster for the live arsenal. Falls back to [`ENEMY_ROSTER`] whenever
+/// the GoldenEye weapons are present (`ge` and `both`), so the tuned squad and every
+/// test that depends on it are untouched.
+pub(crate) fn enemy_roster_for(
+    arsenal: crate::combat::Arsenal,
+) -> Vec<(crate::combat::config::WeaponStats, bool)> {
+    match arsenal {
+        crate::combat::Arsenal::PerfectDark => pd_enemy_roster(),
+        _ => ENEMY_ROSTER.to_vec(),
+    }
+}
+
 /// How many hunters flood in at the spawn point on G→HUNT. Weapons are drawn from
 /// [`ENEMY_ROSTER`] (cycling if this exceeds the roster length), so this is the
 /// single knob for "how big is the wave" — bump it and the rest follows.
@@ -2405,8 +2444,19 @@ impl World {
             .position(|w| w.name == "PP7")
             .or_else(|| arsenal_weapons.iter().position(|w| w.name == "Falcon 2"))
             .unwrap_or(0);
-        let mut owned = vec![false; weapons.len()];
+        // Normally you start owning only the sidearm and buy the rest from the shop.
+        // `OWN_ALL=1` grants the whole arsenal so the full cycle (`Q` / N64 `A`) is
+        // reachable immediately — for judging 33 guns in one session, buying each one
+        // first is pure friction.
+        let own_all = matches!(
+            std::env::var("OWN_ALL").unwrap_or_default().trim(),
+            "1" | "on" | "yes" | "true"
+        );
+        let mut owned = vec![own_all; weapons.len()];
         owned[weapon_index] = true;
+        if own_all {
+            log::info!("OWN_ALL=1 — the whole arsenal is unlocked ({} weapons)", weapons.len());
+        }
         let (gun_model, muzzle_model) = load_weapon_models(weapons[weapon_index].config());
 
         // P5: the GoldenEye radial health HUD graphic (processed once into angle/
@@ -2438,7 +2488,11 @@ impl World {
             // pistols + detonator ship a `gun_handless.glb`; everything else has no
             // hand, so this falls back to `gun.glb`. The player viewmodel keeps the
             // hand (it loads `gun.glb` directly — see `combat::viewmodel::load_gun`).
-            let gun_path = crate::combat::gun_strip::enemy_gun_path(cfg.gun_path, |rel| {
+            // The mesh a HUNTER holds, which is not always the player's. For a
+            // Perfect Dark weapon that is the third-person `chr*` model (see
+            // `enemy_def_for`); for GoldenEye it is the hand-stripped variant.
+            let held = crate::combat::enemy_def_for(cfg).gun_path;
+            let gun_path = crate::combat::gun_strip::enemy_gun_path(held, |rel| {
                 std::path::Path::new(&asset(rel)).exists()
             });
             let gun = match crate::combat::load_gun(&asset(&gun_path)) {

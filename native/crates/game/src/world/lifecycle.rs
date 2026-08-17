@@ -773,11 +773,18 @@ impl World {
         // check the aim/hold transfers from the one-handed pistol case) so behaviour
         // can be observed in isolation.
         let count = if self.anim_debug { 1 } else { self.wave_size };
+        // Drawn from the LIVE arsenal: the GoldenEye roster's weapons do not exist
+        // under `ARSENAL=pd`, and a name that does not resolve means a hunter with
+        // no gun mesh at all.
+        let roster = crate::world::enemy_roster_for(self.arsenal);
         for i in 0..count {
             let (wcfg, dual) = if self.anim_debug {
                 (crate::combat::config::AR33, false)
+            } else if roster.is_empty() {
+                // No roster for this arsenal — better an unarmed hunter than a panic.
+                (crate::combat::config::PP7, false)
             } else {
-                ENEMY_ROSTER[i % ENEMY_ROSTER.len()]
+                roster[i % roster.len()]
             };
             // Spread the wave across the whole family so a single hunt shows a varied
             // squad rather than six clones (body 0 = Karl when only one loaded).

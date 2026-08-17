@@ -232,10 +232,18 @@ fn spread_for(w: &WeaponStats, class: EnemyWeaponClass) -> f32 {
 /// equippable. Asset paths + fire sound come straight off the player weapon (the
 /// enemy and player share the same GLBs).
 pub fn enemy_def_for(w: &WeaponStats) -> EnemyWeaponDef {
-    let class = if PISTOL_NAMES.contains(&w.name) {
-        EnemyWeaponClass::Pistol
-    } else {
-        EnemyWeaponClass::Rifle
+    // One-handed or two? For a Perfect Dark weapon this is authored —
+    // `WEAPONFLAG_ONEHANDED`, whose decomp comment is literally "Makes guards carry
+    // the gun with one hand" (`constants.h:4683`). For GoldenEye it falls back to
+    // the name list below.
+    //
+    // Not cosmetic: the class picks the *fire animation*, so without this every PD
+    // pistol was handed the two-handed rifle pose.
+    let class = match crate::combat::arsenal::pd_weapon_for(w.name) {
+        Some(pd) if pd.one_handed => EnemyWeaponClass::Pistol,
+        Some(_) => EnemyWeaponClass::Rifle,
+        None if PISTOL_NAMES.contains(&w.name) => EnemyWeaponClass::Pistol,
+        None => EnemyWeaponClass::Rifle,
     };
 
     // Class-default AI stats + offsets (pp7 for pistols, kf7 for rifles). The class
@@ -310,10 +318,23 @@ pub fn enemy_def_for(w: &WeaponStats) -> EnemyWeaponDef {
         })
     });
 
+    // A hunter holds the THIRD-PERSON model, not the first-person one.
+    //
+    // PD ships two models per gun and grabbing the wrong one is the documented easy
+    // mistake (`DESIGN_PD_WEAPON_MECHANICS.md` §3) — which I duly made: the bridge
+    // put `fp_glb` on `WeaponStats::gun_path`, correctly for the player's viewmodel,
+    // and the enemy library then copied that field, so hunters were holding
+    // first-person meshes. The `chr*` model is also the one carrying `CHRGUNFIRE`,
+    // and it needs no hand-stripping (it is the weapon alone), so this is the right
+    // asset on all three counts.
+    let gun_path = crate::combat::arsenal::pd_weapon_for(w.name)
+        .map(|pd| pd.tp_glb)
+        .unwrap_or(w.gun_path);
+
     EnemyWeaponDef {
         name: w.name,
         class,
-        gun_path: w.gun_path,
+        gun_path,
         muzzle_path: w.muzzle_path,
         fire_sound: w.fire_sound,
         damage: ENEMY_DAMAGE,
