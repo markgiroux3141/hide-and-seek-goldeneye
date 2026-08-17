@@ -308,10 +308,17 @@ pub fn weapon_stats_from_pd(w: &'static PdWeapon) -> WeaponStats {
         reload_sound: RELOAD_SND,
         empty_sound: EMPTY_SND,
         gun_path: w.fp_glb,
-        // PD authors the flash on the model (CHRGUNFIRE / MUZZLEFLASH parts)
-        // rather than as a separate mesh, and `FUNCFLAG_NOMUZZLEFLASH` suppresses
-        // it outright — so there is no separate flash GLB to point at.
-        muzzle_path: "",
+        // PD authors the flash as a **part of the gun model** (`MUZZLEFLASH1`) and
+        // hides it via `modelpartvisibility` until the weapon fires. The exporter
+        // pulls that part into its own GLB, which is exactly the shape our renderer
+        // already wants — a flash mesh shown while `flash_active()`. Empty when the
+        // weapon authors no flash, or when `FUNCFLAG_NOMUZZLEFLASH` suppresses it
+        // (the silenced Falcon 2, every melee function).
+        muzzle_path: if f.has_flag(super::pd_weapons::FUNCFLAG_NOMUZZLEFLASH) {
+            ""
+        } else {
+            w.flash_glb
+        },
         model_scale: PD_VIEW_SCALE,
         model_offset: view_offset(w),
         pivot_offset: Vec3::ZERO,
@@ -616,6 +623,117 @@ mod tests {
         // A GoldenEye weapon keeps the single mesh it has.
         let ge = super::super::enemy_def_for(&config::KF7);
         assert_eq!(ge.gun_path, config::KF7.gun_path);
+    }
+
+    /// Every gun mesh carries real per-vertex **shading**, not just geometry.
+    ///
+    /// Regression for the guns rendering dead flat. The viewmodel shader is
+    /// deliberately unlit and computes `texel × vertex_colour`, so a mesh without
+    /// varied `COLOR_0` has no shading at all — and the loader defaults a missing
+    /// one to white, which is exactly the kind of absence that looks like a texture
+    /// bug and passes every other check. PD stores this per vertex, as either a
+    /// colour table or a normal table depending on the node.
+    #[test]
+    fn every_gun_mesh_carries_per_vertex_shading() {
+        let asset =
+            |rel: &str| format!("{}/../../assets/weapons/{}", env!("CARGO_MANIFEST_DIR"), rel);
+        if !std::path::Path::new(&asset("pd")).is_dir() {
+            eprintln!("note: PD weapon assets absent");
+            return;
+        }
+        let lum = |c: &[f32; 4]| (c[0] + c[1] + c[2]) / 3.0;
+        let mut shaded = 0;
+        for w in Arsenal::PerfectDark.weapons() {
+            let model = crate::combat::load_gun(&asset(w.gun_path)).unwrap();
+            assert!(!model.vertices.is_empty(), "{} has no vertices", w.name);
+            let lo = model.vertices.iter().map(|v| lum(&v.color)).fold(f32::MAX, f32::min);
+            let hi = model.vertices.iter().map(|v| lum(&v.color)).fold(f32::MIN, f32::max);
+
+            // The real failure is a mesh multiplied toward BLACK. PD's null table
+            // slot is (0,0,0,0) meaning "unspecified", and passing it through as a
+            // colour renders the whole gun black — the Remote Mine indexes nothing
+            // else, so it did exactly that.
+            assert!(
+                lo > 0.05,
+                "{} has near-black vertex colour ({lo}..{hi}) — it would render as \
+                 a silhouette",
+                w.name
+            );
+            // A zero-length normal is NaN once the shader normalises it.
+            for v in &model.vertices {
+                let n = Vec3::from(v.normal);
+                assert!(
+                    n.is_finite() && n.length() > 0.1,
+                    "{} has a degenerate normal {n:?}",
+                    w.name
+                );
+            }
+            if hi - lo > 0.05 {
+                shaded += 1;
+            }
+        }
+        // Most guns carry real shading, but NOT all of them do, and that is PD's art
+        // rather than our bug: the Dragon's visible nodes reference only the null slot
+        // and (254,254,254), so it is authored flat and leans on its texture. Asserting
+        // every gun varies would be asserting something untrue about the source.
+        assert!(
+            shaded >= 25,
+            "only {shaded} of 33 guns carry per-vertex shading — expected most of them"
+        );
+    }
+
+    /// The muzzle flash is a **separate** GLB, never part of the gun mesh.
+    ///
+    /// Regression for a playtest defect: PD authors the flash as `MUZZLEFLASH1`, a
+    /// *part of the gun model* hidden by `modelpartvisibility` until the weapon
+    /// fires. Baking it in drew a permanent square stuck to the barrel — along with
+    /// the scope, silencer and both magazines of every weapon that shares one model
+    /// file across variants.
+    #[test]
+    fn the_muzzle_flash_is_its_own_asset() {
+        let asset =
+            |rel: &str| format!("{}/../../assets/weapons/{}", env!("CARGO_MANIFEST_DIR"), rel);
+        if !std::path::Path::new(&asset("pd")).is_dir() {
+            eprintln!("note: PD weapon assets absent");
+            return;
+        }
+        let mut with_flash = 0;
+        for w in Arsenal::PerfectDark.weapons() {
+            let pd = pd_weapon_for(w.name).unwrap();
+            if pd.flash_glb.is_empty() {
+                continue;
+            }
+            with_flash += 1;
+            assert!(
+                pd.flash_glb.ends_with("-flash.glb"),
+                "{}: {}",
+                w.name,
+                pd.flash_glb
+            );
+            assert_ne!(pd.flash_glb, pd.fp_glb, "{}: flash must not be the gun", w.name);
+            let path = asset(pd.flash_glb);
+            assert!(
+                std::path::Path::new(&path).is_file(),
+                "{} names a flash GLB that was never exported: {path}",
+                w.name
+            );
+            let model = crate::combat::load_flash(&path)
+                .unwrap_or_else(|e| panic!("{} flash failed to load: {e}", w.name));
+            assert!(!model.vertices.is_empty(), "{}'s flash is empty", w.name);
+        }
+        assert!(with_flash >= 15, "most guns author a flash, got {with_flash}");
+    }
+
+    /// A weapon whose firing function sets `FUNCFLAG_NOMUZZLEFLASH` shows no flash,
+    /// even when its model carries the geometry — the silenced Falcon 2 shares the
+    /// plain one's model file.
+    #[test]
+    fn a_silenced_weapon_shows_no_flash() {
+        let pd = Arsenal::PerfectDark.weapons();
+        let sil = pd.iter().find(|w| w.name == "Falcon 2 (silencer)").unwrap();
+        assert_eq!(sil.muzzle_path, "", "a silenced weapon has no flash");
+        let plain = pd.iter().find(|w| w.name == "Falcon 2").unwrap();
+        assert!(!plain.muzzle_path.is_empty(), "the plain Falcon 2 does flash");
     }
 
     /// The damage conversion survives the bridge: a PD pistol still kills a 100 HP

@@ -206,6 +206,7 @@ class Model:
 
         self.verts: list[tuple] = []
         self.uvs: list[tuple] = []
+        self.cols: list[tuple] = []
         self.jnts: list[tuple] = []
         self.wgts: list[tuple] = []
         self.tris: list[tuple[int, int, int, int]] = []  # (a, b, c, primitive)
@@ -218,6 +219,15 @@ class Model:
                 self.verts += p
                 self.uvs += (
                     g.accessor(attrs["TEXCOORD_0"]) if "TEXCOORD_0" in attrs else [(0.0, 0.0)] * len(p)
+                )
+                # Vertex colours (glTF `COLOR_0`). The engine's viewmodel shader
+                # multiplies these onto the sampled texel, and PD's guns carry their
+                # whole shading here — so without them a preview shows a flat
+                # silhouette and reports it as "no textures".
+                self.cols += (
+                    g.accessor(attrs["COLOR_0"])
+                    if "COLOR_0" in attrs
+                    else [(1.0, 1.0, 1.0, 1.0)] * len(p)
                 )
                 self.jnts += (
                     g.accessor(attrs["JOINTS_0"]) if "JOINTS_0" in attrs else [(0, 0, 0, 0)] * len(p)
@@ -542,6 +552,7 @@ def render(
         # field of view, which would read as a UV bug rather than a renderer one.
         iza, izb, izc = 1.0 / sa[2], 1.0 / sb[2], 1.0 / sc[2]
         uva, uvb, uvc = model.uvs[a], model.uvs[b], model.uvs[c]
+        ca, cb, cc = model.cols[a], model.cols[b], model.cols[c]
 
         minx = max(0, int(min(sa[0], sb[0], sc[0])))
         maxx = min(width - 1, int(max(sa[0], sb[0], sc[0])) + 1)
@@ -571,9 +582,22 @@ def render(
                     u = (wa * uva[0] * iza + w1 * uvb[0] * izb + w0 * uvc[0] * izc) / iz
                     v = (wa * uva[1] * iza + w1 * uvb[1] * izb + w0 * uvc[1] * izc) / iz
                     r, g, bl = sample_image(img, u, v)
+                    # texel x vertex colour, matching `shader_viewmodel.wgsl`.
+                    vc = (
+                        wa * ca[0] * iza + w1 * cb[0] * izb + w0 * cc[0] * izc,
+                        wa * ca[1] * iza + w1 * cb[1] * izb + w0 * cc[1] * izc,
+                        wa * ca[2] * iza + w1 * cb[2] * izb + w0 * cc[2] * izc,
+                    )
+                    r *= vc[0] / iz
+                    g *= vc[1] / iz
+                    bl *= vc[2] / iz
                 zb[o] = z
                 fb[o * 4 : o * 4 + 3] = bytes(
-                    (int(r * shade), int(g * shade), int(bl * shade))
+                    (
+                        min(255, int(r * shade)),
+                        min(255, int(g * shade)),
+                        min(255, int(bl * shade)),
+                    )
                 )
     return bytes(fb)
 

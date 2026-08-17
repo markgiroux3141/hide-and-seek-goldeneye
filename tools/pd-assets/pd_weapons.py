@@ -467,6 +467,7 @@ class Consts:
                 "GUNFEATURE_",
                 "MPFEATURE_",
                 "BOTDISTCFG_",
+                "MODELPART_",
                 "EXPLOSIONTYPE_",
                 "SMOKETYPE_",
             ),
@@ -495,6 +496,13 @@ def resolve_expr(tok: str, consts: Consts) -> object:
         return None
     if tok == "NULL":
         return None
+    # C booleans. Worth handling centrally: as bare symbols they come back as the
+    # STRINGS "true"/"false", and `bool("false")` is True in Python — which silently
+    # made every `modelpartvisibility` row read as visible.
+    if tok == "true":
+        return True
+    if tok == "false":
+        return False
     if tok.startswith("{") and tok.endswith("}"):
         return [resolve_expr(p, consts) for p in split_top_level(tok[1:-1])]
 
@@ -620,6 +628,9 @@ def gun_string(strings: dict[str, str], token: object) -> str:
 # The four MP entries with no gameplay system to attach to — the handoff's
 # "no system to attach to; defer or decline" list. Excluded from the port scope
 # by explicit user decision, not by judgement.
+#: The first-person muzzle-flash part (`constants.h`).
+MODELPART_GUN_MUZZLEFLASH1 = 0x005A
+
 EQUIPMENT_ONLY = {
     "MPWEAPON_XRAYSCANNER",
     "MPWEAPON_CLOAKINGDEVICE",
@@ -725,6 +736,37 @@ def build() -> dict:
         # Decode the FUNCFLAG_* bits that are set, so the behaviour flags are
         # readable rather than a hex blob.
         out["flag_names"] = decode_flags(vals.get("flags"), consts, "FUNCFLAG_")
+        return out
+
+    def expand_partvis(sym: object) -> list[dict]:
+        """`invpartvisibility_*` -> the parts this weapon variant shows/hides.
+
+        `struct modelpartvisibility` (`types.h:3018`) is `{part, visible}` pairs
+        terminated by a `{255}` sentinel. This is how three weapons share ONE model
+        file and still look different: the plain Falcon 2 hides its scope, silencer,
+        both magazines and `MUZZLEFLASH1`, while `invpartvisibility_falcon2scope`
+        leaves the scope showing.
+
+        Ignoring it means exporting every part at once — a plain pistol wearing its
+        scope AND its silencer, with the muzzle flash geometry stuck on permanently.
+        """
+        if not isinstance(sym, str) or sym not in inv:
+            return []
+        entry = inv[sym]
+        out: list[dict] = []
+        for row in split_top_level(entry["body"]):
+            row = row.strip()
+            if not row.startswith("{"):
+                continue
+            vals = [resolve_expr(t, consts) for t in split_top_level(row[1:-1])]
+            if not vals:
+                continue
+            part = vals[0]
+            if part == 255:  # the terminator
+                break
+            visible = vals[1] is not False if len(vals) > 1 else True
+            if isinstance(part, int):
+                out.append({"part": part, "visible": visible})
         return out
 
     def expand_ammo(sym: object) -> dict | None:
@@ -848,6 +890,7 @@ def build() -> dict:
             funcs = [funcs]
 
         name_text = gun_string(strings, wdef.get("name"))
+        part_vis = expand_partvis(wdef.get("partvisibility"))
 
         rows.append(
             {
@@ -892,7 +935,15 @@ def build() -> dict:
                     "sec_ammo_qty": mp.get("secammoqty"),
                     "source": f"mplayer.c:{mp_init['g_MpWeapons']['line'] + mp_index}",
                 },
-                "export": export_info(w_slug(mp_index, name_text), tp_bin),
+                "part_visibility": part_vis,
+                "export": export_info(
+                    w_slug(mp_index, name_text),
+                    tp_bin,
+                    has_flash=any(
+                        r["part"] == MODELPART_GUN_MUZZLEFLASH1 and not r["visible"]
+                        for r in part_vis
+                    ),
+                ),
                 "bot": bot_configs[weaponnum] if weaponnum < len(bot_configs) else None,
                 "functions": [expand_func(f) for f in funcs],
                 "ammo": [expand_ammo(wdef.get("pri_ammo")), expand_ammo(wdef.get("sec_ammo"))],
@@ -930,7 +981,7 @@ def w_slug(mp_index: int, name: str) -> str:
     return f"{mp_index:02x}-{out.strip('-')}"
 
 
-def export_info(slug: str, tp_rel: str | None) -> dict:
+def export_info(slug: str, tp_rel: str | None, has_flash: bool = False) -> dict:
     """Where the exported GLBs live, plus the third-person shot origin.
 
     The muzzle is read through `pd_gltf.gun_metadata`, the same function the
@@ -940,6 +991,9 @@ def export_info(slug: str, tp_rel: str | None) -> dict:
     info = {
         "fp_glb": f"pd/{slug}-fp.glb",
         "tp_glb": f"pd/{slug}-tp.glb",
+        # `MUZZLEFLASH1` is exported to its own GLB when the weapon hides it (which
+        # is what PD does), so it can be drawn on fire rather than baked into the gun.
+        "flash_glb": f"pd/{slug}-flash.glb" if has_flash else "",
         "tp_muzzle": [0.0, 0.0, 0.0],
         "muzzle_is_authored": False,
     }
@@ -1344,6 +1398,11 @@ pub struct PdWeapon {
     /// The exported first-person GLB, relative to `native/assets/weapons/` so it
     /// drops straight into the same slot as a GoldenEye `WeaponStats::gun_path`.
     pub fp_glb: &'static str,
+    /// The exported muzzle-flash GLB, or `""` when the weapon authors no flash.
+    /// Separate from the gun because PD hides `MUZZLEFLASH1` in the weapon's
+    /// `modelpartvisibility` and shows it only while firing — baked into the gun it
+    /// reads as a permanent square stuck on the barrel.
+    pub flash_glb: &'static str,
     /// The exported third-person GLB — what a hunter holds. Unlike the GoldenEye
     /// guns this needs no hand-stripping: PD's `chr*` models are the third-person
     /// weapon alone, so the `enemy-weapon-hand-artifact` cannot arise.
@@ -1520,6 +1579,7 @@ impl PdExplosion {
         out.append(f"        tp_model: {rs(w['assets']['tp_model'] or '')},")
         ex = w.get("export") or {}
         out.append(f"        fp_glb: {rs(ex.get('fp_glb'))},")
+        out.append(f"        flash_glb: {rs(ex.get('flash_glb'))},")
         out.append(f"        tp_glb: {rs(ex.get('tp_glb'))},")
         mz = ex.get("tp_muzzle") or [0.0, 0.0, 0.0]
         out.append(

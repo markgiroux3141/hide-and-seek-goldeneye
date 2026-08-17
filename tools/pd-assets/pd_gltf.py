@@ -90,7 +90,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pd_tex  # noqa: E402
 from pd_anim import load_animation  # noqa: E402
-from pd_model import ModelDef, load, seg_off, seg_ok  # noqa: E402
+from pd_model import VTX_SIZE, ModelDef, load, seg_off, seg_ok  # noqa: E402
 from pd_pose import UNITS_PER_METRE, build_skeleton, rotation_matrix  # noqa: E402
 
 # ---------------------------------------------------------------------------
@@ -915,6 +915,11 @@ MODELPART_GUN_HOLDPOS = 0x0037
 MODELPART_0000 = 0x0000
 MODELPART_0001 = 0x0001
 
+#: The first-person muzzle-flash part. PD hides it in the weapon's authored
+#: `modelpartvisibility` and shows it only while firing, so it is exported to its
+#: own GLB rather than baked into the gun (where it reads as a permanent square).
+MODELPART_GUN_MUZZLEFLASH1 = 0x005A
+
 #: PD gun models are on the same 1000-units-per-metre scale as characters. NOT
 #: assumed from the character pipeline — measured off the third-person meshes,
 #: which come out anatomically right at that scale and wrong at any other:
@@ -933,6 +938,22 @@ GUN_UNITS_PER_METRE = UNITS_PER_METRE
 #: reads the same node for the shot ray, which is why flash and bullet always
 #: agree on screen.
 GUN_BARREL_AXIS = (-1.0, 0.0, 0.0)
+
+#: The fixed light PD's normal-lit gun parts are baked against, matching the world
+#: shader's own legacy directional look (`shader.wgsl`'s `shade()`:
+#: `l = normalize(0.4, 1.0, 0.6)`, `0.25 + 0.75 * abs(dot(n, l))`).
+#:
+#: Why bake instead of light at runtime: the viewmodel shader is deliberately UNLIT
+#: (`shader_viewmodel.wgsl` — "the GoldenEye weapon skins are N64-style, no
+#: lighting"), and the GoldenEye guns look shaded only because their `COLOR_0`
+#: carries shading baked in. PD's normal-table parts were lit by the RSP at runtime
+#: instead, so nothing in our pipeline shades them and they render dead flat. For a
+#: static viewmodel, pre-lighting the authored normals into `COLOR_0` gives the same
+#: result as lighting them each frame, needs no engine change, and matches how PD's
+#: OTHER parts already ship their shading. The `NORMAL` attribute is still exported,
+#: so a future lit path has real normals to use.
+GUN_BAKE_LIGHT = (0.4, 1.0, 0.6)
+GUN_BAKE_AMBIENT = 0.25
 
 
 def model_parts(m: ModelDef) -> dict[int, int]:
@@ -1097,7 +1118,131 @@ def gun_metadata(m: ModelDef, scale: float) -> dict:
     return meta
 
 
-def export_gun(path: str, out: str, scale: float) -> dict:
+def dl_vertex_table(
+    m: ModelDef, node_offset: int
+) -> tuple[str, list[tuple[float, float, float, float]]]:
+    """The per-vertex table a drawable node indexes with its `Vtx.colour` byte.
+
+    Returns `(kind, entries)` where `kind` is `"normal"`, `"colour"` or `""`.
+
+    PD calls this field `colours` (`modelrodata_dl.colours` / `numcolours`,
+    `types.h:552`) — and **it is both**, per node. That is the standard F3DEX dual
+    use of the vertex colour slot: with `G_LIGHTING` enabled the RSP reads those
+    three bytes as a normal, without it as a colour. Measured across the 33 guns'
+    174 drawable nodes: **120 hold colours and 54 hold normals**, so neither reading
+    alone is right and assuming either one silently wrecks the other's meshes.
+
+    The two are easy to tell apart from the data, which is how this is classified
+    rather than guessed:
+
+      * a **normal** table's entries are unit length as signed bytes — `(127,0,0)`
+        is +X, `(0,129,0)` is −Y, `(89,167,0)` is (0.7, −0.7, 0);
+      * a **colour** table's entries have equal components — `(48,48,48)`,
+        `(68,68,68)`, `(136,136,136)` — i.e. greyscale, which is PD's baked
+        shading, meant to multiply onto the texture exactly the way the GoldenEye
+        weapon GLBs do (see `engine::assets::textured_model`'s own note that "a
+        white palette entry tinted by the vertex color gives the real dark metal
+        surface color").
+
+    Discarding this is why the guns rendered flat: the loader defaults a missing
+    `COLOR_0` to white (so no shading) and a missing `NORMAL` to a single constant
+    `(0,1,0)` (so no form, and the viewmodel matcap collapses to one texel).
+
+    `Vtx.colour` is a **byte offset** into the table, not an element index — the
+    observed values run 0, 4, 8 … 252, i.e. 64 entries of 4 bytes.
+
+    Two layouts, because the node types differ:
+      * `DL` (0x18) carries a real `colours` pointer at 0x08 and `numcolours` at 0x16.
+      * `GUNDL` (0x04) has neither, so its table follows the vertex array — the same
+        segment-6 convention `pd_model._run_dl` already assumes.
+    """
+    node = m.read_node(node_offset)
+    t = node.type & 0xFF
+    if t not in (0x18, 0x04) or not seg_ok(node.rodata):
+        return "", []
+    ro = seg_off(node.rodata)
+    if ro + 0x18 > len(m.data):
+        return "", []
+    vtx_addr, numvertices = struct.unpack_from(">Ih", m.data, ro + 0x0C)
+    if not seg_ok(vtx_addr) or numvertices <= 0:
+        return "", []
+
+    if t == 0x18:
+        (col_addr,) = struct.unpack_from(">I", m.data, ro + 0x08)
+        (numcolours,) = struct.unpack_from(">H", m.data, ro + 0x16)
+        base = (
+            seg_off(col_addr) if seg_ok(col_addr) else seg_off(vtx_addr) + numvertices * VTX_SIZE
+        )
+        count = numcolours if numcolours > 0 else 64
+    else:
+        base = seg_off(vtx_addr) + numvertices * VTX_SIZE
+        count = 64  # GUNDL declares no count; 64 covers the observed 0..252 offsets
+
+    raw: list[tuple[int, int, int, int]] = []
+    for i in range(count):
+        off = base + i * 4
+        if off + 4 > len(m.data):
+            break
+        raw.append(tuple(m.data[off + k] for k in range(4)))  # type: ignore[arg-type]
+    if not raw:
+        return "", []
+
+    # Classify from the entries that are actually non-null.
+    def signed(b: int) -> int:
+        return b - 256 if b > 127 else b
+
+    live = [e for e in raw if e[:3] != (0, 0, 0)]
+    if not live:
+        return "", []
+    grey = sum(1 for e in live if e[0] == e[1] == e[2])
+    unit = 0
+    for e in live:
+        x, y, z = (signed(e[k]) / 127.0 for k in range(3))
+        if abs((x * x + y * y + z * z) ** 0.5 - 1.0) <= 0.06:
+            unit += 1
+    if grey > len(live) * 0.5 or unit <= len(live) * 0.5:
+        # Colours: 0-255 straight through, alpha included.
+        return "colour", [tuple(c / 255.0 for c in e) for e in raw]  # type: ignore[misc]
+    return "normal", [
+        (signed(e[0]) / 127.0, signed(e[1]) / 127.0, signed(e[2]) / 127.0, 1.0) for e in raw
+    ]
+
+
+def part_subtree_nodes(m: ModelDef, parts: list[int]) -> set[int]:
+    """Every node offset at or under the given `MODELPART_*` numbers.
+
+    Needed because a part is a `POSITION`/`TOGGLE` node and the geometry hangs
+    below it, so hiding a part means dropping its whole subtree rather than one
+    node.
+    """
+    nodes = {n.offset: n for n in m.walk()}
+    table = model_parts(m)
+    roots = [table[p] for p in parts if p in table]
+    if not roots:
+        return set()
+
+    # Walk parents upward for every node and mark it if any ancestor is a root.
+    rootset = set(roots)
+    out: set[int] = set()
+    for off in nodes:
+        cur = nodes.get(off)
+        seen: set[int] = set()
+        while cur is not None and cur.offset not in seen:
+            if cur.offset in rootset:
+                out.add(off)
+                break
+            seen.add(cur.offset)
+            cur = nodes.get(seg_off(cur.parent)) if seg_ok(cur.parent) else None
+    return out
+
+
+def export_gun(
+    path: str,
+    out: str,
+    scale: float,
+    hide_parts: list[int] | None = None,
+    only_parts: list[int] | None = None,
+) -> dict:
     """Export one PD weapon model as a static, textured GLB.
 
     Deliberately **not** skinned. PD's first-person models articulate (a slide,
@@ -1113,9 +1258,30 @@ def export_gun(path: str, out: str, scale: float) -> dict:
     if not groups:
         raise SystemExit(f"{model.name}: no geometry")
 
+    # Apply the weapon's authored `modelpartvisibility`. Three weapons can share one
+    # model file and look different purely through this list — the plain Falcon 2
+    # hides its scope, silencer, both magazines and MUZZLEFLASH1 — so exporting
+    # every part gives a pistol wearing its scope AND its silencer, with the muzzle
+    # flash geometry stuck on permanently as a square.
+    if hide_parts:
+        hidden = part_subtree_nodes(model, hide_parts)
+        kept = [g for g in groups if g.node_offset not in hidden]
+        if kept:
+            groups = kept
+    # `only_parts` is the inverse, for pulling a single part out into its own GLB
+    # (the muzzle flash, so it can be drawn on fire instead of always).
+    if only_parts is not None:
+        wanted = part_subtree_nodes(model, only_parts)
+        groups = [g for g in groups if g.node_offset in wanted]
+        if not groups:
+            raise SystemExit(f"{model.name}: no geometry for parts {only_parts}")
+
     offsets = gun_part_offsets(model)
     meta = gun_metadata(model, scale)
     cfgs = read_texconfigs(model)
+    # One vertex table per drawable node — PD stores them per DL, not per model, and
+    # each is either normals or colours (see `dl_vertex_table`).
+    vtables = {g.node_offset: dl_vertex_table(model, g.node_offset) for g in groups}
 
     glb = Glb("pd_gltf.py (Perfect Dark -> glTF)")
 
@@ -1140,8 +1306,8 @@ def export_gun(path: str, out: str, scale: float) -> dict:
             key = tex if cfg is not None else None
             batch = batches.get(key)
             if batch is None:
-                batch = batches[key] = [cfg, gi, {}, [], [], []]
-            _, _, remap, pos, uv, idx = batch
+                batch = batches[key] = [cfg, gi, {}, [], [], [], [], []]
+            _, _, remap, pos, uv, idx, nrm, col = batch
             for corner in (a, b, c):
                 local = (gi, corner)
                 out_i = remap.get(local)
@@ -1160,6 +1326,37 @@ def export_gun(path: str, out: str, scale: float) -> dict:
                         uv.extend((v.s / 32.0 / cfg.width, v.t / 32.0 / cfg.height))
                     else:
                         uv.extend(palette_uv(gi, len(groups)))
+                    # The authored per-vertex datum. `Vtx.colour` is a byte offset,
+                    # so /4. A normals node feeds NORMAL and leaves the colour white;
+                    # a colours node feeds COLOR_0 and leaves the normal to be
+                    # computed geometrically below.
+                    kind, table = vtables.get(g.node_offset, ("", []))
+                    ti = v.colour // 4
+                    e = table[ti] if ti < len(table) else None
+                    if kind == "normal" and e is not None:
+                        nrm.extend(e[:3])
+                        # Pre-light the authored normal into the vertex colour (see
+                        # GUN_BAKE_LIGHT). `abs` so a face wound the other way is lit
+                        # rather than black — PD's winding is not consistent, and a
+                        # two-sided term is what the world shader uses too.
+                        ln = sum(c * c for c in GUN_BAKE_LIGHT) ** 0.5
+                        ndl = abs(sum(e[k] * GUN_BAKE_LIGHT[k] / ln for k in range(3)))
+                        sh = GUN_BAKE_AMBIENT + (1.0 - GUN_BAKE_AMBIENT) * min(ndl, 1.0)
+                        col.extend((sh, sh, sh, 1.0))
+                    elif kind == "colour" and e is not None:
+                        nrm.extend((0.0, 0.0, 0.0))
+                        # PD's null slot is (0,0,0,0) and means "unspecified", NOT
+                        # black and NOT transparent. Passing it through multiplies the
+                        # whole mesh to nothing — the Remote Mine's entire model
+                        # indexes it, so it rendered pure black.
+                        if e[0] == 0.0 and e[1] == 0.0 and e[2] == 0.0:
+                            col.extend((1.0, 1.0, 1.0, 1.0))
+                        else:
+                            a = e[3] if e[3] > 0.0 else 1.0
+                            col.extend((e[0], e[1], e[2], a))
+                    else:
+                        nrm.extend((0.0, 0.0, 0.0))
+                        col.extend((1.0, 1.0, 1.0, 1.0))
                 idx.append(out_i)
     if untextured:
         print(
@@ -1168,12 +1365,49 @@ def export_gun(path: str, out: str, scale: float) -> dict:
             file=sys.stderr,
         )
 
+    # PD leaves some vertices pointing at table entry 0, which is a null
+    # (0,0,0,0) rather than a direction — 92 of the Falcon 2's 802. Shipping those
+    # as a zero vector would hand the shader `normalize(0)` and produce NaN, so
+    # they fall back to the geometric normal of the faces they belong to. Only the
+    # null ones: an authored normal is always preferred over a computed one.
+    for _cfg, _gi, _remap, pos, _uv, idx, nrm, _col in batches.values():
+        missing = {
+            i for i in range(len(pos) // 3) if nrm[i * 3] == 0.0 and nrm[i * 3 + 1] == 0.0 and nrm[i * 3 + 2] == 0.0
+        }
+        if not missing:
+            continue
+        acc = {i: [0.0, 0.0, 0.0] for i in missing}
+        for k in range(0, len(idx) - 2, 3):
+            a, b, c = idx[k], idx[k + 1], idx[k + 2]
+            if not (a in acc or b in acc or c in acc):
+                continue
+            pa = pos[a * 3 : a * 3 + 3]
+            pb = pos[b * 3 : b * 3 + 3]
+            pc = pos[c * 3 : c * 3 + 3]
+            u = [pb[j] - pa[j] for j in range(3)]
+            v = [pc[j] - pa[j] for j in range(3)]
+            fn = [
+                u[1] * v[2] - u[2] * v[1],
+                u[2] * v[0] - u[0] * v[2],
+                u[0] * v[1] - u[1] * v[0],
+            ]
+            for vi in (a, b, c):
+                if vi in acc:
+                    for j in range(3):
+                        acc[vi][j] += fn[j]
+        for i, n in acc.items():
+            ln = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) ** 0.5
+            if ln > 1e-9:
+                nrm[i * 3], nrm[i * 3 + 1], nrm[i * 3 + 2] = n[0] / ln, n[1] / ln, n[2] / ln
+            else:
+                nrm[i * 3 + 1] = 1.0  # degenerate face — anything unit beats NaN
+
     sampler = glb._append("samplers", {"magFilter": 9728, "minFilter": 9728})
     palette_image = None
     primitives = []
     nverts = 0
     ntris = 0
-    for cfg, gi, _remap, pos, uv, idx in batches.values():
+    for cfg, gi, _remap, pos, uv, idx, nrm, col in batches.values():
         if cfg is not None:
             tw, th, rgba = decode_texture(model, cfg)
             image = glb.image_png(png_bytes(tw, th, rgba))
@@ -1203,7 +1437,9 @@ def export_gun(path: str, out: str, scale: float) -> dict:
             {
                 "attributes": {
                     "POSITION": glb.accessor(pos, CT_F32, "VEC3", TARGET_ARRAY, minmax=True),
+                    "NORMAL": glb.accessor(nrm, CT_F32, "VEC3", TARGET_ARRAY),
                     "TEXCOORD_0": glb.accessor(uv, CT_F32, "VEC2", TARGET_ARRAY),
+                    "COLOR_0": glb.accessor(col, CT_F32, "VEC4", TARGET_ARRAY),
                 },
                 "indices": glb.accessor(
                     idx, CT_U16 if n <= 0xFFFF else CT_U32, "SCALAR", TARGET_ELEMENT
@@ -1276,10 +1512,15 @@ def export_guns(manifest_path: str, outdir: str, scale: float) -> int:
     failures: list[str] = []
     no_muzzle: list[str] = []
     grip_muzzle: list[str] = []
+    flashes: list[str] = []
     for w in table["weapons"]:
         if w.get("equipment_only"):
             continue
         entry: dict = {"name": w["name_text"], "mp_index": w["mp_index"]}
+        # The parts this weapon variant hides (`modelpartvisibility`).
+        hide = [
+            r["part"] for r in (w.get("part_visibility") or []) if not r.get("visible", True)
+        ]
         for role, key in (("fp", "fp_model"), ("tp", "tp_model")):
             rel = w["assets"].get(key)
             if not rel:
@@ -1288,11 +1529,29 @@ def export_guns(manifest_path: str, outdir: str, scale: float) -> int:
             src_path = os.path.join(files_root, rel.replace("/", os.sep))
             out_path = os.path.join(outdir, slug + ".glb")
             try:
-                stats = export_gun(src_path, out_path, scale)
+                # Visibility is authored for the FIRST-PERSON model's parts; the
+                # third-person `chr*` models have one geometry group and no variants.
+                stats = export_gun(
+                    src_path, out_path, scale, hide_parts=hide if role == "fp" else None
+                )
             except SystemExit as e:
                 print(f"  FAILED {rel}: {e}", file=sys.stderr)
                 failures.append(f"{w['name_text']} ({role})")
                 continue
+            # Pull the muzzle flash into its own GLB so it can be drawn on fire.
+            if role == "fp" and MODELPART_GUN_MUZZLEFLASH1 in hide:
+                flash_path = os.path.join(outdir, slug.replace("-fp", "-flash") + ".glb")
+                try:
+                    export_gun(
+                        src_path,
+                        flash_path,
+                        scale,
+                        only_parts=[MODELPART_GUN_MUZZLEFLASH1],
+                    )
+                    entry["flash"] = os.path.basename(flash_path)
+                    flashes.append(w["name_text"])
+                except SystemExit:
+                    pass  # no flash geometry — the weapon simply has none
             entry[role] = {
                 "glb": slug + ".glb",
                 "source": rel,
@@ -1329,8 +1588,17 @@ def export_guns(manifest_path: str, outdir: str, scale: float) -> int:
         )
 
     print(f"\n{len(index)} guns -> {outdir}")
+    if flashes:
+        print(f"  {len(flashes)} carry a separate muzzle-flash GLB (shown only on fire)")
+    if grip_muzzle:
+        # Not a gap: `chr_get_gun_pos` falls back to the grip for these, so this IS
+        # PD's answer for where the shot leaves the weapon.
+        print(
+            f"  {len(grip_muzzle)} fire from the grip — no CHRGUNFIRE authored, PD's own "
+            f"MODELPART_0001 fallback"
+        )
     if no_muzzle:
-        print(f"  no CHRGUNFIRE on the third-person model: {', '.join(no_muzzle)}")
+        print(f"  NO firing origin resolved at all: {', '.join(no_muzzle)}")
     if failures:
         print(f"  FAILED: {', '.join(failures)}", file=sys.stderr)
         return 1
