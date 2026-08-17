@@ -100,7 +100,10 @@ def read_bits(data: bytes, numbits: int, bitoffset: int) -> int:
 def read_signed_short(data: bytes, numbits: int, bitoffset: int) -> int:
     """`anim_read_signed_short` (anim.c:407) — sign-extend to 16 bits."""
     result = read_bits(data, numbits, bitoffset)
-    if numbits < 16 and (result & (1 << (numbits - 1))):
+    # A 0-bit channel is a constant: the base is the whole value and there is
+    # nothing in the frame to sign-extend. (`read_bits` returns 0, so the C sign
+    # test is false either way; Python just refuses to shift by -1.)
+    if 0 < numbits < 16 and (result & (1 << (numbits - 1))):
         result |= ((1 << (16 - numbits)) - 1) << numbits
     return result & 0xFFFF
 
@@ -112,13 +115,25 @@ def s16(v: int) -> int:
 class PartChannels:
     """One part's header record: which channels it animates and where its bits are."""
 
-    __slots__ = ("flags", "bitoffset", "translate", "rotate", "rot_is_f32", "trans_is_s32")
+    __slots__ = (
+        "flags", "bitoffset", "translate", "motion", "rotate", "rot_is_f32", "trans_is_s32",
+    )
 
     def __init__(self) -> None:
         self.flags = 0
         self.bitoffset = 0
         # each entry: (base, bitlen)
         self.translate: list[tuple[int, int]] = []
+        #: `ANIMFIELD_08` — **root motion**: four channels `(x, y, z, angle)` read by
+        #: `anim_get_pos_angle_as_int` (anim.c:610), not by
+        #: `anim_get_rot_translate_scale`, which zeroes `translate` for such a part.
+        #: This is how PD moves a character *through* an animation: how far a walk
+        #: cycle strides, and how far a death falls.
+        #:
+        #: Its bits sit in each frame **before** the part's rotation bits, so it has
+        #: to be stepped over even when the motion itself is not wanted. See
+        #: [`Animation.part_transform`].
+        self.motion: list[tuple[int, int]] = []
         self.rotate: list[tuple[int, int]] = []
         self.rot_is_f32 = False
         self.trans_is_s32 = False
@@ -177,11 +192,22 @@ class Animation:
                     bitoffset += bits
                     p += 5
             elif flags & F_08:
-                # Present but unused for posing; skip its 12 header bytes and bits.
+                # Root motion: four `(base, bitlen)` channels — x, y, z, angle — laid
+                # out exactly like the S16 translate ones, read by
+                # `anim_get_pos_angle_as_int` (anim.c:672-690). Its bits are part of
+                # this part's frame data and PRECEDE the rotation bits, so they are
+                # recorded rather than merely skipped: `part_transform` has to step
+                # over them to find the rotation, and `part_motion` reads them.
                 if p + 12 > len(h):
                     return parts
-                bitoffset += h[p + 2] + h[p + 5] + h[p + 8] + h[p + 11]
-                p += 12
+                for k in range(3):
+                    pc.motion.append(((h[p] << 8) + h[p + 1], h[p + 2]))
+                    bitoffset += h[p + 2]
+                    p += 3
+                # The fourth channel is a facing angle, in the same s16 encoding.
+                pc.motion.append(((h[p] << 8) + h[p + 1], h[p + 2]))
+                bitoffset += h[p + 2]
+                p += 3
 
             # ── rotation ──
             if flags & F_S16_ROTATE:
@@ -229,6 +255,16 @@ class Animation:
         pc = self.parts[part]
         fb = self.frame_bytes(framenum)
         bit = pc.bitoffset
+        # A root-motion part's four channels occupy the first bits of its frame
+        # data, ahead of the rotation — `anim_get_rot_translate_scale` steps over
+        # them (anim.c:510) before reading the angles, and so must we. Skipping this
+        # reads the rotation out of the motion channels' bits, which yields a
+        # *coherent but wrongly-oriented* body: the pose is fine, the whole figure is
+        # simply lying down. It hid because the only clip anyone had rendered,
+        # `ANIM_TWO_GUN_HOLD`, is authored dead still — all four of its bit lengths
+        # are 0, so the misalignment was exactly zero on that one animation.
+        for _base, bits in pc.motion:
+            bit += bits
 
         translate = [0.0, 0.0, 0.0]
         if pc.translate:
@@ -261,6 +297,34 @@ class Animation:
                 bit += bits
 
         return tuple(rot), tuple(translate)
+
+    def part_motion(self, part: int, framenum: int):
+        """Root motion for `part` at `framenum`: `(x, y, z, angle_radians)`.
+
+        `anim_get_pos_angle_as_int` (anim.c:610) — the `ANIMFIELD_08` channels,
+        which `part_transform` deliberately reports as no translation because the
+        game does the same (`anim_get_rot_translate_scale` zeroes `translate` for
+        such a part). This is where a clip's travel actually lives: how far a walk
+        cycle strides, and how far — and how far *down* — a death falls.
+
+        `(0, 0, 0, 0)` for a part with no motion channel, so a caller can treat
+        every part uniformly.
+        """
+        if part >= len(self.parts):
+            return 0.0, 0.0, 0.0, 0.0
+        pc = self.parts[part]
+        if not pc.motion:
+            return 0.0, 0.0, 0.0, 0.0
+        fb = self.frame_bytes(framenum)
+        bit = pc.bitoffset
+        out = []
+        for base, bits in pc.motion:
+            raw = read_signed_short(fb, bits, bit)
+            out.append(float(s16((raw + base) & 0xFFFF)))
+            bit += bits
+        # The fourth channel is a 16-bit turn: `angle * BADDTOR(360) / 65536`
+        # (anim.c:706), the same fixed-point turn the rotations use.
+        return out[0], out[1], out[2], out[3] * ROT_SCALE
 
 
 # ---------------------------------------------------------------------------
@@ -315,9 +379,27 @@ def cmd_info(key: str) -> int:
     print(f"  file {len(a.data)} bytes, expected {expected}", "OK" if len(a.data) == expected else "MISMATCH")
     rot = sum(1 for p in a.parts if p.rotate or p.rot_is_f32)
     tra = sum(1 for p in a.parts if p.translate)
-    print(f"  parts with rotation: {rot}, with translation: {tra}")
-    total_bits = a.parts[-1].bitoffset if a.parts else 0
-    print(f"  final bit offset {total_bits} ({total_bits / 8:.1f} bytes) vs {a.bytesperframe} bytes/frame")
+    mot = sum(1 for p in a.parts if p.motion)
+    print(f"  parts with rotation: {rot}, with translation: {tra}, with root motion: {mot}")
+    for i, p in enumerate(a.parts):
+        if p.motion:
+            bits = [b for _, b in p.motion]
+            end = a.part_motion(i, a.numframes - 1)
+            print(
+                f"    part {i} root motion: bitlens {bits}, "
+                f"last frame (x={end[0]:.0f} y={end[1]:.0f} z={end[2]:.0f} "
+                f"angle={math.degrees(end[3]):.1f}deg)"
+            )
+    # Every part's bits, i.e. one whole frame. Should account for `bytesperframe`
+    # up to the byte the encoder rounds up to; a large shortfall means a channel is
+    # going unread and every part after it is being decoded from the wrong bits.
+    last = a.parts[-1] if a.parts else None
+    total_bits = 0
+    if last is not None:
+        total_bits = last.bitoffset
+        for _b, n in last.motion + last.translate + last.rotate:
+            total_bits += n
+    print(f"  frame uses {total_bits} bits ({total_bits / 8:.1f} of {a.bytesperframe} bytes)")
     return 0
 
 

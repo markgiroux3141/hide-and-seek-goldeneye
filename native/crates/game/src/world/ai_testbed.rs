@@ -919,6 +919,252 @@ fn pd_body_yaw_carries_the_aim_error() {
     assert!(dark < 0.01, "a DarkSim should never leave the target, got {dark:.3}deg");
 }
 
+// ─── PD omniscience (the knowledge rule) ─────────────────────────────────────
+//
+// Perfect Dark's simulants come and find you. `bot_choose_general_target`
+// (`bot.c:1589`) hands a bot the closest out-of-sight opponent when nobody is in
+// sight, and `botcmd_tick_dist_mode` (`botcmd.c:39`) then re-issues
+// `chr_go_to_prop(chr, targetprop, GOPOSFLAG_RUN)` against that target's LIVE
+// position — there is no last-known-position anywhere in the simulant path. These
+// scenarios assert we reproduce that (and that the kill-switch restores our own
+// perceive-then-remember behaviour).
+
+/// The arena for the omniscience scenarios: a 15×15 m room split by a wall with one
+/// ~1.5 m gap, the player on the far side, and hunter 0 tucked into a near-side corner
+/// with **no line of sight** — the straight line to the player crosses the wall. To
+/// reach the player it has to know where the player is, walk to the gap, and come
+/// through. Returns `(arena, player_xz)`; the player is invulnerable so a long run
+/// can't end early with a kill.
+fn omniscience_arena(pd: bool) -> (TestArena, Vec3) {
+    let walls = [
+        [0.0, 0.0, 28.0, 27.0, 16.0, 4.0],  // left wall  (x 0..6.75 m)
+        [33.0, 0.0, 28.0, 27.0, 16.0, 4.0], // right wall (x 8.25..15 m)
+    ];
+    let player = Vec3::new(11.0, 0.0, 12.0);
+    let mut arena = if pd {
+        TestArena::build_pd(
+            [60.0, 16.0, 60.0],
+            &walls,
+            1,
+            player,
+            crate::pdsim::difficulty::BotDifficulty::Normal,
+        )
+    } else {
+        TestArena::build([60.0, 16.0, 60.0], &walls, 1, player)
+    };
+    if pd {
+        arena.world.toggle_invulnerable(); // `build_pd` leaves the player killable
+    }
+    arena.place_hunter(0, 2.0, 3.0); // near-side corner, wall between it and the player
+    (arena, player)
+}
+
+/// Run the omniscience arena for `secs` and report `(closest approach, whether it ever
+/// went blind-hunting)`. "Blind-hunting" = the hunter reached `Search` or `Investigate`,
+/// which is exactly what an omniscient one must never do — it has lost nothing to look
+/// for.
+fn omniscience_run(arena: &mut TestArena, secs: f32, player: Vec3) -> (f32, bool) {
+    let dt = 1.0 / 60.0;
+    let mut closest = f32::MAX;
+    let mut searched = false;
+    for _ in 0..(secs / dt) as usize {
+        arena.set_player(player.x, player.z); // hold them put; only the hunter moves
+        arena.step(dt);
+        let Some(e) = arena.world.enemies.first() else { break };
+        let p = e.enemy.pos;
+        closest = closest.min(Vec3::new(p.x - player.x, 0.0, p.z - player.z).length());
+        if matches!(e.enemy.state(), AiState::Search | AiState::Investigate) {
+            searched = true;
+        }
+    }
+    (closest, searched)
+}
+
+/// **The headline claim.** A PD hunter that cannot see the player still walks to them:
+/// it knows the live position, paths through the gap in the wall, and closes to its
+/// weapon standoff — never once dropping into the fan-out search.
+#[test]
+fn pd_omniscient_hunter_finds_a_player_it_cannot_see() {
+    let (mut arena, player) = omniscience_arena(true);
+    assert!(arena.world.pd_omniscience(), "PD omniscience is on by default");
+    // No sightline at the start — otherwise this proves nothing.
+    let start = arena.world.enemies[0].enemy.pos;
+    assert!(
+        !crate::enemy::perception_los(&mut arena.world.physics, start, player),
+        "the arena must start with the wall between hunter and player"
+    );
+    let (closest, searched) = omniscience_run(&mut arena, 20.0, player);
+    println!("PD omniscient: closest approach {closest:.2} m, ever searched: {searched}");
+    assert!(
+        closest < 6.0,
+        "an omniscient hunter must come and find the player it cannot see (got no closer than {closest:.2} m)"
+    );
+    assert!(!searched, "an omniscient hunter has nothing to search for, yet it entered Search/Investigate");
+}
+
+/// The kill-switch restores our own knowledge rule: the same PD hunter in the same
+/// arena, with omniscience off, never perceives the player and falls back to the
+/// fan-out sweep. This is the A/B that proves the behaviour above is the new policy
+/// and not the arena handing it a free sightline.
+#[test]
+fn pd_omniscience_kill_switch_restores_the_search() {
+    let (mut arena, player) = omniscience_arena(true);
+    arena.world.set_pd_omniscience(false);
+    assert!(!arena.world.pd_omniscience(), "the kill-switch disables omniscience");
+    let (_, searched) = omniscience_run(&mut arena, 20.0, player);
+    assert!(searched, "without omniscience a blind hunter must fall back to Search/Investigate");
+}
+
+/// Omniscience is PD-lab-only: a GoldenEye hunter in the same arena is never flagged,
+/// so the normal game keeps its perceive-then-remember AI untouched.
+#[test]
+fn a_goldeneye_hunter_is_never_omniscient() {
+    let (mut arena, player) = omniscience_arena(false);
+    assert!(arena.world.pd_omniscience(), "the world flag is still on…");
+    omniscience_run(&mut arena, 2.0, player);
+    assert!(
+        !arena.world.enemies[0].enemy.is_omniscient(),
+        "…but it must not reach a hunter with no simulant model"
+    );
+}
+
+// ─── Per-shot spread + burst cadence (why an automatic isn't an instant kill) ───
+//
+// Reported from playtest: "when they have an automatic weapon, every single bullet
+// hits me in a row and I die almost instantly." Both halves of that are real defects
+// against Perfect Dark, and they have different causes:
+//
+// * **Every bullet in a row.** The zeroing model is a damped random walk whose
+//   increment is held for a third to two thirds of a second, so it barely moves across
+//   a burst — a burst was one ray fired repeatedly. PD offsets every individual round
+//   by `bgun_calculate_bot_shot_spread`, so a burst is a pattern.
+// * **Almost instantly.** PD's automatics are `FUNCFLAG_BURST3` rows: three rounds
+//   `nextbullettimer60 = 5` ticks apart, then a `6 + 18 = 24` tick pause. We fired a
+//   flat, gapless stream.
+
+/// Fire a simulant at a stationary player at its standoff and return the intervals (s)
+/// between successive rounds leaving the barrel. Rising edges of `muzzle_timer` count
+/// shots — it is set on every shot, hit or miss, so this measures the trigger and not
+/// the damage.
+fn pd_shot_intervals(tier: crate::pdsim::difficulty::BotDifficulty, secs: f32) -> Vec<f32> {
+    let mut arena = TestArena::build_pd([60.0, 16.0, 60.0], &[], 1, Vec3::new(7.5, 0.0, 2.5), tier);
+    arena.world.toggle_invulnerable(); // measure the whole window, don't die partway
+    arena.set_player(7.5, 2.5);
+    arena.place_hunter(0, 7.5, 9.5); // 7 m — a rifle's standoff band
+    let dt = 1.0 / 60.0;
+    let (mut intervals, mut since, mut prev_muzzle, mut first) = (Vec::new(), 0.0f32, 0.0f32, true);
+    for _ in 0..(secs / dt) as usize {
+        arena.set_player(7.5, 2.5);
+        arena.step(dt);
+        since += dt;
+        let m = arena.world.enemies[0].muzzle_timer;
+        if m > prev_muzzle {
+            if !first {
+                intervals.push(since);
+            }
+            first = false;
+            since = 0.0;
+        }
+        prev_muzzle = m;
+    }
+    intervals
+}
+
+/// A PD simulant with an automatic must fire in **bursts with gaps**, not a continuous
+/// stream — PD's `FUNCFLAG_BURST3`. Asserts the rhythm directly: the intervals between
+/// rounds fall into two populations (tight, then a pause), and no more than
+/// [`PD_BURST_ROUNDS`] rounds ever leave back-to-back without one.
+///
+/// This is the regression for "I die almost instantly": the gap is the player's window
+/// to break line of sight, and it roughly halves sustained incoming DPS.
+#[test]
+fn pd_an_automatic_fires_in_bursts_not_a_continuous_stream() {
+    use crate::pdsim::difficulty::BotDifficulty;
+    let intervals = pd_shot_intervals(BotDifficulty::Dark, 12.0);
+    assert!(intervals.len() >= 12, "not enough shots to judge the rhythm: {intervals:?}");
+    // A "pause" is anything near the authored inter-burst gap; anything much shorter is
+    // inside a burst. The two populations must both exist.
+    let pause = PD_BURST_GAP * 0.9;
+    let pauses = intervals.iter().filter(|&&d| d >= pause).count();
+    let tight = intervals.iter().filter(|&&d| d < pause).count();
+    println!("shot intervals ({} shots): {intervals:?}", intervals.len() + 1);
+    assert!(pauses > 0, "an automatic never paused — it hosed continuously");
+    assert!(tight > 0, "no rounds came close together — the burst itself is missing");
+    // The longest back-to-back run must respect the burst length.
+    let mut run = 1usize;
+    let mut worst = 1usize;
+    for &d in &intervals {
+        if d < pause {
+            run += 1;
+            worst = worst.max(run);
+        } else {
+            run = 1;
+        }
+    }
+    assert!(
+        worst <= PD_BURST_ROUNDS as usize,
+        "{worst} rounds left back-to-back with no pause; PD's burst is {PD_BURST_ROUNDS}"
+    );
+}
+
+/// **Where the misses actually come from.** Measured, because the intuition is wrong.
+///
+/// PD's per-shot spread is *narrow*: a rifle's `spread` of 8 is ±2° worst case and
+/// ~0.67° RMS, which at a 7 m standoff is a few centimetres against a 0.35 m torso. So
+/// a DarkSim — zero zeroing error by definition — really does land nearly every round,
+/// in Perfect Dark as much as here. Spread is what stops a burst being *one ray fired
+/// repeatedly*; it is not an accuracy tax, and it is not what keeps you alive.
+///
+/// What keeps you alive is the **zeroing error**, and it is enormous by comparison: a
+/// NormalSim wanders 4–8°, an order of magnitude past the weapon cone. This asserts that
+/// separation of responsibilities — the tier dominates the hit fraction, the weapon does
+/// not — which is the property the whole zeroing port exists to produce.
+#[test]
+fn pd_the_hit_fraction_is_set_by_tier_not_by_the_weapon() {
+    use crate::pdsim::difficulty::BotDifficulty;
+
+    // Rounds fired / rounds landed for one simulant on a stationary player at 7 m.
+    let engage = |tier| {
+        let mut arena =
+            TestArena::build_pd([60.0, 16.0, 60.0], &[], 1, Vec3::new(7.5, 0.0, 2.5), tier);
+        arena.set_player(7.5, 2.5);
+        arena.place_hunter(0, 7.5, 9.5);
+        let weapon = arena.world.enemies[0].weapon;
+        let dt = 1.0 / 60.0;
+        let (mut fired, mut landed, mut prev_muzzle) = (0u32, 0u32, 0.0f32);
+        let mut hp = arena.world.player_health();
+        for _ in 0..(30.0 / dt) as usize {
+            arena.set_player(7.5, 2.5);
+            arena.step(dt);
+            let m = arena.world.enemies[0].muzzle_timer;
+            if m > prev_muzzle {
+                fired += 1;
+            }
+            prev_muzzle = m;
+            let now = arena.world.player_health();
+            if now < hp {
+                landed += ((hp - now) / weapon.damage).round().max(1.0) as u32;
+                hp = now;
+            }
+            if arena.world.is_player_dead() {
+                break;
+            }
+        }
+        (fired, landed)
+    };
+
+    let (df, dl) = engage(BotDifficulty::Dark);
+    let (nf, nl) = engage(BotDifficulty::Normal);
+    let dark = dl as f32 / df.max(1) as f32;
+    let normal = nl as f32 / nf.max(1) as f32;
+    println!("hit fraction at 7 m — dark {dl}/{df} = {dark:.2}, normal {nl}/{nf} = {normal:.2}");
+    assert!(dark > 0.9, "a DarkSim's gun is genuinely on target; it should hit ~everything ({dark:.2})");
+    assert!(
+        normal < dark * 0.8,
+        "the TIER must dominate the hit fraction: normal {normal:.2} vs dark {dark:.2}"
+    );
+}
+
 /// A PeaceSim must never pull the trigger, however lethal its tier. This is the
 /// personality axis proving it is genuinely orthogonal to difficulty: a Dark
 /// PeaceSim is a perfect shot that refuses to shoot.

@@ -432,6 +432,15 @@ impl App {
             .map(|w| w.pd_debug())
             .unwrap_or_default();
 
+        // PD-style radar: the lab's navigation aid. Same borrow discipline again —
+        // the whole frame is projected into the radar's own frame by the `World` and
+        // handed over as plain values.
+        let radar: Option<crate::world::RadarView> = self
+            .world
+            .as_ref()
+            .filter(|w| w.pd_lab_active())
+            .and_then(|w| w.radar(RADAR_RANGE_M));
+
         let selected = self.shop_selected.min(rows.len().saturating_sub(1));
         let mut actions: Vec<ShopAction> = Vec::new();
         let mut new_selected: Option<usize> = None;
@@ -858,6 +867,9 @@ impl App {
                     });
             }
             draw_pd_lab_overlay(ctx, &pd_debug);
+            if let Some(r) = radar.as_ref() {
+                draw_pd_radar(ctx, r);
+            }
         });
 
         state.handle_platform_output(window, full_output.platform_output);
@@ -973,6 +985,123 @@ fn model_aabb(model: &engine::assets::textured_model::TexturedModel) -> (glam::V
 /// got) and AIM ERR (where the barrel actually is, in degrees) — watch AIM ERR
 /// swing through zero and back as the bot overshoots, and watch ZERO collapse the
 /// moment you break line of sight or make it turn.
+// ─── PD-style radar ──────────────────────────────────────────────────────────
+/// How far (m) the radar's edge reaches. Perfect Dark's own radar is a fixed-scale
+/// local view rather than a whole-level map, and that is the useful property here:
+/// it answers "where is the pack right now" at a glance instead of needing to be read.
+const RADAR_RANGE_M: f32 = 30.0;
+/// Radius of the drawn disc, in points.
+const RADAR_RADIUS_PX: f32 = 92.0;
+
+/// Draw the lab radar: the player at the centre facing **up**, the walkable floor of
+/// its storey as a faint backdrop, and every hunter as a blip.
+///
+/// The floor backdrop is the part that earns its place. A blip in a void tells you a
+/// hunter is 12 m to your left; a blip against the floor plan tells you it is jammed in
+/// a doorway, orbiting a pillar, or stuck on the far side of a wall it will not path
+/// around — which is what makes it a navigation tool rather than a curiosity.
+///
+/// Projection and the yaw convention live in [`World::radar`]; this only maps the unit
+/// disc onto pixels.
+fn draw_pd_radar(ctx: &egui::Context, view: &crate::world::RadarView) {
+    let d = RADAR_RADIUS_PX;
+    // Bottom-LEFT, which is where Perfect Dark puts its own radar — and, less
+    // romantically, the only free corner: the ammo counter owns bottom-right and the
+    // radar was sitting on top of it.
+    egui::Window::new("PD RADAR")
+        .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(12.0, -12.0))
+        .title_bar(false)
+        .resizable(false)
+        .show(ctx, |ui| {
+            let (resp, painter) =
+                ui.allocate_painter(egui::vec2(d * 2.0, d * 2.0), egui::Sense::hover());
+            let c = resp.rect.center();
+            // Radar frame → pixels. `+y` is ahead of the player, and screen y grows
+            // downward, so the vertical axis flips.
+            let to_px = |v: glam::Vec2| egui::pos2(c.x + v.x * d, c.y - v.y * d);
+
+            painter.circle_filled(c, d, egui::Color32::from_rgba_unmultiplied(6, 12, 8, 210));
+            // Range rings at a third and two thirds, so distance is readable.
+            for f in [1.0 / 3.0, 2.0 / 3.0, 1.0] {
+                painter.circle_stroke(
+                    c,
+                    d * f,
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(30, 70, 45)),
+                );
+            }
+
+            // Floor backdrop.
+            for &p in &view.floor {
+                painter.rect_filled(
+                    egui::Rect::from_center_size(to_px(p), egui::vec2(2.0, 2.0)),
+                    0.0,
+                    egui::Color32::from_rgb(28, 62, 42),
+                );
+            }
+
+            // Blips. Colour carries state, because "where is it" and "what is it doing"
+            // are the two questions at once: firing reads hot, engaged amber, idle/
+            // searching green, and a corpse is a hollow ring so the living are countable
+            // at a glance without the dead vanishing (a hunter that died in a corner is
+            // itself a navigation finding).
+            for b in &view.blips {
+                let p = to_px(b.at);
+                if b.dead {
+                    painter.circle_stroke(
+                        p,
+                        4.0,
+                        egui::Stroke::new(1.0, egui::Color32::from_rgb(110, 110, 110)),
+                    );
+                    continue;
+                }
+                let col = if b.firing {
+                    egui::Color32::from_rgb(255, 90, 70)
+                } else if b.engaged {
+                    egui::Color32::from_rgb(250, 190, 70)
+                } else {
+                    egui::Color32::from_rgb(90, 220, 120)
+                };
+                painter.circle_filled(p, 4.5, col);
+                // A blip on another storey gets a ring, so "it is right on top of me"
+                // and "it is directly above me" don't look identical.
+                if b.dy.abs() > 1.5 {
+                    painter.circle_stroke(p, 7.0, egui::Stroke::new(1.0, col));
+                }
+                painter.text(
+                    p + egui::vec2(7.0, -7.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    format!("{}", b.id),
+                    egui::FontId::monospace(10.0),
+                    col,
+                );
+            }
+
+            // The player: a triangle pointing up (the radar rotates with you, PD-style,
+            // so "up" is always where you are looking).
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    c + egui::vec2(0.0, -7.0),
+                    c + egui::vec2(-5.0, 5.0),
+                    c + egui::vec2(5.0, 5.0),
+                ],
+                egui::Color32::WHITE,
+                egui::Stroke::NONE,
+            ));
+
+            let alive = view.blips.iter().filter(|b| !b.dead).count();
+            ui.label(
+                egui::RichText::new(format!(
+                    "RADAR  {:.0} m   ·   {alive} live / {} in range",
+                    view.range,
+                    view.blips.len()
+                ))
+                .color(SHOP_DIM)
+                .monospace()
+                .small(),
+            );
+        });
+}
+
 fn draw_pd_lab_overlay(ctx: &egui::Context, sims: &[crate::world::pd_lab::PdDebug]) {
     if sims.is_empty() {
         return;
@@ -983,12 +1112,70 @@ fn draw_pd_lab_overlay(ctx: &egui::Context, sims: &[crate::world::pd_lab::PdDebu
         .resizable(false)
         .show(ctx, |ui| {
             ui.label(egui::RichText::new("PD SIMULANT LAB").color(SHOP_GOLD).strong());
-            for (i, s) in sims.iter().enumerate() {
+            // A six-simulant lab is taller than the window — the last rows were being
+            // cut off the bottom of the screen. Cap it and scroll, leaving room for the
+            // radar in the corner below.
+            let cap = (ctx.screen_rect().height() * 0.55).max(200.0);
+            egui::ScrollArea::vertical().max_height(cap).show(ui, |ui| {
+            for s in sims.iter() {
                 ui.separator();
-                ui.label(
-                    egui::RichText::new(format!("#{i}  {}  ·  {}", s.tier.name(), s.bot_type.name()))
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "#{}  {}  ·  {}",
+                            s.id,
+                            s.tier.name(),
+                            s.bot_type.name()
+                        ))
                         .color(SHOP_GOLD_DIM)
                         .strong(),
+                    );
+                    // Alive/dead up front — the whole row below it is meaningless for
+                    // a corpse (its aim model keeps ticking; its body does not).
+                    if s.dead {
+                        ui.label(
+                            egui::RichText::new("DEAD")
+                                .color(egui::Color32::from_rgb(150, 150, 150))
+                                .strong(),
+                        );
+                    }
+                });
+
+                // Health. Shown against the hunter's SPAWN max rather than a constant,
+                // because the difficulty dial scales it — a bar against 100 would read
+                // wrong at every level but one.
+                let frac = if s.max_health > 0.0 {
+                    (s.health / s.max_health).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                let hp_color = if s.dead {
+                    egui::Color32::from_rgb(90, 90, 90)
+                } else if frac > 0.6 {
+                    egui::Color32::from_rgb(120, 220, 120)
+                } else if frac > 0.3 {
+                    SHOP_GOLD
+                } else {
+                    egui::Color32::from_rgb(220, 110, 90)
+                };
+                ui.add(
+                    egui::ProgressBar::new(frac)
+                        .desired_width(220.0)
+                        .fill(hp_color)
+                        .text(format!("HP {:.0} / {:.0}", s.health, s.max_health)),
+                );
+
+                if s.dead {
+                    continue; // the aim/reaction readouts below describe a corpse
+                }
+
+                // What the movement FSM is doing — the first thing to look at when a
+                // hunter is not arriving (`Search` in a level it should be crossing
+                // means it never acquired; `Chase` while stationary means nav).
+                ui.label(
+                    egui::RichText::new(format!("{:?}", s.state))
+                        .color(SHOP_TEXT)
+                        .monospace(),
                 );
 
                 // Zeroing progress: full bar = aim has converged as far as this
@@ -1054,6 +1241,7 @@ fn draw_pd_lab_overlay(ctx: &egui::Context, sims: &[crate::world::pd_lab::PdDebu
                     }
                 });
             }
+            });
             ui.separator();
             ui.label(
                 egui::RichText::new("= / -  difficulty tier    N  invisible    I  invincible")
@@ -1150,6 +1338,17 @@ impl ApplicationHandler for App {
                 Ok(meshes) => {
                     for rm in &meshes {
                         renderer.set_region_textured(rm.id, &rm.mesh);
+                    }
+                    // Boot the lab at NormalSim rather than the dial's pinned max
+                    // (which is DarkSim — instant reaction, zero aim error, so it
+                    // just kills on sight and shows nothing). Done by moving the
+                    // dial, not by pinning the tier, so `=` / `-` still sweep the
+                    // whole table live. An explicit `PD_LAB_DIFFICULTY=` wins.
+                    if cfg.difficulty.is_none() {
+                        world.set_difficulty(crate::world::pd_lab::dial_for_tier(
+                            crate::world::pd_lab::LAB_TIER,
+                            crate::world::DIFFICULTY_MAX,
+                        ));
                     }
                     world.enable_pd_lab(cfg);
                 }

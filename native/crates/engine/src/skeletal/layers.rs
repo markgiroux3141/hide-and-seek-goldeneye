@@ -378,7 +378,7 @@ impl PoseLayer for LookAtLayer {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Rotates ONE joint so a joint-local `forward` axis turns toward a model-space
-/// `target`, but only up to `max_angle` (a cone). This is the *light* aim used
+/// `target`, but only as far as [`AimCone`] allows. This is the *light* aim used
 /// instead of two-bone IK: point the shoulder (and thus the whole arm + attached
 /// weapon) roughly at the player while **keeping the authored elbow bend** from the
 /// clip — none of the arm-straightening / robotic extension that full reach-IK
@@ -394,12 +394,37 @@ pub struct AimOffsetLayer {
     pub forward: Vec3,
     /// Model-space point to aim toward.
     pub target: Vec3,
-    /// Maximum swing (radians) — the aim cone. Rotations past this are clamped, so
-    /// a target behind the shoulder just pins the arm at the cone edge, never
-    /// contorts it.
-    pub max_angle: f32,
+    /// How far the joint may swing. Rotations past it are clamped, so a target
+    /// behind the shoulder just pins the arm at the limit, never contorts it.
+    pub cone: AimCone,
     pub weight: f32,
     pub enabled: bool,
+}
+
+/// How far an aim may swing, **separately per direction** (radians, all positive).
+///
+/// A single cone angle cannot express a real aim limit: a body can look further up
+/// than down, and much further up than it can twist sideways. Perfect Dark authors
+/// exactly these four numbers per attack animation — `maxup` / `maxdown` /
+/// `maxleft` / `maxright` on `struct attackanimconfig`, past which the character
+/// leans back or forward instead of swivelling further (`types.h:359`).
+///
+/// Angles are measured from `forward` in the model's frame, with **model +Y as up**
+/// — the character stands upright in model space, and "aiming up" means up in the
+/// room, not up relative to a bone that may itself be tilted.
+#[derive(Clone, Copy, Debug)]
+pub struct AimCone {
+    pub up: f32,
+    pub down: f32,
+    pub left: f32,
+    pub right: f32,
+}
+
+impl AimCone {
+    /// The same limit in every direction — the old single-angle cone.
+    pub fn uniform(angle: f32) -> Self {
+        AimCone { up: angle, down: angle, left: angle, right: angle }
+    }
 }
 
 impl PoseLayer for AimOffsetLayer {
@@ -415,12 +440,46 @@ impl PoseLayer for AimOffsetLayer {
         if to_target == Vec3::ZERO || axis_world == Vec3::ZERO {
             return;
         }
-        // Full rotation that would point the arm exactly at the target, then clamp
-        // its angle to the cone so the shoulder only swings so far.
-        let full = Quat::from_rotation_arc(axis_world, to_target);
-        let (axis, angle) = full.to_axis_angle();
-        let clamped = Quat::from_axis_angle(axis, angle.min(self.max_angle));
-        let g_new = clamped * g_rot;
+        // Clamp the swing per direction rather than as one cone: split the required
+        // turn into yaw (toward the character's left/right) and pitch (up/down)
+        // about model up, limit each, and rebuild the direction. Falls back to a
+        // plain angle clamp when the aim axis is near-vertical and the horizontal
+        // frame degenerates.
+        let up_ref = Vec3::Y;
+        let left_axis = up_ref.cross(axis_world);
+        let aimed = if left_axis.length_squared() > 1e-6 {
+            let left_axis = left_axis.normalize();
+            // Re-derive an exactly orthogonal forward so the decomposition is clean
+            // even if `axis_world` is slightly off the horizontal plane.
+            let fwd_h = left_axis.cross(up_ref).normalize_or_zero();
+            let mut yaw = to_target.dot(left_axis).atan2(to_target.dot(fwd_h));
+            let mut pitch = to_target.dot(up_ref).clamp(-1.0, 1.0).asin();
+            // Clamp to the ELLIPSE the four limits describe, not to their bounding
+            // box: clamping yaw and pitch independently would let a diagonal aim sit
+            // outside the limit in both, so `AimCone::uniform(a)` would no longer be
+            // the circular cone it claims to be. Scaling both back along the same ray
+            // keeps the aim direction and only shortens the swing.
+            let lim_y = if yaw >= 0.0 { self.cone.left } else { self.cone.right };
+            let lim_p = if pitch >= 0.0 { self.cone.up } else { self.cone.down };
+            let ny = if lim_y > 1e-6 { yaw / lim_y } else { 0.0 };
+            let np = if lim_p > 1e-6 { pitch / lim_p } else { 0.0 };
+            let r = (ny * ny + np * np).sqrt();
+            if r > 1.0 {
+                yaw /= r;
+                pitch /= r;
+            }
+            let (sy, cy) = yaw.sin_cos();
+            let (sp, cp) = pitch.sin_cos();
+            (fwd_h * (cp * cy) + left_axis * (cp * sy) + up_ref * sp).normalize_or_zero()
+        } else {
+            let (axis, angle) = Quat::from_rotation_arc(axis_world, to_target).to_axis_angle();
+            let cap = self.cone.up.max(self.cone.down).max(self.cone.left).max(self.cone.right);
+            (Quat::from_axis_angle(axis, angle.min(cap)) * axis_world).normalize_or_zero()
+        };
+        if aimed == Vec3::ZERO {
+            return;
+        }
+        let g_new = Quat::from_rotation_arc(axis_world, aimed) * g_rot;
         let p_rot = match sk.parents[self.joint] {
             Some(p) => globals[p].to_scale_rotation_translation().1,
             None => Quat::IDENTITY,
@@ -457,10 +516,42 @@ impl PoseLayer for AimOffsetLayer {
 /// `time` is a fixed sample point for a static aim hold (advance it for an
 /// animated overlay). At `weight` 1 the masked joints exactly match the clip at
 /// `time`; at 0 the layer is a no-op (the test oracle).
+///
+/// # Root reconciliation — why the mask alone is not enough
+///
+/// A masked overlay copies **local** transforms, so the masked subtree keeps its
+/// orientation *relative to the first unmasked parent* — normally the pelvis. That is
+/// only correct if the overlay clip and the base pose agree about where that parent is
+/// pointing. They frequently do not: a hand-authored fire animation turns the whole
+/// body toward its target, so the clip's own root sits at some authored yaw, while the
+/// base (locomotion) root sits at its own.
+///
+/// Grafting the upper body across that difference rotates the entire hold — gun
+/// included — by exactly the root delta. Measured on our three fire clips, whose guns
+/// all point within 3.3° of forward when the clip is sampled alone:
+///
+/// | clip | clip root | base root | gun ends up |
+/// |---|---|---|---|
+/// | rifle | −53.1° | −11.4° | +39° off |
+/// | pistol | +68.7° | −11.4° | −78° off |
+/// | dual | −15.8° | −11.4° | +4° off |
+///
+/// The dual clip looked fine for months purely because it happens to be authored at
+/// nearly the same root yaw as the locomotion clips.
+///
+/// So the overlay reconciles the two roots: it rotates the topmost masked joint by
+/// `inverse(base parent) · clip parent`, which lands the subtree at the orientation the
+/// animation actually posed rather than at one inherited from an unrelated clip. With
+/// that, an authored aim pose aims where it was drawn to aim, and a downstream aim
+/// solver gets its full swing budget for tracking instead of spending it undoing this.
 pub struct ClipOverlayLayer {
     clip: AnimationClip,
     /// The joint indices this clip writes (the upper-body mask).
     joints: Vec<usize>,
+    /// The topmost masked joint (the subtree root — e.g. the chest) and its parent, or
+    /// `None` when the mask reaches the skeleton root and there is nothing to reconcile
+    /// against. Resolved once in [`Self::new`].
+    subtree_root: Option<(usize, usize)>,
     /// Sample time (s) into the clip — held fixed for a static aim pose.
     pub time: f32,
     pub weight: f32,
@@ -472,10 +563,27 @@ impl ClipOverlayLayer {
         ClipOverlayLayer {
             clip,
             joints,
+            subtree_root: None,
             time: 0.0,
             weight: 0.0,
             enabled: true,
         }
+    }
+
+    /// The topmost masked joint + its (unmasked) parent — the seam the root
+    /// reconciliation acts on. Cached on first use because it needs the skeleton.
+    fn seam(&mut self, sk: &Skeleton) -> Option<(usize, usize)> {
+        if self.subtree_root.is_none() {
+            // The masked joint whose parent is NOT masked: the subtree's root.
+            let top = self
+                .joints
+                .iter()
+                .copied()
+                .find(|&j| sk.parents.get(j).copied().flatten().is_none_or(|p| !self.joints.contains(&p)))?;
+            let parent = sk.parents.get(top).copied().flatten()?;
+            self.subtree_root = Some((top, parent));
+        }
+        self.subtree_root
     }
 }
 
@@ -484,7 +592,29 @@ impl PoseLayer for ClipOverlayLayer {
         if !self.enabled || self.weight <= 1e-4 || self.joints.is_empty() {
             return;
         }
-        let (t, r, s) = self.clip.pose_trs(self.time, ctx.skeleton);
+        let sk = ctx.skeleton;
+        let (t, mut r, s) = self.clip.pose_trs(self.time, sk);
+        // Root reconciliation (see the type docs): rotate the subtree's top joint so the
+        // masked body lands where the CLIP posed it, instead of inheriting the base
+        // pose's unrelated root orientation. Computed from the two parents' global
+        // rotations — the clip's, from its own full pose, and the base's, from whatever
+        // earlier layers produced.
+        if let Some((top, parent)) = self.seam(sk) {
+            let clip_parent = {
+                let locals: Vec<Mat4> = (0..t.len())
+                    .map(|i| Mat4::from_scale_rotation_translation(s[i], r[i], t[i]))
+                    .collect();
+                sk.global_transforms(&locals)[parent].to_scale_rotation_translation().1
+            };
+            let base_parent = sk.global_transforms(&pose.locals())[parent]
+                .to_scale_rotation_translation()
+                .1;
+            // `base_parent · correction · top_local` == `clip_parent · top_local`.
+            let correction = base_parent.inverse() * clip_parent;
+            if top < r.len() {
+                r[top] = correction * r[top];
+            }
+        }
         let w = self.weight.clamp(0.0, 1.0);
         for &j in &self.joints {
             if j >= pose.joint_count() {
@@ -814,7 +944,7 @@ mod tests {
     }
 
     /// Aim-offset: with a wide cone the joint's forward axis points at the target
-    /// (like a look-at); with a tiny cone the swing is clamped to `max_angle`.
+    /// (like a look-at); with a tiny cone the swing is clamped to it.
     #[test]
     fn aim_offset_aims_forward_and_clamps_to_cone() {
         let m = karl();
@@ -833,7 +963,7 @@ mod tests {
             joint,
             forward: forward_local,
             target: origin + dir * 2.0,
-            max_angle: std::f32::consts::PI,
+            cone: AimCone::uniform(std::f32::consts::PI),
             weight: 1.0,
             enabled: true,
         };
@@ -849,7 +979,7 @@ mod tests {
             joint,
             forward: forward_local,
             target: origin - world_forward * 2.0,
-            max_angle: max,
+            cone: AimCone::uniform(max),
             weight: 1.0,
             enabled: true,
         };
@@ -913,11 +1043,33 @@ mod tests {
         let is_masked = |i: usize| mask.contains(&i);
         for i in 0..sk.joint_count() {
             if is_masked(i) {
-                assert!(rot_close(p1.r[i], fr[i]), "masked joint {i} should equal the fire clip");
+                // The subtree ROOT carries the root reconciliation (see the type docs),
+                // so its local rotation is deliberately NOT the clip's — it is the
+                // clip's pre-rotated to cancel the two poses' differing root yaws. Every
+                // other masked joint is still a verbatim copy.
+                if i != chest {
+                    assert!(rot_close(p1.r[i], fr[i]), "masked joint {i} should equal the fire clip");
+                }
                 assert!((p1.t[i] - ft[i]).length() < 1e-4 && (p1.s[i] - fs[i]).length() < 1e-4);
             } else {
                 assert!(rot_close(p1.r[i], base.r[i]), "unmasked joint {i} must be untouched");
             }
+        }
+
+        // The reconciliation's actual contract, and the reason it exists: the masked
+        // subtree must end up at the orientation the CLIP posed it at, in world terms —
+        // not merely at the clip's orientation *relative to a pelvis from another
+        // animation*. Without it, a fire clip authored with the body turned (ours range
+        // over 122° of root yaw) drags the whole hold, and the gun, round with it.
+        let fire_globals = sk.global_transforms(&Pose::from_trs(ft, fr, fs).locals());
+        let out_globals = sk.global_transforms(&p1.locals());
+        for &j in &mask {
+            let want = fire_globals[j].to_scale_rotation_translation().1;
+            let got = out_globals[j].to_scale_rotation_translation().1;
+            assert!(
+                rot_close(want, got),
+                "masked joint {j} must land at the clip's own global orientation"
+            );
         }
         // Sanity: the mask excludes the legs (Bone_10..15 hang off the root).
         for leg in ["Bone_10", "Bone_12", "Bone_14", "Bone_11", "Bone_13", "Bone_15"] {

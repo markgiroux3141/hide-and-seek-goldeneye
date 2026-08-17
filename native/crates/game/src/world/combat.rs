@@ -50,6 +50,84 @@ fn los_clear(physics: &mut PhysicsWorld, eye: Vec3, target: Vec3) -> bool {
         .is_none()
 }
 
+/// Closest approach between the ray `origin + dir·t` (`dir` unit, `t ∈ [0, max_t]`) and
+/// the finite segment `a`→`b`. Returns `(distance, t)`.
+///
+/// This is the hit test for a [PD simulant's round](World::emit_pd_shot): the segment is
+/// a target's torso, so comparing the returned distance against [`PD_TORSO_RADIUS`] is a
+/// ray-versus-capsule test. Segment rather than point because a body is tall — a round
+/// with a little elevation error should clip a shoulder or a hip rather than register as
+/// a clean centre hit or a clean miss.
+///
+/// The standard clamped closest-points solve: minimise |P(s) − Q(t)| over the two
+/// parameters, clamp `t` into the segment, then re-solve `s` for that clamped `t` and
+/// clamp it into the ray. The re-solve is what makes the answer correct when the true
+/// minimum lies off the end of the segment (a shot passing above the head).
+fn ray_segment_closest(origin: Vec3, dir: Vec3, max_t: f32, a: Vec3, b: Vec3) -> (f32, f32) {
+    let v = b - a;
+    let w0 = origin - a;
+    let (bb, cc) = (dir.dot(v), v.dot(v));
+    let (dd, ee) = (dir.dot(w0), v.dot(w0));
+    let den = cc - bb * bb; // dir is unit, so a·a == 1
+    let mut t = if den.abs() < 1e-8 {
+        // Ray parallel to the segment — any point does; take the segment's near end.
+        if cc > 1e-8 { (-ee / cc).clamp(0.0, 1.0) } else { 0.0 }
+    } else {
+        (ee - bb * dd) / den
+    };
+    t = t.clamp(0.0, 1.0);
+    let s = (t * bb - dd).clamp(0.0, max_t);
+    let miss = ((origin + dir * s) - (a + v * t)).length();
+    (miss, s)
+}
+
+/// Which body part a world-space `hit` landed on — Perfect Dark's `HITPART_*`,
+/// resolved by finding the **posed vertex** nearest the impact and reading the bone
+/// it is weighted to.
+///
+/// Nearest *vertex* rather than nearest *bone origin*: bone origins are joints, so a
+/// shot to the middle of a thigh is roughly equidistant from the hip and the knee and
+/// the answer flips on sub-centimetre noise. The skin has no such ambiguity, and it is
+/// the same geometry the blood is painted onto, so the stain and the reaction agree.
+/// `None` if the model has no vertices or the nearest one is weighted only to joints
+/// with no anatomical meaning (a blend joint).
+fn nearest_hit_part(
+    model: &SkinnedModel,
+    char_mat: Mat4,
+    joints: &[Mat4],
+    hit: Vec3,
+) -> Option<crate::combat::hit_anim::HitPart> {
+    let mut best: Option<(f32, usize)> = None;
+    for v in &model.vertices {
+        let src = Vec3::from(v.pos);
+        let mut p = Vec3::ZERO;
+        let mut heaviest = (0.0f32, usize::MAX);
+        for k in 0..4 {
+            let w = v.weights[k];
+            if w == 0.0 {
+                continue;
+            }
+            let j = v.joints[k] as usize;
+            if let Some(m) = joints.get(j) {
+                p += w * m.transform_point3(src);
+            }
+            if w > heaviest.0 {
+                heaviest = (w, j);
+            }
+        }
+        if heaviest.1 == usize::MAX {
+            continue;
+        }
+        let d = char_mat.transform_point3(p).distance_squared(hit);
+        if best.is_none_or(|(bd, _)| d < bd) {
+            best = Some((d, heaviest.1));
+        }
+    }
+    let joint = best?.1;
+    let name = model.skeleton.names.get(joint)?;
+    crate::combat::hit_anim::HitPart::for_bone(name)
+}
+
 /// Paint blood onto a hunter's per-vertex colors at a world-space `hit` point (JS
 /// `EnemyCharacter.paintDamage`): every vertex whose CURRENT (posed) world position
 /// is within [`BLOOD_RADIUS`] reddens by `intensity · falloff` — `r` up toward 1,
@@ -97,11 +175,13 @@ enum HitZone {
 }
 
 impl HitZone {
-    /// Classify by impact height (metres) above the hunter's feet.
-    fn classify(height: f32) -> Self {
-        if height >= ZONE_HEAD_MIN {
+    /// Classify by impact height (metres) above the hunter's feet, against that
+    /// body's own `(head_min, leg_max)` boundaries — the families differ in height,
+    /// so a fixed 1.1 m head line would be mid-chest on a Perfect Dark body.
+    fn classify(height: f32, (head_min, leg_max): (f32, f32)) -> Self {
+        if height >= head_min {
             HitZone::Head
-        } else if height < ZONE_LEG_MAX {
+        } else if height < leg_max {
             HitZone::Legs
         } else {
             HitZone::Torso
@@ -561,7 +641,13 @@ impl World {
         if self.grenade_cooldown > 0.0 {
             self.grenade_cooldown = (self.grenade_cooldown - dt).max(0.0);
         }
-        let t = self.difficulty as f32 / DIFFICULTY_MAX as f32;
+        // Kill-switch (default OFF — hunters were killing themselves with it; see
+        // `World::grenades`). Same quiescent camp tracker as difficulty 0.
+        let t = if self.grenades {
+            self.difficulty as f32 / DIFFICULTY_MAX as f32
+        } else {
+            0.0
+        };
         if t <= 0.0 {
             // Difficulty 0: no grenades. Keep the camp tracker quiescent.
             self.camp_anchor = None;
@@ -1135,6 +1221,31 @@ impl World {
     /// ragdoll (the [`World::ragdoll`] flag, default on) seeded from its current pose +
     /// the killing `impulse` at `impact`, or fall back to the canned death clip. Shared
     /// by the bullet ([`Self::hit_enemy`]) and blast ([`Self::blast_hit_enemy`]) paths.
+    /// A Perfect Dark reaction row for hunter `idx`: the death or injury table for
+    /// the body part its last shot landed on, random-picked exactly as
+    /// `chraction.c:3271` / `:3516` do. `None` for a GoldenEye hunter (whose clips
+    /// are not PD's, so the tables would index the wrong animations) or before any
+    /// hit has been recorded — the caller keeps its zone-based pick in that case.
+    fn pd_reaction(&mut self, idx: usize, death: bool) -> Option<crate::combat::hit_anim::AnimRow> {
+        if !self.authored_reactions {
+            return None;
+        }
+        let inst = self.enemies.get(idx)?;
+        if !inst.pd_anims {
+            return None;
+        }
+        // A kill with no recorded part — a blast, or damage that never went through
+        // `hit_enemy` — is PD's `HITPART_GENERAL`; the torso table is its stand-in, so
+        // a Perfect Dark hunter always dies on an authored animation rather than
+        // silently falling through to the physics path.
+        let part = inst.hit_part.unwrap_or(crate::combat::hit_anim::HitPart::Torso);
+        let rows = if death { part.deaths() } else { part.injuries() };
+        if rows.is_empty() {
+            return None;
+        }
+        Some(rows[self.rand_below(rows.len())])
+    }
+
     fn start_death(&mut self, idx: usize, collider: ColliderHandle, impact: Vec3, impulse: Vec3) {
         // A hunter just went down — pay the kill bounty. Every enemy death funnels
         // through here (bullet + blast paths both call it), so this is the one place
@@ -1142,7 +1253,17 @@ impl World {
         self.award_kill();
         // The corpse can't be shot: the capsule goes now, either way.
         self.physics.remove_enemy_collider(collider);
-        if self.ragdoll {
+        // **Authored first for a Perfect Dark hunter.** It has a real death table for
+        // the part that was hit (`chraction.c:3271`), and playing that is the whole
+        // point of porting them — a physics ragdoll would discard it. The ragdoll
+        // stays the default for GoldenEye hunters, which have no such tables, and
+        // `set_authored_reactions(false)` puts PD hunters back on it for an A/B.
+        if let Some(r) = self.pd_reaction(idx, true) {
+            if let Some(inst) = self.enemies.get_mut(idx) {
+                inst.anim.play_once_scaled(r.slot, 0.2, None, None, r.speed, r.end);
+                inst.thud = Some(r.thud);
+            }
+        } else if self.ragdoll {
             self.spawn_ragdoll(idx, impact, impulse);
         } else {
             // Pre-ragdoll baseline: a random canned death one-shot that clamps + holds
@@ -1231,11 +1352,23 @@ impl World {
     /// `onHit`). The death fade begins later, once the death animation finishes.
     pub(crate) fn hit_enemy(&mut self, idx: usize, hit_point: Vec3) {
         let base = self.weapon().config().damage;
+        self.hit_enemy_with(idx, hit_point, base);
+    }
+
+    /// [`Self::hit_enemy`] with the damage supplied rather than read off the player's
+    /// weapon — the entry point for a shot that did not come from the player, i.e. one
+    /// hunter hitting another (see `emit_pd_shot`). Everything downstream is shared,
+    /// so a hunter shot by a packmate bleeds, flinches and dies identically.
+    pub(crate) fn hit_enemy_with(&mut self, idx: usize, hit_point: Vec3, base: f32) {
         // Paint blood at the impact (before damage, so it shows even on the kill
         // shot). Needs this hunter's body model (immut) + its pose/blood (mut) —
         // disjoint fields, split-borrowed. Body id + its feet offset read out first.
         let body = self.enemies.get(idx).map(|i| i.body).unwrap_or(0);
         let feet_offset = self.body_feet_offset(body);
+        // The bone the shot actually landed on, for Perfect Dark's per-hit-part
+        // reaction tables. Resolved from the SAME posed skeleton the blood painting
+        // uses, so the part and the stain agree by construction.
+        let mut hit_part = None;
         if let Some(model) = self.char_models.get(body) {
             if let Some(inst) = self.enemies.get_mut(idx) {
                 if !inst.enemy.is_dead() {
@@ -1247,14 +1380,22 @@ impl World {
                         feet.z,
                     )) * Mat4::from_rotation_y(inst.yaw())
                         * Mat4::from_scale(Vec3::splat(CHAR_SCALE));
+                    hit_part = nearest_hit_part(model, char_mat, &joints, hit_point)
+                        .map(|p| p.with_gun_in_hand(inst.dual));
                     paint_blood(&mut inst.blood, model, char_mat, &joints, hit_point);
                 }
             }
         }
+        if let Some(inst) = self.enemies.get_mut(idx) {
+            inst.hit_part = hit_part;
+        }
         // Classify the zone, scale the damage, apply — bail if already dead / gone.
+        // `body_hit_zones` borrows `self` immutably, so read it before taking the
+        // hunter mutably below.
+        let zones = self.enemies.get(idx).map(|i| self.body_hit_zones(i.body)).unwrap_or_default();
         let (died, collider, dmg, zone) = match self.enemies.get_mut(idx) {
             Some(inst) if !inst.enemy.is_dead() => {
-                let zone = HitZone::classify(hit_point.y - inst.enemy.pos.y);
+                let zone = HitZone::classify(hit_point.y - inst.enemy.pos.y, zones);
                 let dmg = base * zone.damage_mult();
                 (inst.enemy.take_damage(dmg), inst.collider, dmg, zone)
             }
@@ -1280,6 +1421,25 @@ impl World {
             let knock = (dir + Vec3::Y * 0.25).normalize_or_zero() * RAGDOLL_BULLET_IMPULSE;
             self.start_death(idx, collider, hit_point, knock);
             log::info!("HUNTER DOWN ({zone:?}, {dmg:.0} dmg)");
+        } else if let Some(r) = self.pd_reaction(idx, false) {
+            // Perfect Dark's injury table for the part that was hit — usually the
+            // opening frames of a death animation rather than a purpose-made flinch
+            // (`chr_begin_argh`, chraction.c:3409). This runs ahead of the ragdoll
+            // stagger for a PD hunter, and does not consult `hit_reactions`: PD chrs
+            // *do* enter `ACT_ARGH` when they survive a hit — there is no aibot
+            // exemption in `chraction.c:3600` — so "no flinch" was never the Perfect
+            // Dark behaviour that flag's name claimed.
+            let Some(inst) = self.enemies.get_mut(idx) else { return };
+            let band = band_for_speed(inst.enemy.speed());
+            let dur = r
+                .end
+                .or_else(|| inst.anim.clip(r.slot).map(|c| c.duration))
+                .unwrap_or(0.4)
+                / r.speed.max(0.01);
+            inst.anim.play_once_scaled(r.slot, 0.1, Some(band), None, r.speed, r.end);
+            inst.enemy.stun(dur);
+            let hp = inst.enemy.health();
+            log::info!("hunter hit — {zone:?} {dmg:.0} dmg, {hp:.0} hp left (PD injury table)");
         } else if self.ragdoll {
             // Phase 3 default: a brief physics-ragdoll stagger blended into the run-and-
             // gun animation + a short stun, then the hunter resumes fighting. Flat across
@@ -1297,8 +1457,8 @@ impl World {
             log::info!("hunter staggered — {zone:?} {dmg:.0} dmg, {hp:.0} hp left");
         } else if self.hit_reactions {
             // GoldenEye-style flinch (opt-in — off by default): play a zone-appropriate
-            // hurt clip + a brief stun. The pain SFX + blood above already read the hit;
-            // this adds the authored reaction for a future GE-faithful mode.
+            // hurt clip + a brief stun. A Perfect Dark hunter never reaches here; its
+            // per-hit-part injury table is handled above.
             let clips = zone.hurt_clips();
             let name = clips[self.rand_below(clips.len())];
             let clip = CHAR_HIT_START + anim_set::hit_clip_pos(name).unwrap_or(0);
@@ -1330,7 +1490,9 @@ impl World {
         // Firing is a timer, not a full-body clip: the hunter keeps its locomotion
         // (legs running) while the procedural stack aims the arm + kicks recoil. The
         // shot window / cadence run off `fire_elapsed` in `enemy_combat_step`.
-        inst.fire_elapsed = Some(0.0);
+        // The burst clock starts at the animation's authored `startframe`, not at 0 —
+        // a PD row may trim the lead-in off the clip (the pistol's first 12 frames).
+        inst.fire_elapsed = Some(inst.fire.start);
         inst.shot_timer = 0.0;
         log::info!("hunter firing ({})", inst.weapon.name);
     }
@@ -1375,20 +1537,38 @@ impl World {
         for (i, inst) in self.enemies.iter_mut().enumerate() {
             let Some(t) = inst.fire_elapsed else {
                 inst.shot_timer = 0.0;
+                // Trigger released → the burst counter resets, exactly as PD's
+                // `aibot->burstsdone` does when `firing` goes false (`bot.c:3661`).
+                inst.burst_shot = 0;
                 continue;
             };
-            let win = fire_window_for(inst.weapon.class, inst.dual);
             let t = t + dt;
-            // Pump shots while inside the FIRE_TIMING window, spaced by 1/fireRate.
-            if t >= win.0 && t <= win.1 {
+            // Pump shots while inside the authored shoot window. A PD simulant with an
+            // automatic runs PD's BURST cadence — three rounds close together, then a
+            // pause — instead of a flat 1/fireRate stream. Everything else keeps the
+            // flat cadence.
+            let burst = inst.pdsim.is_some() && inst.weapon.automatic;
+            if inst.fire.shooting(t) {
                 inst.shot_timer -= dt;
                 if inst.shot_timer <= 0.0 {
-                    inst.shot_timer = 1.0 / inst.weapon.fire_rate.max(0.001);
+                    inst.shot_timer = if burst {
+                        inst.burst_shot += 1;
+                        if inst.burst_shot >= PD_BURST_ROUNDS {
+                            inst.burst_shot = 0;
+                            PD_BURST_GAP
+                        } else {
+                            PD_BURST_SPACING
+                        }
+                    } else {
+                        1.0 / inst.weapon.fire_rate.max(0.001)
+                    };
                     shots.push(i);
                 }
             }
-            // End the burst once past the window (+ a short tail).
-            inst.fire_elapsed = if t >= win.1 + ENEMY_FIRE_TAIL { None } else { Some(t) };
+            // End the burst once past the window (+ a short tail), or at the row's
+            // own `endframe` if it keeps the animation running longer than that.
+            let over = t >= inst.fire.shoot.1 + ENEMY_FIRE_TAIL && t >= inst.fire.end;
+            inst.fire_elapsed = if over { None } else { Some(t) };
         }
         for i in shots {
             self.emit_enemy_shot(i);
@@ -1409,7 +1589,11 @@ impl World {
         // for PISTOLS only (autos fire too fast for the kick to read — user call).
         if let Some(inst) = self.enemies.get_mut(idx) {
             inst.muzzle_timer = ENEMY_MUZZLE_TIME;
-            if inst.weapon.class == EnemyWeaponClass::Pistol {
+            // Recoil only inside the animation's authored recoil frames, when it has
+            // them (`recoilstart`/`recoilend` — "for single shot pistols", types.h:347).
+            // A row with none kicks on every shot, which is the legacy behaviour.
+            let in_window = inst.fire_elapsed.is_none_or(|t| inst.fire.recoiling(t));
+            if inst.weapon.class == EnemyWeaponClass::Pistol && in_window {
                 if let Some(r) = inst.stack.layer_as::<AdditiveDecayLayer>(ENEMY_RECOIL_LAYER) {
                     r.kick(ENEMY_RECOIL_KICK);
                 }
@@ -1464,17 +1648,32 @@ impl World {
     /// because its gun is genuinely pointing somewhere else — not because a
     /// `rand()` said so.
     ///
-    /// The test is analytic rather than a second raycast: project the player onto
-    /// the shot line and compare the perpendicular miss distance against a torso
-    /// radius. That is exactly a ray-versus-vertical-cylinder test, and it avoids
+    /// The test is analytic rather than a second raycast: measure the closest approach
+    /// between the shot line and each body's torso segment, and compare it against a
+    /// torso radius. That is exactly a ray-versus-vertical-capsule test, and it avoids
     /// adding a player collider the physics world does not currently carry.
     ///
-    /// Only yaw carries error, matching PD: `bot_update_zero_angle` produces a
-    /// horizontal `zeroangle` and the vertical aim is handled separately by
-    /// `chr_calculate_aimend` pointing at the target's body. So a simulant's
-    /// misses are always to the side, never high or low — which is also why they
-    /// read as "swinging past you" rather than "spraying wildly".
-    fn emit_pd_shot(
+    /// # Two independent sources of error, which is the whole point
+    ///
+    /// **Body yaw** carries the zeroing model's error — a slow damped random walk whose
+    /// increment is held for a third to two thirds of a second, so it barely changes
+    /// across a burst. **Per-shot spread** ([`crate::pdsim::spread`], PD's
+    /// `bgun_calculate_bot_shot_spread`) then offsets each individual bullet in yaw AND
+    /// pitch, re-rolled every round.
+    ///
+    /// Both are needed and they do different jobs. Zeroing alone is all-or-nothing:
+    /// while the walk sits on you every round in the magazine connects and you die in a
+    /// blink, and while it sits off you take nothing. Spread turns a burst from one ray
+    /// fired repeatedly into a *pattern*, so an automatic weapon is threatening without
+    /// being a guaranteed kill the instant the aim crosses you. PD puts its widest
+    /// spread values on exactly the automatics for this reason, and zero on the sniper
+    /// and laser — which therefore still hit every time they are properly zeroed.
+    ///
+    /// The vertical axis matters for the same reason. PD aims at the target's chest
+    /// (`chr_calculate_aimend` drops the aim point by 0.4 × eye height) and the spread
+    /// cone is round, so a marginal shot can miss high or low as readily as wide. A
+    /// purely horizontal model throws away half of the miss space.
+    pub(crate) fn emit_pd_shot(
         &mut self,
         idx: usize,
         epos: Vec3,
@@ -1482,31 +1681,81 @@ impl World {
         collider: ColliderHandle,
         weapon: EnemyWeaponDef,
     ) {
-        // Walls (and other hunters) block the shot regardless of aim.
-        if !crate::enemy::line_of_sight(&mut self.physics, epos, ppos, collider) {
-            return;
-        }
         let Some(yaw) = self.enemies.get(idx).and_then(|i| i.pdsim.as_ref()).map(|s| s.yaw) else {
             return;
         };
-        let to_player = Vec3::new(ppos.x - epos.x, 0.0, ppos.z - epos.z);
-        let dist = to_player.length();
-        if dist < 1e-3 {
-            return;
-        }
+        let dual = self.enemies.get(idx).is_some_and(|i| i.dual);
+
+        // The vertical half of the aim. PD points the barrel at the target's chest
+        // rather than its origin; whoever the simulant is *currently* engaging sets the
+        // elevation, and the round then goes wherever that points — the same rule as
+        // yaw. Pick the intended target's chest, defaulting to the player's.
+        let intended = self
+            .enemies
+            .get(idx)
+            .and_then(|i| i.pd_target)
+            .and_then(|t| match t {
+                pd_lab::PdTarget::Player => Some(ppos),
+                pd_lab::PdTarget::Hunter(j) => self.enemies.get(j).map(|e| e.enemy.pos),
+            })
+            .unwrap_or(ppos);
+        let muzzle = epos + Vec3::Y * PD_MUZZLE_HEIGHT;
+        let aim_at = intended + Vec3::Y * PD_TORSO_AIM;
+        let flat = Vec3::new(aim_at.x - muzzle.x, 0.0, aim_at.z - muzzle.z).length();
+        let pitch = (aim_at.y - muzzle.y).atan2(flat.max(1e-4));
+
+        // Per-shot spread: an independent two-axis offset for THIS bullet (see the doc
+        // comment above for why this is not redundant with the zeroing error).
+        let u = [self.rand_float(), self.rand_float(), self.rand_float(), self.rand_float()];
+        let (dyaw, dpitch) = crate::pdsim::spread::shot_offset(weapon.spread, dual, u);
+        let (yaw, pitch) = (yaw + dyaw, pitch + dpitch);
         // Same yaw convention as the rendered model: yaw 0 faces +Z.
-        let shot_dir = Vec3::new(yaw.sin(), 0.0, yaw.cos());
-        // Perpendicular distance from the player's centre line to the shot line.
-        let along = to_player.dot(shot_dir);
-        if along <= 0.0 {
-            return; // pointing away entirely
-        }
-        let miss = (to_player - shot_dir * along).length();
-        if miss > PD_TORSO_RADIUS {
+        let (sin_p, cos_p) = pitch.sin_cos();
+        let shot_dir = Vec3::new(cos_p * yaw.sin(), sin_p, cos_p * yaw.cos()).normalize_or_zero();
+        if shot_dir == Vec3::ZERO {
             return;
         }
-        // Beyond the weapon's stated range the round simply doesn't carry.
-        if dist > weapon.range {
+
+        // **Whoever is on the line takes it.** The round leaves along the barrel and
+        // the nearest body it passes through is hit, which is why a simulant that
+        // fires across a packmate hits the packmate — friendly fire is emergent here,
+        // not a special case. The intended target above set the elevation and nothing
+        // else; the round itself does not consult it.
+        let mut hits: Vec<(f32, Option<usize>)> = Vec::new();
+        let consider = |feet: Vec3, who: Option<usize>, hits: &mut Vec<(f32, Option<usize>)>| {
+            let lo = feet + Vec3::Y * PD_TORSO_LO;
+            let hi = feet + Vec3::Y * PD_TORSO_HI;
+            let (miss, along) = ray_segment_closest(muzzle, shot_dir, weapon.range, lo, hi);
+            if along <= 0.0 || miss > PD_TORSO_RADIUS {
+                return; // behind the barrel, out of range, or the line misses this body
+            }
+            hits.push((along, who));
+        };
+        consider(ppos, None, &mut hits);
+        if self.pd_lab.is_some() {
+            for (j, other) in self.enemies.iter().enumerate() {
+                if j == idx || other.enemy.is_dead() {
+                    continue;
+                }
+                consider(other.enemy.pos, Some(j), &mut hits);
+            }
+        }
+        // Nearest body along the line takes it, if a **wall** does not stop the round
+        // first. The wall test is `perception_los` (world geometry only) rather than
+        // `line_of_sight` (which capsules also block): a body in the way is not an
+        // obstruction here, it is the thing that gets shot, and the nearest-hit sort
+        // above has already decided which. `collider` is unused for the same reason.
+        let _ = collider;
+        hits.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let Some(&(_, victim)) = hits.first() else { return };
+        let victim_pos = match victim {
+            None => ppos,
+            Some(j) => match self.enemies.get(j) {
+                Some(e) => e.enemy.pos,
+                None => return,
+            },
+        };
+        if !crate::enemy::perception_los(&mut self.physics, epos, victim_pos) {
             return;
         }
         // NOTE: [`MAX_HIT_RATE`] deliberately does **not** apply here.
@@ -1524,7 +1773,22 @@ impl World {
         // with an automatic weapon kills very fast. That is what a DarkSim does in
         // Perfect Dark. If the lab turns out to need a ceiling for playability,
         // it belongs on the *weapon*, not on a global damage throttle.
-        self.take_player_damage(weapon.damage);
+        match victim {
+            None => self.take_player_damage(weapon.damage),
+            Some(j) => {
+                // Hunter-on-hunter. It runs through the same `hit_enemy` the player's
+                // shots do, so the victim gets a hit part, blood, a pain vocal and an
+                // authored reaction exactly as it would from the player — one damage
+                // path, not two.
+                log::info!("hunter {idx} shot hunter {j}");
+                let chest = self
+                    .enemies
+                    .get(j)
+                    .map(|e| self.body_height(e.body) * 0.55)
+                    .unwrap_or(0.8);
+                self.hit_enemy_with(j, victim_pos + Vec3::Y * chest, weapon.damage);
+            }
+        }
     }
 
     /// Apply `dmg` to the player (JS `Actor.takeDamage`: armor-first, then health)

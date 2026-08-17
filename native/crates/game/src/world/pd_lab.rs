@@ -29,9 +29,7 @@
 //! So: the existing FSM still decides *where the hunter goes*. The simulant
 //! decides *where it looks and when it shoots*.
 
-use glam::{Mat4, Vec3};
-
-use engine::skeletal::clip::AnimationClip;
+use glam::Vec3;
 
 use crate::pdsim::difficulty::{tier_for_dial, BotDifficulty};
 use crate::pdsim::personality::{BotType, Candidate, Threat};
@@ -49,6 +47,10 @@ pub struct PdLabConfig {
 }
 
 impl Default for PdLabConfig {
+    /// **Duel mode** — one simulant. This is the *programmatic* default, kept at 1
+    /// because the headless scenarios that build a lab want a single bot in isolation.
+    /// The environment path ([`Self::from_env`]) deliberately does **not** use this
+    /// count; see there for why.
     fn default() -> Self {
         Self { count: 1, difficulty: None, bot_type: BotType::General }
     }
@@ -57,17 +59,27 @@ impl Default for PdLabConfig {
 impl PdLabConfig {
     /// Parse the lab configuration from the environment.
     ///
-    /// * `PD_LAB=1` — on, with defaults (one GeneralSim following the dial).
-    /// * `PD_LAB_COUNT=n` — spawn `n` simulants instead of one.
+    /// * `PD_LAB=1` — on, following the dial, with a pack the size of the normal
+    ///   game's ([`crate::world::PLAYTEST_WAVE_SIZE`]).
+    /// * `PD_LAB_COUNT=n` — spawn `n` simulants instead (1 = duel mode).
     /// * `PD_LAB_DIFFICULTY=meat|easy|normal|hard|perfect|dark` — pin a tier
     ///   rather than following the `=` / `-` dial.
     /// * `PD_LAB_TYPE=general|peace|coward|prey|feud|kaze|speed|turtle|…` — the
     ///   personality axis.
     ///
     /// Returns `None` when `PD_LAB` is unset, which is the normal game.
+    ///
+    /// **Why the count doesn't come from [`Default`].** `World::enable_pd_lab` sets the
+    /// wave size from this config, and it runs *after* the app has already pinned
+    /// [`crate::world::PLAYTEST_WAVE_SIZE`] — so a `default()` of 1 meant that merely
+    /// turning the lab on silently cut the wave from four hunters to one, with nothing
+    /// on screen or in the log to say so. That was defensible when the lab was one bot
+    /// in a bare room; it is actively wrong now that it is used to watch a *pack*
+    /// navigate a real level. Turning the lab on should change which AI the hunters
+    /// run, not how many of them there are.
     pub fn from_env() -> Option<Self> {
         std::env::var("PD_LAB").ok()?;
-        let mut cfg = PdLabConfig::default();
+        let mut cfg = PdLabConfig { count: crate::world::PLAYTEST_WAVE_SIZE, ..Default::default() };
         if let Some(n) = std::env::var("PD_LAB_COUNT").ok().and_then(|s| s.trim().parse().ok()) {
             cfg.count = n;
         }
@@ -87,94 +99,39 @@ impl PdLabConfig {
     }
 }
 
-// ─── Character showcase ──────────────────────────────────────────────────────
-
-/// The Perfect Dark character lineup in the lab: one figure per PD body, each
-/// playing a different clip so the whole locomotion set is visible at a glance.
-///
-/// This **replaces** the four static `PropCategory::PerfectDark` preview props.
-/// Those were baked single poses exported to OBJ — they proved the model, skeleton
-/// and animation decoders agreed, and could prove nothing more. These are real
-/// [`SkinnedModel`](engine::skeletal::gltf_skin::SkinnedModel)s posed every frame
-/// through the engine's own skinning path, which is the thing that actually needed
-/// proving.
-///
-/// Kept out of the hunter roster deliberately: a hunter needs fire/hit/death clips
-/// that PD's animation set has not been triaged for yet (see
-/// [`PD_BODY_CATALOG`](super::PD_BODY_CATALOG)). Nothing here touches the AI.
-pub(crate) struct PdShowcase {
-    figures: Vec<PdFigure>,
-}
-
-struct PdFigure {
-    /// Body id into [`World::char_models`](super::World::char_models).
-    body: usize,
-    /// Index into [`World::pd_clips`](super::World::pd_clips).
-    clip: usize,
-    feet: Vec3,
-    yaw: f32,
-    /// Playback clock, wrapped into the clip's duration.
-    clock: f32,
-}
-
-/// Where the lineup stands: the far side of the `pd_lab` room, spaced so you can
-/// walk between them, facing the player's spawn corner. Matches the placement the
-/// preview props had.
-const LINEUP_Z: f32 = 3.0;
-const LINEUP_X0: f32 = 5.0;
-const LINEUP_SPACING: f32 = 1.6;
-
-impl PdShowcase {
-    /// Build the lineup over the loaded PD bodies. `None` if the PD assets are
-    /// missing, so the lab still boots (as it did before they existed).
-    pub(crate) fn new(bodies: std::ops::Range<usize>, clip_count: usize) -> Option<Self> {
-        if bodies.is_empty() || clip_count == 0 {
-            return None;
-        }
-        let figures = bodies
-            .enumerate()
-            .map(|(i, body)| PdFigure {
-                body,
-                // One clip each, cycling — the lineup shows idle/walk/jog/run at once
-                // rather than needing four visits.
-                clip: i % clip_count,
-                feet: Vec3::new(LINEUP_X0 + i as f32 * LINEUP_SPACING, 0.0, LINEUP_Z),
-                // Face +Z, toward the player's corner.
-                yaw: 0.0,
-                // Stagger the clocks so identical clips don't march in lockstep.
-                clock: i as f32 * 0.37,
-            })
-            .collect();
-        Some(PdShowcase { figures })
-    }
-
-    pub(crate) fn advance(&mut self, dt: f32, clips: &[AnimationClip]) {
-        for f in &mut self.figures {
-            if let Some(c) = clips.get(f.clip) {
-                f.clock = if c.duration > 0.0 { (f.clock + dt) % c.duration } else { 0.0 };
-            }
-        }
-    }
-
-    /// `(body id, feet, yaw, joint matrices)` per figure, for the character draw
-    /// pass. Bodies whose clip or model is missing are skipped rather than drawn in
-    /// bind pose — a splayed star on screen would read as a rendering bug.
-    pub(crate) fn instances<'a>(
-        &'a self,
-        models: &'a [engine::skeletal::gltf_skin::SkinnedModel],
-        clips: &'a [AnimationClip],
-    ) -> impl Iterator<Item = (usize, Vec3, f32, Vec<Mat4>)> + 'a {
-        self.figures.iter().filter_map(move |f| {
-            let m = models.get(f.body)?;
-            let c = clips.get(f.clip)?;
-            Some((f.body, f.feet, f.yaw, c.skinning_matrices(f.clock, &m.skeleton)))
-        })
-    }
-}
+// ─── Character showcase (retired) ────────────────────────────────────────────
+//
+// `PdShowcase` stood the six converted PD bodies in a row in the lab, each looping
+// one locomotion clip, as the animated successor to the static
+// `PropCategory::PerfectDark` preview props. It existed for one reason: hunters
+// could not wear a PD body, so a lineup was the only way to see one move.
+//
+// Hunters wear them now (`World::spawn_family`), which is a strictly better
+// showcase — the bodies are seen fighting, taking hits and dying, on the same code
+// path as everything else, instead of miming in a corner. It is deleted rather than
+// kept behind a flag because it was also never seen: it placed its figures at
+// x = 5.0..13.0 m in a room that is 4.5 m across, so every one of them stood
+// outside the level, embedded in the wall. Nothing rendered, and nothing said so.
 
 /// The tier a normalised (0..1) difficulty-dial position maps onto.
 pub(crate) fn tier_for_dial_frac(frac: f32) -> BotDifficulty {
     tier_for_dial(frac, 1.0)
+}
+
+/// The tier the lab boots at.
+///
+/// **Normal, not Dark.** A DarkSim owes no reaction delay and never mis-aims, so it
+/// kills on sight from across the arena — which shows the top of the difficulty table
+/// and nothing else. Normal has a 0.5 s reaction and wanders ~8°, so the zeroing model
+/// is actually visible as behaviour: it swings past you, corrects, and closes.
+pub(crate) const LAB_TIER: BotDifficulty = BotDifficulty::Normal;
+
+/// The lowest dial position (0..=`max`) whose tier is `want` — so the lab can boot at
+/// a named tier while the `=` / `-` keys keep working, rather than pinning the tier
+/// and disconnecting the dial. Derived by asking [`tier_for_dial`] rather than
+/// hard-coding a number, so re-ordering the tier table cannot silently mis-set it.
+pub(crate) fn dial_for_tier(want: BotDifficulty, max: u32) -> u32 {
+    (0..=max).find(|d| tier_for_dial(*d as f32, max as f32) == want).unwrap_or(max / 2)
 }
 
 fn parse_difficulty(s: &str) -> Option<BotDifficulty> {
@@ -215,6 +172,93 @@ pub struct PdDebug {
     pub distance: f32,
     /// Movement speed multiplier in force.
     pub speed_mult: f32,
+    /// Remaining / spawn health, and whether this one has been killed. Filled in by
+    /// the caller rather than the model: the [`Simulant`] has no notion of a body.
+    /// A dead simulant keeps reporting (the overlay shows it as DEAD rather than
+    /// silently dropping the row), so the roster's indices stay stable across a fight.
+    pub health: f32,
+    pub max_health: f32,
+    pub dead: bool,
+    /// The hunter's index in the roster, so the overlay and the radar agree on who
+    /// `#3` is even once some of them are corpses.
+    pub id: usize,
+    /// What this hunter's FSM is doing — the readout for "why is it not moving".
+    pub state: crate::enemy::AiState,
+}
+
+/// One character a simulant may target: the player, or another hunter.
+///
+/// The lab's candidate list used to be the player alone, which left the half of
+/// [`BotType`] that compares *between* candidates — Prey, Judge, Venge, Feud, Coward
+/// — with nothing to compare. Every live hunter is a candidate now, so those vetoes
+/// run against real alternatives.
+///
+/// Ids are stable within a step: `0` is the player and hunter `i` is `i + 1`, which
+/// is what [`Simulant::target`](crate::pdsim::Simulant::target) and the grudge memory
+/// hold onto between ticks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PdTarget {
+    Player,
+    Hunter(usize),
+}
+
+impl PdTarget {
+    /// The stable candidate id for this target.
+    pub(crate) fn id(self) -> u32 {
+        match self {
+            PdTarget::Player => 0,
+            PdTarget::Hunter(i) => i as u32 + 1,
+        }
+    }
+
+    fn from_id(id: u32) -> PdTarget {
+        match id {
+            0 => PdTarget::Player,
+            n => PdTarget::Hunter(n as usize - 1),
+        }
+    }
+}
+
+/// A shootable character, snapshotted before the hunter loop so a simulant can be
+/// told about its neighbours without borrowing the roster it is inside.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PdActor {
+    pub who: PdTarget,
+    pub pos: Vec3,
+    pub alive: bool,
+    pub health_frac: f32,
+    pub armed: bool,
+    /// Whether this simulant can see it right now. Only the one candidate the
+    /// round-robin asks about is freshly raycast; the rest carry the last answer.
+    pub visible: bool,
+}
+
+/// The candidate list a simulant at `self_target` chooses from — everyone alive
+/// except itself. Weapon score is uniform: our hunters and the player all carry a
+/// gun, and PD's threat comparison is about *who is dangerous*, not which gun.
+pub(crate) fn candidates(self_target: PdTarget, actors: &[PdActor]) -> (Vec<Candidate>, Vec<PdTarget>) {
+    let mut cands = Vec::with_capacity(actors.len());
+    let mut who = Vec::with_capacity(actors.len());
+    for a in actors {
+        if a.who == self_target {
+            continue;
+        }
+        cands.push(Candidate {
+            id: a.who.id(),
+            distance: 0.0, // filled by the caller, which knows its own position
+            in_sight: a.visible,
+            alive: a.alive,
+            threat: Threat {
+                weapon_score: if a.armed { 50.0 } else { 0.0 },
+                health_frac: a.health_frac,
+                since_spawn: 1.0e6,
+                score: 0.0,
+            },
+            armed: a.armed,
+        });
+        who.push(a.who);
+    }
+    (cands, who)
 }
 
 /// Feed one simulant a step of world state and get its aim + fire decision.
@@ -236,48 +280,67 @@ pub struct PdDebug {
 pub(crate) fn step_simulant(
     sim: &mut Simulant,
     dt: f32,
+    self_target: PdTarget,
     self_pos: Vec3,
-    player_feet: Vec3,
-    player_visible: bool,
-    player_health_frac: f32,
-    player_armed: bool,
+    actors: &[PdActor],
     dial_frac: f32,
     follow_dial: bool,
-) -> (SimOutput, PdDebug) {
+) -> (SimOutput, PdDebug, Option<PdTarget>) {
     if follow_dial {
         sim.difficulty = tier_for_dial(dial_frac, 1.0);
     }
 
-    let flat = Vec3::new(player_feet.x - self_pos.x, 0.0, player_feet.z - self_pos.z);
-    let distance = flat.length();
-    let bearing = if distance > 1e-4 { Some(flat.x.atan2(flat.z)) } else { None };
+    // Everyone this simulant could shoot at, with the distance from where it is
+    // standing. `candidates` cannot fill distance itself — it does not know whose
+    // list it is building.
+    let (mut candidates, who) = candidates(self_target, actors);
+    let pos_of = |t: PdTarget| actors.iter().find(|a| a.who == t).map(|a| a.pos);
+    for (c, t) in candidates.iter_mut().zip(&who) {
+        if let Some(p) = pos_of(*t) {
+            c.distance = Vec3::new(p.x - self_pos.x, 0.0, p.z - self_pos.z).length();
+        }
+    }
 
-    // The lab's candidate set is just the player. Multi-simulant deathmatch —
-    // where target selection and the personality vetoes really earn their keep —
-    // needs enemy-vs-enemy damage, which the game does not have yet.
-    let candidates = [Candidate {
-        id: 0,
-        distance,
-        in_sight: player_visible,
-        alive: true,
-        threat: Threat {
-            weapon_score: if player_armed { 50.0 } else { 0.0 },
-            health_frac: player_health_frac,
-            since_spawn: 1.0e6,
-            score: 0.0,
-        },
-        armed: player_armed,
-    }];
+    // Answer exactly the one sight question the round-robin is asking this tick
+    // (`Perception::next_query`) — the caller already resolved visibility for every
+    // actor, so this just routes the right answer to the right slot. Every other
+    // candidate keeps ageing on stale knowledge, which is the point of the model.
+    let query = sim
+        .perception
+        .next_query()
+        .filter(|i| *i < candidates.len())
+        .map(|i| (i, candidates[i].in_sight, candidates[i].distance));
+
+    // Bearing to the target the simulant is *currently* holding, since target
+    // selection happens inside `tick` and may keep it (`sticky`).
+    let current = sim.target.map(PdTarget::from_id);
+    let (bearing, target_in_sight) = match current.and_then(|t| {
+        pos_of(t).map(|p| (t, p))
+    }) {
+        Some((t, p)) => {
+            let flat = Vec3::new(p.x - self_pos.x, 0.0, p.z - self_pos.z);
+            let seen = actors.iter().find(|a| a.who == t).is_some_and(|a| a.visible && a.alive);
+            let b = if flat.length() > 1e-4 { Some(flat.x.atan2(flat.z)) } else { None };
+            (b, seen)
+        }
+        None => (None, false),
+    };
 
     let out = sim.tick(SimInput {
         dt,
         candidates: &candidates,
         own: Threat::of(50.0, 1.0),
-        query: Some((0, player_visible, distance)),
+        query,
         bearing_to_target: bearing,
-        target_in_sight: player_visible,
+        target_in_sight,
         dial_frac,
     });
+    let chosen = out.target_index.and_then(|i| who.get(i).copied());
+    let distance = out
+        .target_index
+        .and_then(|i| candidates.get(i))
+        .map(|c| c.distance)
+        .unwrap_or(0.0);
 
     let tuning = sim.tuning();
     let debug = PdDebug {
@@ -292,6 +355,13 @@ pub(crate) fn step_simulant(
         sticky: sim.sticky,
         distance,
         speed_mult: out.speed_mult,
+        // Body-side fields — the caller owns these (see `PdDebug`), so they are
+        // placeholders here and are overwritten in `World::fixed_step`.
+        health: 0.0,
+        max_health: 0.0,
+        dead: false,
+        id: 0,
+        state: crate::enemy::AiState::Idle,
     };
-    (out, debug)
+    (out, debug, chosen)
 }

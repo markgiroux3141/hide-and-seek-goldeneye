@@ -58,8 +58,22 @@ pub struct AnimationClip {
 
 impl AnimationClip {
     /// Number of channels successfully bound to skeleton joints (for validation).
+    ///
+    /// A *channel* is one track — a joint's rotation, or its translation — so a
+    /// joint that animates both counts twice. Use [`Self::bound_joints`] to ask
+    /// whether a clip reaches every joint.
     pub fn bound_channels(&self) -> usize {
         self.channels.len()
+    }
+
+    /// Number of **distinct joints** this clip drives. `bound_joints() ==
+    /// skeleton.joint_count()` is the check that a clip exported from one body's rig
+    /// resolves by name onto another's, leaving no joint stuck at its bind pose.
+    pub fn bound_joints(&self) -> usize {
+        let mut seen: Vec<usize> = self.channels.iter().map(|c| c.joint).collect();
+        seen.sort_unstable();
+        seen.dedup();
+        seen.len()
     }
 
     /// Per-joint local TRS at `time` seconds: start from the bind TRS and apply

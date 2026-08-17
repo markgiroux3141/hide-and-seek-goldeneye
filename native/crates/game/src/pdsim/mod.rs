@@ -32,6 +32,7 @@
 
 pub mod difficulty;
 pub mod personality;
+pub mod spread;
 pub mod targeting;
 pub mod zeroing;
 

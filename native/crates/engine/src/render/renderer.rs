@@ -25,9 +25,18 @@ const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const PREVIEW_SIZE: u32 = 320;
 
 /// Max joints in the skinned-character uniform. The GoldenEye skeleton is 15
-/// bones; 16 leaves headroom and keeps the array 16-aligned. Must match
+/// bones, but a **Perfect Dark** body declares 30 joints — `Bone_1..15` plus
+/// `Blend_1..15`, PD's midpoint frames, exported as real joints. 32 covers both
+/// with headroom and keeps the array 16-aligned. Must match
 /// `shader_skinned.wgsl`'s `MAX_JOINTS`.
-const MAX_JOINTS: usize = 16;
+///
+/// This was 16, which silently truncated every PD blend joint: the CPU wrote only
+/// the first 16 matrices and the shader clamped the out-of-range indices onto
+/// joint 15, so PD bodies drew as a fan of stretched triangles instead of a
+/// person. Nothing headless caught it — `skinning_matrices` returned all 30,
+/// finite and correct, and `pd_preview.py` skins on the CPU with no such cap. It
+/// only exists on the GPU path.
+const MAX_JOINTS: usize = 32;
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -158,6 +167,10 @@ struct GpuPrimitive {
 struct GpuCharacterMesh {
     vertex_buf: wgpu::Buffer,
     index_buf: wgpu::Buffer,
+    /// How many vertices `vertex_buf` holds — the size a drawing instance's
+    /// blood-color buffer must match, including for a caller that supplies no
+    /// blood at all (see [`Renderer::set_character_instances`]).
+    vertex_count: u32,
     primitives: Vec<GpuPrimitive>,
     _textures: Vec<wgpu::Texture>,
 }
@@ -178,6 +191,10 @@ struct GpuCharacterInstance {
     color_buf: wgpu::Buffer,
     /// Vertex count the `color_buf` is currently sized for (to detect a body switch).
     color_verts: u32,
+    /// Whether `color_buf` currently holds all-white (no blood painted into it).
+    /// Lets a slot that draws an unpainted body skip the per-frame upload, while
+    /// still being scrubbed clean when it takes over from a bloodied hunter.
+    color_clean: bool,
 }
 
 /// A GPU-resident enemy weapon's shared geometry (gun or muzzle-flash): the same
@@ -2163,6 +2180,7 @@ impl Renderer {
         let mesh = GpuCharacterMesh {
             vertex_buf,
             index_buf,
+            vertex_count: model.vertices.len() as u32,
             primitives,
             _textures: textures,
         };
@@ -2199,7 +2217,14 @@ impl Renderer {
             contents: bytemuck::cast_slice(&[1.0f32; 3]),
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         });
-        GpuCharacterInstance { body: 0, uniform_buf, uniform_bind, color_buf, color_verts: 0 }
+        GpuCharacterInstance {
+            body: 0,
+            uniform_buf,
+            uniform_bind,
+            color_buf,
+            color_verts: 1,
+            color_clean: true,
+        }
     }
 
     /// Set every character instance to draw this frame as `(body id, model, joint
@@ -2216,11 +2241,21 @@ impl Renderer {
             self.character_instances.push(inst);
         }
         for (i, (body, model, joints, opacity, colors)) in instances.iter().enumerate() {
+            // The blood buffer is a per-vertex VERTEX buffer, so it must cover the
+            // body's whole vertex count or the shader reads past the end (an
+            // indexed draw is not bounds-checked against it — the reads come back
+            // as zeros, i.e. a BLACK character, with no validation error). A caller
+            // that paints no blood passes an empty slice, so the size comes from
+            // the body's mesh, not from the slice.
+            let verts = if colors.is_empty() {
+                self.character_meshes.get(*body).map_or(1, |m| m.vertex_count.max(1))
+            } else {
+                (colors.len() / 3) as u32
+            };
             // Re-size this slot's blood buffer if it's now drawing a body with a
             // different vertex count (a pooled slot can switch bodies frame-to-frame).
-            let verts = (colors.len() / 3) as u32;
             if self.character_instances[i].color_verts != verts {
-                let white = vec![1.0f32; colors.len().max(3)];
+                let white = vec![1.0f32; verts as usize * 3];
                 let buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("char-blood"),
                     contents: bytemuck::cast_slice(&white),
@@ -2228,6 +2263,7 @@ impl Renderer {
                 });
                 self.character_instances[i].color_buf = buf;
                 self.character_instances[i].color_verts = verts;
+                self.character_instances[i].color_clean = true;
             }
             self.character_instances[i].body = *body;
             let mut u = CharUniform {
@@ -2235,13 +2271,39 @@ impl Renderer {
                 opacity: [*opacity, 0.0, 0.0, 0.0],
                 ..Default::default()
             };
+            // A body with more joints than the uniform holds would be skinned by a
+            // clamped index and draw as torn geometry, so say so rather than
+            // truncate in silence (this is how the PD 30-joint rig hid behind a
+            // 16-joint cap — see `MAX_JOINTS`).
+            if joints.len() > MAX_JOINTS {
+                log::warn!(
+                    "character body {body} needs {} joints; the uniform holds {MAX_JOINTS} — it will draw torn",
+                    joints.len()
+                );
+            }
             for (j, m) in joints.iter().take(MAX_JOINTS).enumerate() {
                 u.joints[j] = m.to_cols_array_2d();
             }
             self.queue
                 .write_buffer(&self.character_instances[i].uniform_buf, 0, bytemuck::cast_slice(&[u]));
-            self.queue
-                .write_buffer(&self.character_instances[i].color_buf, 0, bytemuck::cast_slice(colors));
+            if !colors.is_empty() {
+                self.queue.write_buffer(
+                    &self.character_instances[i].color_buf,
+                    0,
+                    bytemuck::cast_slice(colors),
+                );
+                self.character_instances[i].color_clean = false;
+            } else if !self.character_instances[i].color_clean {
+                // This slot last drew a bloodied hunter and is now reused for an
+                // unpainted body of the same size — scrub it back to white.
+                let white = vec![1.0f32; verts as usize * 3];
+                self.queue.write_buffer(
+                    &self.character_instances[i].color_buf,
+                    0,
+                    bytemuck::cast_slice(&white),
+                );
+                self.character_instances[i].color_clean = true;
+            }
         }
     }
 

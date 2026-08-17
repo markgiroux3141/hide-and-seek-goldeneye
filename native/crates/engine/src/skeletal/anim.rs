@@ -21,6 +21,25 @@ struct Playing {
     clip: usize,
     time: f32,
     looping: bool,
+    /// Playback rate multiplier. Perfect Dark authors one per animation row
+    /// (`struct animtablerow.speed`), which is how the same death clip reads as a
+    /// heavy fall in one table and a quicker crumple in another.
+    speed: f32,
+    /// Stop (and clamp) here instead of at the clip's end — `animtablerow.endframe`.
+    /// This is how PD builds a flinch out of a death: the torso injury rows play the
+    /// first 20 frames of `ANIM_DEATH_0022` and stop. `None` = play to the end.
+    end: Option<f32>,
+}
+
+impl Playing {
+    /// Where this playback actually stops: its own `end`, or the clip's duration.
+    fn end_time(&self, clips: &[AnimationClip]) -> f32 {
+        let dur = clips[self.clip].duration;
+        match self.end {
+            Some(e) => e.clamp(0.0, dur),
+            None => dur,
+        }
+    }
 }
 
 /// A crossfading animation player. Holds named clips for one skeleton, the
@@ -55,7 +74,7 @@ impl AnimPlayer {
     pub fn new(clips: Vec<AnimationClip>, start: usize) -> Self {
         AnimPlayer {
             clips,
-            current: Playing { clip: start, time: 0.0, looping: true },
+            current: Playing { clip: start, time: 0.0, looping: true, speed: 1.0, end: None },
             prev: None,
             blend: 1.0,
             blend_rate: f32::INFINITY,
@@ -107,7 +126,26 @@ impl AnimPlayer {
         return_to: Option<usize>,
         fire_window: Option<(f32, f32)>,
     ) {
+        self.play_once_scaled(idx, fade, return_to, fire_window, 1.0, None);
+    }
+
+    /// [`Self::play_once`] with Perfect Dark's per-row playback controls: a `speed`
+    /// multiplier and an early stop time (`end`, seconds), both straight off
+    /// `struct animtablerow`. A clip stopped early clamps and returns exactly as a
+    /// completed one does, so a 20-frame slice of a death animation behaves like any
+    /// other flinch.
+    pub fn play_once_scaled(
+        &mut self,
+        idx: usize,
+        fade: f32,
+        return_to: Option<usize>,
+        fire_window: Option<(f32, f32)>,
+        speed: f32,
+        end: Option<f32>,
+    ) {
         self.start(idx, fade, false);
+        self.current.speed = speed.max(0.0);
+        self.current.end = end;
         self.return_to = return_to;
         self.fire_window = fire_window;
         self.fire_open = false;
@@ -119,7 +157,7 @@ impl AnimPlayer {
             return;
         }
         self.prev = Some(self.current);
-        self.current = Playing { clip: idx, time: 0.0, looping };
+        self.current = Playing { clip: idx, time: 0.0, looping, speed: 1.0, end: None };
         if fade > 1e-4 {
             self.blend = 0.0;
             self.blend_rate = 1.0 / fade;
@@ -135,6 +173,13 @@ impl AnimPlayer {
         !self.current.looping
     }
 
+    /// The current clip's local clock, in seconds. Needed to fire animation *events*
+    /// — Perfect Dark's `thudframe1`/`thudframe2`, the frames a falling body strikes
+    /// the floor, are cues on this timeline.
+    pub fn current_time(&self) -> f32 {
+        self.current.time
+    }
+
     /// Whether the current one-shot has reached its last frame (clamped). For a
     /// no-return one-shot (death) this stays true while it holds the final pose —
     /// the cue to start the death fade once the animation is actually done.
@@ -142,8 +187,8 @@ impl AnimPlayer {
         if self.current.looping {
             return false;
         }
-        let dur = self.clips[self.current.clip].duration;
-        dur > 0.0 && self.current.time >= dur
+        let end = self.current.end_time(&self.clips);
+        end > 0.0 && self.current.time >= end
     }
 
     /// Whether playback is currently inside a fire clip's shot window.
@@ -175,8 +220,8 @@ impl AnimPlayer {
 
         // One-shot finished (clamped at its end) → return to the base loop.
         if !self.current.looping {
-            let dur = self.clips[self.current.clip].duration;
-            if dur > 0.0 && self.current.time >= dur {
+            let end = self.current.end_time(&self.clips);
+            if end > 0.0 && self.current.time >= end {
                 if let Some(rt) = self.return_to.take() {
                     self.play(rt, self.return_fade);
                 }
@@ -243,12 +288,14 @@ impl AnimPlayer {
 /// one-shots clamp at the last frame.
 fn advance(p: &mut Playing, clips: &[AnimationClip], dt: f32) {
     let dur = clips[p.clip].duration;
+    let dt = dt * p.speed;
     if dur <= 0.0 {
         p.time += dt;
     } else if p.looping {
         p.time = (p.time + dt).rem_euclid(dur);
     } else {
-        p.time = (p.time + dt).min(dur);
+        // A one-shot may be cut short by its row's `endframe`.
+        p.time = (p.time + dt).min(p.end_time(clips));
     }
 }
 

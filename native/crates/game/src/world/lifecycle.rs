@@ -2,6 +2,7 @@
 //! projection, the BUILD↔HUNT toggle, and the spawn floor probe.
 
 use super::*;
+use crate::combat::attack_anim;
 use engine::render::camera::apply_look_delta;
 use engine::sim::avoidance;
 use glam::Vec2;
@@ -181,8 +182,37 @@ impl World {
                 // Utility-AI decision layer on/off, applied per hunter below (like the
                 // detectable + wall-clearance toggles) so it can be A/B'd against the FSM.
                 let utility_on = self.utility_ai;
+                // PD's knowledge rule, applied per hunter below. Gated on the hunter
+                // actually carrying a simulant (`pdsim`) rather than on the lab flag, so
+                // it travels with the model rather than with the mode — a GoldenEye
+                // hunter in the same wave would keep its own last-known/search behaviour.
+                let omniscient_on = self.pd_omniscience;
                 // Difficulty dial as a fraction, for the PD simulant tier lookup.
                 let dial_frac = self.difficulty_frac();
+                // Everyone a simulant could shoot at, snapshotted before the loop —
+                // inside it each hunter is held `&mut` and cannot read its neighbours.
+                // The player is index 0 (`PdTarget::Player`); hunters follow.
+                let pd_actors: Vec<pd_lab::PdActor> = if self.pd_lab.is_some() {
+                    let mut v = vec![pd_lab::PdActor {
+                        who: pd_lab::PdTarget::Player,
+                        pos: feet,
+                        alive: !self.player_dead,
+                        health_frac: (self.player_health / PLAYER_MAX_HEALTH).clamp(0.0, 1.0),
+                        armed: true, // the player always carries a gun in this game
+                        visible: false,
+                    }];
+                    v.extend(enemies.iter().enumerate().map(|(j, e)| pd_lab::PdActor {
+                        who: pd_lab::PdTarget::Hunter(j),
+                        pos: e.enemy.pos,
+                        alive: !e.enemy.is_dead(),
+                        health_frac: (e.enemy.health() / crate::enemy::ENEMY_HEALTH).clamp(0.0, 1.0),
+                        armed: true,
+                        visible: false,
+                    }));
+                    v
+                } else {
+                    Vec::new()
+                };
                 let mut fire_requests: Vec<usize> = Vec::new();
                 let mut needs_target: Vec<usize> = Vec::new();
                 let mut any_caught = false;
@@ -194,6 +224,9 @@ impl World {
                     inst.enemy.set_wall_clearance_radius(wall_clear_r);
                     // Select the decision layer (utility vs legacy FSM) for this step.
                     inst.enemy.set_utility(utility_on);
+                    // Perfect Dark hunters always know where the player is (movement
+                    // only — perception is untouched, see `Enemy::known_player_pos`).
+                    inst.enemy.set_omniscient(omniscient_on && inst.pdsim.is_some());
                     // Is THIS hunter mid fire burst? (the JS `enemyState === 'action'`
                     // proxy the attack→cooldown transition needs). Firing is a timer
                     // now, so the hunter can move + aim through it.
@@ -239,28 +272,47 @@ impl World {
                     // perception contract it was never tuned against.
                     let mut pd_fire = None;
                     if let (Some(sim), Some(cfg)) = (inst.pdsim.as_mut(), self.pd_lab) {
-                        let visible = player_visible
-                            && crate::enemy::line_of_sight(
+                        // Resolve sight to every candidate this simulant might pick.
+                        // The model only *believes* one fresh answer per tick (the
+                        // round-robin), but the caller has to be able to answer
+                        // whichever slot it asks about.
+                        let me = pd_lab::PdTarget::Hunter(i);
+                        let mut actors = pd_actors.clone();
+                        for a in &mut actors {
+                            if a.who == me || !a.alive {
+                                a.visible = false;
+                                continue;
+                            }
+                            a.visible = match a.who {
+                                pd_lab::PdTarget::Player => player_visible,
+                                pd_lab::PdTarget::Hunter(_) => true,
+                            } && crate::enemy::line_of_sight(
                                 &mut self.physics,
                                 inst.enemy.pos,
-                                feet,
+                                a.pos,
                                 inst.collider,
                             );
-                        let (out, dbg) = pd_lab::step_simulant(
+                        }
+                        let (out, mut dbg, chosen) = pd_lab::step_simulant(
                             sim,
                             dt,
+                            me,
                             inst.enemy.pos,
-                            feet,
-                            visible,
-                            (self.player_health / PLAYER_MAX_HEALTH).clamp(0.0, 1.0),
-                            true, // the player always carries a gun in this game
+                            &actors,
                             dial_frac,
                             cfg.difficulty.is_none(),
                         );
+                        // Body-side readouts the model can't know (see `PdDebug`).
+                        dbg.id = i;
+                        dbg.health = inst.enemy.health();
+                        dbg.max_health = inst.enemy.max_health();
+                        dbg.dead = inst.enemy.is_dead();
+                        dbg.state = inst.enemy.state();
                         // The simulant's yaw IS the rendered facing: the aim error
                         // must be visible on the body, or none of this reads.
                         inst.render_yaw = Some(out.yaw);
                         inst.pd_debug = Some(dbg);
+                        inst.pd_target = chosen;
                         pd_fire = Some(out.want_fire);
                     }
 
@@ -469,6 +521,9 @@ impl World {
                         // Resolve the fixed enemy spawn point (marker → standable
                         // cell) and the fan-out search-point pool.
                         self.prepare_spawn(&nav);
+                        // Decimate the walkable floor for the radar backdrop (once —
+                        // it's static for the hunt).
+                        self.bake_radar_cells(&nav);
                         // Flood in the wave: ENEMY_COUNT hunters clustered at the fixed
                         // spawn point, each in Search, fanning out to hunt the player.
                         if self.spawn_enemies {
@@ -496,6 +551,7 @@ impl World {
                 self.enemies.clear();
                 self.hunt_spawn = None;
                 self.search_points.clear();
+                self.radar_cells.clear();
                 self.caught = false;
                 self.sparks.clear();
                 // Explosives don't survive the hunt: drop any in-flight rounds,
@@ -566,18 +622,20 @@ impl World {
     /// its first step. Skips entirely if the animation template failed to load (no
     /// clips → nothing to animate).
     fn spawn_wave(&mut self, nav: &NavWorld) {
-        let Some(template) = self.char_anim_template.clone() else {
+        // Which character family this wave wears, and the clip template that drives
+        // it — Perfect Dark in the `PD_LAB`, GoldenEye otherwise. A body and its
+        // clips travel together (see `World::spawn_family`).
+        let Some((template, bodies)) = self.spawn_family() else {
             log::warn!("no animation template loaded — spawning no hunters");
             return;
         };
+        let template = template.clone();
+        let (body_first, body_count) = (bodies.start, bodies.len());
+        // Which family this wave is — the Perfect Dark bodies start at `ge_body_count`.
+        let pd_family = body_first >= self.ge_bodies().end && body_count > 0;
         // Face the player initially (harmless: if the player's out of sight/range the
         // search FSM takes over immediately; if in view they engage, which is right).
         let watch = self.player_pos().unwrap_or(self.spawn_point);
-        // How many distinct bodies loaded — hunters spread across the catalog below.
-        // GoldenEye bodies only: the Perfect Dark bodies loaded after them have no
-        // fire/hit/death clips, and this template's fixed clip layout assumes the GE
-        // rig's bind orientation (see `PD_BODY_CATALOG`).
-        let body_count = self.ge_body_count;
         // Difficulty survivability: each hunter spawns with scaled health.
         let spawn_hp = crate::enemy::ENEMY_HEALTH * self.difficulty_params().health_mult;
         // Gait clips for the continuous locomotion blend (fixed template layout:
@@ -600,9 +658,13 @@ impl World {
             } else {
                 ENEMY_ROSTER[i % ENEMY_ROSTER.len()]
             };
-            // Spread the wave across the whole body catalog so a single hunt shows a
-            // varied squad rather than six clones (body 0 = Karl when only one loaded).
-            let body = if body_count == 0 { 0 } else { (i * body_count / count.max(1)) % body_count };
+            // Spread the wave across the whole family so a single hunt shows a varied
+            // squad rather than six clones (body 0 = Karl when only one loaded).
+            let body = if body_count == 0 {
+                0
+            } else {
+                body_first + (i * body_count / count.max(1)) % body_count
+            };
             // This hunter starts clean (all-white blood), sized to ITS body's mesh.
             let vert_count = self.char_models.get(body).map(|m| m.vertices.len()).unwrap_or(0);
             // This body's resolved gun-arm + upper-body mask; the hunter clones its own
@@ -616,9 +678,10 @@ impl World {
                 .nearest_standable(raw.x, raw.y.max(0.1), raw.z, 6)
                 .unwrap_or(self.spawn_point);
             let weapon = enemy_def_for(&wcfg);
-            let collider =
-                self.physics
-                    .add_enemy_collider(spawn, ENEMY_RADIUS, ENEMY_HALF_HEIGHT);
+            // Sized to THIS body — a Perfect Dark hunter is 1.73 m and needs a taller
+            // capsule than a 1.50 m GoldenEye one, or its head is not there to shoot.
+            let (radius, half_height) = self.body_capsule(body);
+            let collider = self.physics.add_enemy_collider(spawn, radius, half_height);
 
             // Per-hunter stack: [locomotion, upper-body aim overlay, chest-aim, recoil].
             // The overlay plays this weapon class's authored fire/aim clip on the arms
@@ -635,12 +698,32 @@ impl World {
             };
             let skel = self.char_models.get(body).map(|m| &m.skeleton);
             let asset = self.enemy_weapon_lib.iter().find(|w| w.name == weapon.name);
+            // When this hunter aims / shoots / recoils. A Perfect Dark hunter uses
+            // PD's **authored** `attackanimconfig` row for the exact animation it is
+            // about to play; a GoldenEye one keeps the hand-set `FIRE_TIMING` guess.
+            // Both rows describe the same three animations (the two games share an
+            // animation bank), so this is an A/B of authored-versus-guessed timing on
+            // identical clips — which is why the choice is per family, not global.
+            let fire = if pd_family {
+                let cfg = attack_anim::config_for(weapon.class, dual);
+                let dur = template.clip(aim_idx).map(|c| c.duration).unwrap_or(0.0);
+                attack_anim::FireTiming::from_pd(cfg, dur)
+            } else {
+                attack_anim::FireTiming::legacy(
+                    super::hunt::fire_window_for(weapon.class, dual),
+                    ENEMY_CHEST_AIM_CONE,
+                )
+            };
             let stack = match (arm, loco_clips.clone(), template.clip(aim_idx).cloned()) {
                 (Some(a), Some(clips), Some(aim_clip)) => {
                     let mut s = a.build_stack(clips, aim_clip);
-                    // Freeze the overlay at the shot instant — the fully-raised aim pose.
+                    // Freeze the overlay at the first shot — the fully-raised aim pose.
                     if let Some(ov) = s.layer_as::<ClipOverlayLayer>(ENEMY_AIM_OVERLAY_LAYER) {
-                        ov.time = super::hunt::fire_window_for(weapon.class, dual).0;
+                        ov.time = fire.shoot.0;
+                    }
+                    // The authored aim limits replace the single fallback cone.
+                    if let Some(ca) = s.layer_as::<AimOffsetLayer>(ENEMY_CHEST_AIM_LAYER) {
+                        ca.cone = fire.cone;
                     }
                     // Measure the real gun barrel (in the chest frame) at the aim pose,
                     // then enable the chest-aim so it swings the whole hold to point the
@@ -694,7 +777,13 @@ impl World {
                 collider,
                 fade: None,
                 shot_timer: 0.0,
+                burst_shot: 0,
                 fire_elapsed: None,
+                fire,
+                pd_anims: pd_family,
+                hit_part: None,
+                thud: None,
+                thud_played: [false; 2],
                 muzzle_timer: 0.0,
                 damage_cooldown: 0.0,
                 blood: vec![1.0f32; vert_count * 3],
@@ -722,6 +811,7 @@ impl World {
                     )
                 }),
                 pd_debug: None,
+                pd_target: None,
             });
             log::info!(
                 "hunter {i} flooded in at {spawn:?} as body {body} with {}{}",

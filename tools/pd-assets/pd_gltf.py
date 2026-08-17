@@ -935,21 +935,32 @@ def export_clip(
     rots: list[list[float]] = [[] for _ in rig.joints]
     trans: list[list[float]] = [[] for _ in rig.joints]
     animates_translation = [False] * len(rig.joints)
+    turned = 0.0
     for frame in range(anim.numframes):
         for i, j in enumerate(rig.joints):
             rot, tra = anim.part_transform(j.part, frame)
+            # **Root motion** (`ANIMFIELD_08`) is a separate channel the game reads
+            # with `anim_get_pos_angle_as_int` and feeds into the model transform
+            # (`model.c:1856`) — it is where the clip's travel lives. Without it a
+            # death rotates into a heap while its hips stay at standing height; with
+            # it the pelvis drops 1083 mm -> 209 mm and the body lands. It only ever
+            # appears on part 0, whose rest offset is the origin, and a blend joint
+            # is the owning bone's *sibling*, so adding it to both is not a
+            # double-count.
+            mx, my, mz, angle = anim.part_motion(j.part, frame)
+            turned = max(turned, abs(angle))
             q = quat_from_pd_rotation(*rot)
             if j.is_blend:
                 q = quat_halfway(q)
             rots[i] += list(q)
-            if tra != (0.0, 0.0, 0.0):
+            if tra != (0.0, 0.0, 0.0) or (mx, my, mz) != (0.0, 0.0, 0.0):
                 animates_translation[i] = True
             # `model.c:1158` — the animation translation is ADDED to the node's
             # rest offset, it does not replace it.
             trans[i] += [
-                (j.offset[0] + tra[0]) * scale,
-                (j.offset[1] + tra[1]) * scale,
-                (j.offset[2] + tra[2]) * scale,
+                (j.offset[0] + tra[0] + mx) * scale,
+                (j.offset[1] + tra[1] + my) * scale,
+                (j.offset[2] + tra[2] + mz) * scale,
             ]
 
     samplers: list[dict] = []
@@ -986,6 +997,14 @@ def export_clip(
         f"{anim.id} -> {out}: {anim.numframes} frames, {duration:.2f}s @ {fps:g}fps, "
         f"{len(channels)} channels ({moved} translated)"
     )
+    # The root-motion field's fourth channel turns the whole character. The engine
+    # owns a hunter's facing, so it is deliberately NOT baked into the clip — say so
+    # if a clip actually uses it rather than dropping it silently.
+    if turned > 1e-3:
+        print(
+            f"  note: {anim.id} also turns the root by up to {math.degrees(turned):.1f}deg; "
+            "that channel is not exported (the game drives facing)"
+        )
     return {
         "anim": anim.id,
         "frames": anim.numframes,
@@ -1009,7 +1028,7 @@ def export_batch(manifest_path: str, outdir: str, scale: float, blend_joints: bo
     ```json
     {
       "characters": {"pd_a51guard": "a51guard", "pd_joanna": ["dark_frock", "headdark_frock"]},
-      "clips":      {"pd-idle": "ANIM_TWO_GUN_HOLD"},
+      "clips":      {"00-idle": "ANIM_TWO_GUN_HOLD"},
       "clip_rig":   "a51guard",
       "fps": 30
     }

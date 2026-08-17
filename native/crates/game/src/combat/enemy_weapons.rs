@@ -55,6 +55,16 @@ pub struct EnemyWeaponDef {
     /// from [`Self::range`] via [`standoff_for`], so a sniper hangs way back and a
     /// shotgunner charges in. Threaded into the FSM ([`crate::enemy::Enemy::update`]).
     pub standoff: f32,
+    /// Perfect Dark's per-shot **spread** field for this weapon (see
+    /// [`crate::pdsim::spread`]) — the width of the random cone each individual
+    /// bullet is offset into, in PD's own units (`±spread/4` degrees per axis).
+    /// Used only on the PD shot path; the legacy hit-roll path ignores it.
+    pub spread: f32,
+    /// Whether this is a full-auto weapon (straight off the player [`WeaponStats`]).
+    /// On the PD shot path it selects the **burst cadence** — PD's automatics are
+    /// `FUNCFLAG_BURST3` rows that fire three rounds and then pause, rather than a
+    /// continuous stream. See `World::enemy_combat_step`.
+    pub automatic: bool,
     /// Right-hand (`Bone_9`) bone-local offset + XYZ-euler rotation, GE units.
     pub right_offset: Vec3,
     pub right_rot: Vec3,
@@ -160,6 +170,33 @@ pub fn standoff_for(range: f32) -> f32 {
     (range * STANDOFF_FRAC).clamp(MIN_STANDOFF, MAX_STANDOFF)
 }
 
+/// Weapons that scatter like a shotgun rather than a rifle — PD gives its Shotgun a
+/// `spread` of 30 against the AR34's 8, and that cone is most of what a shotgun *is*.
+const SHOTGUN_NAMES: &[&str] = &["Shotgun", "Auto Shotgun"];
+/// Bullet hoses. PD's widest non-shotgun rows are the CMP150 and Callisto NTG at 9 —
+/// an SMG trades precision for rate, which is exactly what stops one deleting you.
+const HOSE_NAMES: &[&str] = &["Klobb", "D5K Deutsche", "D5K (Silenced)", "Phantom", "ZMG 9mm", "RC-P90"];
+
+/// Perfect Dark's per-shot [`spread`](crate::pdsim::spread) field for a weapon, matched
+/// by role: shotguns cone, SMGs hose, precision weapons (`LONG_NAMES` — sniper + laser)
+/// add **nothing** and ride on the zeroing model alone, and everything else falls back
+/// to its class baseline (pistol 1 / rifle 8).
+fn spread_for(w: &WeaponStats, class: EnemyWeaponClass) -> f32 {
+    use crate::pdsim::spread::table;
+    if SHOTGUN_NAMES.contains(&w.name) {
+        table::SHOTGUN
+    } else if HOSE_NAMES.contains(&w.name) {
+        table::SMG
+    } else if LONG_NAMES.contains(&w.name) {
+        table::PRECISION
+    } else {
+        match class {
+            EnemyWeaponClass::Pistol => table::PISTOL,
+            EnemyWeaponClass::Rifle => table::RIFLE,
+        }
+    }
+}
+
 /// Build the enemy-side definition for any player [`WeaponStats`]. The four
 /// source-defined guns (pp7/kf7/ar33/rcp90) get their exact bone offsets + AI
 /// stats; every other weapon gets its class defaults so the full arsenal is
@@ -235,6 +272,8 @@ pub fn enemy_def_for(w: &WeaponStats) -> EnemyWeaponDef {
         range,
         fire_rate,
         standoff: standoff_for(range),
+        spread: spread_for(w, class),
+        automatic: w.automatic,
         right_offset: r_off,
         right_rot: r_rot,
         left_offset: l_off,
@@ -255,6 +294,37 @@ mod tests {
         assert_eq!(enemy_def_for(&config::KF7).class, EnemyWeaponClass::Rifle);
         assert_eq!(enemy_def_for(&config::SHOTGUN).class, EnemyWeaponClass::Rifle);
         assert_eq!(enemy_def_for(&config::LASER).class, EnemyWeaponClass::Rifle);
+    }
+
+    /// The PD spread table reaches the weapon defs, and keeps the *shape* PD gave it:
+    /// hosers and shotguns scatter, service pistols barely do, and the marksman weapons
+    /// add nothing at all so their accuracy is purely a statement about the shooter.
+    #[test]
+    fn pd_spread_follows_the_weapons_role() {
+        use crate::pdsim::spread::table;
+        assert_eq!(enemy_def_for(&config::SHOTGUN).spread, table::SHOTGUN);
+        assert_eq!(enemy_def_for(&config::KLOBB).spread, table::SMG);
+        assert_eq!(enemy_def_for(&config::RCP90).spread, table::SMG);
+        assert_eq!(enemy_def_for(&config::KF7).spread, table::RIFLE);
+        assert_eq!(enemy_def_for(&config::PP7).spread, table::PISTOL);
+        assert_eq!(enemy_def_for(&config::SNIPER).spread, table::PRECISION);
+        assert_eq!(enemy_def_for(&config::LASER).spread, table::PRECISION);
+        // Ordering is the property that matters, not the exact numbers.
+        assert!(
+            enemy_def_for(&config::SNIPER).spread < enemy_def_for(&config::PP7).spread
+                && enemy_def_for(&config::PP7).spread < enemy_def_for(&config::KF7).spread
+                && enemy_def_for(&config::KF7).spread < enemy_def_for(&config::KLOBB).spread
+                && enemy_def_for(&config::KLOBB).spread < enemy_def_for(&config::SHOTGUN).spread,
+            "spread must widen from marksman → pistol → rifle → SMG → shotgun"
+        );
+    }
+
+    /// The burst cadence keys off `automatic`, so it has to survive the copy from the
+    /// player weapon stats onto the enemy def.
+    #[test]
+    fn the_automatic_flag_carries_over() {
+        assert!(enemy_def_for(&config::KF7).automatic, "the KF7 is full-auto");
+        assert!(!enemy_def_for(&config::PP7).automatic, "the PP7 is not");
     }
 
     #[test]

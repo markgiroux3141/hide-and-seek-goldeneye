@@ -258,8 +258,17 @@ weapon-attach chain (§2) is de-risked along with it.
    hand-tuned offsets.
 4. **Muzzle flash + barrel origin** from `CHRGUNFIRE`. Also nearly free, and it makes flash and
    bullet agree by construction.
-5. **`attackanimconfig` transcription** — replaces our `FIRE_TIMING` guesses with the authored
-   windows.
+5. ~~**`attackanimconfig` transcription**~~ **Done** — `game/src/combat/attack_anim.rs` carries
+   the three rows our fire clips need (`ANIM_0032` / `ANIM_0041` / `ANIM_007A`), resolved per
+   hunter at spawn into a `FireTiming`. PD hunters use it; GoldenEye hunters keep the
+   `FIRE_TIMING` guess, so the two are an A/B on *identical animations*. What it changed:
+   the pistol's shoot window went from a 3-frame sliver (frames 63–66) to the authored 58–92,
+   turning a one-round burst into three; every row brought an **aim window wider than the
+   shoot window**, so a hunter swivels onto you before it can fire and keeps tracking after
+   the last round; and the authored `maxup`/`maxdown`/`maxleft`/`maxright` replaced our single
+   80° cone with ±40° sideways and +50°/−40° vertical, so the body turns where the chest used
+   to twist. Bursts are now fewer and longer (the row's `endframe` holds the action open),
+   which is the cadence change to judge in playtest.
 6. **Weapon stats** from `invitems.c` — damage, spread, RPM, penetration, clip sizes.
 7. **Player viewmodel** — `guncmd` scripts + first-person models. Largest and most independent;
    sensible to do last. Note `g_HeadsAndBodies[].handfilenum` gives the per-character

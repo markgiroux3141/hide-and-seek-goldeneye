@@ -26,7 +26,11 @@ use super::builder::{BuiltLevel, LevelBuilder, RoomId};
 ///   already engaged.
 pub fn pd_lab() -> BuiltLevel {
     let mut b = LevelBuilder::new();
-    const SIZE: f32 = 18.0;
+    // The builder's horizontal units are **world tiles** (0.25 m), not metres. This
+    // was 18, i.e. a 4.5 m box: the hunters spawned 0.7 m from the player's face and
+    // killed them before the aim model did anything observable, which is the exact
+    // opposite of what the arena is for. 64 WT = 16 m.
+    const SIZE: f32 = 64.0;
     // 12 WT = 3 m of headroom. The analyzer flags anything under 8 WT as cramped,
     // and a low ceiling in an open room reads as a corridor.
     let room = b.room("pd_lab", 0.0, 0.0, SIZE, SIZE, 0.0, 12.0);
@@ -35,17 +39,15 @@ pub fn pd_lab() -> BuiltLevel {
     // it. Every one clears the `z = x` line by more than its own width, so the
     // spawn-to-spawn sightline stays open — you can always back onto the diagonal
     // for a clean look at the aim, then strafe one pillar off it to break LOS.
-    for (x, z) in [(3.5, 8.0), (8.0, 13.0), (8.0, 3.5), (13.0, 8.0)] {
-        b.pillar_in(room, x, z, 1.5);
+    // 6 WT = 1.5 m across, wide enough to actually hide a body.
+    for (x, z) in [(12.0, 28.0), (28.0, 46.0), (28.0, 12.0), (46.0, 28.0)] {
+        b.pillar_in(room, x, z, 6.0);
     }
 
-    // The Perfect Dark character lineup that used to stand here as static props is
-    // now real skinned, animated characters — see `world::pd_lab::PdShowcase`, which
-    // places them itself so they can be posed per frame rather than baked into the
-    // level as scenery.
-
-    // Player far corner; hunters flood in at the fixed spawn marker near (3, 3).
-    b.spawn_wt(14.0, 0.5, 14.0);
+    // Player far corner, 12.5 m out; the hunters flood in at the fixed spawn marker
+    // at (3, 3) m. That is ~13.4 m apart — just outside the 12 m detection range, so
+    // every run starts with a clean acquisition rather than already engaged.
+    b.spawn_wt(50.0, 0.5, 50.0);
     b.finish()
 }
 

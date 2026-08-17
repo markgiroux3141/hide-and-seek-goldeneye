@@ -22,6 +22,11 @@
 //!
 //! Scope note (2026-07-16): door **breach/blocking is disabled** — doors are open
 //! passages during the hunt — so the FSM has no door-blocking branch.
+//!
+//! Scope note (2026-08-17): a hunter can be flagged [`Enemy::set_omniscient`], which
+//! swaps the *knowledge* rule (not the perception one) for Perfect Dark's — it always
+//! knows where the player is and walks to the live position instead of a last-known
+//! spot. See [`Enemy::known_player_pos`].
 
 use glam::Vec3;
 use rapier3d::prelude::ColliderHandle;
@@ -448,6 +453,14 @@ pub struct Enemy {
     /// Utility edge flag: a fire burst just ended this tick, so next tick's scorer
     /// initiates the between-bursts move (break to cover if desired, else reposition).
     post_burst: bool,
+
+    // ─── Perfect Dark knowledge rule ──
+    /// **Omniscience** — this hunter always knows where the player is, so it navigates
+    /// to the *live* position rather than a last-known one and never searches. The
+    /// `World` sets it each step (PD-lab hunters only, see `World::pd_omniscience`).
+    /// Perception is deliberately untouched: it still only *sees* what the raycast +
+    /// cone allow. See [`Self::known_player_pos`]. Defaults `false`.
+    omniscient: bool,
 }
 
 impl Enemy {
@@ -509,6 +522,7 @@ impl Enemy {
             since_seen: 1e6,
             alert_served: false,
             post_burst: false,
+            omniscient: false,
         }
     }
 
@@ -523,6 +537,62 @@ impl Enemy {
     /// each step from its `utility_ai` flag; `false` runs the legacy FSM (kill-switch).
     pub fn set_utility(&mut self, on: bool) {
         self.utility = on;
+    }
+
+    /// Enable/disable **omniscience** — Perfect Dark's knowledge rule. See
+    /// [`Self::omniscient`] and [`Self::known_player_pos`]. The `World` sets it each
+    /// step; `false` is our original perceive-then-remember behaviour (kill-switch).
+    pub fn set_omniscient(&mut self, on: bool) {
+        self.omniscient = on;
+    }
+
+    /// Whether this hunter always knows where the player is.
+    pub fn is_omniscient(&self) -> bool {
+        self.omniscient
+    }
+
+    /// **Where this hunter believes the player is** — the single knowledge source every
+    /// movement decision reads, so omniscience is a *policy* rather than a rewrite.
+    ///
+    /// * Normally: [`Self::last_known`], written only when the player is actually
+    ///   perceived (or a noise is heard). Break line-of-sight and it goes stale, which
+    ///   is what makes a hunter walk to where you *were* and then fan out searching.
+    /// * Omniscient: the player's live position, always. This is
+    ///   `botcmd_tick_dist_mode`'s rule (`botcmd.c:39`) — a PD bot re-issues
+    ///   `chr_go_to_prop(chr, targetprop, GOPOSFLAG_RUN)` against the target prop's
+    ///   *current* coordinates whether or not it can see it, and
+    ///   `bot_choose_general_target` (`bot.c:1589`) hands it the closest out-of-sight
+    ///   chr when nobody is in sight. There is no last-known-position anywhere in the
+    ///   simulant path.
+    ///
+    /// **Knowledge is not perception.** This never claims the hunter can *see* you:
+    /// `perceived` / `perception_los` / `since_seen` are untouched, so the aim model
+    /// (fed a real raycast on purpose — see `world::pd_lab`) and the LOS-gated `Attack`
+    /// state keep the contract they were tuned against. An omniscient hunter with no
+    /// sightline knows exactly where to walk and still cannot shoot through the wall.
+    fn known_player_pos(&self, player_feet: Vec3) -> Option<Vec3> {
+        if self.omniscient {
+            Some(player_feet)
+        } else {
+            self.last_known
+        }
+    }
+
+    /// Where a hunter goes when it loses contact mid-engagement.
+    ///
+    /// Normally `Investigate` — walk to the last-known spot, scan it, then give up to
+    /// the fan-out `Search`. An **omniscient** hunter never loses contact (PD's bot
+    /// keeps its target and simply re-paths to its live position), so it drops to
+    /// `Chase` instead and keeps coming. `Search` / `Investigate` are unreachable for
+    /// it, and so is `pick_search_point`.
+    fn lose_contact(&mut self) {
+        if self.omniscient {
+            self.state = AiState::Chase;
+            self.chase_timer = 0.0;
+        } else {
+            self.state = AiState::Investigate;
+            self.scan_timer = 0.0;
+        }
     }
 
     /// Set the body half-width (m) for the wall-clearance nudge (`0.0` disables it).
@@ -807,6 +877,12 @@ impl Enemy {
         self.health
     }
 
+    /// The health this hunter spawned with — the denominator for a health readout.
+    /// Difficulty-scaled at spawn, so it is not [`ENEMY_HEALTH`] in general.
+    pub fn max_health(&self) -> f32 {
+        self.max_health
+    }
+
     /// Stun the hunter for `dur` seconds — it stops moving while a hit reaction
     /// plays. Refreshes (does not stack) so a fresh hit restarts the window.
     pub fn stun(&mut self, dur: f32) {
@@ -926,7 +1002,10 @@ impl Enemy {
         }
         // Utility belief lapse: once the player's been lost past the memory window, a
         // fresh acquisition re-serves the alert reaction delay (harmless to the FSM path).
-        if self.since_seen >= ENGAGE_MEMORY {
+        // An omniscient hunter's belief never lapses — it has not lost anything — so it
+        // serves its reaction ONCE and then presses on. (Without this exemption it would
+        // re-arm the delay every tick it couldn't see you and stand in `Alert` forever.)
+        if self.since_seen >= ENGAGE_MEMORY && !self.omniscient {
             self.alert_served = false;
         }
 
@@ -967,18 +1046,22 @@ impl Enemy {
             };
             return step;
         }
+        // Acquisition gate for the three BLIND states. An omniscient hunter is never
+        // blind — PD's `bot_choose_general_target` always hands it a target, so it goes
+        // straight into the engagement chain and never sweeps for you.
+        let acquired = perceived || self.omniscient;
         match self.state {
             AiState::Idle => {
                 // Unaware and with nowhere assigned to search — the `World` will give
                 // it a point (spawn-in / stuck fallback). Acquire on sight meanwhile.
-                if perceived {
+                if acquired {
                     self.enter_alert();
                 } else {
                     step.needs_search_target = true;
                 }
             }
             AiState::Search => {
-                if perceived {
+                if acquired {
                     self.enter_alert();
                 } else {
                     match self.search_target {
@@ -994,7 +1077,7 @@ impl Enemy {
                 }
             }
             AiState::Investigate => {
-                if perceived {
+                if acquired {
                     self.enter_alert();
                 } else {
                     match self.last_known {
@@ -1069,12 +1152,14 @@ impl Enemy {
                     // at the spot, curve in from an offset bearing on this hunter's
                     // assigned side — 0 swing at difficulty 0 (unchanged straight chase),
                     // wider with `flank`, and packmates split sides so the pack surrounds.
-                    let base = self.last_known.unwrap_or(player_feet);
+                    let base = self.known_player_pos(player_feet).unwrap_or(player_feet);
                     let flank_angle = FLANK_MAX_ANGLE * tuning.flank * self.flank_dir;
                     let target = flank_point(base, self.pos, flank_angle);
+                    // Arriving at the believed spot without eyes on = they got away →
+                    // go poke at it. `lose_contact` keeps an omniscient hunter chasing
+                    // (its "believed spot" is the live one, so there is nothing to poke).
                     if self.move_toward(dt, target, nav, chase_speed * tuning.speed_mult) && !perceived {
-                        self.state = AiState::Investigate;
-                        self.scan_timer = 0.0;
+                        self.lose_contact();
                     }
                 }
             }
@@ -1193,9 +1278,9 @@ impl Enemy {
                         self.state = AiState::Chase;
                         self.chase_timer = 0.0;
                     } else {
-                        // Lost them — go poke at where they last were.
-                        self.state = AiState::Investigate;
-                        self.scan_timer = 0.0;
+                        // Lost them — go poke at where they last were (an omniscient
+                        // hunter just keeps closing; see `lose_contact`).
+                        self.lose_contact();
                     }
                 }
             }
@@ -1227,8 +1312,7 @@ impl Enemy {
                         } else if perceived {
                             self.enter_attack();
                         } else {
-                            self.state = AiState::Investigate;
-                            self.scan_timer = 0.0;
+                            self.lose_contact();
                         }
                     }
                 }
@@ -1269,9 +1353,9 @@ impl Enemy {
                         if perceived {
                             self.enter_attack();
                         } else {
-                            self.state = AiState::Investigate;
                             self.is_attacking = false;
                             self.holding = false;
+                            self.lose_contact();
                         }
                         self.scan_timer = 0.0;
                     }
@@ -1519,8 +1603,12 @@ impl Enemy {
             self.attack_los_lost += dt;
         }
         let los_hold = has_los || self.attack_los_lost < ATTACK_LOS_GRACE;
-        // Belief: "engaged" while a fresh-enough last-known is held.
-        let engaged = self.last_known.is_some() && self.since_seen < ENGAGE_MEMORY;
+        // Belief: "engaged" while a fresh-enough last-known is held. An OMNISCIENT
+        // hunter's knowledge never ages, so it is permanently engaged — which is what
+        // zeroes the `Search` / `Investigate` scores (both require `!engaged`) and
+        // makes those behaviours unreachable for it without a special case.
+        let engaged = self.omniscient
+            || (self.last_known.is_some() && self.since_seen < ENGAGE_MEMORY);
         // A burst in flight (suppress or attack) — gates the plant-initiation so a
         // closing hunter keeps advancing while it fires (mirrors the FSM).
         let firing = fire_anim || self.is_attacking;
@@ -1559,7 +1647,7 @@ impl Enemy {
                 }
                 None => step.needs_search_target = true,
             },
-            AiState::Investigate => match self.last_known {
+            AiState::Investigate => match self.known_player_pos(player_feet) {
                 Some(t) if self.dist_to(t) > ARRIVE_DIST => {
                     self.move_toward(dt, t, nav, SPEED_SEARCH);
                 }
@@ -1589,7 +1677,7 @@ impl Enemy {
                     self.pump_fire(fire_anim, step); // Chase bursts just cycle (no reposition)
                 }
                 let chase_speed = if firing { SPEED_ADVANCE } else { SPEED_CHASE };
-                let base = self.last_known.unwrap_or(player_feet);
+                let base = self.known_player_pos(player_feet).unwrap_or(player_feet);
                 let flank_angle = FLANK_MAX_ANGLE * tuning.flank * self.flank_dir;
                 let target = flank_point(base, self.pos, flank_angle);
                 self.move_toward(dt, target, nav, chase_speed * tuning.speed_mult);

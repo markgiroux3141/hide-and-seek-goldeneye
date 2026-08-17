@@ -13,10 +13,12 @@
 //! - P4 — recoil + bob/sway.
 //! - P5 — player health + the GoldenEye radial-arc HUD.
 
+pub mod attack_anim;
 pub mod config;
 pub mod enemy_weapons;
 pub mod explosives;
 pub mod gun_strip;
+pub mod hit_anim;
 pub mod shooting;
 pub mod viewmodel;
 

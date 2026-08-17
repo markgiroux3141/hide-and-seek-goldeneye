@@ -11,7 +11,14 @@ struct Camera {
 @group(1) @binding(0) var tex: texture_2d<f32>;
 @group(1) @binding(1) var samp: sampler;
 
-const MAX_JOINTS: u32 = 16u;
+// 32, not 16: the GoldenEye rig is 15 bones, but a Perfect Dark body declares 30
+// joints — `Bone_1..15` plus `Blend_1..15`, PD's midpoint frames, which are real
+// joints on the exported rig (see `HANDOFF_PD_ASSETS.md`, conversion decision 3).
+// At 16 every `Blend_*` index was out of range; WGSL clamps an out-of-bounds
+// uniform-array index to the last element, so every blend-weighted vertex was
+// skinned by `Bone_16`'s matrix and the body tore into a fan of stretched
+// triangles. Must stay in step with `renderer::MAX_JOINTS`.
+const MAX_JOINTS: u32 = 32u;
 struct Char {
     // World placement of the whole character (GE-scale → metres + position).
     model: mat4x4<f32>,

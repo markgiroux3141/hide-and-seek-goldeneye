@@ -51,7 +51,16 @@ impl SkinnedModel {
     /// this (the GoldenEye bind pose is a splayed star), so callers sample an
     /// actual animation pose instead.
     pub fn skinned_min_y(&self, joints: &[Mat4]) -> f32 {
-        let mut min_y = f32::INFINITY;
+        self.skinned_y_extent(joints).0
+    }
+
+    /// `(lowest, highest)` skinned vertex Y under these joint matrices, in model
+    /// units. The span is the posed figure's **standing height**, which differs per
+    /// body — the GoldenEye and Perfect Dark families are not the same size — so
+    /// anything sized to a character (its hit capsule, its hit-zone boundaries)
+    /// should be derived from this rather than from one global constant.
+    pub fn skinned_y_extent(&self, joints: &[Mat4]) -> (f32, f32) {
+        let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
         for v in &self.vertices {
             let src = Vec3::from(v.pos);
             let mut y = 0.0;
@@ -65,8 +74,9 @@ impl SkinnedModel {
                 }
             }
             min_y = min_y.min(y);
+            max_y = max_y.max(y);
         }
-        min_y
+        (min_y, max_y)
     }
 }
 

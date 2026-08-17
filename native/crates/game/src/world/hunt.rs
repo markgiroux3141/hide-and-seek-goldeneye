@@ -248,11 +248,6 @@ impl World {
     /// nav/AI-driven [`Enemy`] (the model is purely visual); a fire/hit/death one-shot
     /// isn't stomped. No-op in BUILD (nothing animated there).
     pub fn advance_animation(&mut self, dt: f32) {
-        // The PD lab lineup runs in both phases — it's scenery, visible while
-        // authoring as well as hunting, exactly as the preview props were.
-        if let Some(showcase) = self.pd_showcase.as_mut() {
-            showcase.advance(dt, &self.pd_clips);
-        }
         if self.is_build() {
             // Spike: the BUILD-phase procedural-anim preview (if toggled on).
             self.advance_procedural_preview(dt);
@@ -275,6 +270,9 @@ impl World {
         let nav = self.nav.as_ref();
         // Physics (read-only here) — the source for the living-hit reaction blend.
         let physics = &self.physics;
+        // Death-animation impact cues collected in the loop (see `thud` below) and
+        // played after it, since `audio` is a sibling field of the borrowed roster.
+        let mut thuds: Vec<Vec3> = Vec::new();
 
         for inst in &mut self.enemies {
             // A ragdolling corpse is driven entirely by the physics bodies (see
@@ -302,6 +300,19 @@ impl World {
             if inst.enemy.is_dead() && inst.anim.oneshot_finished() {
                 let t = inst.fade.get_or_insert(0.0);
                 *t = (*t + dt).min(FADE_DURATION);
+            }
+            // Animation events: Perfect Dark authors the frames at which a falling
+            // body strikes the floor (`thudframe1`/`thudframe2` on each death row), so
+            // the impact lands with the animation instead of at the moment of the
+            // shot. Collected here and played after the loop — `inst` is borrowed.
+            if let Some((a, b)) = inst.thud {
+                let now = inst.anim.current_time() * crate::combat::hit_anim::PD_ANIM_FPS;
+                for (k, frame) in [a, b].into_iter().enumerate() {
+                    if frame >= 0.0 && !inst.thud_played[k] && now >= frame {
+                        inst.thud_played[k] = true;
+                        thuds.push(inst.enemy.pos);
+                    }
+                }
             }
             // The mixer now carries ONLY the hit/death one-shots — locomotion is the
             // continuous blend layer below. Advance it so a one-shot plays out.
@@ -363,11 +374,20 @@ impl World {
                 let ct = char_transform_raw(inst.enemy.pos, inst.yaw(), feet_off);
                 ct.inverse().transform_point3(ap)
             });
+            // Tracking is gated by the animation's **aim window** while a burst is
+            // running: Perfect Dark lets a character swivel onto its target before it
+            // can shoot and for a while after (pistol: frames 20→120 around a 58→92
+            // shoot window), and resets the aim outside that (`chr_reset_aimend`,
+            // chraction.c:10766). Between bursts we keep tracking, because our
+            // hunters hold their weapon up whenever engaged rather than entering and
+            // leaving a discrete attack action the way a PD chr does. A legacy
+            // (GoldenEye) hunter's window is unbounded, so this is a no-op for it.
+            let tracking = inst.fire_elapsed.is_none_or(|t| inst.fire.aiming(t));
             if let Some(ca) = inst.stack.layer_as::<AimOffsetLayer>(ENEMY_CHEST_AIM_LAYER) {
                 if let Some(t) = aim_target {
                     ca.target = t;
                 }
-                ca.weight = if one_shot { 0.0 } else { inst.aim_weight };
+                ca.weight = if one_shot || !tracking { 0.0 } else { inst.aim_weight };
             }
 
             // ── Head look-at: turn the head toward what the hunter is thinking about. ──
@@ -473,6 +493,17 @@ impl World {
                 }
             }
             inst.final_pose = Some(pose);
+        }
+
+        // A body hitting the floor. One `fallover` variant per event so repeated
+        // deaths in a firefight do not machine-gun the same sample.
+        if !thuds.is_empty() {
+            for _ in 0..thuds.len() {
+                let n = self.rand_below(FALLOVER_COUNT) + 1;
+                if let Some(audio) = self.audio.as_mut() {
+                    audio.play(&format!("sounds/enemies/fallover{n}.wav"), FALLOVER_VOL);
+                }
+            }
         }
 
         self.log_anim_debug();
@@ -650,18 +681,7 @@ impl World {
         if self.char_models.is_empty() {
             return Vec::new();
         }
-        // The PD lab lineup, drawn in both phases. Clean bodies, so the empty blood
-        // slice leaves the renderer's white init alone (as the BUILD preview does).
         let mut pd: Vec<(usize, Mat4, Vec<Mat4>, f32, &[f32])> = Vec::new();
-        if let Some(showcase) = self.pd_showcase.as_ref() {
-            pd.extend(
-                showcase
-                    .instances(&self.char_models, &self.pd_clips)
-                    .map(|(body, feet, yaw, joints)| {
-                        (body, self.char_transform(feet, yaw, body), joints, 1.0, &[][..])
-                    }),
-            );
-        }
         // Spike: in BUILD the only character is the optional procedural preview (body 0).
         if self.is_build() {
             if let Some(p) = self.procedural_preview.as_ref() {

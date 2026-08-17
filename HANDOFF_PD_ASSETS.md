@@ -15,14 +15,21 @@ Five Python tools in [tools/pd-assets/](tools/pd-assets/) decode and re-export P
 | `pd_gltf.py` | **model → skinned GLB, animation → clip GLB** — the engine import |
 | `pd_tex.py` | compressed global-pool textures → RGBA8 (PD's rzip/paletted codec) |
 | `pd_preview.py` | renders any GLB to a PNG on the CPU, for verifying by eye |
+| `pd_triage.py` | **posture curve** over a clip — screens 1,207 animations into death / injury / upright before anything is rendered |
+| `pd_animmap.py` | **measures the GoldenEye ↔ Perfect Dark animation-id correspondence** (`--check` fails if a claimed match breaks) |
 
-**PD characters are now skinned, animated characters in the engine**, not props.
-Six bodies + four locomotion clips ship under `native/assets/enemies/pd/`, loaded
-through the *existing* GoldenEye pipeline (`engine/src/assets/gltf_load.rs`,
-`engine/src/skeletal/gltf_skin.rs`, `engine/src/skeletal/clip.rs`) with no new Rust
-loader. All six wear **Perfect Dark's own textures**, and any of the 65 shared-rig
-bodies can be exported the same way. The `PropCategory::PerfectDark` preview props
-are gone.
+**Perfect Dark characters are the hunters in the `PD_LAB`.** Six bodies + a
+**36-clip hunter set** (locomotion, three fire clips, 12 hit reactions, 17 deaths)
+ship under `native/assets/enemies/pd/`, loaded through the *existing* GoldenEye
+pipeline (`engine/src/skeletal/gltf_skin.rs`, `engine/src/skeletal/clip.rs`) with no
+new Rust loader. All six wear **Perfect Dark's own textures**, and any of the 65
+shared-rig bodies can be exported the same way.
+
+`PD_LAB=1` now spawns Joanna Dark, Cassandra, Elvis and the rest as the hunters
+themselves — they walk, aim, fire, take hits and die on Perfect Dark's own
+animations. `World::spawn_family` picks the family; a wave is all-PD or all-GE,
+never mixed. The `PdShowcase` lineup and the `PropCategory::PerfectDark` preview
+props it replaced are both gone.
 
 **Look at [tools/pd-assets/preview/](tools/pd-assets/preview/) first** — every claim
 below that could be checked by eye is rendered there, with an index saying what each
@@ -34,9 +41,7 @@ $env:PD_LAB = 1
 cargo run --release
 ```
 
-The lineup that used to be four static props is now four skinned bodies animating
-on their own clocks (`world::pd_lab::PdShowcase`). 275 tests green, release built,
-nothing committed.
+Press `G`. 279 tests green, release built.
 
 Re-export any time with:
 
@@ -134,8 +139,40 @@ reading before adding a sixth.
    A/B-ing the swap ([13-swizzle-before-after.png](tools/pd-assets/preview/13-swizzle-before-after.png)).
    `tex_swizzle` confirmed it afterwards, term for term.
 
+8. **`ANIMFIELD_08` is root motion, and its bits come first.** Part 0 carries a
+   four-channel field — x, y, z and a facing angle — that
+   `anim_get_rot_translate_scale` deliberately reports as *no translation*
+   (anim.c:510) because a different function, `anim_get_pos_angle_as_int`, is what
+   reads it. `pd_anim.py` skipped it as "present but unused", which cost two things
+   at once: the clip lost its travel, **and** every rotation was read 28–42 bits
+   early, because those bits sit ahead of the rotation bits in the same frame. The
+   result is not noise — it is a perfectly coherent human body that happens to be
+   lying down for the entire animation, which is why it survived being looked at.
+   *Caught by:* exporting a death for the first time and asking the only question a
+   contact sheet cannot answer — does the body end up on the ground? (`pd_triage.py`
+   exists because of this.) *Why it hid for a whole session:* the four bit lengths
+   are per-animation, and `ANIM_TWO_GUN_HOLD` — the idle, the one clip every earlier
+   render used — is authored dead still, so all four are **0** and the misalignment
+   on that single animation was exactly zero. Walk and run were 28 and 29 bits out
+   the whole time and still read as a person walking.
+   ([24-root-motion-fix.png](tools/pd-assets/preview/24-root-motion-fix.png))
+9. **The GPU only had room for 16 joints.** A PD body declares 30
+   (`Bone_1..15` + `Blend_1..15`); `renderer::MAX_JOINTS` and
+   `shader_skinned.wgsl` were sized for GoldenEye's 15. The CPU wrote the first 16
+   matrices and WGSL clamped every out-of-range index onto the last one, so every
+   blend-weighted vertex was skinned by `Bone_16` and the body drew as a fan of
+   stretched black triangles converging on a point. Nothing headless could see it:
+   `skinning_matrices` returns all 30, finite and correct, and `pd_preview.py` skins
+   on the CPU with no such cap — *the defect existed only on the GPU path*. The
+   blackness was a second, independent bug: a caller with no blood to paint passed an
+   empty slice, which never resized the 1-vertex placeholder colour buffer, and an
+   indexed draw reads past a short vertex buffer as zeros with no validation error.
+   *Caught by:* the user running the game and saying there was a weird black moving
+   thing attached to the crosshair.
+
 **Lesson for whoever continues:** the numeric checks in this codebase are necessary but
-not sufficient. Bugs 3, 4, 6 and 7 all passed every structural assertion. Put it on
+not sufficient — and bug 9 sharpens that, because *no* CPU-side check of any kind could
+have found it. Run the thing. Bugs 3, 4, 6 and 7 all passed every structural assertion. Put it on
 screen — and then keep looking, because bug 7 survived being looked at from four angles
 (it needed zooming into a single texture), and bug 6 survived every render *and* a
 0.0006 mm engine-vs-verifier agreement, because both sides were consistently wrong about
@@ -220,22 +257,52 @@ START_HERE §4 — plus the `tex_inflate_non_zlib` path (`tex_inflate_huffman`,
 `tex_channels_to_pixels` and `tex_swizzle`. The `struct tex` metadata is *not* in
 the extracted `textures/*.bin` (they are payload only) — dimensions come from
 `texconfig`, and the format from the texture table.
-- **PD bodies are 1.73 m; GoldenEye bodies render 1.50 m.** PD's is the true figure
-  (a51guard's nominal height is 167 cm) — `CHAR_SCALE` is `0.00104 × 0.8`, i.e. GE
-  bodies were deliberately shrunk 20%. Standing side by side the PD bodies are
-  visibly taller. Decide which way to reconcile before mixing them in one level.
-- **Hunters cannot wear PD bodies yet.** Blocked on clips, not on the rig: the
-  hunter template has a fixed layout of idle/walk/jog/run + 3 fire + 12 hit + 17
-  death, and PD's equivalents are among ~1,100 numerically-named animations that
-  need identifying by eye. `world::tests::hunters_never_wear_a_pd_body` pins the
-  boundary. Locomotion + the standing-fire candidate (`ANIM_0002`, from
-  `g_StandHeavyAttackAnims`) are already known.
-- **Verified by eye in `pd_preview.py`, not yet in the running game.** The assets,
-  the loader path and the height are all checked headlessly (275 tests); the
-  in-engine render under `PD_LAB=1` is the confirmation still owed.
+- **PD bodies are 1.73 m; GoldenEye bodies render 1.50 m** — `CHAR_SCALE` is
+  `0.00104 × 0.8`, i.e. the GE bodies were deliberately shrunk 20%. **Resolved by
+  keeping both.** `World::new` measures each body's standing height over its own idle
+  and `World::body_capsule` / `body_hit_zones` scale the hit capsule and the
+  head/torso/legs boundaries to it, calibrated so a 1.50 m body reproduces
+  `ENEMY_RADIUS` / `ENEMY_HALF_HEIGHT` / `ZONE_HEAD_MIN` to the millimetre. Without
+  it a PD hunter's head sat 23 cm above its own collider — unshootable, and the 4×
+  headshot multiplier could never fire.
 - **12 triangle edges exceed 25 cm** on the posed guard, all among the `G_TRI1` set.
   Probably legitimate (those triangles bridge bone groups at seams, so they span joints
   by design) but unverified. GE's Karl has 52 such edges, for scale.
+- **616 pool textures are still on the non-zlib codec** (below) — a few flat patches
+  on a few heads.
+
+## The hunter clip set
+
+A hunter needs the engine's fixed 36-slot layout — locomotion 0–3, one fire clip per
+weapon class, 12 hit reactions, 17 deaths — and the combat code does arithmetic on
+those indices (`CHAR_HIT_START + HIT_CLIPS.len()`). `World::pd_anim_template` fills
+all 36 with Perfect Dark animations, chosen in `tools/pd-assets/pd_roster.json`.
+
+**Perfect Dark and GoldenEye share one animation bank.** Rare carried the GoldenEye
+character animations into PD at the *same numbers*, so the GE clip the game ships as
+`2A-jogging.glb` is PD's `ANIM_002A`. That is measured, not assumed —
+`pd_animmap.py` checks all 36 and 30 match frame-for-frame (143, 227, 245, 185
+frames…), and the posed body traces the same posture curve turn for turn at the 1.15×
+height ratio ([23-shared-animation-bank.png](tools/pd-assets/preview/23-shared-animation-bank.png)).
+It also resolves the two places the banks disagree: PD's slot 0 is a null entry, so
+idle sits at `0x01` (`ANIM_TWO_GUN_HOLD`), and GE ships `39-death-left-leg` for what
+PD's own symbols call `ANIM_DEATH_STOMACH_LONG`.
+
+Six GE deaths have no PD counterpart at their id — `ANIM_0016/0018/001B/001D/001E/001F`
+are different animations that never leave their feet, confirmed by two independent
+signals (frame count *and* `pd_triage.py`'s posture curve, which partition the same
+six). Three of them are GoldenEye *mirrors*, which PD has no need of: `animtablerow`
+carries a `flip` flag and the game mirrors at runtime. Those six slots are filled from
+`g_DeathAnimsHuman*` (`game/chraction.c:228`) instead, so a PD hunter dies six ways a
+GoldenEye guard cannot.
+
+**Which clip is which was decided by looking, not by name.** `pd_triage.py` skins a
+body across a clip and reports its standing height over time — tall throughout is
+locomotion or a fire, a dip that recovers is an injury, tall-then-short-and-stays is a
+death. That is exactly what a contact sheet cannot show, because `pd_preview.py`
+frames every tile independently on purpose. All 36 shipped clips classify as their
+role, including `21-death-stagger-back-to-wall` settling at 1.00 m rather than 0.35 —
+correct, because it is PD's `g_AnimTableHumanSlumped`, a body slumped against a wall.
 
 ## After that
 
@@ -244,8 +311,22 @@ is located and verified, these are wiring jobs:
 
 3. **Weapon attach.** `MODELPART_CHR_RIGHTHAND` (3) / `LEFTHAND` (5) resolve to real
    joints — now known to be anim parts 8 and 7, i.e. `Bone_9` and `Bone_8` on the
-   exported rig. The gun's root transform is literally the hand matrix, no offset.
-   Deletes the hand-tuned placement.
+   exported rig. The gun's root transform is literally the hand matrix, no offset,
+   which would delete the hand-tuned placement in `combat/enemy_weapons.rs`.
+
+   **This turned out not to be a blocker for PD-bodied hunters, and the reason is
+   worth knowing.** The expectation was that GoldenEye's hand-tuned bone-local
+   offsets would put the gun somewhere wrong on a PD rig. They don't, because
+   `spawn_wave` never assumed where the barrel ends up: it measures the real barrel
+   direction in the chest frame from *that hunter's own* skeleton and aim pose
+   (`EnemyArm::barrel_forward_in_chest`) and hands it to the chest-aim layer, which
+   swings the hold until the barrel points at the player. Different rig, different
+   measurement, same result on screen — see
+   [25-pd-hunter-in-game.png](tools/pd-assets/preview/25-pd-hunter-in-game.png), and
+   `world::tests::the_chest_aim_axis_is_measured_per_body`, which fails if the two
+   families ever measure the same axis (i.e. if the calibration silently became a
+   constant). PD's own rule still applies to PD's own gun models, which the hunters
+   do not carry — they carry the GoldenEye arsenal.
 4. **Muzzle flash + barrel origin** from the `CHRGUNFIRE` node on `props/chr*.bin`.
 5. **`attackanimconfig`** (`game/chraction.c:912+`) — authored per-animation frame
    windows for shoot/aim/recoil, replacing the guessed `FIRE_TIMING`.

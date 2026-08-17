@@ -13,11 +13,14 @@
 //! rather than as a number nobody reads.
 //!
 //! ```sh
-//! cargo run --release --example pd_pose_dump -- pd_a51guard pd-running 6 out/
+//! cargo run --release --example pd_pose_dump -- pd_a51guard 29-death-forward-face-down-hard 8 out/
 //! python tools/pd-assets/pd_preview.py \
 //!     native/assets/enemies/pd/characters/pd_a51guard.glb engine.png \
-//!     --positions out/pd_a51guard_pd-running.f32 --frames 6
+//!     --positions out/pd_a51guard_29-death-forward-face-down-hard.f32
 //! ```
+//!
+//! Clip names are the 36 numbered files in `assets/enemies/pd/animations/` — the
+//! hunter template's fixed slot order (see `world::PD_TEMPLATE_CLIPS`).
 //!
 //! Output is a flat little-endian `f32` file: `frames x vertices x [x, y, z]`, in
 //! the GLB's own units (the caller applies `CHAR_SCALE` if it wants metres).
@@ -30,7 +33,7 @@ use glam::Vec3;
 fn main() {
     let mut args = std::env::args().skip(1);
     let body = args.next().unwrap_or_else(|| "pd_a51guard".into());
-    let clip_name = args.next().unwrap_or_else(|| "pd-idle".into());
+    let clip_name = args.next().unwrap_or_else(|| "00-idle".into());
     let frames: usize = args.next().and_then(|s| s.parse().ok()).unwrap_or(6);
     let outdir = args.next().unwrap_or_else(|| ".".into());
 
