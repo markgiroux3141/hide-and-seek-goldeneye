@@ -1648,6 +1648,42 @@ mod tests {
         assert!(rocket.peak_damage_hp() > 100.0, "a direct rocket hit is lethal");
     }
 
+    /// Every gun's two exported GLBs exist on disk, named as
+    /// `pd_gltf.py guns` writes them. This is the seam where the weapon table and
+    /// the asset export can silently drift apart — a row naming a model nobody
+    /// exported reads fine in code and draws nothing in game.
+    #[test]
+    fn every_gun_has_its_exported_glbs() {
+        let dir = format!("{}/../../assets/weapons/pd", env!("CARGO_MANIFEST_DIR"));
+        if !std::path::Path::new(&dir).is_dir() {
+            // The export is reproducible from the (gitignored) decomp, so a clone
+            // without it should not fail the suite — but say so rather than pass
+            // quietly, since a silent skip is how this stops testing anything.
+            eprintln!("note: {dir} absent — run `pd_gltf.py guns` to check the assets");
+            return;
+        }
+        for w in pd_guns() {
+            let slug: String = w
+                .name
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+                .collect();
+            let mut slug = slug;
+            while slug.contains("--") {
+                slug = slug.replace("--", "-");
+            }
+            let slug = slug.trim_matches('-');
+            for role in ["fp", "tp"] {
+                let path = format!("{dir}/{:02x}-{slug}-{role}.glb", w.mp_index);
+                assert!(
+                    std::path::Path::new(&path).is_file(),
+                    "{} is missing its {role} model at {path}",
+                    w.name
+                );
+            }
+        }
+    }
+
     /// Provenance is not decoration — every row must be traceable, because the
     /// whole reason this file is generated is so a wrong number can be found.
     #[test]

@@ -898,6 +898,453 @@ def export_char(
 
 
 # ---------------------------------------------------------------------------
+# gun: static weapon GLB + its authored attach/muzzle metadata
+# ---------------------------------------------------------------------------
+
+NODE_POSITION_T = 0x02
+NODE_CHRGUNFIRE = 0x0C
+NODE_POSITIONHELD = 0x15
+NODE_STARGUNFIRE = 0x16
+
+#: Named `POSITION` parts on a FIRST-PERSON gun model (`constants.h:2418-2424`).
+MODELPART_GUN_MUZZLEPOS = 0x0032
+MODELPART_GUN_HOLDPOS = 0x0037
+
+#: The two parts `chr_get_gun_pos` looks for on a THIRD-PERSON gun, in order
+#: (`constants.h:2584`). 0x0 is the CHRGUNFIRE node; 0x1 is POSITIONHELD.
+MODELPART_0000 = 0x0000
+MODELPART_0001 = 0x0001
+
+#: PD gun models are on the same 1000-units-per-metre scale as characters. NOT
+#: assumed from the character pipeline — measured off the third-person meshes,
+#: which come out anatomically right at that scale and wrong at any other:
+#: chrfalcon2 0.213 m, chrar34 0.616 m, chrsniperrifle 0.984 m. (`modeldef.scale`
+#: disagrees — 127 for chrfalcon2, 939 for guns/falcon2 — and is the trap
+#: `pd_pose.py` already warns about.)
+GUN_UNITS_PER_METRE = UNITS_PER_METRE
+
+#: The barrel axis of a third-person gun model, as a unit vector.
+#:
+#: `DESIGN_PD_SIMULANT_AI.md` §15 had to infer this by measuring a convention,
+#: because it is not recoverable from the mesh. It does not have to be inferred:
+#: the `CHRGUNFIRE` node authors the muzzle position, and across **all 27** chr
+#: gun models that carry one, the dominant component is negative X — unanimously,
+#: with no exceptions to explain away. `chr_get_gun_pos` (`chraction.c:9640`)
+#: reads the same node for the shot ray, which is why flash and bullet always
+#: agree on screen.
+GUN_BARREL_AXIS = (-1.0, 0.0, 0.0)
+
+
+def model_parts(m: ModelDef) -> dict[int, int]:
+    """`MODELPART_* -> node offset`, from the modeldef's own parts table.
+
+    Layout per `model_get_part` (`lib/model.c:327`): `numparts` node pointers at
+    `modeldef.parts`, followed immediately by a sorted `s16 partnums[numparts]`
+    that the engine binary-searches. The part numbers are NOT the `part` field in
+    a `POSITION` node's rodata — that is the *animation* part — which is why
+    looking for `MUZZLEPOS` there finds nothing on a first-person gun.
+    """
+    out: dict[int, int] = {}
+    if m.numparts <= 0 or not seg_ok(m.parts):
+        return out
+    base = seg_off(m.parts)
+    nums_base = base + 4 * m.numparts
+    if nums_base + 2 * m.numparts > len(m.data):
+        return out
+    for i in range(m.numparts):
+        (ptr,) = struct.unpack_from(">I", m.data, base + 4 * i)
+        (partnum,) = struct.unpack_from(">h", m.data, nums_base + 2 * i)
+        if seg_ok(ptr) and partnum >= 0:
+            out.setdefault(partnum, seg_off(ptr))
+    return out
+
+
+def gun_part_offsets(m: ModelDef) -> dict[int, tuple[float, float, float]]:
+    """Accumulated rest translation per matrix slot, for baking a static mesh.
+
+    A character gets this for free: its `POSITION` nodes become glTF joints and
+    the node hierarchy composes them. A gun has no rig here — we want one static
+    mesh — so the same parent-relative translations have to be summed down the
+    tree and folded into the vertices, or every part piles up at the origin.
+    """
+    nodes = {n.offset: n for n in m.walk()}
+    local: dict[int, tuple[float, float, float]] = {}
+    slots: dict[int, list[int]] = {}
+
+    for node in nodes.values():
+        t = node.type & 0xFF
+        if t == NODE_POSITION_T and seg_ok(node.rodata):
+            ro = seg_off(node.rodata)
+            x, y, z, _part, mi0, mi1, mi2 = struct.unpack_from(">fffHhhh", m.data, ro)
+            local[node.offset] = (x, y, z)
+            slots[node.offset] = [i for i in (mi0, mi1, mi2) if i >= 0]
+        elif t == NODE_POSITIONHELD and seg_ok(node.rodata):
+            ro = seg_off(node.rodata)
+            x, y, z, mi = struct.unpack_from(">fffh", m.data, ro)
+            local[node.offset] = (x, y, z)
+            slots[node.offset] = [mi] if mi >= 0 else []
+
+    def accumulated(off: int) -> tuple[float, float, float]:
+        total = [0.0, 0.0, 0.0]
+        cur = nodes.get(off)
+        seen = set()
+        while cur is not None and cur.offset not in seen:
+            seen.add(cur.offset)
+            t = local.get(cur.offset)
+            if t is not None:
+                total[0] += t[0]
+                total[1] += t[1]
+                total[2] += t[2]
+            cur = nodes.get(seg_off(cur.parent)) if seg_ok(cur.parent) else None
+        return (total[0], total[1], total[2])
+
+    out: dict[int, tuple[float, float, float]] = {}
+    for off, mis in slots.items():
+        acc = accumulated(off)
+        for mi in mis:
+            out.setdefault(mi, acc)
+    return out
+
+
+def gun_metadata(m: ModelDef, scale: float) -> dict:
+    """The authored nodes an engine needs off a gun model.
+
+    `CHRGUNFIRE` (`modelrodata_chrgunfire`, `types.h:502`) is the important one:
+    a position, a size in three axes, and a texture. It is BOTH the muzzle-flash
+    placement and the barrel origin for the shot ray, so taking it means flash
+    and bullet agree by construction rather than by tuning.
+
+    `POSITIONHELD` (`types.h:536`) is the grip offset applied between a holder's
+    hand matrix and the gun geometry — the reason PD needs no per-weapon,
+    per-character attach tuning at all (`DESIGN_PD_WEAPON_MECHANICS.md` §2).
+    """
+    meta: dict = {"muzzle": None, "muzzle_dim": None, "hold": None, "star_flash": False}
+
+    # The FIRST-PERSON models have no CHRGUNFIRE at all — they place the flash and
+    # the grip with named `POSITION` parts instead (`MODELPART_GUN_MUZZLEPOS` 0x32
+    # / `HOLDPOS` 0x37, `constants.h:2418-2424`). This is the authored version of
+    # the single shared `DEFAULT_MUZZLE` that `combat/config.rs` applies to all 24
+    # weapons, so it is worth reading even though the two model families use
+    # different mechanisms for the same job.
+    nodes = {n.offset: n for n in m.walk()}
+    parts = model_parts(m)
+
+    def accumulated_offset(off: int) -> tuple[float, float, float]:
+        """Sum the POSITION translations from a node up to the root."""
+        total = [0.0, 0.0, 0.0]
+        cur = nodes.get(off)
+        seen: set[int] = set()
+        while cur is not None and cur.offset not in seen:
+            seen.add(cur.offset)
+            if (cur.type & 0xFF) in (NODE_POSITION_T, NODE_POSITIONHELD) and seg_ok(cur.rodata):
+                cro = seg_off(cur.rodata)
+                cx, cy, cz = struct.unpack_from(">fff", m.data, cro)
+                total[0] += cx
+                total[1] += cy
+                total[2] += cz
+            cur = nodes.get(seg_off(cur.parent)) if seg_ok(cur.parent) else None
+        return (total[0] * scale, total[1] * scale, total[2] * scale)
+
+    if MODELPART_GUN_MUZZLEPOS in parts:
+        meta["muzzle"] = list(accumulated_offset(parts[MODELPART_GUN_MUZZLEPOS]))
+        meta["muzzle_from"] = "MODELPART_GUN_MUZZLEPOS"
+    if MODELPART_GUN_HOLDPOS in parts:
+        meta["hold"] = list(accumulated_offset(parts[MODELPART_GUN_HOLDPOS]))
+
+    for node in m.walk():
+        t = node.type & 0xFF
+        # CHRGUNFIRE wins where both exist: on a third-person model it is the
+        # authoritative flash AND shot origin (`chr_get_gun_pos`).
+        if t == NODE_CHRGUNFIRE and seg_ok(node.rodata) and meta.get("muzzle_from") != "CHRGUNFIRE":
+            ro = seg_off(node.rodata)
+            px, py, pz, dx, dy, dz = struct.unpack_from(">ffffff", m.data, ro)
+            meta["muzzle"] = [px * scale, py * scale, pz * scale]
+            meta["muzzle_dim"] = [dx * scale, dy * scale, dz * scale]
+            meta["muzzle_from"] = "CHRGUNFIRE"
+        elif t == NODE_STARGUNFIRE:
+            # A handful of weapons use the star-shaped flash instead (AR34,
+            # Cyclone, Dragon, Avenger). Recorded so a renderer can tell.
+            meta["star_flash"] = True
+        elif t == NODE_POSITIONHELD and seg_ok(node.rodata) and meta["hold"] is None:
+            ro = seg_off(node.rodata)
+            x, y, z, _mi = struct.unpack_from(">fffh", m.data, ro)
+            meta["hold"] = [x * scale, y * scale, z * scale]
+
+    # PD's OWN fallback, not an invention of ours. `chr_get_gun_pos`
+    # (`chraction.c:9640`) is a two-tier lookup:
+    #
+    #   MODELPART_0000 (the CHRGUNFIRE node) -> fire from its authored `pos`
+    #   else MODELPART_0001 (POSITIONHELD)   -> fire from that node's translation
+    #
+    # 17 of our 33 third-person models genuinely carry no CHRGUNFIRE — the data
+    # is absent, not missed — and for those PD shoots from the **grip point**,
+    # with no barrel offset at all. Two independent signals agree on the split:
+    # every model with a CHRGUNFIRE exposes part 0x0, and every model without one
+    # exposes part 0x1 instead. So this is the authored answer to the barrel-origin
+    # question, and the weapons that look like they lack one do not need a guess.
+    if meta["muzzle"] is None:
+        if MODELPART_0000 in parts:
+            meta["muzzle"] = list(accumulated_offset(parts[MODELPART_0000]))
+            meta["muzzle_from"] = "MODELPART_0000"
+        elif MODELPART_0001 in parts:
+            meta["muzzle"] = list(accumulated_offset(parts[MODELPART_0001]))
+            meta["muzzle_from"] = "MODELPART_0001 (grip — PD's own fallback)"
+        elif meta["hold"] is not None:
+            # No parts table at all (the thrown items: grenade, mines, knife).
+            # Same rule, reached through the node rather than the parts array.
+            meta["muzzle"] = list(meta["hold"])
+            meta["muzzle_from"] = "POSITIONHELD (grip — no parts table)"
+    return meta
+
+
+def export_gun(path: str, out: str, scale: float) -> dict:
+    """Export one PD weapon model as a static, textured GLB.
+
+    Deliberately **not** skinned. PD's first-person models articulate (a slide,
+    a magazine, 43 matrices on the Falcon 2) driven by the `guncmd` bytecode, but
+    our viewmodel is a single mesh with a recoil kick, so there is nowhere for
+    those parts to land yet. Baking the rest pose into one mesh is the honest
+    version of what we can actually draw; the part offsets are preserved in the
+    geometry rather than thrown away, so adding articulation later is a re-export
+    and not a re-rip.
+    """
+    model = load(path)
+    groups = model.geometry()
+    if not groups:
+        raise SystemExit(f"{model.name}: no geometry")
+
+    offsets = gun_part_offsets(model)
+    meta = gun_metadata(model, scale)
+    cfgs = read_texconfigs(model)
+
+    glb = Glb("pd_gltf.py (Perfect Dark -> glTF)")
+
+    # Same texture batching as the character path: one primitive per PD texture,
+    # which is how PD draws it and what the renderer wants.
+    batches: dict[object, list] = {}
+    untextured = 0
+    undecodable: set[int] = set()
+    for gi, g in enumerate(groups):
+        for a, b, c, tex in g.tris:
+            cfg = cfgs.get(tex)
+            if cfg is not None and tex not in undecodable:
+                try:
+                    decode_texture(model, cfg)
+                except pd_tex.UnsupportedTexture as e:
+                    print(f"  NOTE: {model.name} texture {cfg.index}: {e}", file=sys.stderr)
+                    undecodable.add(tex)
+            if cfg is not None and tex in undecodable:
+                cfg = None
+            if cfg is None:
+                untextured += 1
+            key = tex if cfg is not None else None
+            batch = batches.get(key)
+            if batch is None:
+                batch = batches[key] = [cfg, gi, {}, [], [], []]
+            _, _, remap, pos, uv, idx = batch
+            for corner in (a, b, c):
+                local = (gi, corner)
+                out_i = remap.get(local)
+                if out_i is None:
+                    v = g.verts[corner]
+                    ox, oy, oz = offsets.get(v.mtx, (0.0, 0.0, 0.0))
+                    out_i = remap[local] = len(pos) // 3
+                    pos.extend(
+                        (
+                            (v.x + ox) * scale,
+                            (v.y + oy) * scale,
+                            (v.z + oz) * scale,
+                        )
+                    )
+                    if cfg is not None:
+                        uv.extend((v.s / 32.0 / cfg.width, v.t / 32.0 / cfg.height))
+                    else:
+                        uv.extend(palette_uv(gi, len(groups)))
+                idx.append(out_i)
+    if untextured:
+        print(
+            f"  WARNING: {model.name}: {untextured} triangles had no texture — "
+            "they fall back to the per-part debug palette",
+            file=sys.stderr,
+        )
+
+    sampler = glb._append("samplers", {"magFilter": 9728, "minFilter": 9728})
+    palette_image = None
+    primitives = []
+    nverts = 0
+    ntris = 0
+    for cfg, gi, _remap, pos, uv, idx in batches.values():
+        if cfg is not None:
+            tw, th, rgba = decode_texture(model, cfg)
+            image = glb.image_png(png_bytes(tw, th, rgba))
+            mat_name = f"tex{cfg.index:02d}_{tw}x{th}"
+        else:
+            if palette_image is None:
+                palette_image = glb.image_png(palette_png(len(groups)))
+            image = palette_image
+            mat_name = f"part{gi:02d}_untextured"
+        texture = glb._append("textures", {"sampler": sampler, "source": image})
+        material = glb._append(
+            "materials",
+            {
+                "name": mat_name,
+                "pbrMetallicRoughness": {
+                    "baseColorTexture": {"index": texture},
+                    "metallicFactor": 0.0,
+                    "roughnessFactor": 1.0,
+                },
+                "alphaMode": "MASK",
+                "alphaCutoff": 0.5,
+                "doubleSided": True,
+            },
+        )
+        n = len(pos) // 3
+        primitives.append(
+            {
+                "attributes": {
+                    "POSITION": glb.accessor(pos, CT_F32, "VEC3", TARGET_ARRAY, minmax=True),
+                    "TEXCOORD_0": glb.accessor(uv, CT_F32, "VEC2", TARGET_ARRAY),
+                },
+                "indices": glb.accessor(
+                    idx, CT_U16 if n <= 0xFFFF else CT_U32, "SCALAR", TARGET_ELEMENT
+                ),
+                "material": material,
+            }
+        )
+        nverts += n
+        ntris += len(idx) // 3
+
+    mesh = glb._append("meshes", {"name": model.name, "primitives": primitives})
+    mesh_node = glb._append("nodes", {"name": "gun", "mesh": mesh})
+    glb.doc["scenes"][0]["nodes"].append(mesh_node)
+
+    # The authored attach points ride along as empty nodes AND as `extras`. The
+    # nodes make them visible in any glTF viewer (so a wrong muzzle is something
+    # you can see rather than something you infer from a bad tracer); the extras
+    # are what a loader reads.
+    if meta["muzzle"] is not None:
+        n = glb._append("nodes", {"name": "MUZZLE", "translation": meta["muzzle"]})
+        glb.doc["scenes"][0]["nodes"].append(n)
+    if meta["hold"] is not None:
+        n = glb._append("nodes", {"name": "HOLD", "translation": meta["hold"]})
+        glb.doc["scenes"][0]["nodes"].append(n)
+    glb.doc.setdefault("extras", {})["pd_gun"] = {
+        "source": os.path.basename(path),
+        "muzzle": meta["muzzle"],
+        "muzzle_dim": meta["muzzle_dim"],
+        "hold": meta["hold"],
+        "star_flash": meta["star_flash"],
+        "barrel_axis": list(GUN_BARREL_AXIS),
+        "units_per_metre": GUN_UNITS_PER_METRE,
+    }
+
+    glb.save(out)
+    stats = {
+        "model": model.name,
+        "verts": nverts,
+        "tris": ntris,
+        "parts": len(groups),
+        "textures": sum(1 for cfg, *_ in batches.values() if cfg is not None),
+        **meta,
+    }
+    muzzle = (
+        "muzzle ({:.3f},{:.3f},{:.3f})".format(*meta["muzzle"])
+        if meta["muzzle"]
+        else "NO MUZZLE NODE"
+    )
+    print(
+        f"{model.name} -> {out}: {stats['verts']} verts, {stats['tris']} tris, "
+        f"{stats['textures']} textures, {muzzle}"
+    )
+    return stats
+
+
+def export_guns(manifest_path: str, outdir: str, scale: float) -> int:
+    """Batch-export every gun named by `pd_weapons.py`'s table.
+
+    The manifest is the generated `pd_weapons.json`, so the roster of guns is the
+    decomp's own MP set rather than a hand-kept list that can drift from the
+    weapon table it has to line up with.
+    """
+    with open(manifest_path, encoding="utf-8") as fh:
+        table = json.load(fh)
+
+    files_root = os.path.join(assets_root(), "files")
+    os.makedirs(outdir, exist_ok=True)
+
+    index: dict[str, dict] = {}
+    failures: list[str] = []
+    no_muzzle: list[str] = []
+    grip_muzzle: list[str] = []
+    for w in table["weapons"]:
+        if w.get("equipment_only"):
+            continue
+        entry: dict = {"name": w["name_text"], "mp_index": w["mp_index"]}
+        for role, key in (("fp", "fp_model"), ("tp", "tp_model")):
+            rel = w["assets"].get(key)
+            if not rel:
+                continue
+            slug = f"{w['mp_index']:02x}-{slugify(w['name_text'])}-{role}"
+            src_path = os.path.join(files_root, rel.replace("/", os.sep))
+            out_path = os.path.join(outdir, slug + ".glb")
+            try:
+                stats = export_gun(src_path, out_path, scale)
+            except SystemExit as e:
+                print(f"  FAILED {rel}: {e}", file=sys.stderr)
+                failures.append(f"{w['name_text']} ({role})")
+                continue
+            entry[role] = {
+                "glb": slug + ".glb",
+                "source": rel,
+                "muzzle": stats["muzzle"],
+                "muzzle_from": stats.get("muzzle_from"),
+                "hold": stats["hold"],
+                "star_flash": stats["star_flash"],
+                "verts": stats["verts"],
+                "tris": stats["tris"],
+            }
+            if role == "tp":
+                if stats["muzzle"] is None:
+                    no_muzzle.append(w["name_text"])
+                elif "grip" in (stats.get("muzzle_from") or ""):
+                    grip_muzzle.append(w["name_text"])
+        index[str(w["mp_index"])] = entry
+
+    with open(os.path.join(outdir, "guns.json"), "w", encoding="utf-8") as fh:
+        json.dump(
+            {
+                "_comment": [
+                    "GENERATED by pd_gltf.py guns — do not hand-edit.",
+                    "Keyed by MPWEAPON index, matching combat/pd_weapons.rs.",
+                    "`muzzle` is the CHRGUNFIRE node: muzzle-flash placement AND the",
+                    "barrel origin for the shot ray, in engine units. `hold` is the",
+                    "POSITIONHELD grip offset. The barrel points down -X on every one",
+                    "of the 27 chr gun models that has a CHRGUNFIRE node.",
+                ],
+                "barrel_axis": list(GUN_BARREL_AXIS),
+                "guns": index,
+            },
+            fh,
+            indent=2,
+        )
+
+    print(f"\n{len(index)} guns -> {outdir}")
+    if no_muzzle:
+        print(f"  no CHRGUNFIRE on the third-person model: {', '.join(no_muzzle)}")
+    if failures:
+        print(f"  FAILED: {', '.join(failures)}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def slugify(name: str) -> str:
+    out = "".join(c.lower() if c.isalnum() else "-" for c in name)
+    while "--" in out:
+        out = out.replace("--", "-")
+    return out.strip("-")
+
+
+# ---------------------------------------------------------------------------
 # clip: animation-only GLB
 # ---------------------------------------------------------------------------
 
@@ -1105,6 +1552,14 @@ def main() -> int:
     p.add_argument("manifest")
     p.add_argument("outdir")
 
+    p = sub.add_parser("gun", help="static weapon GLB (first- or third-person model)")
+    p.add_argument("model")
+    p.add_argument("out")
+
+    p = sub.add_parser("guns", help="every gun in pd_weapons.json, both models each")
+    p.add_argument("manifest", help="the pd_weapons.py-generated pd_weapons.json")
+    p.add_argument("outdir")
+
     args = ap.parse_args()
     scale = 1.0 / UNITS_PER_METRE if args.metres else EXPORT_SCALE
     blends = not args.no_blend_joints
@@ -1116,6 +1571,11 @@ def main() -> int:
         rig = args.rig or os.path.join(assets_root(), "files", "chrs", "a51guard.bin")
         export_clip(args.anim, args.out, rig, scale, args.fps, blends, args.name)
         return 0
+    if args.cmd == "gun":
+        export_gun(args.model, args.out, scale)
+        return 0
+    if args.cmd == "guns":
+        return export_guns(args.manifest, args.outdir, scale)
     return export_batch(args.manifest, args.outdir, scale, blends)
 
 

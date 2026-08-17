@@ -171,24 +171,38 @@ class Model:
         g = Gltf(path)
         self.g = g
         skins = g.doc.get("skins") or []
-        if not skins:
-            raise SystemExit(f"{path}: no skin")
-        skin = skins[0]
-        self.joint_nodes = skin["joints"]
-        self.names = [
-            g.doc["nodes"][n].get("name", f"joint{i}") for i, n in enumerate(self.joint_nodes)
-        ]
-        pos_in_skin = {n: i for i, n in enumerate(self.joint_nodes)}
-        parents = g.node_parents()
-        self.parents = [pos_in_skin.get(parents.get(n, -1)) for n in self.joint_nodes]
-        if "inverseBindMatrices" in skin:
-            self.ibm = [
-                [[m[j * 4 + i] for j in range(4)] for i in range(4)]
-                for m in g.accessor(skin["inverseBindMatrices"])
+        if skins:
+            skin = skins[0]
+            self.joint_nodes = skin["joints"]
+            self.names = [
+                g.doc["nodes"][n].get("name", f"joint{i}") for i, n in enumerate(self.joint_nodes)
             ]
+            pos_in_skin = {n: i for i, n in enumerate(self.joint_nodes)}
+            parents = g.node_parents()
+            self.parents = [pos_in_skin.get(parents.get(n, -1)) for n in self.joint_nodes]
+            if "inverseBindMatrices" in skin:
+                self.ibm = [
+                    [[m[j * 4 + i] for j in range(4)] for i in range(4)]
+                    for m in g.accessor(skin["inverseBindMatrices"])
+                ]
+            else:
+                self.ibm = [m_identity() for _ in self.joint_nodes]
+            self.bind = [g.node_trs(n) for n in self.joint_nodes]
+            self.skinned = True
         else:
-            self.ibm = [m_identity() for _ in self.joint_nodes]
-        self.bind = [g.node_trs(n) for n in self.joint_nodes]
+            # A STATIC mesh — the weapon exports (`pd_gltf.py gun`) are deliberately
+            # unskinned, because our viewmodel is one mesh with a recoil kick and PD's
+            # articulated gun parts have nowhere to land yet. Rather than a second code
+            # path, stand in one identity joint that every vertex binds to with weight
+            # 1: posing and skinning below then work untouched, so the static case is
+            # drawn by exactly the same maths as the characters (which is the whole
+            # point of this tool sharing nothing with the exporter).
+            self.joint_nodes = []
+            self.names = ["static"]
+            self.parents = [None]
+            self.ibm = [m_identity()]
+            self.bind = [m_identity()]
+            self.skinned = False
 
         self.verts: list[tuple] = []
         self.uvs: list[tuple] = []
@@ -239,7 +253,7 @@ class Model:
 
     def joint_matrices(self, locals_=None):
         locals_ = self.bind if locals_ is None else locals_
-        globals_: list[list | None] = [None] * len(self.joint_nodes)
+        globals_: list[list | None] = [None] * len(self.bind)
 
         def resolve(i):
             if globals_[i] is None:
@@ -247,7 +261,7 @@ class Model:
                 globals_[i] = locals_[i] if p is None else m_mul(resolve(p), locals_[i])
             return globals_[i]
 
-        return [m_mul(resolve(i), self.ibm[i]) for i in range(len(self.joint_nodes))]
+        return [m_mul(resolve(i), self.ibm[i]) for i in range(len(self.bind))]
 
     def skin_positions(self, joints):
         out = []
