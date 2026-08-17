@@ -1681,6 +1681,24 @@ impl EnemyWeaponAsset {
 /// convention where it is not — rather than inventing a statistic that happens to look
 /// right on the gun someone last checked.
 fn resolve_barrel_axis(name: &str, muzzle_offset: Option<Vec3>) -> Vec3 {
+    // A Perfect Dark weapon does not need this measured at all: its third-person
+    // model carries the authored `CHRGUNFIRE` node, which is the same point
+    // `chr_get_gun_pos` uses for the shot ray, so flash and bullet agree by
+    // construction. Checked FIRST, because an authored answer outranks a
+    // convention inferred from eighteen meshes agreeing.
+    if let Some(pd) = crate::combat::arsenal::pd_weapon_for(name) {
+        if pd.muzzle_is_authored {
+            let a = Vec3::from(pd.tp_muzzle).normalize_or_zero();
+            if a != Vec3::ZERO {
+                return a;
+            }
+        }
+        // No CHRGUNFIRE authored (17 of the 33) — PD fires from the grip, so
+        // there is no barrel offset to recover and the model convention is the
+        // honest fallback. See `pd_gltf.py`'s `gun_metadata`.
+        log::debug!("{name}: PD weapon with no authored muzzle — firing from the grip");
+        return crate::combat::arsenal::PD_BARREL_AXIS;
+    }
     match muzzle_offset.map(|o| o.normalize_or_zero()) {
         Some(a) if a != Vec3::ZERO => a,
         _ => {
@@ -2350,16 +2368,24 @@ impl World {
         // guns load their meshes lazily on the first switch (see `cycle_weapon`) —
         // startup only pays for PP7 (index 0). Warn-not-panic if an asset is
         // missing. All GLBs live under `native/assets/weapons/`.
-        let weapons: Vec<Weapon> = crate::combat::config::WEAPONS
-            .iter()
-            .map(|&cfg| Weapon::new(cfg))
-            .collect();
+        // Which arsenal: the tuned GoldenEye 23, Perfect Dark's 33, or both.
+        // Resolved from the environment and logged, so the answer is visible in a
+        // playtest log rather than deduced from what the guns look like.
+        let arsenal = crate::combat::Arsenal::from_env();
+        log::info!("{}", arsenal.summary());
+        let arsenal_weapons = arsenal.weapons();
+        let weapons: Vec<Weapon> = arsenal_weapons.iter().map(|&cfg| Weapon::new(cfg)).collect();
         // Start on the PP7 (the default sidearm) — and, now that there's an economy,
         // start *owning only* the PP7. The rest of the arsenal is bought from the
         // BUILD-phase shop; cycling (Q / N64 A) reaches only what you own.
-        let weapon_index = crate::combat::config::WEAPONS
+        // The starting sidearm: the PP7 in a GoldenEye arsenal, the Falcon 2 in a
+        // Perfect Dark one (PD's own starting pistol, and `MPWEAPON_FALCON2` is
+        // index 1 of the MP set for the same reason). Falls back to index 0 so an
+        // arsenal that has neither still starts holding something.
+        let weapon_index = arsenal_weapons
             .iter()
             .position(|w| w.name == "PP7")
+            .or_else(|| arsenal_weapons.iter().position(|w| w.name == "Falcon 2"))
             .unwrap_or(0);
         let mut owned = vec![false; weapons.len()];
         owned[weapon_index] = true;
@@ -2388,7 +2414,7 @@ impl World {
         // additive `CullBoth` billboards). Warn-not-panic per weapon.
         let asset = |rel: &str| format!("{}/../../assets/weapons/{}", env!("CARGO_MANIFEST_DIR"), rel);
         let mut enemy_weapon_lib: Vec<EnemyWeaponAsset> = Vec::new();
-        for cfg in crate::combat::config::WEAPONS {
+        for cfg in arsenal_weapons {
             // Enemies wield the HANDLESS variant so Bond's ripped first-person hand
             // doesn't float on the hunter's gun (see `combat::gun_strip`). Only the
             // pistols + detonator ship a `gun_handless.glb`; everything else has no

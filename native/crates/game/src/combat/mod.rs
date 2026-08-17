@@ -13,6 +13,7 @@
 //! - P4 — recoil + bob/sway.
 //! - P5 — player health + the GoldenEye radial-arc HUD.
 
+pub mod arsenal;
 pub mod attack_anim;
 pub mod config;
 pub mod enemy_weapons;
@@ -23,6 +24,7 @@ pub mod pd_weapons;
 pub mod shooting;
 pub mod viewmodel;
 
+pub use arsenal::Arsenal;
 pub use config::{Explosion, FireKind, MineSpec, MineTrigger, ProjectileSpec, WeaponStats};
 pub use enemy_weapons::{enemy_def_for, standoff_for, EnemyWeaponClass, EnemyWeaponDef};
 pub use explosives::{falloff_damage, Mine, Projectile};

@@ -600,6 +600,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:56"
       },
+      "export": {
+        "fp_glb": "pd/01-falcon-2-fp.glb",
+        "tp_glb": "pd/01-falcon-2-tp.glb",
+        "tp_muzzle": [
+          -143.02884615384616,
+          0.0,
+          28.846153846153847
+        ],
+        "muzzle_is_authored": true
+      },
       "bot": {
         "score1": 56,
         "score2": 60,
@@ -745,6 +755,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:57"
+      },
+      "export": {
+        "fp_glb": "pd/02-falcon-2-silencer-fp.glb",
+        "tp_glb": "pd/02-falcon-2-silencer-tp.glb",
+        "tp_muzzle": [
+          -476.03593422816346,
+          7.5821200242409335,
+          90.8973767207219
+        ],
+        "muzzle_is_authored": false
       },
       "bot": {
         "score1": 52,
@@ -893,6 +913,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:58"
       },
+      "export": {
+        "fp_glb": "pd/03-falcon-2-scope-fp.glb",
+        "tp_glb": "pd/03-falcon-2-scope-tp.glb",
+        "tp_muzzle": [
+          -143.02884615384616,
+          0.0,
+          28.846153846153847
+        ],
+        "muzzle_is_authored": true
+      },
       "bot": {
         "score1": 60,
         "score2": 60,
@@ -1039,6 +1069,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:59"
       },
+      "export": {
+        "fp_glb": "pd/04-magsec-4-fp.glb",
+        "tp_glb": "pd/04-magsec-4-tp.glb",
+        "tp_muzzle": [
+          -188.70192307692307,
+          0.0,
+          20.432692307692307
+        ],
+        "muzzle_is_authored": true
+      },
       "bot": {
         "score1": 76,
         "score2": 88,
@@ -1179,6 +1219,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:60"
+      },
+      "export": {
+        "fp_glb": "pd/05-mauler-fp.glb",
+        "tp_glb": "pd/05-mauler-tp.glb",
+        "tp_muzzle": [
+          -217.5480769230769,
+          0.0,
+          7.211538461538462
+        ],
+        "muzzle_is_authored": true
       },
       "bot": {
         "score1": 64,
@@ -1322,6 +1372,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:61"
       },
+      "export": {
+        "fp_glb": "pd/06-phoenix-fp.glb",
+        "tp_glb": "pd/06-phoenix-tp.glb",
+        "tp_muzzle": [
+          -389.57497706780066,
+          9.629853141422455,
+          68.25242821986858
+        ],
+        "muzzle_is_authored": false
+      },
       "bot": {
         "score1": 72,
         "score2": 76,
@@ -1464,6 +1524,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:62"
+      },
+      "export": {
+        "fp_glb": "pd/07-dy357-magnum-fp.glb",
+        "tp_glb": "pd/07-dy357-magnum-tp.glb",
+        "tp_muzzle": [
+          -240.9855769230769,
+          0.6009615384615384,
+          30.64903846153846
+        ],
+        "muzzle_is_authored": true
       },
       "bot": {
         "score1": 68,
@@ -1611,6 +1681,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:63"
       },
+      "export": {
+        "fp_glb": "pd/08-dy357-lx-fp.glb",
+        "tp_glb": "pd/08-dy357-lx-tp.glb",
+        "tp_muzzle": [
+          -240.9855769230769,
+          0.6009615384615384,
+          30.64903846153846
+        ],
+        "muzzle_is_authored": true
+      },
       "bot": {
         "score1": 180,
         "score2": 188,
@@ -1757,6 +1837,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:64"
+      },
+      "export": {
+        "fp_glb": "pd/09-cmp150-fp.glb",
+        "tp_glb": "pd/09-cmp150-tp.glb",
+        "tp_muzzle": [
+          -198.91826923076923,
+          -0.6009615384615384,
+          30.048076923076923
+        ],
+        "muzzle_is_authored": true
       },
       "bot": {
         "score1": 116,
@@ -1908,6 +1998,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:65"
+      },
+      "export": {
+        "fp_glb": "pd/0a-cyclone-fp.glb",
+        "tp_glb": "pd/0a-cyclone-tp.glb",
+        "tp_muzzle": [
+          -260.21634615384613,
+          0.0,
+          -19.23076923076923
+        ],
+        "muzzle_is_authored": true
       },
       "bot": {
         "score1": 120,
@@ -2061,6 +2161,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:66"
       },
+      "export": {
+        "fp_glb": "pd/0b-callisto-ntg-fp.glb",
+        "tp_glb": "pd/0b-callisto-ntg-tp.glb",
+        "tp_muzzle": [
+          -456.67085280785193,
+          9.629853642903841,
+          130.30803719392188
+        ],
+        "muzzle_is_authored": false
+      },
       "bot": {
         "score1": 152,
         "score2": 176,
@@ -2213,6 +2323,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:67"
       },
+      "export": {
+        "fp_glb": "pd/0c-rc-p120-fp.glb",
+        "tp_glb": "pd/0c-rc-p120-tp.glb",
+        "tp_muzzle": [
+          -335.33653846153845,
+          0.0,
+          49.27884615384615
+        ],
+        "muzzle_is_authored": true
+      },
       "bot": {
         "score1": 172,
         "score2": 188,
@@ -2346,6 +2466,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:68"
+      },
+      "export": {
+        "fp_glb": "pd/0d-laptop-gun-fp.glb",
+        "tp_glb": "pd/0d-laptop-gun-tp.glb",
+        "tp_muzzle": [
+          -402.6442307692308,
+          0.0,
+          125.0
+        ],
+        "muzzle_is_authored": true
       },
       "bot": {
         "score1": 128,
@@ -2487,6 +2617,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:69"
       },
+      "export": {
+        "fp_glb": "pd/0e-dragon-fp.glb",
+        "tp_glb": "pd/0e-dragon-tp.glb",
+        "tp_muzzle": [
+          -558.8942307692307,
+          0.0,
+          13.221153846153845
+        ],
+        "muzzle_is_authored": true
+      },
       "bot": {
         "score1": 124,
         "score2": 148,
@@ -2620,6 +2760,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:70"
+      },
+      "export": {
+        "fp_glb": "pd/0f-k7-avenger-fp.glb",
+        "tp_glb": "pd/0f-k7-avenger-tp.glb",
+        "tp_muzzle": [
+          -488.5817307692308,
+          1.2019230769230769,
+          39.66346153846154
+        ],
+        "muzzle_is_authored": true
       },
       "bot": {
         "score1": 156,
@@ -2778,6 +2928,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:71"
       },
+      "export": {
+        "fp_glb": "pd/10-ar34-fp.glb",
+        "tp_glb": "pd/10-ar34-tp.glb",
+        "tp_muzzle": [
+          -498.19711538461536,
+          0.0,
+          7.8125
+        ],
+        "muzzle_is_authored": true
+      },
       "bot": {
         "score1": 148,
         "score2": 176,
@@ -2929,6 +3089,16 @@
         "sec_ammo_type": 11,
         "sec_ammo_qty": 16,
         "source": "mplayer.c:72"
+      },
+      "export": {
+        "fp_glb": "pd/11-superdragon-fp.glb",
+        "tp_glb": "pd/11-superdragon-tp.glb",
+        "tp_muzzle": [
+          -430.28846153846155,
+          -1.2019230769230769,
+          18.028846153846153
+        ],
+        "muzzle_is_authored": true
       },
       "bot": {
         "score1": 164,
@@ -3094,6 +3264,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:73"
       },
+      "export": {
+        "fp_glb": "pd/12-shotgun-fp.glb",
+        "tp_glb": "pd/12-shotgun-tp.glb",
+        "tp_muzzle": [
+          -587.7403846153846,
+          -3.605769230769231,
+          67.3076923076923
+        ],
+        "muzzle_is_authored": true
+      },
       "bot": {
         "score1": 140,
         "score2": 156,
@@ -3230,6 +3410,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:74"
+      },
+      "export": {
+        "fp_glb": "pd/13-reaper-fp.glb",
+        "tp_glb": "pd/13-reaper-tp.glb",
+        "tp_muzzle": [
+          -444.1105769230769,
+          -312.5,
+          -80.52884615384615
+        ],
+        "muzzle_is_authored": true
       },
       "bot": {
         "score1": 144,
@@ -3376,6 +3566,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:75"
       },
+      "export": {
+        "fp_glb": "pd/14-sniper-rifle-fp.glb",
+        "tp_glb": "pd/14-sniper-rifle-tp.glb",
+        "tp_muzzle": [
+          -942.374797967764,
+          9.629902921749187,
+          145.29023835292227
+        ],
+        "muzzle_is_authored": false
+      },
       "bot": {
         "score1": 28,
         "score2": 40,
@@ -3504,6 +3704,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:76"
+      },
+      "export": {
+        "fp_glb": "pd/15-farsight-xr-20-fp.glb",
+        "tp_glb": "pd/15-farsight-xr-20-tp.glb",
+        "tp_muzzle": [
+          -1032.7451962691086,
+          7.295341589129888,
+          123.5351012303279
+        ],
+        "muzzle_is_authored": false
       },
       "bot": {
         "score1": 188,
@@ -3640,6 +3850,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:77"
+      },
+      "export": {
+        "fp_glb": "pd/16-devastator-fp.glb",
+        "tp_glb": "pd/16-devastator-tp.glb",
+        "tp_muzzle": [
+          -601.8886932959923,
+          -28.809235646174503,
+          121.75315160017746
+        ],
+        "muzzle_is_authored": false
       },
       "bot": {
         "score1": 176,
@@ -3805,6 +4025,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:78"
       },
+      "export": {
+        "fp_glb": "pd/17-rocket-launcher-fp.glb",
+        "tp_glb": "pd/17-rocket-launcher-tp.glb",
+        "tp_muzzle": [
+          -470.6132687055147,
+          -16.98491464440639,
+          185.50008993882398
+        ],
+        "muzzle_is_authored": false
+      },
       "bot": {
         "score1": 160,
         "score2": 188,
@@ -3966,6 +4196,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:79"
+      },
+      "export": {
+        "fp_glb": "pd/18-slayer-fp.glb",
+        "tp_glb": "pd/18-slayer-tp.glb",
+        "tp_muzzle": [
+          -566.1933972285344,
+          -21.933342401797955,
+          256.75463676452637
+        ],
+        "muzzle_is_authored": false
       },
       "bot": {
         "score1": 168,
@@ -4135,6 +4375,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:80"
       },
+      "export": {
+        "fp_glb": "pd/19-combat-knife-fp.glb",
+        "tp_glb": "pd/19-combat-knife-tp.glb",
+        "tp_muzzle": [
+          -137.25211987128623,
+          -6.749716515724475,
+          166.59489044776328
+        ],
+        "muzzle_is_authored": false
+      },
       "bot": {
         "score1": 20,
         "score2": 40,
@@ -4263,6 +4513,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:81"
+      },
+      "export": {
+        "fp_glb": "pd/1a-crossbow-fp.glb",
+        "tp_glb": "pd/1a-crossbow-tp.glb",
+        "tp_muzzle": [
+          4.017435587369478,
+          18.24336043612745,
+          56.493576042927224
+        ],
+        "muzzle_is_authored": false
       },
       "bot": {
         "score1": 108,
@@ -4428,6 +4688,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:82"
       },
+      "export": {
+        "fp_glb": "pd/1b-tranquilizer-fp.glb",
+        "tp_glb": "pd/1b-tranquilizer-tp.glb",
+        "tp_muzzle": [
+          -190.35880382244403,
+          -21.384200224509605,
+          71.80440368560645
+        ],
+        "muzzle_is_authored": false
+      },
       "bot": {
         "score1": 48,
         "score2": 188,
@@ -4571,6 +4841,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:83"
       },
+      "export": {
+        "fp_glb": "pd/1c-grenade-fp.glb",
+        "tp_glb": "pd/1c-grenade-tp.glb",
+        "tp_muzzle": [
+          -175.61650276184082,
+          11.250436305999756,
+          70.98371707476102
+        ],
+        "muzzle_is_authored": false
+      },
       "bot": {
         "score1": 36,
         "score2": 172,
@@ -4697,6 +4977,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:84"
       },
+      "export": {
+        "fp_glb": "pd/1d-n-bomb-fp.glb",
+        "tp_glb": "pd/1d-n-bomb-tp.glb",
+        "tp_muzzle": [
+          -175.61650276184082,
+          11.250436305999756,
+          70.98371707476102
+        ],
+        "muzzle_is_authored": false
+      },
       "bot": {
         "score1": 32,
         "score2": 188,
@@ -4821,6 +5111,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:85"
       },
+      "export": {
+        "fp_glb": "pd/1e-timed-mine-fp.glb",
+        "tp_glb": "pd/1e-timed-mine-tp.glb",
+        "tp_muzzle": [
+          -202.7170841510479,
+          -8.96962617452328,
+          -0.6754242886717503
+        ],
+        "muzzle_is_authored": false
+      },
       "bot": {
         "score1": 12,
         "score2": 12,
@@ -4937,6 +5237,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:86"
       },
+      "export": {
+        "fp_glb": "pd/1f-proximity-mine-fp.glb",
+        "tp_glb": "pd/1f-proximity-mine-tp.glb",
+        "tp_muzzle": [
+          -202.7170841510479,
+          -8.96962617452328,
+          -0.6754242886717503
+        ],
+        "muzzle_is_authored": false
+      },
       "bot": {
         "score1": 40,
         "score2": 176,
@@ -5052,6 +5362,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:87"
+      },
+      "export": {
+        "fp_glb": "pd/20-remote-mine-fp.glb",
+        "tp_glb": "pd/20-remote-mine-tp.glb",
+        "tp_muzzle": [
+          -202.7170841510479,
+          -8.96962617452328,
+          -0.6754242886717503
+        ],
+        "muzzle_is_authored": false
       },
       "bot": {
         "score1": 44,
@@ -5176,6 +5496,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:88"
+      },
+      "export": {
+        "fp_glb": "pd/21-laser-fp.glb",
+        "tp_glb": "pd/21-laser-tp.glb",
+        "tp_muzzle": [
+          115.66737981942983,
+          -0.2685648998102316,
+          57.99464996044452
+        ],
+        "muzzle_is_authored": false
       },
       "bot": {
         "score1": 112,
@@ -5309,6 +5639,16 @@
         "sec_ammo_qty": 0,
         "source": "mplayer.c:89"
       },
+      "export": {
+        "fp_glb": "pd/22-x-ray-scanner-fp.glb",
+        "tp_glb": "pd/22-x-ray-scanner-tp.glb",
+        "tp_muzzle": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "muzzle_is_authored": false
+      },
       "bot": {
         "score1": 4,
         "score2": 4,
@@ -5390,6 +5730,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:90"
+      },
+      "export": {
+        "fp_glb": "pd/23-cloaking-device-fp.glb",
+        "tp_glb": "pd/23-cloaking-device-tp.glb",
+        "tp_muzzle": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "muzzle_is_authored": false
       },
       "bot": {
         "score1": 218,
@@ -5483,6 +5833,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:91"
+      },
+      "export": {
+        "fp_glb": "pd/24-combat-boost-fp.glb",
+        "tp_glb": "pd/24-combat-boost-tp.glb",
+        "tp_muzzle": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "muzzle_is_authored": false
       },
       "bot": {
         "score1": 8,
@@ -5597,6 +5957,16 @@
         "sec_ammo_type": 0,
         "sec_ammo_qty": 0,
         "source": "mplayer.c:92"
+      },
+      "export": {
+        "fp_glb": "pd/25--fp.glb",
+        "tp_glb": "pd/25--tp.glb",
+        "tp_muzzle": [
+          0.0,
+          0.0,
+          0.0
+        ],
+        "muzzle_is_authored": false
       },
       "bot": {
         "score1": 220,

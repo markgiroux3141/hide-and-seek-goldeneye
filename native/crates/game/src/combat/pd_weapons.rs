@@ -139,6 +139,11 @@ pub struct PdFunc {
     pub projectile_timer60: i32,
     /// `Melee` only: reach, in PD centimetres.
     pub melee_range: f32,
+    /// Viewmodel recoil: kick-back distance (PD centimetres) and muzzle rise
+    /// (PD's own angle units). The authored counterpart of our `recoil_z` /
+    /// `recoil_rot`, which are two shared constants across all 24 GE weapons.
+    pub recoil_dist: f32,
+    pub recoil_angle: f32,
     /// `invitems.c` line of the `funcdef` this row came from.
     pub source: &'static str,
 }
@@ -161,6 +166,8 @@ impl PdFunc {
         projectile_speed: 0.0,
         projectile_timer60: 0,
         melee_range: 0.0,
+        recoil_dist: 0.0,
+        recoil_angle: 0.0,
         source: "",
     };
 
@@ -184,6 +191,18 @@ impl PdFunc {
 
     pub fn has_flag(&self, flag: u32) -> bool {
         self.flags & flag != 0
+    }
+
+    /// `recoildist` as metres. PD's values run 0-40ish in centimetres, which is a
+    /// viewmodel kick and not a world distance.
+    pub fn recoildist_m(&self) -> f32 {
+        self.recoil_dist * PD_CM_TO_M
+    }
+
+    /// `recoilangle` as radians. PD stores whole-ish degrees here (the Falcon 2's
+    /// 15, the Magnum's larger), so this is a degree conversion.
+    pub fn recoilangle_rad(&self) -> f32 {
+        self.recoil_angle.to_radians()
     }
 }
 
@@ -234,6 +253,20 @@ pub struct PdWeapon {
     pub fp_model: &'static str,
     /// Third-person model an enemy holds — the one carrying `CHRGUNFIRE`.
     pub tp_model: &'static str,
+    /// The exported first-person GLB, relative to `native/assets/weapons/` so it
+    /// drops straight into the same slot as a GoldenEye `WeaponStats::gun_path`.
+    pub fp_glb: &'static str,
+    /// The exported third-person GLB — what a hunter holds. Unlike the GoldenEye
+    /// guns this needs no hand-stripping: PD's `chr*` models are the third-person
+    /// weapon alone, so the `enemy-weapon-hand-artifact` cannot arise.
+    pub tp_glb: &'static str,
+    /// Authored muzzle / shot origin on the third-person model, in engine units.
+    /// From `CHRGUNFIRE` where PD authors one, else PD's own grip fallback — see
+    /// [`Self::muzzle_is_authored`].
+    pub tp_muzzle: [f32; 3],
+    /// True when [`Self::tp_muzzle`] came from a real `CHRGUNFIRE` node; false
+    /// when it is `chr_get_gun_pos`'s `MODELPART_0001` grip fallback (17 of 33).
+    pub muzzle_is_authored: bool,
     /// Rounds per magazine (`ammodef.clipsize`); 0 when the weapon has no clip.
     pub clip_size: i32,
     /// Rounds an MP match hands out (`mpweapon.priammoqty`).
@@ -366,6 +399,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Falcon 2",
         fp_model: "guns/falcon2.bin",
         tp_model: "props/chrfalcon2.bin",
+        fp_glb: "pd/01-falcon-2-fp.glb",
+        tp_glb: "pd/01-falcon-2-tp.glb",
+        tp_muzzle: [-143.02885, 0.0, 28.846154],
+        muzzle_is_authored: true,
         clip_size: 8,
         ammo_qty: 80,
         primary: PdFunc {
@@ -381,6 +418,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 10.0,
+            recoil_angle: 15.0,
             source: "invitems.c:484",
         },
         secondary: Some(PdFunc {
@@ -396,6 +435,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 60.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:528",
         }),
         view: PdView { muzzlez: 2.0, posx: 9.0, posy: -15.7, posz: -23.8, sway: 1.0 },
@@ -412,6 +453,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Falcon 2 (silencer)",
         fp_model: "guns/falcon2.bin",
         tp_model: "props/chrfalcon2sil.bin",
+        fp_glb: "pd/02-falcon-2-silencer-fp.glb",
+        tp_glb: "pd/02-falcon-2-silencer-tp.glb",
+        tp_muzzle: [-476.03593, 7.58212, 90.897377],
+        muzzle_is_authored: false,
         clip_size: 8,
         ammo_qty: 80,
         primary: PdFunc {
@@ -427,6 +472,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 10.0,
+            recoil_angle: 15.0,
             source: "invitems.c:506",
         },
         secondary: Some(PdFunc {
@@ -442,6 +489,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 60.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:528",
         }),
         view: PdView { muzzlez: 1.0, posx: 9.0, posy: -15.7, posz: -23.8, sway: 1.0 },
@@ -458,6 +507,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Falcon 2 (scope)",
         fp_model: "guns/falcon2.bin",
         tp_model: "props/chrfalcon2scope.bin",
+        fp_glb: "pd/03-falcon-2-scope-fp.glb",
+        tp_glb: "pd/03-falcon-2-scope-tp.glb",
+        tp_muzzle: [-143.02885, 0.0, 28.846154],
+        muzzle_is_authored: true,
         clip_size: 8,
         ammo_qty: 80,
         primary: PdFunc {
@@ -473,6 +526,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 10.0,
+            recoil_angle: 15.0,
             source: "invitems.c:484",
         },
         secondary: Some(PdFunc {
@@ -488,6 +543,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 60.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:528",
         }),
         view: PdView { muzzlez: 1.0, posx: 9.0, posy: -15.7, posz: -23.8, sway: 1.0 },
@@ -504,6 +561,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "MagSec 4",
         fp_model: "guns/leegun1.bin",
         tp_model: "props/chrleegun1.bin",
+        fp_glb: "pd/04-magsec-4-fp.glb",
+        tp_glb: "pd/04-magsec-4-tp.glb",
+        tp_muzzle: [-188.70192, 0.0, 20.432692],
+        muzzle_is_authored: true,
         clip_size: 9,
         ammo_qty: 80,
         primary: PdFunc {
@@ -519,6 +580,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 5.0,
+            recoil_angle: 10.0,
             source: "invitems.c:726",
         },
         secondary: Some(PdFunc {
@@ -534,6 +597,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 8.0,
+            recoil_angle: 12.0,
             source: "invitems.c:748",
         }),
         view: PdView { muzzlez: 2.0, posx: 10.5, posy: -17.2, posz: -26.5, sway: 1.0 },
@@ -550,6 +615,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Mauler",
         fp_model: "guns/skpistol.bin",
         tp_model: "props/chrmauler.bin",
+        fp_glb: "pd/05-mauler-fp.glb",
+        tp_glb: "pd/05-mauler-tp.glb",
+        tp_muzzle: [-217.54808, 0.0, 7.2115385],
+        muzzle_is_authored: true,
         clip_size: 20,
         ammo_qty: 92,
         primary: PdFunc {
@@ -565,6 +634,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:1202",
         },
         secondary: Some(PdFunc {
@@ -580,6 +651,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:1224",
         }),
         view: PdView { muzzlez: 1.0, posx: 11.5, posy: -17.5, posz: -20.0, sway: 1.0 },
@@ -596,6 +669,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Phoenix",
         fp_model: "guns/maianpistol.bin",
         tp_model: "props/chrmaianpistol.bin",
+        fp_glb: "pd/06-phoenix-fp.glb",
+        tp_glb: "pd/06-phoenix-tp.glb",
+        tp_muzzle: [-389.57498, 9.6298531, 68.252428],
+        muzzle_is_authored: false,
         clip_size: 8,
         ammo_qty: 64,
         primary: PdFunc {
@@ -611,6 +688,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 10.0,
+            recoil_angle: 15.0,
             source: "invitems.c:1062",
         },
         secondary: Some(PdFunc {
@@ -626,6 +705,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 15.0,
+            recoil_angle: 25.0,
             source: "invitems.c:1084",
         }),
         view: PdView { muzzlez: 1.0, posx: 9.5, posy: -16.2, posz: -23.0, sway: 1.0 },
@@ -642,6 +723,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "DY357 Magnum",
         fp_model: "guns/dy357.bin",
         tp_model: "props/chrdy357.bin",
+        fp_glb: "pd/07-dy357-magnum-fp.glb",
+        tp_glb: "pd/07-dy357-magnum-tp.glb",
+        tp_muzzle: [-240.98558, 0.60096154, 30.649038],
+        muzzle_is_authored: true,
         clip_size: 6,
         ammo_qty: 50,
         primary: PdFunc {
@@ -657,6 +742,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 12.0,
+            recoil_angle: 35.0,
             source: "invitems.c:893",
         },
         secondary: Some(PdFunc {
@@ -672,6 +759,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 60.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:937",
         }),
         view: PdView { muzzlez: 2.0, posx: 9.5, posy: -18.2, posz: -25.5, sway: 1.0 },
@@ -688,6 +777,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "DY357-LX",
         fp_model: "guns/dy357trent.bin",
         tp_model: "props/chrdy357trent.bin",
+        fp_glb: "pd/08-dy357-lx-fp.glb",
+        tp_glb: "pd/08-dy357-lx-tp.glb",
+        tp_muzzle: [-240.98558, 0.60096154, 30.649038],
+        muzzle_is_authored: true,
         clip_size: 6,
         ammo_qty: 50,
         primary: PdFunc {
@@ -703,6 +796,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 12.0,
+            recoil_angle: 35.0,
             source: "invitems.c:915",
         },
         secondary: Some(PdFunc {
@@ -718,6 +813,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 60.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:937",
         }),
         view: PdView { muzzlez: 2.0, posx: 9.5, posy: -18.2, posz: -25.5, sway: 1.0 },
@@ -734,6 +831,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "CMP150",
         fp_model: "guns/cmp150.bin",
         tp_model: "props/chrcmp150.bin",
+        fp_glb: "pd/09-cmp150-fp.glb",
+        tp_glb: "pd/09-cmp150-tp.glb",
+        tp_muzzle: [-198.91827, -0.60096154, 30.048077],
+        muzzle_is_authored: true,
         clip_size: 32,
         ammo_qty: 100,
         primary: PdFunc {
@@ -749,6 +850,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 4.0,
+            recoil_angle: 3.0,
             source: "invitems.c:1357",
         },
         secondary: Some(PdFunc {
@@ -764,6 +867,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 4.0,
+            recoil_angle: 3.0,
             source: "invitems.c:1385",
         }),
         view: PdView { muzzlez: 3.0, posx: 13.0, posy: -17.7, posz: -27.5, sway: 1.0 },
@@ -780,6 +885,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Cyclone",
         fp_model: "guns/cyclone.bin",
         tp_model: "props/chrcyclone.bin",
+        fp_glb: "pd/0a-cyclone-fp.glb",
+        tp_glb: "pd/0a-cyclone-tp.glb",
+        tp_muzzle: [-260.21635, 0.0, -19.230769],
+        muzzle_is_authored: true,
         clip_size: 50,
         ammo_qty: 150,
         primary: PdFunc {
@@ -795,6 +904,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 5.0,
+            recoil_angle: 2.0,
             source: "invitems.c:1485",
         },
         secondary: Some(PdFunc {
@@ -810,6 +921,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 5.0,
+            recoil_angle: 2.0,
             source: "invitems.c:1513",
         }),
         view: PdView { muzzlez: 1.0, posx: 21.5, posy: -26.5, posz: -35.0, sway: 1.0 },
@@ -826,6 +939,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Callisto NTG",
         fp_model: "guns/maiansmg.bin",
         tp_model: "props/chrmaiansmg.bin",
+        fp_glb: "pd/0b-callisto-ntg-fp.glb",
+        tp_glb: "pd/0b-callisto-ntg-tp.glb",
+        tp_muzzle: [-456.67085, 9.6298536, 130.30804],
+        muzzle_is_authored: false,
         clip_size: 32,
         ammo_qty: 150,
         primary: PdFunc {
@@ -841,6 +958,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 4.0,
+            recoil_angle: 3.0,
             source: "invitems.c:1705",
         },
         secondary: Some(PdFunc {
@@ -856,6 +975,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 4.0,
+            recoil_angle: 3.0,
             source: "invitems.c:1733",
         }),
         view: PdView { muzzlez: 3.0, posx: 17.5, posy: -22.7, posz: -25.0, sway: 1.0 },
@@ -872,6 +993,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "RC-P120",
         fp_model: "guns/rcp120.bin",
         tp_model: "props/chrrcp120.bin",
+        fp_glb: "pd/0c-rc-p120-fp.glb",
+        tp_glb: "pd/0c-rc-p120-tp.glb",
+        tp_muzzle: [-335.33654, 0.0, 49.278846],
+        muzzle_is_authored: true,
         clip_size: 120,
         ammo_qty: 150,
         primary: PdFunc {
@@ -887,6 +1012,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 4.0,
+            recoil_angle: 3.0,
             source: "invitems.c:1605",
         },
         secondary: Some(PdFunc {
@@ -902,6 +1029,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:1633",
         }),
         view: PdView { muzzlez: 3.0, posx: 13.0, posy: -18.2, posz: -27.5, sway: 1.0 },
@@ -918,6 +1047,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Laptop Gun",
         fp_model: "guns/pcgun.bin",
         tp_model: "props/chrpcgun.bin",
+        fp_glb: "pd/0d-laptop-gun-fp.glb",
+        tp_glb: "pd/0d-laptop-gun-tp.glb",
+        tp_muzzle: [-402.64423, 0.0, 125.0],
+        muzzle_is_authored: true,
         clip_size: 50,
         ammo_qty: 150,
         primary: PdFunc {
@@ -933,6 +1066,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 5.0,
+            recoil_angle: 2.0,
             source: "invitems.c:2390",
         },
         secondary: Some(PdFunc {
@@ -948,6 +1083,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:2418",
         }),
         view: PdView { muzzlez: 1.2, posx: 16.0, posy: -17.7, posz: -14.5, sway: 1.0 },
@@ -964,6 +1101,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Dragon",
         fp_model: "guns/dydragon.bin",
         tp_model: "props/chrdragon.bin",
+        fp_glb: "pd/0e-dragon-fp.glb",
+        tp_glb: "pd/0e-dragon-tp.glb",
+        tp_muzzle: [-558.89423, 0.0, 13.221154],
+        muzzle_is_authored: true,
         clip_size: 30,
         ammo_qty: 150,
         primary: PdFunc {
@@ -979,6 +1120,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 5.0,
+            recoil_angle: 2.0,
             source: "invitems.c:1822",
         },
         secondary: Some(PdFunc {
@@ -994,6 +1137,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:1850",
         }),
         view: PdView { muzzlez: 1.0, posx: 15.0, posy: -29.5, posz: -27.0, sway: 1.0 },
@@ -1010,6 +1155,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "K7 Avenger",
         fp_model: "guns/k7avenger.bin",
         tp_model: "props/chravenger.bin",
+        fp_glb: "pd/0f-k7-avenger-fp.glb",
+        tp_glb: "pd/0f-k7-avenger-tp.glb",
+        tp_muzzle: [-488.58173, 1.2019231, 39.663462],
+        muzzle_is_authored: true,
         clip_size: 25,
         ammo_qty: 150,
         primary: PdFunc {
@@ -1025,6 +1174,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 5.0,
+            recoil_angle: 2.0,
             source: "invitems.c:2237",
         },
         secondary: Some(PdFunc {
@@ -1040,6 +1191,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 5.0,
+            recoil_angle: 2.0,
             source: "invitems.c:2265",
         }),
         view: PdView { muzzlez: 1.0, posx: 6.5, posy: -24.0, posz: -27.0, sway: 1.0 },
@@ -1056,6 +1209,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "AR34",
         fp_model: "guns/ar34.bin",
         tp_model: "props/chrar34.bin",
+        fp_glb: "pd/10-ar34-fp.glb",
+        tp_glb: "pd/10-ar34-tp.glb",
+        tp_muzzle: [-498.19712, 0.0, 7.8125],
+        muzzle_is_authored: true,
         clip_size: 30,
         ammo_qty: 100,
         primary: PdFunc {
@@ -1071,6 +1228,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 5.0,
+            recoil_angle: 2.0,
             source: "invitems.c:2095",
         },
         secondary: Some(PdFunc {
@@ -1086,6 +1245,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 5.0,
+            recoil_angle: 2.0,
             source: "invitems.c:2123",
         }),
         view: PdView { muzzlez: 1.0, posx: 11.5, posy: -25.7, posz: -30.5, sway: 1.0 },
@@ -1102,6 +1263,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "SuperDragon",
         fp_model: "guns/dysuperdragon.bin",
         tp_model: "props/chrsuperdragon.bin",
+        fp_glb: "pd/11-superdragon-fp.glb",
+        tp_glb: "pd/11-superdragon-tp.glb",
+        tp_muzzle: [-430.28846, -1.2019231, 18.028846],
+        muzzle_is_authored: true,
         clip_size: 30,
         ammo_qty: 150,
         primary: PdFunc {
@@ -1117,6 +1282,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 5.0,
+            recoil_angle: 2.0,
             source: "invitems.c:1956",
         },
         secondary: Some(PdFunc {
@@ -1132,6 +1299,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 1200,
             melee_range: 0.0,
+            recoil_dist: 3.0,
+            recoil_angle: 2.0,
             source: "invitems.c:1984",
         }),
         view: PdView { muzzlez: 1.0, posx: 15.0, posy: -29.5, posz: -27.0, sway: 1.0 },
@@ -1148,6 +1317,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Shotgun",
         fp_model: "guns/shotgun.bin",
         tp_model: "props/chrshotgun.bin",
+        fp_glb: "pd/12-shotgun-fp.glb",
+        tp_glb: "pd/12-shotgun-tp.glb",
+        tp_muzzle: [-587.74038, -3.6057692, 67.307692],
+        muzzle_is_authored: true,
         clip_size: 9,
         ammo_qty: 16,
         primary: PdFunc {
@@ -1163,6 +1336,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:2505",
         },
         secondary: Some(PdFunc {
@@ -1178,6 +1353,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:2527",
         }),
         view: PdView { muzzlez: 1.0, posx: 12.0, posy: -16.7, posz: -21.0, sway: 1.0 },
@@ -1194,6 +1371,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Reaper",
         fp_model: "guns/skminigun.bin",
         tp_model: "props/chrskminigun.bin",
+        fp_glb: "pd/13-reaper-fp.glb",
+        tp_glb: "pd/13-reaper-tp.glb",
+        tp_muzzle: [-444.11058, -312.5, -80.528846],
+        muzzle_is_authored: true,
         clip_size: 200,
         ammo_qty: 200,
         primary: PdFunc {
@@ -1209,6 +1390,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:2630",
         },
         secondary: Some(PdFunc {
@@ -1224,6 +1407,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 80.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:2658",
         }),
         view: PdView { muzzlez: 1.0, posx: 4.0, posy: -21.2, posz: -30.5, sway: 1.0 },
@@ -1240,6 +1425,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Sniper Rifle",
         fp_model: "guns/sniperrifle.bin",
         tp_model: "props/chrsniperrifle.bin",
+        fp_glb: "pd/14-sniper-rifle-fp.glb",
+        tp_glb: "pd/14-sniper-rifle-tp.glb",
+        tp_muzzle: [-942.3748, 9.6299029, 145.29024],
+        muzzle_is_authored: false,
         clip_size: 8,
         ammo_qty: 50,
         primary: PdFunc {
@@ -1255,6 +1444,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 8.0,
+            recoil_angle: 0.0,
             source: "invitems.c:4023",
         },
         secondary: Some(PdFunc {
@@ -1270,6 +1461,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:4045",
         }),
         view: PdView { muzzlez: 6.0, posx: 21.0, posy: -27.2, posz: -31.5, sway: 1.0 },
@@ -1286,6 +1479,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "FarSight XR-20",
         fp_model: "guns/z2020.bin",
         tp_model: "props/chrz2020.bin",
+        fp_glb: "pd/15-farsight-xr-20-fp.glb",
+        tp_glb: "pd/15-farsight-xr-20-tp.glb",
+        tp_muzzle: [-1032.7452, 7.2953416, 123.5351],
+        muzzle_is_authored: false,
         clip_size: 8,
         ammo_qty: 10,
         primary: PdFunc {
@@ -1301,6 +1498,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:3573",
         },
         secondary: Some(PdFunc {
@@ -1316,6 +1515,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:3595",
         }),
         view: PdView { muzzlez: 6.0, posx: 21.5, posy: -25.2, posz: -32.5, sway: 1.0 },
@@ -1332,6 +1533,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Devastator",
         fp_model: "guns/dydevastator.bin",
         tp_model: "props/chrdevastator.bin",
+        fp_glb: "pd/16-devastator-fp.glb",
+        tp_glb: "pd/16-devastator-tp.glb",
+        tp_muzzle: [-601.88869, -28.809236, 121.75315],
+        muzzle_is_authored: false,
         clip_size: 8,
         ammo_qty: 16,
         primary: PdFunc {
@@ -1347,6 +1552,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 1200,
             melee_range: 0.0,
+            recoil_dist: 5.0,
+            recoil_angle: 8.0,
             source: "invitems.c:2988",
         },
         secondary: Some(PdFunc {
@@ -1362,6 +1569,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 360,
             melee_range: 0.0,
+            recoil_dist: 5.0,
+            recoil_angle: 8.0,
             source: "invitems.c:3019",
         }),
         view: PdView { muzzlez: 1.0, posx: 19.5, posy: -25.5, posz: -29.0, sway: 1.0 },
@@ -1378,6 +1587,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Rocket Launcher",
         fp_model: "guns/dyrocket.bin",
         tp_model: "props/chrdyrocket.bin",
+        fp_glb: "pd/17-rocket-launcher-fp.glb",
+        tp_glb: "pd/17-rocket-launcher-tp.glb",
+        tp_muzzle: [-470.61327, -16.984915, 185.50009],
+        muzzle_is_authored: false,
         clip_size: 1,
         ammo_qty: 3,
         primary: PdFunc {
@@ -1393,6 +1606,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 60.0,
             projectile_timer60: -1,
             melee_range: 0.0,
+            recoil_dist: 3.0,
+            recoil_angle: 2.0,
             source: "invitems.c:2758",
         },
         secondary: Some(PdFunc {
@@ -1408,6 +1623,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: -1,
             melee_range: 0.0,
+            recoil_dist: 3.0,
+            recoil_angle: 2.0,
             source: "invitems.c:2789",
         }),
         view: PdView { muzzlez: 1.0, posx: 24.5, posy: -25.2, posz: -30.0, sway: 1.0 },
@@ -1424,6 +1641,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Slayer",
         fp_model: "guns/skrocket.bin",
         tp_model: "props/chrskrocket.bin",
+        fp_glb: "pd/18-slayer-fp.glb",
+        tp_glb: "pd/18-slayer-tp.glb",
+        tp_muzzle: [-566.1934, -21.933342, 256.75464],
+        muzzle_is_authored: false,
         clip_size: 1,
         ammo_qty: 3,
         primary: PdFunc {
@@ -1439,6 +1660,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 10.0,
             projectile_timer60: -1,
             melee_range: 0.0,
+            recoil_dist: 3.0,
+            recoil_angle: 2.0,
             source: "invitems.c:2868",
         },
         secondary: Some(PdFunc {
@@ -1454,6 +1677,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 10.0,
             projectile_timer60: -1,
             melee_range: 0.0,
+            recoil_dist: 3.0,
+            recoil_angle: 2.0,
             source: "invitems.c:2899",
         }),
         view: PdView { muzzlez: 1.0, posx: 22.5, posy: -32.0, posz: -40.5, sway: 1.0 },
@@ -1470,6 +1695,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Combat Knife",
         fp_model: "guns/knife.bin",
         tp_model: "props/chrknife.bin",
+        fp_glb: "pd/19-combat-knife-fp.glb",
+        tp_glb: "pd/19-combat-knife-tp.glb",
+        tp_muzzle: [-137.25212, -6.7497165, 166.59489],
+        muzzle_is_authored: false,
         clip_size: 1,
         ammo_qty: 5,
         primary: PdFunc {
@@ -1485,6 +1714,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 70.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:4901",
         },
         secondary: Some(PdFunc {
@@ -1500,6 +1731,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:4925",
         }),
         view: PdView { muzzlez: 1.0, posx: 18.5, posy: -26.5, posz: -28.0, sway: 1.0 },
@@ -1516,6 +1749,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Crossbow",
         fp_model: "guns/crossbow.bin",
         tp_model: "props/chrcrossbow.bin",
+        fp_glb: "pd/1a-crossbow-fp.glb",
+        tp_glb: "pd/1a-crossbow-tp.glb",
+        tp_muzzle: [4.0174356, 18.24336, 56.493576],
+        muzzle_is_authored: false,
         clip_size: 5,
         ammo_qty: 10,
         primary: PdFunc {
@@ -1531,6 +1768,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: -1,
             melee_range: 0.0,
+            recoil_dist: 3.0,
+            recoil_angle: 2.0,
             source: "invitems.c:3728",
         },
         secondary: Some(PdFunc {
@@ -1546,6 +1785,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: -1,
             melee_range: 0.0,
+            recoil_dist: 3.0,
+            recoil_angle: 2.0,
             source: "invitems.c:3697",
         }),
         view: PdView { muzzlez: 1.0, posx: 11.0, posy: -15.0, posz: -21.0, sway: 1.0 },
@@ -1562,6 +1803,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Tranquilizer",
         fp_model: "guns/druggun.bin",
         tp_model: "props/chrdruggun.bin",
+        fp_glb: "pd/1b-tranquilizer-fp.glb",
+        tp_glb: "pd/1b-tranquilizer-tp.glb",
+        tp_muzzle: [-190.3588, -21.3842, 71.804404],
+        muzzle_is_authored: false,
         clip_size: 8,
         ammo_qty: 50,
         primary: PdFunc {
@@ -1577,6 +1822,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 1.0,
+            recoil_angle: 0.0,
             source: "invitems.c:3838",
         },
         secondary: Some(PdFunc {
@@ -1592,6 +1839,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 60.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:3860",
         }),
         view: PdView { muzzlez: 1.0, posx: 10.0, posy: -15.2, posz: -24.0, sway: 1.0 },
@@ -1608,6 +1857,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Grenade",
         fp_model: "guns/grenade.bin",
         tp_model: "props/chrgrenade.bin",
+        fp_glb: "pd/1c-grenade-fp.glb",
+        tp_glb: "pd/1c-grenade-tp.glb",
+        tp_muzzle: [-175.6165, 11.250436, 70.983717],
+        muzzle_is_authored: false,
         clip_size: 1,
         ammo_qty: 5,
         primary: PdFunc {
@@ -1623,6 +1876,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:3420",
         },
         secondary: Some(PdFunc {
@@ -1638,6 +1893,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:3434",
         }),
         view: PdView { muzzlez: 1.0, posx: 17.0, posy: -19.7, posz: -21.0, sway: 1.0 },
@@ -1654,6 +1911,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "N-Bomb",
         fp_model: "guns/nbomb.bin",
         tp_model: "props/chrnbomb.bin",
+        fp_glb: "pd/1d-n-bomb-fp.glb",
+        tp_glb: "pd/1d-n-bomb-tp.glb",
+        tp_muzzle: [-175.6165, 11.250436, 70.983717],
+        muzzle_is_authored: false,
         clip_size: 1,
         ammo_qty: 3,
         primary: PdFunc {
@@ -1669,6 +1930,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:3481",
         },
         secondary: Some(PdFunc {
@@ -1684,6 +1947,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:3495",
         }),
         view: PdView { muzzlez: 1.0, posx: 17.0, posy: -19.7, posz: -21.0, sway: 1.0 },
@@ -1700,6 +1965,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Timed Mine",
         fp_model: "guns/timedmine.bin",
         tp_model: "props/chrtimedmine.bin",
+        fp_glb: "pd/1e-timed-mine-fp.glb",
+        tp_glb: "pd/1e-timed-mine-tp.glb",
+        tp_muzzle: [-202.71708, -8.9696262, -0.67542429],
+        muzzle_is_authored: false,
         clip_size: 1,
         ammo_qty: 5,
         primary: PdFunc {
@@ -1715,6 +1984,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:3115",
         },
         secondary: Some(PdFunc {
@@ -1730,6 +2001,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:3088",
         }),
         view: PdView { muzzlez: 1.0, posx: 8.0, posy: -15.0, posz: -23.0, sway: 1.0 },
@@ -1746,6 +2019,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Proximity Mine",
         fp_model: "guns/proximitymine.bin",
         tp_model: "props/chrproximitymine.bin",
+        fp_glb: "pd/1f-proximity-mine-fp.glb",
+        tp_glb: "pd/1f-proximity-mine-tp.glb",
+        tp_muzzle: [-202.71708, -8.9696262, -0.67542429],
+        muzzle_is_authored: false,
         clip_size: 1,
         ammo_qty: 5,
         primary: PdFunc {
@@ -1761,6 +2038,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:3260",
         },
         secondary: Some(PdFunc {
@@ -1776,6 +2055,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:3088",
         }),
         view: PdView { muzzlez: 1.0, posx: 8.0, posy: -15.0, posz: -23.0, sway: 1.0 },
@@ -1792,6 +2073,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Remote Mine",
         fp_model: "guns/remotemine.bin",
         tp_model: "props/chrremotemine.bin",
+        fp_glb: "pd/20-remote-mine-fp.glb",
+        tp_glb: "pd/20-remote-mine-tp.glb",
+        tp_muzzle: [-202.71708, -8.9696262, -0.67542429],
+        muzzle_is_authored: false,
         clip_size: 1,
         ammo_qty: 5,
         primary: PdFunc {
@@ -1807,6 +2092,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:3191",
         },
         secondary: Some(PdFunc {
@@ -1822,6 +2109,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:3205",
         }),
         view: PdView { muzzlez: 1.0, posx: 4.0, posy: -15.0, posz: -23.0, sway: 1.0 },
@@ -1838,6 +2127,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Laser",
         fp_model: "guns/laser.bin",
         tp_model: "props/chrlaser.bin",
+        fp_glb: "pd/21-laser-fp.glb",
+        tp_glb: "pd/21-laser-tp.glb",
+        tp_muzzle: [115.66738, -0.2685649, 57.99465],
+        muzzle_is_authored: false,
         clip_size: 0,
         ammo_qty: 0,
         primary: PdFunc {
@@ -1853,6 +2146,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:4110",
         },
         secondary: Some(PdFunc {
@@ -1868,6 +2163,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 4.0,
+            recoil_angle: 3.0,
             source: "invitems.c:4132",
         }),
         view: PdView { muzzlez: 3.0, posx: -12.0, posy: -12.7, posz: -21.5, sway: 1.0 },
@@ -1884,6 +2181,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "X-Ray Scanner",
         fp_model: "props/xrayspecs.bin",
         tp_model: "props/chrnightsight.bin",
+        fp_glb: "pd/22-x-ray-scanner-fp.glb",
+        tp_glb: "pd/22-x-ray-scanner-tp.glb",
+        tp_muzzle: [0.0, 0.0, 0.0],
+        muzzle_is_authored: false,
         clip_size: 0,
         ammo_qty: 0,
         primary: PdFunc {
@@ -1899,6 +2200,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:5489",
         },
         secondary: None,
@@ -1916,6 +2219,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Cloaking Device",
         fp_model: "props/chrcloaker.bin",
         tp_model: "props/chrcloaker.bin",
+        fp_glb: "pd/23-cloaking-device-fp.glb",
+        tp_glb: "pd/23-cloaking-device-tp.glb",
+        tp_muzzle: [0.0, 0.0, 0.0],
+        muzzle_is_authored: false,
         clip_size: 10,
         ammo_qty: 0,
         primary: PdFunc {
@@ -1931,6 +2238,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:5170",
         },
         secondary: None,
@@ -1948,6 +2257,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "Combat Boost",
         fp_model: "props/chrspeedpill.bin",
         tp_model: "props/chrspeedpill.bin",
+        fp_glb: "pd/24-combat-boost-fp.glb",
+        tp_glb: "pd/24-combat-boost-tp.glb",
+        tp_muzzle: [0.0, 0.0, 0.0],
+        muzzle_is_authored: false,
         clip_size: 4,
         ammo_qty: 0,
         primary: PdFunc {
@@ -1963,6 +2276,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:5214",
         },
         secondary: Some(PdFunc {
@@ -1978,6 +2293,8 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
             projectile_speed: 0.0,
             projectile_timer60: 0,
             melee_range: 0.0,
+            recoil_dist: 0.0,
+            recoil_angle: 0.0,
             source: "invitems.c:5227",
         }),
         view: PdView { muzzlez: 1.0, posx: 0.0, posy: -39.5, posz: -55.5, sway: 1.0 },
@@ -1994,6 +2311,10 @@ pub const PD_WEAPONS: [PdWeapon; 37] = [
         name: "",
         fp_model: "",
         tp_model: "props/chrshield.bin",
+        fp_glb: "pd/25--fp.glb",
+        tp_glb: "pd/25--tp.glb",
+        tp_muzzle: [0.0, 0.0, 0.0],
+        muzzle_is_authored: false,
         clip_size: 30,
         ammo_qty: 0,
         primary: PdFunc::INERT,

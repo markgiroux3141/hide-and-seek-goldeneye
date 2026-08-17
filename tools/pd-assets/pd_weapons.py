@@ -847,6 +847,8 @@ def build() -> dict:
         if not isinstance(funcs, list):
             funcs = [funcs]
 
+        name_text = gun_string(strings, wdef.get("name"))
+
         rows.append(
             {
                 "mp_index": mp_index,
@@ -890,6 +892,7 @@ def build() -> dict:
                     "sec_ammo_qty": mp.get("secammoqty"),
                     "source": f"mplayer.c:{mp_init['g_MpWeapons']['line'] + mp_index}",
                 },
+                "export": export_info(w_slug(mp_index, name_text), tp_bin),
                 "bot": bot_configs[weaponnum] if weaponnum < len(bot_configs) else None,
                 "functions": [expand_func(f) for f in funcs],
                 "ammo": [expand_ammo(wdef.get("pri_ammo")), expand_ammo(wdef.get("sec_ammo"))],
@@ -917,6 +920,45 @@ def build() -> dict:
         "explosions": explosions,
         "weapons": rows,
     }
+
+
+def w_slug(mp_index: int, name: str) -> str:
+    """The export slug `pd_gltf.py guns` writes, e.g. `01-falcon-2`."""
+    out = "".join(c.lower() if c.isalnum() else "-" for c in name)
+    while "--" in out:
+        out = out.replace("--", "-")
+    return f"{mp_index:02x}-{out.strip('-')}"
+
+
+def export_info(slug: str, tp_rel: str | None) -> dict:
+    """Where the exported GLBs live, plus the third-person shot origin.
+
+    The muzzle is read through `pd_gltf.gun_metadata`, the same function the
+    exporter uses, so the number in the Rust table and the number baked into the
+    GLB cannot disagree — rather than re-deriving it here and hoping.
+    """
+    info = {
+        "fp_glb": f"pd/{slug}-fp.glb",
+        "tp_glb": f"pd/{slug}-tp.glb",
+        "tp_muzzle": [0.0, 0.0, 0.0],
+        "muzzle_is_authored": False,
+    }
+    if not tp_rel:
+        return info
+    try:
+        sys.path.insert(0, HERE)
+        import pd_gltf  # noqa: PLC0415  (deferred: heavy, and only needed here)
+        from pd_model import load as load_model  # noqa: PLC0415
+
+        m = load_model(os.path.join(ASSETS, "files", tp_rel.replace("/", os.sep)))
+        meta = pd_gltf.gun_metadata(m, pd_gltf.EXPORT_SCALE)
+    except Exception as exc:  # noqa: BLE001 — provenance beats a hard failure here
+        print(f"warning: could not read {tp_rel} muzzle: {exc}", file=sys.stderr)
+        return info
+    if meta.get("muzzle"):
+        info["tp_muzzle"] = [float(v) for v in meta["muzzle"]]
+    info["muzzle_is_authored"] = meta.get("muzzle_from") == "CHRGUNFIRE"
+    return info
 
 
 def decode_flags(value: object, consts: Consts, prefix: str) -> list[str]:
@@ -1179,6 +1221,11 @@ pub struct PdFunc {
     pub projectile_timer60: i32,
     /// `Melee` only: reach, in PD centimetres.
     pub melee_range: f32,
+    /// Viewmodel recoil: kick-back distance (PD centimetres) and muzzle rise
+    /// (PD's own angle units). The authored counterpart of our `recoil_z` /
+    /// `recoil_rot`, which are two shared constants across all 24 GE weapons.
+    pub recoil_dist: f32,
+    pub recoil_angle: f32,
     /// `invitems.c` line of the `funcdef` this row came from.
     pub source: &'static str,
 }
@@ -1201,6 +1248,8 @@ impl PdFunc {
         projectile_speed: 0.0,
         projectile_timer60: 0,
         melee_range: 0.0,
+        recoil_dist: 0.0,
+        recoil_angle: 0.0,
         source: "",
     };
 
@@ -1224,6 +1273,18 @@ impl PdFunc {
 
     pub fn has_flag(&self, flag: u32) -> bool {
         self.flags & flag != 0
+    }
+
+    /// `recoildist` as metres. PD's values run 0-40ish in centimetres, which is a
+    /// viewmodel kick and not a world distance.
+    pub fn recoildist_m(&self) -> f32 {
+        self.recoil_dist * PD_CM_TO_M
+    }
+
+    /// `recoilangle` as radians. PD stores whole-ish degrees here (the Falcon 2's
+    /// 15, the Magnum's larger), so this is a degree conversion.
+    pub fn recoilangle_rad(&self) -> f32 {
+        self.recoil_angle.to_radians()
     }
 }
 
@@ -1274,6 +1335,20 @@ pub struct PdWeapon {
     pub fp_model: &'static str,
     /// Third-person model an enemy holds — the one carrying `CHRGUNFIRE`.
     pub tp_model: &'static str,
+    /// The exported first-person GLB, relative to `native/assets/weapons/` so it
+    /// drops straight into the same slot as a GoldenEye `WeaponStats::gun_path`.
+    pub fp_glb: &'static str,
+    /// The exported third-person GLB — what a hunter holds. Unlike the GoldenEye
+    /// guns this needs no hand-stripping: PD's `chr*` models are the third-person
+    /// weapon alone, so the `enemy-weapon-hand-artifact` cannot arise.
+    pub tp_glb: &'static str,
+    /// Authored muzzle / shot origin on the third-person model, in engine units.
+    /// From `CHRGUNFIRE` where PD authors one, else PD's own grip fallback — see
+    /// [`Self::muzzle_is_authored`].
+    pub tp_muzzle: [f32; 3],
+    /// True when [`Self::tp_muzzle`] came from a real `CHRGUNFIRE` node; false
+    /// when it is `chr_get_gun_pos`'s `MODELPART_0001` grip fallback (17 of 33).
+    pub muzzle_is_authored: bool,
     /// Rounds per magazine (`ammodef.clipsize`); 0 when the weapon has no clip.
     pub clip_size: i32,
     /// Rounds an MP match hands out (`mpweapon.priammoqty`).
@@ -1403,6 +1478,8 @@ impl PdExplosion {
             f"{indent}    projectile_speed: {rf(f.get('speed'))},\n"
             f"{indent}    projectile_timer60: {ri(f.get('timer60'))},\n"
             f"{indent}    melee_range: {rf(f.get('range'))},\n"
+            f"{indent}    recoil_dist: {rf(f.get('recoildist'))},\n"
+            f"{indent}    recoil_angle: {rf(f.get('recoilangle'))},\n"
             f"{indent}    source: {rs(f.get('source'))},\n"
             f"{indent}}}"
         )
@@ -1430,6 +1507,16 @@ impl PdExplosion {
         out.append(f"        name: {rs(w['name_text'])},")
         out.append(f"        fp_model: {rs(w['assets']['fp_model'] or '')},")
         out.append(f"        tp_model: {rs(w['assets']['tp_model'] or '')},")
+        ex = w.get("export") or {}
+        out.append(f"        fp_glb: {rs(ex.get('fp_glb'))},")
+        out.append(f"        tp_glb: {rs(ex.get('tp_glb'))},")
+        mz = ex.get("tp_muzzle") or [0.0, 0.0, 0.0]
+        out.append(
+            f"        tp_muzzle: [{rf(mz[0])}, {rf(mz[1])}, {rf(mz[2])}],"
+        )
+        out.append(
+            f"        muzzle_is_authored: {str(bool(ex.get('muzzle_is_authored'))).lower()},"
+        )
         out.append(f"        clip_size: {ri(clip)},")
         out.append(f"        ammo_qty: {ri(w['mp']['pri_ammo_qty'])},")
         out.append(f"        primary: {emit_func(pri, '        ')},")
