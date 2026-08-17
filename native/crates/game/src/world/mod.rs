@@ -945,6 +945,12 @@ const GRENADE_THROW_RANGE: f32 = 16.0;
 /// camper the pack is *held away from* (behind cover / at range); when a hunter is
 /// close it just shoots instead.
 const GRENADE_SAFE_DIST: f32 = 6.5;
+/// How long a lobbed grenade spends in the air, for the predictive safety guard in
+/// `grenade_flush_step`. Measured from the throw tuning rather than guessed: the
+/// enemy grenade rides the same `GRENADE` spec the player throws (fuse 3.5 s, but
+/// it detonates on impact well before that), and a flat ~1 s covers the arc across
+/// the throw range. Erring long is the safe direction — it refuses more throws.
+const GRENADE_FLIGHT_SECS: f32 = 1.0;
 /// Height (m above feet) a hunter releases the grenade from (chest/overhand).
 const GRENADE_THROW_Y: f32 = 1.2;
 /// Squad-wide cooldown (s) between grenade lobs.

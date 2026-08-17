@@ -249,14 +249,343 @@ impl Mine {
     }
 }
 
-/// Damage dealt by an [`Explosion`] to an actor `dist` metres from the blast centre:
-/// linear falloff from `max_damage` at the centre to 0 at (and beyond) `radius`.
-/// A GoldenEye blast is lethal point-blank and survivable at the rim.
+/// Damage dealt by an [`Explosion`] to an actor `dist` metres from the blast centre.
+///
+/// Which model runs depends on [`use_pd_explosions`]: Perfect Dark's authored
+/// falloff by default, the original authored-fresh linear sphere when switched off.
+/// Both are kept because the GoldenEye explosives were tuned against the linear one
+/// and the A/B is the only way to judge the change — the established pattern here.
 pub fn falloff_damage(explosion: &Explosion, dist: f32) -> f32 {
+    if use_pd_explosions() {
+        pd_falloff_damage(explosion, dist)
+    } else {
+        linear_falloff_damage(explosion, dist)
+    }
+}
+
+/// The original: linear falloff from `max_damage` at the centre to 0 at (and beyond)
+/// `radius`. Authored fresh for the GoldenEye feel, with no oracle behind it.
+pub fn linear_falloff_damage(explosion: &Explosion, dist: f32) -> f32 {
     if dist >= explosion.radius {
         return 0.0;
     }
     explosion.max_damage * (1.0 - dist / explosion.radius.max(1e-6))
+}
+
+// ─── Perfect Dark's explosion model ──────────────────────────────────────────
+// `explosion_apply_damage` (`explosions.c:674`) — and it is not a sphere.
+//
+// For a character (`explosions.c:931-968`), given a blast at the origin and the
+// axis distances to the victim:
+//
+//     frac = min(1-|dx|/R, 1-|dy|/R, 1-|dz|/R)      // per-axis box, take the min
+//     frac = frac * frac                            // squared
+//     damage = frac * type.damage * 8.0
+//
+// Three differences from ours, all of which change how a blast reads:
+//
+//  1. **Box, not sphere.** The min over axes means the falloff follows a cube's
+//     inscribed profile, so a blast reaches further along an axis than diagonally.
+//  2. **Squared.** Damage drops off much faster than linear — PD blasts are far
+//     more lethal at the centre and far more survivable at the rim.
+//  3. **No floor for characters.** The *object* path (`explosions.c:843`) has a
+//     `frac*0.7 + 0.3` floor, so scenery always takes at least 30%; characters do
+//     not get that. Easy to conflate; they are different formulas.
+
+/// Environment kill-switch for the PD explosion model. `PD_EXPLOSIONS=0` restores
+/// the original linear falloff for an A/B.
+///
+/// Read once and cached: this sits on the damage path, which runs per actor per
+/// blast frame.
+pub fn use_pd_explosions() -> bool {
+    static CELL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CELL.get_or_init(|| {
+        let off = matches!(
+            std::env::var("PD_EXPLOSIONS").unwrap_or_default().trim(),
+            "0" | "off" | "no" | "false"
+        );
+        if off {
+            log::info!("explosions: original linear falloff (PD_EXPLOSIONS=0)");
+        } else {
+            log::info!("explosions: Perfect Dark model (squared per-axis box falloff)");
+        }
+        !off
+    })
+}
+
+/// PD's character falloff, along one axis only.
+///
+/// A caller with a real offset vector should use [`pd_falloff_damage_axes`]; this
+/// scalar form treats `dist` as the dominant axis, which is what our call sites
+/// have (they pass a centre-to-actor distance). It is the same curve, just
+/// evaluated with the worst case on one axis — so it never over-reports damage.
+pub fn pd_falloff_damage(explosion: &Explosion, dist: f32) -> f32 {
+    let r = explosion.radius.max(1e-6);
+    if dist >= r {
+        return 0.0;
+    }
+    let frac = 1.0 - dist / r;
+    frac * frac * explosion.max_damage
+}
+
+/// PD's character falloff with a real per-axis offset — the faithful form.
+///
+/// `offset` is centre → victim in metres. Returns 0 outside the box, which is what
+/// PD's own bounds test does before it gets here.
+pub fn pd_falloff_damage_axes(explosion: &Explosion, offset: Vec3) -> f32 {
+    let r = explosion.radius.max(1e-6);
+    let (dx, dy, dz) = (offset.x.abs(), offset.y.abs(), offset.z.abs());
+    if dx >= r || dy >= r || dz >= r {
+        return 0.0;
+    }
+    let frac = (1.0 - dx / r).min(1.0 - dy / r).min(1.0 - dz / r);
+    if frac <= 0.0 {
+        return 0.0;
+    }
+    frac * frac * explosion.max_damage
+}
+
+/// PD's **object** falloff, which is a different formula from the character one and
+/// worth keeping distinct: linear (not squared) and floored at 30%, so scenery
+/// inside the blast always takes something (`explosions.c:843`).
+pub fn pd_falloff_damage_object(explosion: &Explosion, offset: Vec3) -> f32 {
+    let r = explosion.radius.max(1e-6);
+    let (dx, dy, dz) = (offset.x.abs(), offset.y.abs(), offset.z.abs());
+    if dx >= r || dy >= r || dz >= r {
+        return 0.0;
+    }
+    let frac = (1.0 - dx / r).min(1.0 - dy / r).min(1.0 - dz / r);
+    if frac <= 0.0 {
+        return 0.0;
+    }
+    (frac * 0.7 + 0.3) * explosion.max_damage
+}
+
+/// A Perfect Dark blast as it **propagates** (`explosion_apply_damage`,
+/// `explosions.c:674`).
+///
+/// This is the structural idea our single instantaneous sphere had no equivalent
+/// for, and it is the reason chain reactions and "the blast caught up with me" read
+/// the way they do in PD:
+///
+/// * The blast has TWO radii. `blast_radius` is the visible fireball;
+///   `damage_radius` is the lethal volume, and it is up to 2x larger.
+/// * The **first frame** applies the full `damage_radius` at once. Later frames
+///   apply a radius growing from `blast_radius` toward `damage_radius` across the
+///   blast's `duration`, at 5% strength per tick.
+///
+/// So a blast is one hard hit followed by a widening, weakening wake — not a single
+/// sphere and not a slow expansion from nothing.
+#[derive(Clone, Copy, Debug)]
+pub struct Blast {
+    /// The damage + lethal radius this blast came from.
+    pub explosion: Explosion,
+    /// The visible fireball radius (metres) the growth starts from.
+    pub blast_radius: f32,
+    /// Seconds the blast lives and grows over.
+    pub duration: f32,
+    /// Seconds elapsed.
+    pub age: f32,
+    /// Whether the first (full-radius, full-strength) frame has been applied.
+    pub first_frame_done: bool,
+}
+
+/// Sustained-frame damage scale (`explosions.c:983`: `minfrac *= 0.05f * lvupdate60`).
+/// A tick is 1/60 s, so this is the per-tick fraction.
+const PD_SUSTAIN_SCALE: f32 = 0.05;
+
+impl Blast {
+    /// Start a blast from an [`Explosion`] plus its visible radius and duration —
+    /// both of which come off a [`crate::combat::pd_weapons::PdExplosion`] row.
+    pub fn new(explosion: Explosion, blast_radius: f32, duration: f32) -> Self {
+        Blast {
+            explosion,
+            blast_radius,
+            duration: duration.max(1e-3),
+            age: 0.0,
+            first_frame_done: false,
+        }
+    }
+
+    /// The lethal radius right now.
+    ///
+    /// Full `damage_radius` on the first frame; afterwards it grows from
+    /// `blast_radius` toward `damage_radius` in proportion to `age/duration`, capped.
+    pub fn current_radius(&self) -> f32 {
+        let full = self.explosion.radius;
+        if !self.first_frame_done {
+            return full;
+        }
+        let t = (self.age / self.duration).clamp(0.0, 1.0);
+        (self.blast_radius + (full - self.blast_radius) * t).min(full)
+    }
+
+    /// Whether the blast has finished applying damage.
+    pub fn finished(&self) -> bool {
+        self.age >= self.duration
+    }
+
+    /// Damage to an actor at `offset` from the centre this frame, and advance the
+    /// blast by `dt`.
+    ///
+    /// The first call is the hard hit (full radius, full strength); later calls are
+    /// the weakening wake. `dt` scales the sustained contribution so the total does
+    /// not depend on frame rate.
+    pub fn damage_at(&self, offset: Vec3, dt: f32) -> f32 {
+        let r = self.current_radius();
+        let scaled = Explosion { radius: r, max_damage: self.explosion.max_damage };
+        let base = pd_falloff_damage_axes(&scaled, offset);
+        if !self.first_frame_done {
+            base
+        } else {
+            base * PD_SUSTAIN_SCALE * (dt * 60.0)
+        }
+    }
+
+    /// Advance the blast one frame, latching the first-frame flag.
+    pub fn advance(&mut self, dt: f32) {
+        self.first_frame_done = true;
+        self.age += dt;
+    }
+}
+
+#[cfg(test)]
+mod pd_explosion_tests {
+    use super::*;
+
+    fn blast() -> Explosion {
+        Explosion { radius: 4.0, max_damage: 100.0 }
+    }
+
+    /// Both models agree at the two ends — full damage dead centre, nothing at the
+    /// rim — and disagree in between, which is the whole point of the change.
+    #[test]
+    fn the_two_models_agree_at_the_ends_and_differ_in_the_middle() {
+        let e = blast();
+        assert!((linear_falloff_damage(&e, 0.0) - 100.0).abs() < 1e-3);
+        assert!((pd_falloff_damage(&e, 0.0) - 100.0).abs() < 1e-3);
+        assert_eq!(linear_falloff_damage(&e, 4.0), 0.0);
+        assert_eq!(pd_falloff_damage(&e, 4.0), 0.0);
+        // Half-way: linear gives 50, PD's squared curve gives 25.
+        let (lin, pd) = (linear_falloff_damage(&e, 2.0), pd_falloff_damage(&e, 2.0));
+        assert!((lin - 50.0).abs() < 1e-3, "linear at half radius: {lin}");
+        assert!((pd - 25.0).abs() < 1e-3, "PD squared at half radius: {pd}");
+        assert!(pd < lin, "PD's falloff is sharper everywhere inside the rim");
+    }
+
+    /// The per-axis box: PD's blast reaches further along an axis than diagonally,
+    /// because it takes the MIN over axes rather than a Euclidean distance. A sphere
+    /// model cannot produce this, so it is the signature of the port being real.
+    #[test]
+    fn the_falloff_is_a_per_axis_box_not_a_sphere() {
+        let e = blast();
+        let along = pd_falloff_damage_axes(&e, Vec3::new(2.0, 0.0, 0.0));
+        let diagonal = pd_falloff_damage_axes(&e, Vec3::new(2.0, 2.0, 0.0));
+        assert!(
+            (along - 25.0).abs() < 1e-3,
+            "2 m along one axis is the same as the scalar form: {along}"
+        );
+        assert!(
+            (diagonal - along).abs() < 1e-3,
+            "the min-over-axes makes these equal, unlike a sphere: {diagonal} vs {along}"
+        );
+        // Held against the SAME curve evaluated on Euclidean distance, the box is
+        // more generous on the diagonal — which is the shape difference, isolated
+        // from the curve. (Comparing against the linear model instead would prove
+        // nothing: two different curves crossing says nothing about geometry.)
+        let sphere_diag = pd_falloff_damage(&e, Vec3::new(2.0, 2.0, 0.0).length());
+        assert!(
+            diagonal > sphere_diag,
+            "the box reaches further on the diagonal than a sphere: {diagonal} vs {sphere_diag}"
+        );
+        // Outside the box on any single axis is nothing at all.
+        assert_eq!(pd_falloff_damage_axes(&e, Vec3::new(4.5, 0.0, 0.0)), 0.0);
+    }
+
+    /// Scenery and characters use DIFFERENT formulas, and the object one is floored
+    /// at 30% — easy to conflate, so pinned.
+    #[test]
+    fn objects_keep_pds_thirty_percent_floor_and_characters_do_not() {
+        let e = blast();
+        let near_rim = Vec3::new(3.9, 0.0, 0.0);
+        let chr = pd_falloff_damage_axes(&e, near_rim);
+        let obj = pd_falloff_damage_object(&e, near_rim);
+        assert!(chr < 1.0, "a character at the rim takes almost nothing: {chr}");
+        assert!(obj > 30.0, "scenery at the rim still takes its 30% floor: {obj}");
+    }
+
+    /// Propagation: the first frame is the hard hit at the FULL damage radius, and
+    /// later frames are a widening, much weaker wake starting from the fireball.
+    #[test]
+    fn a_blast_hits_hard_once_then_widens_weakly() {
+        // PD's rocket: 2 m fireball, 4 m lethal, 1.5 s.
+        let mut b = Blast::new(blast(), 2.0, 1.5);
+        let at = Vec3::new(3.0, 0.0, 0.0); // outside the fireball, inside the lethal radius
+
+        let first = b.damage_at(at, 1.0 / 60.0);
+        assert!(first > 0.0, "the first frame reaches the full damage radius");
+        b.advance(1.0 / 60.0);
+
+        let second = b.damage_at(at, 1.0 / 60.0);
+        assert!(
+            second < first * 0.2,
+            "the wake is far weaker than the initial hit: {second} vs {first}"
+        );
+
+        // The lethal radius grows from the fireball toward the damage radius.
+        let early = b.current_radius();
+        // 1.5 s at 60 Hz is 90 frames; two of them are already spent above.
+        for _ in 0..90 {
+            b.advance(1.0 / 60.0);
+        }
+        let late = b.current_radius();
+        assert!(late > early, "the blast expands: {early} -> {late}");
+        assert!(late <= blast().radius + 1e-3, "and never past its damage radius");
+        assert!(b.finished(), "and it ends");
+    }
+
+    /// The sustained wake is frame-rate independent — the same elapsed time deals
+    /// the same total damage whether stepped at 30 or 240 Hz. A per-frame scale
+    /// without the `dt` term would make explosives lethality depend on frame rate.
+    #[test]
+    fn the_sustained_damage_is_frame_rate_independent() {
+        let total_at = |hz: f32| {
+            let mut b = Blast::new(blast(), 2.0, 1.0);
+            let at = Vec3::new(1.0, 0.0, 0.0);
+            let dt = 1.0 / hz;
+            let mut total = 0.0;
+            // Skip the first frame so only the sustained wake is measured.
+            b.advance(dt);
+            while !b.finished() {
+                total += b.damage_at(at, dt);
+                b.advance(dt);
+            }
+            total
+        };
+        let (slow, fast) = (total_at(30.0), total_at(240.0));
+        let rel = (slow - fast).abs() / slow.max(1e-6);
+        assert!(rel < 0.05, "30 Hz gave {slow}, 240 Hz gave {fast}");
+    }
+
+    /// Every lethal PD explosion row builds a coherent blast: a fireball no larger
+    /// than its lethal radius, a real duration, and a first hit that hurts.
+    #[test]
+    fn every_pd_explosion_row_makes_a_usable_blast() {
+        use crate::combat::pd_weapons::PD_EXPLOSIONS;
+        let mut checked = 0;
+        for e in PD_EXPLOSIONS.iter().filter(|e| e.damage > 0.0) {
+            let ex = Explosion {
+                radius: e.damage_radius_m,
+                max_damage: e.peak_damage_hp(),
+            };
+            let b = Blast::new(ex, e.blast_radius_m, e.duration_s);
+            assert!(b.blast_radius <= ex.radius + 1e-3, "{}", e.name);
+            assert!(b.duration > 0.0, "{}", e.name);
+            assert!(b.damage_at(Vec3::ZERO, 1.0 / 60.0) > 0.0, "{} is inert", e.name);
+            checked += 1;
+        }
+        assert!(checked >= 20, "most rows are lethal, checked {checked}");
+    }
 }
 
 #[cfg(test)]
@@ -330,11 +659,19 @@ mod tests {
     /// Falloff: full damage at the centre, zero at/after the radius, linear between.
     #[test]
     fn blast_falloff_is_linear() {
+        // Explicitly the LINEAR model. This test predates the Perfect Dark
+        // explosion port and encoded the old default by calling the dispatcher —
+        // which now selects PD's squared falloff, under which "half at
+        // half-radius" is simply false (it is a quarter). The property it was
+        // written to check still holds for the model it names.
         let e = Explosion { radius: 5.0, max_damage: 200.0 };
-        assert_eq!(falloff_damage(&e, 0.0), 200.0, "max at centre");
-        assert!((falloff_damage(&e, 2.5) - 100.0).abs() < 1e-3, "half at half-radius");
-        assert_eq!(falloff_damage(&e, 5.0), 0.0, "zero at the rim");
-        assert_eq!(falloff_damage(&e, 9.0), 0.0, "zero beyond the rim");
+        assert_eq!(linear_falloff_damage(&e, 0.0), 200.0, "max at centre");
+        assert!(
+            (linear_falloff_damage(&e, 2.5) - 100.0).abs() < 1e-3,
+            "half at half-radius"
+        );
+        assert_eq!(linear_falloff_damage(&e, 5.0), 0.0, "zero at the rim");
+        assert_eq!(linear_falloff_damage(&e, 9.0), 0.0, "zero beyond the rim");
     }
 
     // ── Mines ──────────────────────────────────────────────────────────────────

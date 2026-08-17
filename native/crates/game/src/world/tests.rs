@@ -2053,6 +2053,45 @@ use super::editing::find_room_brushes;
         );
     }
 
+    /// The self-kill that put `World::grenades` behind a default-off switch: a
+    /// hunter clear of the blast **on release** but able to run into it during the
+    /// round's ~1 s of flight.
+    ///
+    /// 8 m is past `GRENADE_SAFE_DIST` (6.5 m), so the original at-release check
+    /// permitted the throw — then the hunter closed to ~3.4 m and stood inside a 4 m
+    /// blast on impact. The predictive guard has to refuse this, while the 9 m case
+    /// above (which lands ~4.4 m out, outside the blast) still throws. That is a 1 m
+    /// discrimination, so it is worth pinning both sides.
+    #[test]
+    fn no_grenade_when_a_hunter_would_run_into_the_blast() {
+        let mut world = World::new();
+        world.set_difficulty(DIFFICULTY_MAX);
+        world.set_grenades(true);
+        world.initial_meshes();
+        world.toggle_mode();
+        world.toggle_invulnerable();
+        let input = InputState::default();
+        let dt = 1.0 / 60.0;
+        for _ in 0..120 {
+            world.fixed_step(dt, &input);
+            if world.enemies[0].enemy.is_engaged() {
+                break;
+            }
+        }
+        let ppos = world.player_pos().unwrap();
+        // Clear of GRENADE_SAFE_DIST on release, but inside the blast on impact.
+        world.enemies[0].enemy.pos = ppos + Vec3::new(8.0, 0.0, 0.0);
+        world.camp_anchor = Some(ppos);
+        world.camp_timer = 100.0;
+        world.grenade_cooldown = 0.0;
+        world.projectiles.clear();
+        world.grenade_flush_step(dt);
+        assert!(
+            world.projectiles.is_empty(),
+            "a hunter that would close into its own blast must not throw"
+        );
+    }
+
     /// #5 no self-harm: a hunter that's right on top of the camper does NOT lob a
     /// grenade (it would blast itself / packmates). Regression for "explodes in front
     /// of them." Everything is set up to throw EXCEPT the hunter is point-blank.

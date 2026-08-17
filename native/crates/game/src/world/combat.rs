@@ -717,18 +717,54 @@ impl World {
             return;
         }
         let Some(anchor) = self.camp_anchor else { return };
-        // Don't lob if ANY living hunter is close to the camp spot: it would be caught
-        // in its own blast (the self/friendly-fire bug), and a hunter that close should
-        // just shoot. Grenades are only for a camper the pack is held away from.
-        let anyone_close = self
-            .enemies
-            .iter()
-            .any(|e| !e.enemy.is_dead() && e.enemy.pos.distance(anchor) < GRENADE_SAFE_DIST);
+        // Don't lob if any living hunter is close to the camp spot, or **will be by
+        // the time the round lands**. Testing only the moment of release is what put
+        // `grenades` behind a default-off switch: the round spends ~1 s in the air
+        // while the pack keeps closing at up to `SPEED_CHASE`, so a hunter that was
+        // clear on release was regularly inside a 4 m blast on impact.
+        //
+        // So the guard predicts instead of sampling: a hunter counts as unsafe if it
+        // could reach the blast radius within the flight time. That is the fix this
+        // flag was waiting for, and it is deliberately conservative — it refuses more
+        // throws than strictly necessary, because a refused grenade costs nothing and
+        // a self-kill costs a hunter.
+        //
+        // NOTE it is NOT the propagation model that fixes this. Perfect Dark applies
+        // the FULL damage radius on the blast's first frame (`explosions.c:685`), so
+        // PD's own explosions are if anything less forgiving than our linear sphere;
+        // the recon's hypothesis that propagation might solve this does not survive
+        // measurement. PD's real answer is the same shape as this one — it keeps a
+        // grenade-carrying bot at `BOTDISTCFG_THROWEXPLOSIVE`, an authored 4.5-7.0 m,
+        // so the bot is outside its own blast before it ever throws.
+        // Two conditions, and they mean different things:
+        //
+        //  * inside `GRENADE_SAFE_DIST` NOW — too close to be lobbing at all; a
+        //    hunter that near should shoot. (The original check.)
+        //  * able to be inside the BLAST RADIUS at impact — the predictive part.
+        //
+        // The second is derived from the round's own blast radius rather than
+        // stacking a margin on `GRENADE_SAFE_DIST`, which refused throws at 9 m
+        // where a closing hunter still ends up ~4.4 m out — outside a 4 m blast,
+        // and taking zero damage at the rim under either falloff model. Stacked
+        // margins would have made the feature almost never fire and looked like it
+        // was still broken.
+        let blast = match crate::combat::config::GRENADE.fire_kind {
+            crate::combat::FireKind::Projectile(p) => p.explosion.radius,
+            _ => 4.0,
+        };
+        let closing_reach = crate::enemy::SPEED_CHASE * GRENADE_FLIGHT_SECS;
+        let anyone_close = self.enemies.iter().any(|e| {
+            if e.enemy.is_dead() {
+                return false;
+            }
+            let d = e.enemy.pos.distance(anchor);
+            d < GRENADE_SAFE_DIST || (d - closing_reach) < blast
+        });
         if anyone_close {
             return;
         }
         // Pick the nearest engaged, living hunter within throw range of the camp spot
-        // (guaranteed ≥ GRENADE_SAFE_DIST away by the guard above).
+        // (guaranteed ≥ `unsafe_dist` away by the predictive guard above).
         let thrower = self
             .enemies
             .iter()

@@ -206,7 +206,7 @@ const WT: f32 = WORLD_SCALE;
 const SPEED_SEARCH: f32 = 1.6; // ~walk gait — calm sweeping / investigating
 const SPEED_ADVANCE: f32 = 3.2; // ~jog gait — closing on the player while firing
 /// Chase speed (JS `chaseSpeed`) — the urgent run.
-const SPEED_CHASE: f32 = 4.6; // m/s (~run gait)
+pub(crate) const SPEED_CHASE: f32 = 4.6; // m/s (~run gait)
 const REPATH_INTERVAL: f32 = 0.4; // s between path recomputes (CHASE_UPDATE_INTERVAL)
 
 // ─── Anti-grind (crowd / separation-fight) ───────────────────────────────────
