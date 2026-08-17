@@ -1,16 +1,14 @@
-# Handoff — port Perfect Dark's arsenal (player + enemies), and PD's explosions
+# Handoff — Perfect Dark's arsenal (SHIPPED) and what remains
 
-State: branch `feat/pd-hunters-ship` @ `c647e8d`, 332 tests green, release built.
-The PD **hunter** track is complete and shipped (`DESIGN_PD_SIMULANT_AI.md` §13–19,
-`HANDOFF_PD_FIDELITY.md`). Hunters are Perfect Dark simulants on Perfect Dark
-animations, drawing from all 44 GoldenEye + 6 PD bodies.
+State: branch `feat/pd-hunters-ship` @ `21ffef0`, **378 tests green**, release built.
 
-**This handoff is the next piece: the guns.** Our arsenal is still GoldenEye's 23
-weapons with one fire mode each. PD's is ~33 weapons with **two functions each** and a
-fully-authored data table for all of it.
+The five build items in the original recon are **done**. PD's 33 multiplayer guns are
+playable by the player and the hunters, with two firing functions each, both models per
+gun, and PD's explosion model. Everything below the "What shipped" section is what is
+*left*, in the order it is worth doing.
 
-The recon below is done and verified — every claim here was checked against the decomp
-or run locally. Start from the decisions, not the code.
+**Nothing here has been playtested yet.** See the playtest brief at the bottom — that is
+the first thing to do, before building anything further on top.
 
 ---
 
@@ -19,273 +17,209 @@ or run locally. Start from the decisions, not the code.
 Two rules the user has stated explicitly, both learned the hard way:
 
 1. **Always go back to the decomp** (`reference/pd-decomp`, gitignored — `reference/README.md`
-   says how to re-clone). Do not invent a plausible adjustment to make something look
-   right. On the hunter track the *obvious* fix was wrong more often than not: the barrel
-   axis was not recoverable from the gun mesh, the pack fighting itself was a missing team
-   check rather than a scoring problem, packmates blocking fire was our raycast rather than
-   crowding, and "PD's bind pose differs from GoldenEye's" was simply false and cost 38
-   bodies. Every one of those had a decomp answer and a headless measurement that settled it.
-2. **Do not launch and drive the game yourself.** It steals focus and makes the user's
-   machine unusable. When something has to be seen on screen, stop and hand them a specific
-   brief: exact command, what to do in-game, what to look at, which screenshot.
-   *PowerShell note:* env vars need `$env:NAME = "value"` as a separate statement —
-   `NAME=value cmd` is bash-only and fails.
-
-What you can do without them:
-* `python tools/pd-assets/pd_model.py info|obj <file.bin> [out.obj]` — parse/convert any PD
-  model. `pd_tex.py` decodes textures, `pd_preview.py` CPU-renders a GLB to PNG.
-* Headless measurement through the real engine types. The pattern that has repeatedly
-  settled arguments on this track: **assert the asset against the decomp**, not against
-  itself. `cargo test -p game fire_animation -- --nocapture` is the model — it measures each
-  exported clip's barrel yaw and compares it to the `angleoffset` read out of `chraction.c`.
-* `cargo test -p game -- world::ai_testbed` runs the AI jank scenarios; `JankMonitor`
-  reports stalls, thrash, overlap and occlusion.
+   says how to re-clone). Do not invent a plausible adjustment. This track produced five more
+   examples where the obvious answer was wrong and the decomp had the real one — see
+   "Five things measured" below.
+2. **Do not launch and drive the game yourself.** It steals focus and makes the user's machine
+   unusable. Hand them a specific brief instead.
+   *PowerShell note:* env vars need `$env:NAME = "value"` as a separate statement.
 
 ```
-cargo test --release      # 332 green today
+cargo test --release      # 378 green today
 cargo build --release     # the user tests target/release/build-and-hide.exe
 ```
 
+Regenerate, never hand-edit, the transcribed tables:
+
+```
+python tools/pd-assets/pd_weapons.py list                       # summary, one line per weapon
+python tools/pd-assets/pd_weapons.py json  tools/pd-assets/pd_weapons.json
+python tools/pd-assets/pd_weapons.py rust  native/crates/game/src/combat/pd_weapons.rs
+python tools/pd-assets/pd_gltf.py guns tools/pd-assets/pd_weapons.json native/assets/weapons/pd
+```
+
 ---
 
-## What PD gives us, and where it is
+## What shipped
 
-### The weapon table — `game/invitems.c` (172 KB), fully transcribable
-
-| thing | where | shape |
+| | before | now |
 |---|---|---|
-| `struct weapondef` | `include/types.h:3023` | models, 4 anim scripts, **`functions[2]`**, 2 `ammodef`s, aim settings, viewmodel placement, part visibility, name/manufacturer/description text ids, flags |
-| `struct funcdef` + 7 subtypes | `include/types.h:2910–3010` | `funcdef_shoot` / `shootsingle` / `shootauto` / `shootprojectile` / `throw` / `melee` / `special` / `device` |
-| `struct ammodef` | search `invammo_` | ammo type, casing, **clip size**, reload animation, flags |
-| the entries | `game/invitems.c` | 84 `invitem_*` definitions; roughly 40 are weapons, the rest equipment/props/items |
-| the MP weapon set | `include/constants.h:2982+` | 33 `MPWEAPON_*` — the arsenal a multiplayer match can draw from, and the natural scope for "all the guns" |
+| weapons | 23 GoldenEye | +33 Perfect Dark, coexisting (`ARSENAL=ge\|pd\|both`) |
+| fire modes | one per weapon | **two**, for player and hunters |
+| barrel axis | measured convention | authored `CHRGUNFIRE`, or PD's own grip fallback |
+| explosions | one linear sphere | PD's per-axis box, squared, propagating |
+| enemy standoff | guessed range × 0.6 | PD's authored per-function engagement bands |
+| viewmodel placement | hand-tuned JSON | PD's `posx/posy/posz` (PD guns only) |
 
-`funcdef_shoot` carries **damage, spread, recoverytime60, recoildist, recoilangle,
-slidemax, impactforce, duration60, shootsound, penetration**. `funcdef_shootauto` adds
-**initialrpm / maxrpm** (autos spin up — we have a flat fire rate) plus
-`turretaccel`/`turretdecel`. `funcdef_shootprojectile` adds **model, scale, speed,
-speeddecel, traveldist, timer60, hitspeedpreservationfrac**.
+**Controls.** `E` (keyboard) or **hold B ~0.42 s** (N64 pad) switches firing function. Both are
+PD's own model: a *remembered per-weapon mode bit*, not a second trigger
+(`bgun_is_using_secondary_function`, `bondgun.c:9043`). The pad threshold is exact —
+`bondmove.c:931` only toggles once `usedowntime > TICKS(25)`. A short B tap still reloads,
+which is why **reload now fires on B release rather than on the press**: until B comes up
+there is no way to know which press it was.
 
-This is the same situation as `attackanimconfig` on the hunter track: **the numbers we
-hand-tuned exist as authored data.** In particular `weapondef.muzzlez / posx / posy / posz
-/ sway` is the **viewmodel placement** we guessed in `weapon-config.json` and carry as
-`WeaponStats::model_offset` / `pivot_offset` / `muzzle_offset`.
+**Files.** `combat/pd_weapons.rs` (generated table), `combat/arsenal.rs` (the family bridge
++ the AI's function choice), `combat/config.rs` (`SecondaryFire`), `combat/mod.rs` (the
+two-function runtime), `combat/explosives.rs` (PD falloff + `Blast`), `combat/enemy_weapons.rs`
+(`EnemySecondary`), `gamepad.rs` (the B hold/tap split), `world/combat.rs`, `app.rs`.
 
-### `FUNCFLAG_*` — `include/constants.h:1037–1061`
+### Five things measured, each contradicting a plausible assumption
 
-25 behaviour flags on a firing function. Several are things we already have in some form
-(`BURST3` is our `PD_BURST_ROUNDS`; `NOMUZZLEFLASH` matches the weapons with no flash mesh),
-and several are whole features: `STICKTOWALL`, `MAKEDIZZY`, `DISARM`, `FLYBYWIRE`,
-`EXPLOSIVESHELLS`, `HOMINGROCKET`, `CALCULATETRAJECTORY` (throwables land on the crosshair),
-`DISCARDWEAPON`, `THREATDETECTOR`, `PSYCHOSIS`, `BLUNTIMPACT`, `NOSTUN`, `NOAUTOAIM`.
-
-`WEAPONFLAG_AICANUSE` on `weapondef.flags` says exactly which guns an enemy may hold —
-which answers "the player and the enemies should be able to use these guns" from the data
-rather than from our judgement.
-
-### Explosions — `game/explosions.c:41`, `struct explosiontype` at `include/types.h:4313`
-
-A **data table** (`g_ExplosionTypes[]`, commented column-by-column in the source) of
-rangeh, rangev, changerateh, changeratev, innersize, blastradius, damageradius, duration,
-propagationrate, flarespeed, smoketype, sound, damage.
-
-**This matters more than it looks.** `combat/explosives.rs` opens with: *"There is no 3DS
-FPS oracle for any of this — the JS shipped the weapon GLBs but never wired a projectile or
-explosion system. So this is authored fresh."* PD is the oracle we did not have. Two
-structural ideas ours lacks:
-
-* **Separate blast and damage radii**, and separate horizontal/vertical ranges — ours is
-  one spherical falloff.
-* **Propagation** (`propagationrate`, and the growth rates) — a PD explosion *expands* over
-  its duration rather than applying instantly, which is why chain reactions and "the blast
-  caught up with me" read the way they do. Relevant to a known open bug: `set_grenades` is
-  **default OFF** because hunters catch their own blast — the safe-distance check tests the
-  moment of release while the round flies ~1 s. A propagating blast with a real
-  `damageradius` may be the honest fix.
-
-Read `explosions.c` around lines 95–340 for how a type is instantiated, propagated and how
-it lights the room.
-
-### Assets — verified working
-
-* **All 106 gun models parse with existing tooling, zero failures.** `files/guns/*.bin`;
-  `pd_model.py info falcon2.bin` → 802 verts, 565 tris, 8 geometry groups, 14 texconfigs,
-  and node types `GUNDL`(8) / `POSITION`(43) / `TOGGLE`(8). Those nodes are the gun's
-  animated parts (slide, magazine) and its muzzle position.
-* **61 third-person `files/props/chr*.bin`** — the model an *enemy* holds. Already recorded
-  in `pd-weapon-mechanics` memory: there are **two models per gun**, and only the `chr*` one
-  carries the `CHRGUNFIRE` node (authored muzzle-flash position + size, which doubles as the
-  barrel origin). Grabbing the wrong one is an easy mistake, and it is exactly what
-  `DESIGN_PD_SIMULANT_AI.md` §15 had to work around by measuring a convention instead.
-* `pd_gltf.py` currently exports **characters** (skinned + animated). Its prop path was
-  retired. A gun needs a **new export path**: static-ish mesh + named part nodes + textures
-  via `pd_tex.py`. Model this on the char path and keep the same discipline — the roster
-  manifest (`pd_roster.json`) plus a batch command, so it is reproducible.
-* `weapondef` also names a **lo-poly LOD model** per gun. We have no LOD system; ignore it,
-  but do not be confused by the `*lod.bin` files.
-
-### Gun animation scripts — `struct guncmd`, `include/types.h`
-
-A **12-opcode bytecode** (`GUNCMD_*` in `constants.h`): END, SHOWPART, HIDEPART,
-WAITFORZRELEASED, ALLOWFEATURE, PLAYSOUND, INCLUDE, RANDOM, and a few more. Four scripts per
-weapon: equip, unequip, primary→secondary, secondary→primary. Plus `gunviscmds` and
-`partvisibility` for which parts show when.
-
-Small enough to port properly if the viewmodel wants it. **Assess before committing** — our
-viewmodel is a single mesh with a recoil kick, so most of what these scripts express has
-nowhere to land yet.
+1. **`WEAPONFLAG_AICANUSE` is not a gun filter.** The original recon said it "says exactly which
+   guns an enemy may hold". It is set on all 64 real weapons and absent only from the 20
+   non-weapons, so it gates *items*. The real per-weapon AI data is `g_BotWeaponConfigs`
+   (`botinv.c:21`) — a score per function plus an engagement band each.
+2. **1 PD damage unit = 25.0 of our HP.** Derived from two independent facts agreeing: a PD guard
+   has `maxdamage = 4` and the Falcon 2 does `damage = 1` (4 shots); our hunters have 100 HP and
+   the PP7 does 25 (also 4).
+3. **The barrel axis *is* recoverable from the asset.** `DESIGN_PD_SIMULANT_AI.md` §15 measured a
+   convention because it "was not recoverable from the gun mesh". `CHRGUNFIRE` authors it, −X on
+   all 27 models that carry one. For the 17 (of 33) with none, `chr_get_gun_pos`
+   (`chraction.c:9640`) falls back to `MODELPART_0001` — **fire from the grip**.
+4. **PD's explosion falloff is not a sphere.** Per-axis box minimum, squared for characters,
+   peaking at `damage * 8.0`. Characters and scenery use **different formulas** (the object path
+   has a 30% floor; the character path does not).
+5. **Propagation does not fix the grenade self-kill.** The recon hoped it might. PD applies the
+   **full** damage radius on the blast's first frame, so PD is *less* forgiving. PD's real answer
+   is structural — a grenade bot stands at an authored 4.5–7.0 m. Fixed here with a predictive
+   guard instead (refuse the throw if a hunter could be inside the blast after ~1 s of flight).
 
 ---
 
-## Our side, and the size of the gap
+## Playtest brief — do this first
 
-| | ours | PD |
-|---|---|---|
-| weapons | 23 GoldenEye (`combat/config.rs`, 875 lines) | ~33 MP weapons |
-| fire modes | **one** per weapon | **two** (`functions[2]`) |
-| fire kinds | `FireKind::{Hitscan, Projectile, Mine}` | 7 funcdef subtypes |
-| enemy classes | 2 (`EnemyWeaponClass::{Pistol, Rifle}`) | per-weapon, `AICANUSE` flag |
-| auto fire | flat `fire_cooldown` | `initialrpm` → `maxrpm` spin-up |
-| explosions | one authored spherical falloff | 12+ typed, propagating |
-| viewmodel placement | hand-tuned `weapon-config.json` | authored `posx/posy/posz/muzzlez/sway` |
+Nothing below is worth starting until the arsenal has been seen on screen. **CPU-side green
+does not mean it works**: a `MAX_JOINTS` truncation once drew every PD body as a black fan
+while every headless check passed.
 
-Files you will touch: `combat/config.rs` (the table), `combat/mod.rs` (`Weapon` runtime),
-`combat/enemy_weapons.rs` (enemy defs + classes), `combat/viewmodel.rs`, `combat/explosives.rs`,
-`combat/attack_anim.rs` (the fire animation is chosen per weapon class today — PD names an
-animation *per firing function*), `world/combat.rs` (the shot paths), and `shop.rs` /
-`ENEMY_ROSTER` for what is buyable and what enemies carry.
+```powershell
+$env:ARSENAL = "pd"
+.\native\target\release\build-and-hide.exe
+```
 
-**Note the family precedent.** The hunter track ended up with two body families and two clip
-sets coexisting, selected per hunter, with `BODIES=` / `GE_CLIPS=` to narrow them. The same
-shape is available here and is probably right: a PD arsenal alongside the GoldenEye one
-rather than replacing it. Ask (see below) rather than assuming.
+In-game, in HUNT:
 
----
+1. **Do the guns look right in your hands?** Cycle with `Q` through all 33. The viewmodel
+   placement is PD's authored `posx/posy/posz` rather than the hand-tuned JSON, and it has
+   never been looked at — expect this to be the thing that needs tuning. Screenshot any gun
+   that sits wrong (too big, clipping the camera, off-centre, pointing the wrong way).
+2. **Press `E`.** The log names the function it switched to. Try it on the **Falcon 2**
+   (shot ↔ pistol whip) and the **SuperDragon** (rifle ↔ grenade launcher, its own 6 rounds).
+   Does the HUD ammo change to the right pool? Does firing feel like a different weapon?
+3. **Hold B on the N64 pad** for about half a second — same switch. Then **tap B** — that
+   should still reload, and this is the risky one, because reload moved from press to release.
+   Does reloading feel late or unreliable?
+4. **Do the hunters hold their guns properly?** PD's `chr*` models are handless by construction,
+   so the "James Bond's hand" artifact should be gone. Watch for the gun sitting in the fist at
+   a wrong angle instead.
+5. **Do hunters hit you?** The barrel axis is authored now. If they consistently miss, that is
+   the aim path and worth a screenshot of the aim overlay.
+6. **Explosives.** Fire the Rocket Launcher (PD) at a wall near a hunter. PD's blast is much
+   more lethal at the centre and much weaker at the rim than before. A/B it with
+   `$env:PD_EXPLOSIONS = "0"` for the old linear feel.
 
-## Decisions to put to the user first
-
-Do not start coding until these are answered — each one changes the work materially.
-
-1. **Replace or coexist?** Does the PD arsenal *replace* GoldenEye's 23 weapons, or sit
-   alongside them (the way the two body families now do)? Coexisting keeps the shop's 24
-   buyable guns and the GoldenEye feel available, at the cost of a weapon-family concept in
-   the config. Replacing is simpler but throws away the tuned GoldenEye arsenal.
-2. **Secondary fire.** PD's defining weapon feature is `functions[2]`. Giving the player
-   access needs a **new control** (PD used a modifier + trigger). Is that wanted, and on
-   which key? Without it, half of every PD weapon is dead data — but adding it touches the
-   input map, the N64 pad scheme, and the HUD.
-3. **Do enemies get secondary functions too?** `chr_attack` picks a firing animation per
-   *function*, and `WEAPONFLAG_AICANUSE` gates the weapon, not the function. A hunter with a
-   SuperDragon choosing between rapid-fire and its grenade launcher is a real AI decision
-   (PD has `botinv_get_dist_config` keyed by weapon **and** `gunfunc`).
-4. **Adopt PD's explosion table wholesale?** It would replace the authored `Explosion` specs
-   in `combat/config.rs` and add propagation. Strictly better fidelity, and it may fix the
-   grenade self-blast that has `set_grenades` defaulted off — but it changes the feel of
-   every explosive we already tuned.
-5. **Scope of "all the guns."** 33 MP weapons is the clean line. The campaign set adds
-   another ~10 (`pp9i`, `cc13`, `kl01313`, `kf7special`, `zzt9mm`, `dmc`, `ar53`, `rcp45`,
-   `choppergun`, `watchlaser`) which are mostly re-skins with different stats — cheap once
-   the scaffolding exists.
+Also worth one run of `$env:ARSENAL = "both"` to confirm the GoldenEye 23 are untouched and the
+`(PD)`-suffixed duplicates read sensibly in the shop.
 
 ---
 
-## Suggested order
+## What remains, in order
 
-The lesson from the hunter track is that **the data transcribes fast and the systems are
-the work**. So build the scaffolding on the boring weapons first and leave every special
-case until it can be added as data plus one behaviour.
+### 1. Tune the PD viewmodel placement (expect this to be needed)
 
-1. **Assets.** A gun export path in `pd_gltf.py` + roster entries: first-person `guns/*.bin`,
-   third-person `props/chr*.bin`, textures via `pd_tex.py`. Verify with `pd_preview.py`, and
-   pin the `CHRGUNFIRE` muzzle node — that is the thing §15 had to infer.
-2. **Transcribe the table.** `weapondef` + `funcdef_*` + `ammodef` for the MP set, in a new
-   `combat/pd_weapons.rs`, with the same provenance discipline as `combat/attack_anim.rs`
-   (source line per row, invariants asserted, and a test pinning each row to its exported
-   asset). Include `AICANUSE` and the `FUNCFLAG`s even where nothing consumes them yet.
-3. **One fire path, two functions.** Generalise `FireKind` to PD's funcdef subtypes and give
-   a weapon a primary and secondary. Get the ~20 ordinary guns fully working for **both**
-   player and enemy before touching anything exotic. `initialrpm`→`maxrpm` spin-up and the
-   burst flags land here and are cheap.
-4. **Explosions.** Port `g_ExplosionTypes` + propagation into `combat/explosives.rs`,
-   behind a kill-switch so the old authored behaviour is one setter away for A/B — the
-   established pattern in this codebase.
-5. **Then the special cases**, in rising cost. See below.
+`combat/arsenal.rs` converts `weapondef.posx/posy/posz` from PD centimetres into our view
+space, negating z. That conversion is *reasoned* but unverified — PD's first-person camera is
+not ours, and `PD_VIEW_SCALE` is inherited from the character pipeline's measured unit
+equivalence rather than measured for guns. If the guns sit wrong, this is the one place to fix
+it, and the fix is per-weapon data, not code.
+
+### 2. The gun's own animation (`guncmd`)
+
+A 12-opcode bytecode, four scripts per weapon, keyframed sound / part visibility / "you may act
+again now". **The exports are deliberately static** — PD's first-person models articulate (43
+matrices on the Falcon 2) but our viewmodel is one mesh with a recoil kick, so those parts had
+nowhere to land. The part offsets are baked into the geometry rather than dropped, so adding
+articulation is a **re-export, not a re-rip**. Assess whether the viewmodel wants it before
+committing; most of what these scripts express still has nowhere to go.
+
+### 3. PD weapon audio
+
+Every PD gun currently borrows the closest GoldenEye sound (`combat/arsenal.rs`,
+`fire_sound_for`). The real `funcdef_shoot.shootsound` SFX ids **are** transcribed, so this is
+a substitution waiting on an asset, not a guess. PD's audio is in `sfx.ctl`/`sfx.tbl` under
+`reference/pd-decomp/src/assets/ntsc-final/` and is not yet extracted. See
+[goldeneye-soundpack](memory) for the AIFF→WAV precedent.
+
+### 4. Shop prices for the PD arsenal
+
+`shop::weapon_price` falls back to 1000 credits for anything unlisted, so all 33 PD guns cost
+the same. `listed_price` needs PD entries. PD authors no prices, so this is a design call —
+but `g_BotWeaponConfigs.score1` is a ready-made desirability ranking to derive them from.
+
+### 5. The special cases, in rising cost
+
+Cheap now that the two-function scaffolding exists (data plus a flag):
+* **Phoenix** `EXPLOSIVESHELLS`, **Crossbow** two damage modes, **DY357LX** — all already
+  bridged; they need their flags *consumed*, not transcribed.
+* **Devastator** `wallhugger` — `STICKTOWALL` is our existing mine behaviour.
+* **Reaper** `grind` — the melee funcdef path exists (the pistol whip uses it).
+
+Real features, one system each:
+* **Laptop Gun** `deploy` — a deployable sentry. Still the largest single item. `crate::ecs` is
+  the natural home, `funcdef_shootauto` already carries `turretaccel`/`turretdecel`, and
+  `EngageTarget` means a turret can pick a target the way a hunter does.
+* **FarSight** `targetlocator` — sees and shoots through walls. `penetration` is already a
+  transcribed `funcdef` field so the *shot* half may be nearly free; the targeting half is the
+  work.
+* **Slayer** `flybywire` — a player-steered rocket. Camera takeover + controllable projectile.
+* **Psychosis Gun** — much cheaper than it looks: §14 gave the FSM an arbitrary `EngageTarget`
+  and §16.1 a team predicate, so this is close to "flip the target's team for N seconds".
+* **Tranquilizer** `MAKEDIZZY` — the simulant model has the `dizzyamount` hook; nothing drives it.
+
+Also unported, and each needs a system we do not have:
+* **B+Z temporary alt-fire.** PD's third B-button behaviour: `invertgunfunc` uses the other
+  function *only while held*, versus the tap's permanent toggle. Also two per-weapon exceptions
+  in `bgun_consider_toggle_gun_function` — the Sniper Rifle wants a longer 50-tick hold, and the
+  RC-P120 / Laptop / Dragon / Remote Mine treat B as a one-shot **action** (deploy,
+  self-destruct, detonate) rather than a mode.
+* **Cloaking Device / Shield / Combat Boost / X-Ray** — the four `equipment_only` rows,
+  excluded by the scope decision. They are transcribed and tagged, not dropped.
+
+### 6. Re-enable the grenade flush
+
+`World::grenades` is still **default-OFF**. The self-kill it was disabled for now has a
+predictive fix (and a regression test pinning both sides of a 1 m discrimination), but the
+default was set from a playtest, so flipping it back is the user's call. Turn it on and watch
+whether hunters still blow each other up.
 
 ---
 
-## Complexities to flag — leave these until the scaffolding is in
+## Traps this track hit, carried forward
 
-Assessed from each weapon's `functions[2]` in `invitems.c`. Grouped by what they actually
-need from us, which is the thing that decides their cost.
+1. **CPU-side green does not mean it works.** Still true; hence the playtest brief.
+2. **A test can pass because of the bug you are about to fix — or fail because of the fix.**
+   Three fired here. `blast_falloff_is_linear` called the dispatcher and so silently changed
+   meaning when the default moved to PD. `every_weapon_aims_down_its_barrel` caught a real bug
+   (GoldenEye's Shotgun picking up PD's −X barrel through a name collision). And the
+   camper-flush test encoded the old non-predictive grenade rule.
+3. **Name-keyed lookups collide across families.** Seven PD weapons share a GoldenEye name.
+   Shop prices and enemy defs are name-keyed *on purpose*; resolve by **display** name, never
+   source name.
+4. **Assert token counts when transcribing.** Four parser defects surfaced only because the
+   generator refused a column-count mismatch instead of shrugging: a bitfield pair, two
+   different `functions[2]` initializer shapes, `#if VERSION` inside an enum (which
+   mis-resolved every weapon past 0x4f into a *plausible wrong answer*), and trailing `//`
+   comments eating 7 flag defines.
+5. **Measure the invariant you actually have.** The barrel-axis test asserts "the muzzle's
+   dominant component is −X" — what was measured — rather than an angular tolerance. The Reaper
+   sits 36° off because it is a minigun with the barrel slung under the grip; a 25° bound
+   invented for tidiness would have failed on real data.
 
-**Cheap once the two-function scaffolding exists** — these are data plus a flag:
-* **Crossbow** (`shoot` + `lethal`) — two damage modes.
-* **SuperDragon** (`rapidfire` + `grenadelauncher`) — a second function that is a
-  projectile; we already have grenade projectiles.
-* **Phoenix** (`EXPLOSIVESHELLS`), **Falcon 2** scope/silencer variants, **DY357LX** — stat
-  and flag variations on weapons we will already have.
-* **Devastator** (`shoot` + `wallhugger`) — `STICKTOWALL` is our existing mine behaviour.
-* **Reaper** (`shoot` + `grind`) — a melee function; needs the melee funcdef path.
+## Context worth reading
 
-**Real features, one system each:**
-* **Laptop Gun** (`burstfire` + `deploy`) — a **deployable sentry**. Needs a placeable
-  entity that acquires and tracks targets on its own. Notably `funcdef_shootauto` already
-  carries `turretaccel`/`turretdecel`, so the turret aim is authored. Our ECS
-  (`crate::ecs`) is the natural home, and the `EngageTarget` work means a turret can pick a
-  target the same way a hunter does. Still the largest single item here.
-* **FarSight** (`shoot` + `targetlocator`) — **sees and shoots through walls**. Touches the
-  renderer (a through-wall overlay) and the hitscan (penetration is already a `funcdef`
-  field, so the shot half may be nearly free). The *targeting* half is the work.
-* **Slayer** (`shoot` + `flybywire`) — a **player-steered rocket** (`FUNCFLAG_FLYBYWIRE`).
-  Needs a camera takeover and a controllable projectile. Self-contained but touches input
-  and the camera.
-* **Tranquilizer** — `MAKEDIZZY` and PD's `dizzyamount` degradation, which
-  `DESIGN_PD_SIMULANT_AI.md` §9 already lists as deliberately unported. The simulant model
-  has the hook; nothing drives it.
-* **Psychosis Gun** (`FUNCFLAG_PSYCHOSIS`) — makes a hunter attack its own side. **Much
-  cheaper than it used to be**: §14 gave the FSM an arbitrary `EngageTarget` and §16.1 gave
-  us a team predicate (`pd_lab::is_friend`). This is close to "flip the target's team for N
-  seconds" now.
-* **N-Bomb** — an area effect on an explosion type we will already have.
-
-**No system to attach to; defer or decline:**
-* **Cloaking Device** — no invisibility system (the `N` toggle is a dev aid, not a
-  mechanic). The simulant model *does* carry `zerocloakspeed` already, unused.
-* **Shield** / **Combat Boost** — no shield system; §9 lists `SHIELD`/`TURTLE`'s double
-  shield as unported for exactly this reason.
-* **X-Ray Scanner**, **Threat Detector**, **IR Scanner**, **Night Vision** — HUD/render
-  features, no gameplay dependency, easy to do badly.
-* **Disarm** (`FUNCFLAG_DISARM`) — needs a hunter to be able to lose its weapon, which
-  touches the weapon-attach and AI weapon-choice paths.
-
----
-
-## Traps this track will hit — carried forward from the hunter port
-
-1. **CPU-side green does not mean it works.** A `MAX_JOINTS` truncation once drew every PD
-   body as a black fan while all headless checks passed. Hand off a playtest brief.
-2. **Measure through the real stack, not the raw asset.** An aim bug was invisible in the
-   clip and only appeared once composed: clip-alone `+1.6°`, through the layer stack `−78.2°`.
-3. **A doc comment asserting an incompatibility is not evidence of one.** "PD's bind pose is
-   not GoldenEye's" cost the roster 38 bodies and was false. Measure load-bearing claims.
-4. **A test can pass because of the bug you are about to fix.** Three did on the hunter
-   track. When a change makes one default universal, expect the tests that encoded the old
-   default to be load-bearing in ways nobody wrote down.
-5. **Porting a table means porting its filters too.** We took `bot_choose_general_target`'s
-   distance walk and its vetoes and left out one line of team check — the whole difference
-   between a squad and a free-for-all. `WEAPONFLAG_AICANUSE` and the `FUNCFLAG`s are the
-   equivalents here.
-6. **An explicit flag must outrank a mode default.** `enable_pd_lab` pinned a body set and
-   silently ate `BODIES=ge` for a whole playtest. Apply environment/user choices last, and
-   log the resolved answer (`World::roster_summary` is the pattern).
-
-## Context worth reading first
-
-* `DESIGN_PD_WEAPON_MECHANICS.md` — the earlier weapon-side recon, including the two-models-
-  per-gun finding and the `attackanimconfig` pointer. **Start here.**
-* `DESIGN_PD_SIMULANT_AI.md` §13 (direction tables — the model for transcribing PD data with
-  provenance), §15 (why the barrel axis is a convention, which the `CHRGUNFIRE` node makes
-  moot), §19 (the two clip/asset conventions that bit us).
-* `combat/attack_anim.rs` — the reference example of a transcribed PD table in this codebase:
-  source line per row, invariants asserted, assets pinned by test.
-* Memory: `pd-weapon-mechanics`, `pd-direction-table`, `explosives-port`, `pd-asset-conversion`.
+* `DESIGN_PD_WEAPON_MECHANICS.md` — the weapon-side recon. §2 (no attach offset to tune),
+  §3 (two models per gun), §5 (`attackanimconfig`), §8 (`guncmd`).
+* `DESIGN_PD_SIMULANT_AI.md` §13 (transcribing PD data with provenance), §15 (the barrel axis —
+  now superseded, see above), §19 (the two asset conventions).
+* `combat/pd_weapons.rs` module docs — the conversion constants and why each is derived.
+* Memory: `pd-arsenal-decisions`, `pd-weapon-mechanics`, `pd-direction-table`, `explosives-port`.
