@@ -1484,6 +1484,13 @@ pub(crate) struct EnemyInstance {
     /// [`PD_BURST_ROUNDS`], then the next shot waits [`PD_BURST_GAP`] and it resets.
     /// PD simulants with an automatic weapon only; zero everywhere else.
     pub burst_shot: u32,
+    /// Whether this hunter is firing its weapon's **secondary** function.
+    ///
+    /// Decided once when a burst starts ([`World::start_enemy_fire`]) rather than
+    /// per frame, from PD's own engagement bands and per-function scores — so a
+    /// hunter commits to a choice for the burst instead of flickering between two
+    /// functions while the range wobbles. Always `false` on the GoldenEye arsenal.
+    pub use_secondary: bool,
     /// Active fire burst: `Some(elapsed_seconds)` while a burst is running, `None`
     /// otherwise. Firing is now a **timer** (not a full-body clip), so the hunter
     /// keeps running its locomotion + procedural aim while shooting.
@@ -1961,8 +1968,13 @@ pub struct World {
     /// arsenal, loaded once and handed to the renderer so any hunter can draw any
     /// weapon (and the BUILD demo can preview each). Keyed by weapon name.
     enemy_weapon_lib: Vec<EnemyWeaponAsset>,
+    /// Which arsenal is live — GoldenEye's 23, Perfect Dark's 33, or both.
+    /// Resolved once in [`Self::new`] from `ARSENAL=` and then the single source of
+    /// truth for the weapon list, so the shop, the cycle order and the enemy
+    /// weapon library cannot disagree about what index means what.
+    arsenal: crate::combat::Arsenal,
     /// The player's weapon inventory (JS `WeaponSystem.slots`) — one [`Weapon`]
-    /// per `config::WEAPONS` entry, each keeping its own ammo/reload state so a
+    /// per [`Self::arsenal`] entry, each keeping its own ammo/reload state so a
     /// swap resumes where you left off. `Q` / N64 `A` cycles [`weapon_index`].
     weapons: Vec<Weapon>,
     /// Ownership flag per [`weapons`] entry (same length/order as `config::WEAPONS`).
@@ -2455,6 +2467,7 @@ impl World {
 
         World {
             camera,
+            arsenal,
             physics: PhysicsWorld::new(),
             mode: Mode::Build,
             ecs: crate::ecs::Ecs::new(),

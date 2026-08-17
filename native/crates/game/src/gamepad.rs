@@ -52,6 +52,15 @@ const BTN_C_RIGHT: PadButton = PadButton::DPadRight;
 /// that expose the yellow C-cluster as the right analog stick).
 const C_STICK_THRESHOLD: f32 = 0.5;
 
+/// How long B must be held to switch the weapon's firing function, in seconds.
+///
+/// Perfect Dark's own threshold, not a feel guess: `bondmove.c:931` only calls
+/// `bgun_consider_toggle_gun_function` once `usedowntime > TICKS(25)`, and PD ticks
+/// at 60 Hz — so 25/60 s. Under that, releasing B is a *tap*, which PD counts as
+/// `btapcount` and uses for reload/activate. That split is why the same button can
+/// carry both without a modifier.
+const B_HOLD_TOGGLE_SECS: f32 = 25.0 / 60.0;
+
 /// One frame's edge-triggered actions the app must handle (held/analog inputs are
 /// injected straight into [`InputState`] / [`World`] and aren't reported here).
 #[derive(Default)]
@@ -67,6 +76,11 @@ pub struct PadActions {
     /// A+B pressed together this frame — detonate all live remote mines (HUNT). Takes
     /// the place of a separate Detonator weapon slot.
     pub detonate: bool,
+    /// B held past [`B_HOLD_TOGGLE_SECS`] this frame — switch the equipped weapon
+    /// between its primary and secondary firing function (Perfect Dark's
+    /// `functions[2]`). Fires ONCE per hold, and suppresses the tap-reload on
+    /// release so one press does not do both.
+    pub toggle_function: bool,
     /// Start pressed this frame — toggle the shop/inventory menu (which frees the
     /// cursor while open, then restores it on close).
     pub menu: bool,
@@ -84,6 +98,11 @@ pub struct N64Pad {
     prev_cycle: bool,
     /// A+B-together state last frame, for the detonate edge.
     prev_both: bool,
+    /// Seconds B has been held, for PD's hold-to-switch-function threshold.
+    b_held_secs: f32,
+    /// Whether this B hold already fired the function toggle, so it happens once
+    /// per press rather than every frame past the threshold.
+    b_toggled: bool,
     /// Keys the pad is currently synthesizing (from the stick / C-buttons). Tracked
     /// so the pad only ever RELEASES a key it pressed itself — a centered stick
     /// never clobbers a key the player is holding on the keyboard.
@@ -103,6 +122,8 @@ impl N64Pad {
             prev_reload: false,
             prev_cycle: false,
             prev_both: false,
+            b_held_secs: 0.0,
+            b_toggled: false,
             held_keys: Vec::new(),
             held_fire: false,
         })
@@ -256,7 +277,19 @@ impl N64Pad {
         // lands may still cycle/reload once — acceptable for a two-button combo.)
         let both = reload && cycle;
         actions.detonate = both && !self.prev_both;
-        actions.reload = reload && !self.prev_reload && !both;
+
+        // B is PD's dual-purpose button — see `b_button_edges`.
+        let mut b = BState {
+            held_secs: self.b_held_secs,
+            toggled: self.b_toggled,
+        };
+        let (toggle, do_reload) =
+            b_button_edges(&mut b, dt, reload && !both, self.prev_reload, self.prev_both);
+        actions.toggle_function = toggle;
+        actions.reload = do_reload;
+        self.b_held_secs = b.held_secs;
+        self.b_toggled = b.toggled;
+
         actions.cycle = cycle && !self.prev_cycle && !both;
         actions.menu = start && !self.prev_start;
         self.prev_reload = reload;
@@ -264,5 +297,139 @@ impl N64Pad {
         self.prev_start = start;
         self.prev_both = both;
         actions
+    }
+}
+
+/// The B-button hold state, split out of [`N64Pad`] so the decision below is
+/// testable without a controller plugged in.
+#[derive(Default, Clone, Copy, Debug)]
+pub(crate) struct BState {
+    pub held_secs: f32,
+    pub toggled: bool,
+}
+
+/// PD's dual-purpose B button, as `(toggle_function, reload)` for this frame.
+///
+/// `bgun_consider_toggle_gun_function` (`bondgun.c:8963`) is reached from
+/// `bondmove.c:931` only once `usedowntime > TICKS(25)`, so **holding** B switches
+/// the weapon's firing function, while a short **tap** is the reload/activate PD
+/// counts as `btapcount` on release.
+///
+/// The consequence worth stating: the reload can only fire on RELEASE, because
+/// until B comes up there is no way to know whether the press was a tap or the
+/// start of a hold. That is a deliberate change from firing reload on the press
+/// edge, and it is what lets one button carry both without a modifier.
+pub(crate) fn b_button_edges(
+    state: &mut BState,
+    dt: f32,
+    b_down: bool,
+    prev_down: bool,
+    prev_both: bool,
+) -> (bool, bool) {
+    let mut toggle = false;
+    if b_down {
+        state.held_secs += dt;
+        if !state.toggled && state.held_secs >= B_HOLD_TOGGLE_SECS {
+            toggle = true;
+            state.toggled = true;
+        }
+    }
+    // A release counts as a reload only if the hold never became a function
+    // switch — one press does one thing.
+    let released = !b_down && prev_down;
+    let reload = released && !state.toggled && !prev_both;
+    if !b_down {
+        state.held_secs = 0.0;
+        state.toggled = false;
+    }
+    (toggle, reload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A short tap reloads on release and never switches function.
+    #[test]
+    fn a_short_b_tap_reloads() {
+        let mut st = BState::default();
+        let mut prev = false;
+        // Hold for 0.2 s — comfortably under PD's 25/60 s.
+        for _ in 0..12 {
+            let (toggle, reload) = b_button_edges(&mut st, 1.0 / 60.0, true, prev, false);
+            assert!(!toggle, "a tap must not switch function");
+            assert!(!reload, "reload waits for the release");
+            prev = true;
+        }
+        let (toggle, reload) = b_button_edges(&mut st, 1.0 / 60.0, false, prev, false);
+        assert!(!toggle);
+        assert!(reload, "releasing a short tap reloads");
+    }
+
+    /// A hold switches function once, at the threshold, and then does NOT also
+    /// reload when released.
+    #[test]
+    fn a_long_b_hold_switches_function_and_suppresses_the_reload() {
+        let mut st = BState::default();
+        let mut prev = false;
+        let mut toggles = 0;
+        // Hold for a full second — well past the threshold.
+        for _ in 0..60 {
+            let (toggle, reload) = b_button_edges(&mut st, 1.0 / 60.0, true, prev, false);
+            if toggle {
+                toggles += 1;
+            }
+            assert!(!reload, "no reload while held");
+            prev = true;
+        }
+        assert_eq!(toggles, 1, "exactly one switch per hold, not one per frame");
+        let (toggle, reload) = b_button_edges(&mut st, 1.0 / 60.0, false, prev, false);
+        assert!(!toggle);
+        assert!(!reload, "a hold that switched must not also reload");
+    }
+
+    /// The threshold is PD's, to the frame: 25 ticks at 60 Hz.
+    #[test]
+    fn the_threshold_is_pds_25_ticks() {
+        assert!((B_HOLD_TOGGLE_SECS - 25.0 / 60.0).abs() < 1e-6);
+        let mut st = BState::default();
+        let mut prev = false;
+        // 24 frames: not yet.
+        for _ in 0..24 {
+            let (toggle, _) = b_button_edges(&mut st, 1.0 / 60.0, true, prev, false);
+            assert!(!toggle, "not before 25 ticks");
+            prev = true;
+        }
+        let (toggle, _) = b_button_edges(&mut st, 1.0 / 60.0, true, prev, false);
+        assert!(toggle, "switches at the 25th tick");
+    }
+
+    /// Releasing B out of the A+B detonate combo neither reloads nor switches —
+    /// the combo already did its job.
+    #[test]
+    fn the_detonate_combo_does_not_leak_a_reload() {
+        let mut st = BState::default();
+        let (toggle, reload) = b_button_edges(&mut st, 1.0 / 60.0, false, true, true);
+        assert!(!toggle);
+        assert!(!reload, "A+B is the detonate combo, not a reload");
+    }
+
+    /// Two consecutive holds each switch once — the state resets on release.
+    #[test]
+    fn consecutive_holds_each_switch() {
+        let mut st = BState::default();
+        for _ in 0..2 {
+            let mut prev = false;
+            let mut toggles = 0;
+            for _ in 0..40 {
+                let (toggle, _) = b_button_edges(&mut st, 1.0 / 60.0, true, prev, false);
+                if toggle {
+                    toggles += 1;
+                }
+                prev = true;
+            }
+            assert_eq!(toggles, 1);
+            b_button_edges(&mut st, 1.0 / 60.0, false, prev, false);
+        }
     }
 }

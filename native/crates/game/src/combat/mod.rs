@@ -25,8 +25,12 @@ pub mod shooting;
 pub mod viewmodel;
 
 pub use arsenal::Arsenal;
-pub use config::{Explosion, FireKind, MineSpec, MineTrigger, ProjectileSpec, WeaponStats};
-pub use enemy_weapons::{enemy_def_for, standoff_for, EnemyWeaponClass, EnemyWeaponDef};
+pub use config::{
+    Explosion, FireKind, MineSpec, MineTrigger, ProjectileSpec, SecondaryFire, WeaponStats,
+};
+pub use enemy_weapons::{
+    enemy_def_for, standoff_for, EnemySecondary, EnemyWeaponClass, EnemyWeaponDef,
+};
 pub use explosives::{falloff_damage, Mine, Projectile};
 pub use shooting::{cast, HitResult};
 pub use viewmodel::{load_flash, load_gun, ViewModel};
@@ -91,10 +95,30 @@ pub struct Weapon {
     /// empty-click branch, drained by the game layer via [`Self::take_cues`]. Keeps
     /// the fire model audio-free so it stays headless-testable.
     cues: Vec<SoundCue>,
+    /// Whether this weapon's **secondary** function is the active one — Perfect
+    /// Dark's `gunfuncs[]` bit, remembered per weapon rather than held down.
+    ///
+    /// Lives on the `Weapon` (and the `World` keeps one `Weapon` per arsenal
+    /// entry), so it persists across weapon switches exactly as PD's per-weapon
+    /// bit does: put the SuperDragon on grenades, cycle away, come back, and it is
+    /// still on grenades. Always `false` for a GoldenEye weapon, which has no
+    /// second function to select.
+    secondary: bool,
+    /// The second ammo pool, for a secondary function with `ammo_index == 1`.
+    /// Separate from [`Self::magazine`] because PD gives those functions their own
+    /// `ammodef` — the SuperDragon's 6 grenades are not rifle rounds. Unused (and
+    /// zero) for every other weapon.
+    magazine2: u32,
+    reserve2: u32,
 }
 
 impl Weapon {
     pub fn new(config: WeaponStats) -> Self {
+        let mag2 = config
+            .secondary
+            .filter(|s| s.ammo_index == 1)
+            .map(|s| s.magazine_size)
+            .unwrap_or(0);
         Weapon {
             view: ViewModel::new(config),
             game_time: 0.0,
@@ -107,6 +131,117 @@ impl Weapon {
             reload_timer: 0.0,
             reload_delay_timer: 0.0,
             cues: Vec::new(),
+            secondary: false,
+            magazine2: mag2,
+            reserve2: mag2 * RESERVE_MULTIPLIER,
+        }
+    }
+
+    // ── Firing function (Perfect Dark's `functions[2]`) ─────────────────────
+
+    /// Whether this weapon has a second firing function to switch to.
+    pub fn has_secondary(&self) -> bool {
+        self.config().secondary.is_some()
+    }
+
+    /// Whether the secondary function is currently selected.
+    pub fn is_secondary(&self) -> bool {
+        self.secondary && self.has_secondary()
+    }
+
+    /// The active function's authored label, or `None` on the primary. Drives the
+    /// HUD, so the player can tell which mode a gun is in without firing it.
+    pub fn function_label(&self) -> Option<&'static str> {
+        if self.is_secondary() {
+            self.config().secondary.map(|s| s.label)
+        } else {
+            None
+        }
+    }
+
+    /// Toggle between the primary and secondary function, PD-style.
+    ///
+    /// A no-op (returning `false`) on a weapon with one function, so the key does
+    /// nothing rather than something surprising. Cancels any in-progress reload —
+    /// PD plays a `pritosec_animation` here, and letting a reload complete *through*
+    /// a mode switch would top up the wrong magazine.
+    pub fn toggle_function(&mut self) -> bool {
+        if !self.has_secondary() {
+            return false;
+        }
+        self.secondary = !self.secondary;
+        self.cancel_reload();
+        // Re-arm the cadence so switching modes is not a way to skip a cooldown.
+        self.last_fire_time = self.game_time;
+        true
+    }
+
+    /// Seconds between shots for the active function.
+    fn active_cooldown(&self) -> f32 {
+        match self.config().secondary {
+            Some(s) if self.secondary => s.fire_cooldown,
+            _ => self.config().fire_cooldown,
+        }
+    }
+
+    /// Whether the active function is full-auto.
+    fn active_automatic(&self) -> bool {
+        match self.config().secondary {
+            Some(s) if self.secondary => s.automatic,
+            _ => self.config().automatic,
+        }
+    }
+
+    /// Damage per hit for the active function.
+    pub fn active_damage(&self) -> f32 {
+        match self.config().secondary {
+            Some(s) if self.secondary => s.damage,
+            _ => self.config().damage,
+        }
+    }
+
+    /// Effective range for the active function.
+    pub fn active_range(&self) -> f32 {
+        match self.config().secondary {
+            Some(s) if self.secondary => s.range,
+            _ => self.config().range,
+        }
+    }
+
+    /// How the active function delivers its damage.
+    pub fn active_fire_kind(&self) -> FireKind {
+        match self.config().secondary {
+            Some(s) if self.secondary => s.fire_kind,
+            _ => self.config().fire_kind,
+        }
+    }
+
+    /// The fire sound for the active function (a silenced secondary sounds
+    /// silenced).
+    fn active_fire_sound(&self) -> &'static str {
+        match self.config().secondary {
+            Some(s) if self.secondary => s.fire_sound,
+            _ => self.config().fire_sound,
+        }
+    }
+
+    /// `funcdef.ammoindex` for the active function: `0` the shared magazine, `1`
+    /// the second pool, `-1` free.
+    fn active_ammo_index(&self) -> i8 {
+        match self.config().secondary {
+            Some(s) if self.secondary => s.ammo_index,
+            _ => 0,
+        }
+    }
+
+    /// Rounds available to the active function. A function that consumes no ammo
+    /// (`ammo_index == -1`, the melee ones) always reports one, so the shared fire
+    /// gate treats it as loaded without a special case.
+    fn active_magazine(&self) -> u32 {
+        match self.active_ammo_index() {
+            -1 => 1,
+            1 => self.magazine2,
+            _ => self.magazine,
         }
     }
 
@@ -121,14 +256,24 @@ impl Weapon {
         &self.view.config
     }
 
-    /// Rounds currently in the magazine (for the HUD ammo counter).
+    /// Rounds currently in the magazine (for the HUD ammo counter) — of the pool
+    /// the **active** function draws from, so the HUD reads the ammo you are about
+    /// to spend. A melee function has no magazine and reports 0.
     pub fn magazine(&self) -> u32 {
-        self.magazine
+        match self.active_ammo_index() {
+            -1 => 0,
+            1 => self.magazine2,
+            _ => self.magazine,
+        }
     }
 
-    /// Rounds held in reserve (for the HUD ammo counter).
+    /// Rounds held in reserve (for the HUD ammo counter), of the active pool.
     pub fn reserve(&self) -> u32 {
-        self.reserve
+        match self.active_ammo_index() {
+            -1 => 0,
+            1 => self.reserve2,
+            _ => self.reserve,
+        }
     }
 
     /// Add `rounds` to the reserve pool (a shop ammo purchase). Saturates.
@@ -192,15 +337,15 @@ impl Weapon {
         if !self.reloading {
             // Fire readiness: semi = a fresh edge (no cooldown, our deliberate
             // GoldenEye-trigger-pull deviation); auto = held + cooldown elapsed.
-            let fire_ready = if self.config().automatic {
-                trigger && self.game_time - self.last_fire_time >= self.config().fire_cooldown
+            let fire_ready = if self.active_automatic() {
+                trigger && self.game_time - self.last_fire_time >= self.active_cooldown()
             } else {
                 edge
             };
-            if self.magazine > 0 && fire_ready {
+            if self.active_magazine() > 0 && fire_ready {
                 self.fire();
                 fired = true;
-            } else if self.magazine == 0 && edge {
+            } else if self.active_magazine() == 0 && edge {
                 // Empty click: a fresh trigger pull on an empty magazine clicks.
                 //
                 // DEVIATION from the JS oracle (flagged): JS queued `empty` then
@@ -242,12 +387,24 @@ impl Weapon {
     /// already running, the post-fire delay isn't active, the magazine isn't full,
     /// and there's reserve to draw from — JS `WeaponSystem.update`'s `KeyR` branch.
     pub fn request_reload(&mut self) {
-        if !self.reloading
-            && self.reload_delay_timer <= 0.0
-            && self.magazine < self.config().magazine_size
-            && self.reserve > 0
-        {
-            self.start_reload();
+        if self.reloading || self.reload_delay_timer > 0.0 {
+            return;
+        }
+        // Whichever pool the active function uses. A no-ammo (melee) function has
+        // nothing to reload.
+        match self.active_ammo_index() {
+            -1 => {}
+            1 => {
+                let cap = self.config().secondary.map(|s| s.magazine_size).unwrap_or(0);
+                if self.magazine2 < cap && self.reserve2 > 0 {
+                    self.start_reload();
+                }
+            }
+            _ => {
+                if self.magazine < self.config().magazine_size && self.reserve > 0 {
+                    self.start_reload();
+                }
+            }
         }
     }
 
@@ -255,14 +412,28 @@ impl Weapon {
     /// the magazine (with reserve left) arms the auto-reload delay.
     fn fire(&mut self) {
         self.last_fire_time = self.game_time;
-        self.magazine -= 1;
-        if self.magazine == 0 && self.reserve > 0 {
-            self.reload_delay_timer = RELOAD_DELAY;
+        // Spend from whichever pool the ACTIVE function draws on. A melee
+        // secondary (`ammo_index == -1`) spends nothing — the pistol whip does not
+        // consume a bullet.
+        match self.active_ammo_index() {
+            -1 => {}
+            1 => {
+                self.magazine2 = self.magazine2.saturating_sub(1);
+                if self.magazine2 == 0 && self.reserve2 > 0 {
+                    self.reload_delay_timer = RELOAD_DELAY;
+                }
+            }
+            _ => {
+                self.magazine -= 1;
+                if self.magazine == 0 && self.reserve > 0 {
+                    self.reload_delay_timer = RELOAD_DELAY;
+                }
+            }
         }
         self.flash_timer = MUZZLE_FLASH_TIME;
         self.view.play_recoil();
         self.cues.push(SoundCue {
-            name: self.config().fire_sound,
+            name: self.active_fire_sound(),
             volume: FIRE_VOL,
         });
     }
@@ -282,10 +453,24 @@ impl Weapon {
     /// Refill the magazine from reserve, capped at the magazine size and available
     /// reserve (JS `finishReload`).
     fn finish_reload(&mut self) {
-        let needed = self.config().magazine_size - self.magazine;
-        let to_load = needed.min(self.reserve);
-        self.magazine += to_load;
-        self.reserve -= to_load;
+        // Reload the pool the ACTIVE function feeds from, so switching the
+        // SuperDragon to grenades and reloading tops up grenades, not rifle rounds.
+        if self.active_ammo_index() == 1 {
+            let cap = self
+                .config()
+                .secondary
+                .map(|s| s.magazine_size)
+                .unwrap_or(0);
+            let needed = cap.saturating_sub(self.magazine2);
+            let to_load = needed.min(self.reserve2);
+            self.magazine2 += to_load;
+            self.reserve2 -= to_load;
+        } else {
+            let needed = self.config().magazine_size - self.magazine;
+            let to_load = needed.min(self.reserve);
+            self.magazine += to_load;
+            self.reserve -= to_load;
+        }
         self.reloading = false;
     }
 }
@@ -472,6 +657,176 @@ mod tests {
         assert!(!w.is_reloading(), "reload finished");
         assert_eq!(w.magazine(), 7, "magazine topped up");
         assert_eq!(w.reserve(), 70 - 3, "reserve drew the 3 rounds loaded");
+    }
+
+    // ── Perfect Dark's two firing functions ─────────────────────────────────
+
+    /// A GoldenEye weapon has one function, so the toggle is inert rather than
+    /// surprising.
+    #[test]
+    fn a_single_function_weapon_cannot_switch() {
+        let mut w = Weapon::new(config::PP7);
+        assert!(!w.has_secondary());
+        assert!(!w.toggle_function(), "nothing to switch to");
+        assert!(!w.is_secondary());
+        assert_eq!(w.function_label(), None);
+    }
+
+    /// A PD weapon switches, reports its authored label, and switches back.
+    #[test]
+    fn a_pd_weapon_toggles_between_its_two_functions() {
+        let falcon = *arsenal::Arsenal::PerfectDark
+            .weapons()
+            .iter()
+            .find(|w| w.name == "Falcon 2")
+            .unwrap();
+        let mut w = Weapon::new(falcon);
+        assert!(w.has_secondary());
+        assert_eq!(w.function_label(), None, "starts on the primary");
+
+        assert!(w.toggle_function());
+        assert!(w.is_secondary());
+        // PD's own label for the Falcon 2's second function.
+        assert_eq!(w.function_label(), Some("Pistol Whip"));
+
+        assert!(w.toggle_function());
+        assert!(!w.is_secondary(), "toggles back");
+    }
+
+    /// The active function drives damage, reach and delivery — not just a label.
+    #[test]
+    fn the_active_function_drives_the_shot() {
+        let falcon = *arsenal::Arsenal::PerfectDark
+            .weapons()
+            .iter()
+            .find(|w| w.name == "Falcon 2")
+            .unwrap();
+        let mut w = Weapon::new(falcon);
+        let (pri_dmg, pri_range) = (w.active_damage(), w.active_range());
+        w.toggle_function();
+        // The pistol whip is a melee function: it reaches barely any distance
+        // compared to the gun, which is the point of it being a separate function.
+        assert!(
+            w.active_range() < pri_range * 0.5,
+            "the whip ({}) should be far shorter than the shot ({pri_range})",
+            w.active_range()
+        );
+        assert!(w.active_damage() > 0.0 && pri_dmg > 0.0);
+    }
+
+    /// A melee secondary consumes no ammo (`funcdef.ammoindex == -1`) — you can
+    /// pistol-whip with an empty gun, which is exactly when you would want to.
+    #[test]
+    fn a_melee_secondary_costs_no_ammo() {
+        let falcon = *arsenal::Arsenal::PerfectDark
+            .weapons()
+            .iter()
+            .find(|w| w.name == "Falcon 2")
+            .unwrap();
+        let mut w = Weapon::new(falcon);
+        // Empty the magazine on the primary.
+        for _ in 0..falcon.magazine_size {
+            w.update(0.016, true);
+            w.update(0.016, false);
+        }
+        assert_eq!(w.magazine(), 0, "gun is dry");
+        w.toggle_function();
+        w.take_cues();
+        let mut hits = 0;
+        for _ in 0..5 {
+            if w.update(0.016, true) {
+                hits += 1;
+            }
+            w.update(0.016, false);
+        }
+        assert_eq!(hits, 5, "the whip works on an empty gun");
+    }
+
+    /// The SuperDragon is the MP set's one weapon whose secondary has its **own**
+    /// ammo pool (`ammoindex == 1`, a 6-round grenade `ammodef`). Firing grenades
+    /// must not eat rifle rounds, and the HUD must read the pool in use.
+    #[test]
+    fn a_secondary_with_its_own_pool_spends_that_pool() {
+        let dragon = *arsenal::Arsenal::PerfectDark
+            .weapons()
+            .iter()
+            .find(|w| w.name == "SuperDragon")
+            .unwrap();
+        let sec = dragon.secondary.expect("a grenade launcher");
+        assert_eq!(sec.ammo_index, 1, "PD gives it its own ammodef");
+        assert_eq!(sec.magazine_size, 6, "6 grenades");
+
+        let mut w = Weapon::new(dragon);
+        let rifle_rounds = w.magazine();
+        w.toggle_function();
+        assert_eq!(w.magazine(), 6, "the HUD shows grenades once switched");
+
+        w.update(0.016, true);
+        w.update(0.016, false);
+        assert_eq!(w.magazine(), 5, "a grenade was spent");
+
+        w.toggle_function();
+        assert_eq!(w.magazine(), rifle_rounds, "the rifle magazine is untouched");
+    }
+
+    /// Reloading tops up the pool the active function feeds from.
+    #[test]
+    fn reloading_fills_the_active_pool() {
+        let dragon = *arsenal::Arsenal::PerfectDark
+            .weapons()
+            .iter()
+            .find(|w| w.name == "SuperDragon")
+            .unwrap();
+        let mut w = Weapon::new(dragon);
+        w.toggle_function(); // grenades
+        for _ in 0..3 {
+            w.update(0.016, true);
+            w.update(0.016, false);
+        }
+        assert_eq!(w.magazine(), 3, "three grenades spent");
+        let rifle_before = {
+            w.toggle_function();
+            let m = w.magazine();
+            w.toggle_function();
+            m
+        };
+        w.request_reload();
+        assert!(w.is_reloading());
+        for _ in 0..400 {
+            w.update(0.016, false);
+        }
+        assert_eq!(w.magazine(), 6, "grenades refilled");
+        w.toggle_function();
+        assert_eq!(w.magazine(), rifle_before, "the rifle pool never moved");
+    }
+
+    /// Switching function cancels a running reload rather than letting it complete
+    /// into the other magazine, and does not hand out a free shot by resetting the
+    /// cadence backwards.
+    #[test]
+    fn switching_function_cancels_a_reload_and_does_not_skip_the_cooldown() {
+        let dragon = *arsenal::Arsenal::PerfectDark
+            .weapons()
+            .iter()
+            .find(|w| w.name == "SuperDragon")
+            .unwrap();
+        let mut w = Weapon::new(dragon);
+        // Spend a round so a reload is legal, then start one.
+        w.update(0.016, true);
+        w.update(0.016, false);
+        // Clear the post-fire delay so the manual reload is allowed.
+        for _ in 0..40 {
+            w.update(0.016, false);
+        }
+        w.request_reload();
+        assert!(w.is_reloading(), "a reload is running");
+        w.toggle_function();
+        assert!(!w.is_reloading(), "the switch cancelled it");
+
+        // The primary is automatic, so an immediate held trigger must still wait
+        // out the cadence rather than firing on the switch frame.
+        w.toggle_function(); // back to the automatic primary
+        assert!(!w.update(0.001, true), "no free shot on the switch frame");
     }
 
     /// Emptying the magazine auto-reloads after the post-fire delay elapses,

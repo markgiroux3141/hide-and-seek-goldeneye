@@ -29,6 +29,25 @@ pub enum EnemyWeaponClass {
     Rifle,
 }
 
+/// A weapon's second firing function, as a hunter wields it.
+///
+/// Only what changes the shot: cadence, damage, whether it hoses, and the
+/// distance band PD wants it used at. The attach transforms and the gun mesh
+/// belong to the weapon, not to the function, so they are not duplicated here.
+#[derive(Clone, Copy, Debug)]
+pub struct EnemySecondary {
+    /// PD's authored label, e.g. `"Grenade Launcher"` — logged when a hunter
+    /// switches, so a playtest can tell what it chose.
+    pub label: &'static str,
+    /// Shots per second while inside the fire window.
+    pub fire_rate: f32,
+    pub damage: f32,
+    pub automatic: bool,
+    /// The engagement band (metres) PD wants this function used at
+    /// (`g_BotDistConfigs[secdistconfig]`).
+    pub band: (f32, f32),
+}
+
 /// A weapon as an enemy wields it: the shared gun/muzzle/sound assets (identical to
 /// the player [`WeaponStats`] paths), the AI fire stats, and the two bone-local
 /// attach transforms (right hand always; left hand only when dual-wielding).
@@ -68,6 +87,13 @@ pub struct EnemyWeaponDef {
     /// `FUNCFLAG_BURST3` rows that fire three rounds and then pause, rather than a
     /// continuous stream. See `World::enemy_combat_step`.
     pub automatic: bool,
+    /// The weapon's **secondary** firing function as a hunter uses it, when it has
+    /// one (Perfect Dark weapons only). `None` for every GoldenEye weapon.
+    ///
+    /// Which one a hunter actually uses is decided per burst from PD's own data —
+    /// see [`crate::combat::arsenal::ai_prefers_secondary`], which reads the
+    /// engagement bands and per-function scores out of `g_BotWeaponConfigs`.
+    pub secondary: Option<EnemySecondary>,
     /// Right-hand (`Bone_9`) bone-local offset + XYZ-euler rotation, GE units.
     pub right_offset: Vec3,
     pub right_rot: Vec3,
@@ -264,6 +290,26 @@ pub fn enemy_def_for(w: &WeaponStats) -> EnemyWeaponDef {
     let (range, fire_rate, r_off, r_rot, l_off, l_rot) =
         bespoke.unwrap_or((range, fire_rate, r_off, r_rot, l_off, l_rot));
 
+    // A Perfect Dark weapon brings its second function along. Cadence and damage
+    // come from the authored `funcdef`, and the band from `g_BotWeaponConfigs` —
+    // the hunter's choice between the two is then data, not our judgement.
+    let secondary = crate::combat::arsenal::pd_weapon_for(w.name).and_then(|pd| {
+        let sec = pd.secondary.as_ref()?;
+        use crate::combat::pd_weapons::PdFuncKind;
+        // A cloak or a crouch is not something a hunter can shoot with.
+        if matches!(sec.kind, PdFuncKind::Special | PdFuncKind::Device) {
+            return None;
+        }
+        let cd = sec.sustained_cooldown();
+        Some(EnemySecondary {
+            label: sec.label,
+            fire_rate: if cd > 0.0 { 1.0 / cd } else { 1.0 },
+            damage: sec.damage * crate::combat::pd_weapons::PD_DAMAGE_TO_HP,
+            automatic: sec.kind == PdFuncKind::Auto,
+            band: pd.band_m(true),
+        })
+    });
+
     EnemyWeaponDef {
         name: w.name,
         class,
@@ -275,6 +321,7 @@ pub fn enemy_def_for(w: &WeaponStats) -> EnemyWeaponDef {
         fire_rate,
         standoff: standoff_for(range),
         spread: spread_for(w, class),
+        secondary,
         automatic: w.automatic,
         right_offset: r_off,
         right_rot: r_rot,

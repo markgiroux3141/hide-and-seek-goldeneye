@@ -309,6 +309,43 @@ pub fn weapon_stats_from_pd(w: &'static PdWeapon) -> WeaponStats {
         recoil_rot: (f.recoilangle_rad()).clamp(0.02, 0.30),
         automatic,
         fire_kind: fire_kind_for(w, f),
+        secondary: w.secondary.as_ref().map(|s| secondary_from_pd(w, s)),
+    }
+}
+
+/// Bridge a PD weapon's second function into a [`SecondaryFire`].
+///
+/// The interesting field is `ammo_index`, straight off `funcdef.ammoindex`: `0`
+/// shares the primary's magazine, `1` is a separate pool (which is what makes the
+/// SuperDragon's grenade launcher its own resource rather than eating rifle
+/// rounds), and `-1` costs nothing (the melee functions). Carrying it through
+/// verbatim is what stops "two functions" collapsing into "one gun with two damage
+/// numbers".
+fn secondary_from_pd(w: &'static PdWeapon, s: &PdFunc) -> config::SecondaryFire {
+    let mut fire_cooldown = s.sustained_cooldown();
+    if fire_cooldown <= 0.0 {
+        fire_cooldown = 0.5;
+    }
+    let (_near, far) = w.band_m(true);
+    // A melee function's reach is authored directly, in PD centimetres, and is a
+    // real contact distance rather than an engagement band.
+    let range = if s.kind == PdFuncKind::Melee {
+        (s.melee_range * PD_CM_TO_M).max(1.0)
+    } else {
+        (far * 4.0).clamp(25.0, 200.0)
+    };
+    config::SecondaryFire {
+        label: s.label,
+        fire_cooldown,
+        damage: s.damage * PD_DAMAGE_TO_HP,
+        range,
+        automatic: s.kind == PdFuncKind::Auto,
+        fire_kind: fire_kind_for(w, s),
+        fire_sound: fire_sound_for(w, s),
+        ammo_index: s.ammo_index,
+        // PD's `ammos[1]` clip size where the function has its own pool. The
+        // SuperDragon is the one MP weapon that actually uses this.
+        magazine_size: if s.ammo_index == 1 { w.sec_clip_size.max(1) as u32 } else { 0 },
     }
 }
 
@@ -395,6 +432,51 @@ fn explosion_for(w: &PdWeapon) -> Explosion {
         radius: 4.0,
         max_damage: (w.primary.damage * PD_DAMAGE_TO_HP * 4.0).clamp(80.0, 300.0),
     }
+}
+
+// ─── The AI's function choice ────────────────────────────────────────────────
+
+/// Which firing function a hunter should use at `dist_m` from its target.
+///
+/// Ported from the data, not invented: `g_BotWeaponConfigs` (`botinv.c:21`) gives
+/// every weapon a `score1`/`score2` per function and a `pridistconfig`/
+/// `secdistconfig` naming the engagement band each one wants
+/// (`g_BotDistConfigs`, `botcmd.c:29`). `botinv_get_dist_config` is keyed by
+/// weapon **and** `gunfunc` for exactly this reason.
+///
+/// The rule: prefer whichever function's band contains the current distance; if
+/// both fit or neither does, take the higher-scoring one. PD's own scoring is a
+/// much larger machine (it also weighs ammo, suicides-with-this-gun and bot
+/// personality), and the parts that are missing are missing because they need
+/// state we do not keep — not because they were skipped as inconvenient.
+///
+/// Returns `true` to use the secondary. Always `false` for a weapon with one
+/// function, and for `Special`/`Device` secondaries, which have no shot to fire.
+pub fn ai_prefers_secondary(w: &PdWeapon, dist_m: f32) -> bool {
+    let Some(sec) = w.secondary.as_ref() else {
+        return false;
+    };
+    // A function with no weapon behaviour is not a choice a hunter can act on.
+    if matches!(sec.kind, PdFuncKind::Special | PdFuncKind::Device) {
+        return false;
+    }
+    let (pri_min, pri_max) = w.band_m(false);
+    let (sec_min, sec_max) = w.band_m(true);
+    let pri_fits = dist_m >= pri_min && dist_m <= pri_max;
+    let sec_fits = dist_m >= sec_min && dist_m <= sec_max;
+    match (pri_fits, sec_fits) {
+        (true, false) => false,
+        (false, true) => true,
+        // Both bands cover this range, or neither does — fall back to which
+        // function PD scores higher.
+        _ => w.ai.score_sec > w.ai.score_pri,
+    }
+}
+
+/// [`ai_prefers_secondary`] for a bridged weapon, by its arsenal display name.
+/// `false` for a GoldenEye weapon, which has one function.
+pub fn ai_prefers_secondary_named(display_name: &str, dist_m: f32) -> bool {
+    pd_weapon_for(display_name).is_some_and(|w| ai_prefers_secondary(w, dist_m))
 }
 
 #[cfg(test)]
@@ -649,6 +731,66 @@ mod tests {
             }
         }
         assert_eq!(authored, 16, "16 of the 33 author a CHRGUNFIRE muzzle");
+    }
+
+    /// The AI's function choice comes out of PD's bands, and reads the way the
+    /// weapons do: a pistol whips you when you are on top of it and shoots you
+    /// otherwise; a SuperDragon reaches for the grenade launcher at range.
+    #[test]
+    fn the_ai_picks_a_function_from_pds_own_bands() {
+        let falcon = super::super::pd_weapons::pd_weapon_by_name("Falcon 2").unwrap();
+        // The pistol whip's band is CLOSE (0-1.2 m); the shot's is PISTOL (3-4.5 m).
+        assert!(
+            ai_prefers_secondary(falcon, 0.8),
+            "in your face, the Falcon 2 should whip"
+        );
+        assert!(
+            !ai_prefers_secondary(falcon, 4.0),
+            "at pistol range it should shoot"
+        );
+
+        let dragon = super::super::pd_weapons::pd_weapon_by_name("SuperDragon").unwrap();
+        // Rapid fire wants DEFAULT (3-6 m); the grenade launcher SHOOTEXPLOSIVE
+        // (6-12 m). So it hoses up close and lobs at range.
+        assert!(!ai_prefers_secondary(dragon, 4.0), "close in, hose");
+        assert!(ai_prefers_secondary(dragon, 9.0), "at range, lob a grenade");
+    }
+
+    /// A function with no shot to fire is never chosen — the RC-P120's secondary is
+    /// a cloak and the Sniper Rifle's is a crouch, neither of which a hunter can
+    /// act on. Picking one would leave the hunter aiming and never shooting, which
+    /// is precisely the sort of quiet stall the AI testbed exists to catch.
+    #[test]
+    fn the_ai_never_picks_a_non_weapon_function() {
+        for w in super::super::pd_weapons::pd_guns() {
+            if let Some(sec) = w.secondary.as_ref() {
+                if matches!(sec.kind, PdFuncKind::Special | PdFuncKind::Device) {
+                    for d in [0.5, 2.0, 5.0, 10.0, 25.0] {
+                        assert!(
+                            !ai_prefers_secondary(w, d),
+                            "{} would pick its {:?} secondary at {d} m",
+                            w.name,
+                            sec.kind
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// A GoldenEye weapon has no second function, so the choice is always the
+    /// primary — including for the seven names that clash with a PD weapon.
+    #[test]
+    fn a_goldeneye_weapon_always_uses_its_only_function() {
+        for ge in config::WEAPONS {
+            for d in [0.5, 5.0, 20.0] {
+                assert!(
+                    !ai_prefers_secondary_named(ge.name, d),
+                    "{} has one function",
+                    ge.name
+                );
+            }
+        }
     }
 
     /// Every PD weapon name is distinct from every GoldenEye one, so the

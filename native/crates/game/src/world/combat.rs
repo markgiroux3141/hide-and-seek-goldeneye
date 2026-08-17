@@ -296,17 +296,61 @@ impl World {
         }
     }
 
+    /// The weapon table the game is playing with, for the shop and the HUD. The
+    /// single source of truth for what a weapon index means.
+    pub fn arsenal_weapons(&self) -> &'static [crate::combat::WeaponStats] {
+        self.arsenal.weapons()
+    }
+
+    /// Which arsenal is live (`ARSENAL=ge|pd|both`).
+    pub fn arsenal(&self) -> crate::combat::Arsenal {
+        self.arsenal
+    }
+
+    /// Switch the equipped weapon between its primary and secondary firing
+    /// function (the `F` key in HUNT) — Perfect Dark's `functions[2]`.
+    ///
+    /// Returns `false` when the weapon has only one function, so the key is inert
+    /// on the GoldenEye arsenal rather than doing something invisible. The choice
+    /// is remembered per weapon, because each arsenal entry owns its own
+    /// [`crate::combat::Weapon`] — which is exactly how PD's per-weapon
+    /// `gunfuncs[]` bit behaves.
+    pub fn toggle_weapon_function(&mut self) -> bool {
+        if self.mode != Mode::Hunt {
+            return false;
+        }
+        let switched = self.weapon_mut().toggle_function();
+        if switched {
+            let w = self.weapon();
+            log::info!(
+                "{}: {}",
+                w.config().name,
+                w.function_label().unwrap_or("primary function")
+            );
+        }
+        switched
+    }
+
+    /// The active firing function's authored label, or `None` when the weapon is on
+    /// its primary. Drives the HUD readout.
+    pub fn weapon_function_label(&self) -> Option<&'static str> {
+        if self.mode != Mode::Hunt {
+            return None;
+        }
+        self.weapon().function_label()
+    }
+
     /// The player's current credit balance (HUD readout + shop affordability).
     pub fn credits(&self) -> u32 {
         self.economy.credits()
     }
 
-    /// Whether the player owns the weapon at `idx` in `config::WEAPONS`.
+    /// Whether the player owns the weapon at `idx` in the live arsenal.
     pub fn owns_weapon(&self, idx: usize) -> bool {
         self.owned.get(idx).copied().unwrap_or(false)
     }
 
-    /// Number of weapons in the arsenal (the shop list length; = `config::WEAPONS`).
+    /// Number of weapons in the live arsenal (also the shop list length).
     pub fn weapon_count(&self) -> usize {
         self.weapons.len()
     }
@@ -329,7 +373,7 @@ impl World {
         if idx >= self.owned.len() || self.owned[idx] {
             return false;
         }
-        let name = crate::combat::config::WEAPONS[idx].name;
+        let name = self.arsenal.weapons()[idx].name;
         let price = crate::shop::weapon_price(name);
         if self.economy.try_spend(price) {
             self.owned[idx] = true;
@@ -350,7 +394,7 @@ impl World {
         if idx >= self.weapons.len() || !self.owned.get(idx).copied().unwrap_or(false) {
             return false;
         }
-        let cfg = crate::combat::config::WEAPONS[idx];
+        let cfg = self.arsenal.weapons()[idx];
         let price = crate::shop::ammo_price(cfg.name);
         if self.economy.try_spend(price) {
             let rounds = cfg.magazine_size * crate::shop::AMMO_MAGS_PER_BUY;
@@ -564,7 +608,10 @@ impl World {
         // Delivery branches on the weapon's fire kind. Recoil is gun-only (the
         // viewmodel kick, armed in `Weapon::update`) — no camera kick, matching
         // GoldenEye — for every kind.
-        match self.weapon().config().fire_kind {
+        // The ACTIVE function's delivery, so a weapon switched to its secondary
+        // actually fires the secondary — otherwise the mode toggle would change a
+        // HUD label and nothing else.
+        match self.weapon().active_fire_kind() {
             crate::combat::FireKind::Hitscan => self.fire_hitscan(eye, dir),
             crate::combat::FireKind::Projectile(spec) => {
                 // Spawn a bit ahead of the eye so it clears the player, along the
@@ -786,7 +833,7 @@ impl World {
     /// aimed `dir`, damage a hit hunter or drop a wall spark. Split out of
     /// [`Self::combat_step`] so the fire path can branch cleanly on [`FireKind`].
     fn fire_hitscan(&mut self, eye: Vec3, dir: Vec3) {
-        let range = self.weapon().config().range;
+        let range = self.weapon().active_range();
         // Player collider excluded — `None` today (the native player is a transient
         // shape-cast, not a registered collider), threaded for Track A.
         match crate::combat::shooting::cast(&mut self.physics, eye, dir, range, None) {
@@ -846,7 +893,7 @@ impl World {
         if spent {
             return;
         }
-        let dmg = self.weapon().config().damage;
+        let dmg = self.weapon().active_damage();
         let died = match self
             .ecs
             .world_mut()
@@ -1353,7 +1400,7 @@ impl World {
     /// the hunter for the clip's length. Always plays the pain + bullet-hit SFX (JS
     /// `onHit`). The death fade begins later, once the death animation finishes.
     pub(crate) fn hit_enemy(&mut self, idx: usize, hit_point: Vec3) {
-        let base = self.weapon().config().damage;
+        let base = self.weapon().active_damage();
         self.hit_enemy_with(idx, hit_point, base);
     }
 
@@ -1567,7 +1614,17 @@ impl World {
         if let Some(row) = row {
             self.install_fire_row(idx, row);
         }
+        // Which firing function, decided ONCE per burst from PD's engagement bands
+        // and per-function scores (`g_BotWeaponConfigs`). Per burst rather than per
+        // frame so a hunter commits instead of flickering between two functions as
+        // the range wobbles — and so the choice is legible in the log below.
+        let player_pos = self.player_pos();
         let Some(inst) = self.enemies.get_mut(idx) else { return };
+        if inst.weapon.secondary.is_some() {
+            let dist = player_pos.map(|p| p.distance(inst.enemy.pos)).unwrap_or(f32::MAX);
+            inst.use_secondary =
+                crate::combat::arsenal::ai_prefers_secondary_named(inst.weapon.name, dist);
+        }
         // Firing is a timer, not a full-body clip: the hunter keeps its locomotion
         // (legs running) while the procedural stack aims the arm + kicks recoil. The
         // shot window / cadence run off `fire_elapsed` in `enemy_combat_step`.
@@ -1575,7 +1632,12 @@ impl World {
         // a PD row may trim the lead-in off the clip (the pistol's first 12 frames).
         inst.fire_elapsed = Some(inst.fire.start);
         inst.shot_timer = 0.0;
-        log::info!("hunter firing ({})", inst.weapon.name);
+        let func = if inst.use_secondary {
+            inst.weapon.secondary.map(|x| x.label).unwrap_or("secondary")
+        } else {
+            "primary"
+        };
+        log::info!("hunter firing ({}, {func})", inst.weapon.name);
     }
 
     /// Point hunter `idx`'s whole fire pipeline at one [`AttackAnimConfig`] row: the
@@ -1658,7 +1720,13 @@ impl World {
             // automatic runs PD's BURST cadence — three rounds close together, then a
             // pause — instead of a flat 1/fireRate stream. Everything else keeps the
             // flat cadence.
-            let burst = inst.pdsim.is_some() && inst.weapon.automatic;
+            // The ACTIVE function's cadence. A hunter on the SuperDragon's grenade
+            // launcher lobs at that function's rate, not the rifle's.
+            let (rate, auto) = match inst.weapon.secondary {
+                Some(sec) if inst.use_secondary => (sec.fire_rate, sec.automatic),
+                _ => (inst.weapon.fire_rate, inst.weapon.automatic),
+            };
+            let burst = inst.pdsim.is_some() && auto;
             if inst.fire.shooting(t) {
                 inst.shot_timer -= dt;
                 if inst.shot_timer <= 0.0 {
@@ -1671,7 +1739,7 @@ impl World {
                             PD_BURST_SPACING
                         }
                     } else {
-                        1.0 / inst.weapon.fire_rate.max(0.001)
+                        1.0 / rate.max(0.001)
                     };
                     shots.push(i);
                 }

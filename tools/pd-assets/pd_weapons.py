@@ -1213,6 +1213,11 @@ pub struct PdFunc {
     pub recovery60: i32,
     /// How many bodies a round passes through.
     pub penetration: u32,
+    /// `funcdef.ammoindex` — which of the weapon's two ammo pools this function
+    /// draws from. `0` = the primary's, `1` = a separate pool, `-1` = costs
+    /// nothing (melee). This is what stops "two functions" collapsing into one
+    /// gun with two damage numbers.
+    pub ammo_index: i8,
     /// `Auto` only: the rate the trigger-pull starts at, and what it winds up to.
     pub initial_rpm: f32,
     pub max_rpm: f32,
@@ -1243,6 +1248,7 @@ impl PdFunc {
         spread: 0.0,
         recovery60: 0,
         penetration: 0,
+        ammo_index: -1,
         initial_rpm: 0.0,
         max_rpm: 0.0,
         projectile_speed: 0.0,
@@ -1351,6 +1357,10 @@ pub struct PdWeapon {
     pub muzzle_is_authored: bool,
     /// Rounds per magazine (`ammodef.clipsize`); 0 when the weapon has no clip.
     pub clip_size: i32,
+    /// Clip size of the SECOND ammo pool (`weapondef.ammos[1]`), for a weapon
+    /// whose secondary function has its own resource — the SuperDragon's grenade
+    /// launcher is the MP set's example. 0 when there is no second pool.
+    pub sec_clip_size: i32,
     /// Rounds an MP match hands out (`mpweapon.priammoqty`).
     pub ammo_qty: u32,
     pub primary: PdFunc,
@@ -1473,6 +1483,7 @@ impl PdExplosion {
             f"{indent}    spread: {rf(f.get('spread'))},\n"
             f"{indent}    recovery60: {ri(f.get('recoverytime60'))},\n"
             f"{indent}    penetration: {ri(f.get('penetration'))},\n"
+            f"{indent}    ammo_index: {ri(f.get('ammoindex'), -1)},\n"
             f"{indent}    initial_rpm: {rf(f.get('initialrpm'))},\n"
             f"{indent}    max_rpm: {rf(f.get('maxrpm'))},\n"
             f"{indent}    projectile_speed: {rf(f.get('speed'))},\n"
@@ -1517,7 +1528,10 @@ impl PdExplosion {
         out.append(
             f"        muzzle_is_authored: {str(bool(ex.get('muzzle_is_authored'))).lower()},"
         )
+        sec_ammo = (w.get("ammo") or [None, None])[1] if len(w.get("ammo") or []) > 1 else None
+        sec_clip = sec_ammo.get("clipsize") if sec_ammo else 0
         out.append(f"        clip_size: {ri(clip)},")
+        out.append(f"        sec_clip_size: {ri(sec_clip)},")
         out.append(f"        ammo_qty: {ri(w['mp']['pri_ammo_qty'])},")
         out.append(f"        primary: {emit_func(pri, '        ')},")
         if sec:

@@ -405,10 +405,19 @@ impl App {
         // block). Read here so the closure can draw it as an image.
         let preview_tex = self.renderer.as_ref().map(|r| r.weapon_preview_texture_id());
         // Snapshot each weapon's shop state so the closure needs no `World` borrow.
+        // The selected weapon's stat block for the preview pane, snapshotted for the
+        // same reason as `rows`: the egui closure holds no `World` borrow.
+        let sel_stats: Option<crate::combat::WeaponStats> = match (shop_open, self.world.as_ref()) {
+            (true, Some(world)) => {
+                let arsenal = world.arsenal_weapons();
+                arsenal.get(self.shop_selected.min(arsenal.len().saturating_sub(1))).copied()
+            }
+            _ => None,
+        };
         let rows: Vec<ShopRow> = match (shop_open, self.world.as_ref()) {
             (true, Some(world)) => (0..world.weapon_count())
                 .map(|i| {
-                    let name = crate::combat::config::WEAPONS[i].name;
+                    let name = world.arsenal_weapons()[i].name;
                     ShopRow {
                         idx: i,
                         name,
@@ -417,6 +426,7 @@ impl App {
                         owned: world.owns_weapon(i),
                         reserve: world.weapon_ammo(i).map(|(_, r)| r).unwrap_or(0),
                         active: world.active_weapon_index() == i,
+                        magazine_size: world.arsenal_weapons()[i].magazine_size,
                     }
                 })
                 .collect(),
@@ -506,7 +516,10 @@ impl App {
                         // ── Left: preview pane (stats now; 3D model soon) ──
                         ui.vertical(|ui| {
                             ui.set_width(190.0);
-                            let sel = &crate::combat::config::WEAPONS[selected];
+                            let sel = match sel_stats.as_ref() {
+                                Some(s) => s,
+                                None => return,
+                            };
                             ui.group(|ui| {
                                 ui.set_min_size(egui::vec2(174.0, 174.0));
                                 ui.vertical_centered(|ui| match preview_tex {
@@ -580,9 +593,7 @@ impl App {
                                                         )
                                                         .on_hover_text(format!(
                                                             "{} rounds · ${}",
-                                                            crate::combat::config::WEAPONS
-                                                                [row.idx]
-                                                                .magazine_size
+                                                            row.magazine_size
                                                                 * crate::shop::AMMO_MAGS_PER_BUY,
                                                             row.ammo_price
                                                         ))
@@ -1321,6 +1332,10 @@ struct ShopRow {
     owned: bool,
     reserve: u32,
     active: bool,
+    /// Magazine size, snapshotted so the "+Ammo" tooltip needs no `World` borrow
+    /// (and so it reads the LIVE arsenal rather than the GoldenEye table, which
+    /// would quote the wrong round count for a Perfect Dark gun).
+    magazine_size: u32,
 }
 
 /// Map a number-row / numpad digit key to its '1'..'9' char (for scheme keys).
@@ -1803,6 +1818,13 @@ impl ApplicationHandler for App {
                         }
                     }
                 }
+                // B held past PD's 25-tick threshold → switch firing function. The
+                // keyboard counterpart is `E`; inert on a single-function weapon.
+                if pad_actions.toggle_function {
+                    if let Some(world) = self.world.as_mut() {
+                        world.toggle_weapon_function(); // HUNT-gated inside
+                    }
+                }
                 if pad_actions.cycle {
                     self.begin_weapon_switch();
                 }
@@ -2011,10 +2033,9 @@ impl ApplicationHandler for App {
                     // texture (submitted before the main frame, whose egui pass samples
                     // it) so the panel shows a live rotating 3D model.
                     if self.shop_open {
-                        let sel = self
-                            .shop_selected
-                            .min(crate::combat::config::WEAPONS.len() - 1);
-                        let name = crate::combat::config::WEAPONS[sel].name;
+                        let arsenal = world.arsenal_weapons();
+                        let sel = self.shop_selected.min(arsenal.len().saturating_sub(1));
+                        let name = arsenal[sel].name;
                         renderer.render_weapon_preview(name, self.shop_preview_angle);
                     }
                     // Object panel open → render the selected prop into the same
@@ -2340,6 +2361,23 @@ impl App {
         {
             if let Some(world) = self.world.as_mut() {
                 world.detonate_remote_mines();
+            }
+            return;
+        }
+        // E in HUNT: switch the equipped weapon between its primary and secondary
+        // firing function — Perfect Dark's `functions[2]`. A mode toggle, not a
+        // second trigger, because that is what PD does: the choice is a persistent
+        // per-weapon bit (`bgun_is_using_secondary_function`, `bondgun.c:9043`), so
+        // it is remembered per weapon rather than held down.
+        //
+        // `E` and not `F` — F in HUNT already detonates remote mines, and right
+        // mouse is the GoldenEye free-aim modifier. Inert on a GoldenEye weapon,
+        // which has one function.
+        if code == KeyCode::KeyE
+            && self.world.as_ref().map(|w| !w.is_build()).unwrap_or(false)
+        {
+            if let Some(world) = self.world.as_mut() {
+                world.toggle_weapon_function();
             }
             return;
         }

@@ -949,6 +949,7 @@ impl World {
                 fade: None,
                 shot_timer: 0.0,
                 burst_shot: 0,
+                use_secondary: false,
                 fire_elapsed: None,
                 fire,
                 fire_axes,

@@ -103,6 +103,40 @@ pub enum FireKind {
     Mine(MineSpec),
 }
 
+/// A weapon's **secondary firing function** — Perfect Dark's defining feature
+/// (`weapondef.functions[2]`, `include/types.h:3023`).
+///
+/// Only the fields that actually differ between a weapon's two functions live
+/// here; everything else (the mesh, its placement, the reload) belongs to the
+/// weapon, not to the function. GoldenEye weapons have one function each and
+/// leave [`WeaponStats::secondary`] `None`, so nothing about them changes.
+///
+/// **Not a second trigger.** PD switches *mode*: `bgun_is_using_secondary_function`
+/// (`bondgun.c:9043`) reads a persistent per-weapon bit out of
+/// `g_PlayerConfigsArray[].gunfuncs[]`, and `weapondef` carries
+/// `pritosec_animation` / `sectopri_animation` — a real switch animation. So the
+/// player toggles it and the choice is remembered per weapon.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SecondaryFire {
+    /// PD's authored label for this function, e.g. `"3-Round Burst"`,
+    /// `"Grenade Launcher"`, `"Pistol Whip"`. Shown on the HUD when active.
+    pub label: &'static str,
+    /// Seconds between shots for this function.
+    pub fire_cooldown: f32,
+    pub damage: f32,
+    pub range: f32,
+    pub automatic: bool,
+    pub fire_kind: FireKind,
+    pub fire_sound: &'static str,
+    /// Which of PD's two ammo pools this function draws from
+    /// (`funcdef.ammoindex`): `0` shares the primary's magazine (most weapons),
+    /// `1` is a **separate** pool (the SuperDragon's grenade launcher), and `-1`
+    /// consumes nothing at all (a melee function like the pistol whip).
+    pub ammo_index: i8,
+    /// Magazine size when `ammo_index == 1`; ignored otherwise.
+    pub magazine_size: u32,
+}
+
 /// Static per-weapon configuration (JS `WeaponStats`).
 #[derive(Clone, Copy, Debug)]
 pub struct WeaponStats {
@@ -153,6 +187,10 @@ pub struct WeaponStats {
     /// How the shot is delivered: hitscan (the 19 base guns) or an explosive
     /// projectile / mine. See [`FireKind`].
     pub fire_kind: FireKind,
+    /// The weapon's second firing function, if it has one. `None` for every
+    /// GoldenEye weapon (they have a single fire mode); `Some` for the Perfect
+    /// Dark arsenal, where it is the whole point. See [`SecondaryFire`].
+    pub secondary: Option<SecondaryFire>,
 }
 
 // ─── Shared viewmodel placement ───────────────────────────────────────────────
@@ -196,6 +234,7 @@ pub const PP7: WeaponStats = WeaponStats {
     recoil_rot: 0.26,
     automatic: false,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 pub const DD44: WeaponStats = WeaponStats {
@@ -219,6 +258,7 @@ pub const DD44: WeaponStats = WeaponStats {
     recoil_rot: 0.26,
     automatic: false,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 pub const MAGNUM: WeaponStats = WeaponStats {
@@ -242,6 +282,7 @@ pub const MAGNUM: WeaponStats = WeaponStats {
     recoil_rot: 0.26,
     automatic: false,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 pub const GOLDEN_GUN: WeaponStats = WeaponStats {
@@ -265,6 +306,7 @@ pub const GOLDEN_GUN: WeaponStats = WeaponStats {
     recoil_rot: 0.26,
     automatic: false,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 pub const GOLD_PP7: WeaponStats = WeaponStats {
@@ -288,6 +330,7 @@ pub const GOLD_PP7: WeaponStats = WeaponStats {
     recoil_rot: 0.26,
     automatic: false,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 pub const SILVER_PP7: WeaponStats = WeaponStats {
@@ -311,6 +354,7 @@ pub const SILVER_PP7: WeaponStats = WeaponStats {
     recoil_rot: 0.26,
     automatic: false,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 pub const PP7_SILENCER: WeaponStats = WeaponStats {
@@ -334,6 +378,7 @@ pub const PP7_SILENCER: WeaponStats = WeaponStats {
     recoil_rot: 0.26,
     automatic: false,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 // ─── SMGs (automatic) ─────────────────────────────────────────────────────────
@@ -359,6 +404,7 @@ pub const KLOBB: WeaponStats = WeaponStats {
     recoil_rot: 0.03,
     automatic: true,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 pub const DK5: WeaponStats = WeaponStats {
@@ -382,6 +428,7 @@ pub const DK5: WeaponStats = WeaponStats {
     recoil_rot: 0.03,
     automatic: true,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 pub const DK5_SILENCER: WeaponStats = WeaponStats {
@@ -405,6 +452,7 @@ pub const DK5_SILENCER: WeaponStats = WeaponStats {
     recoil_rot: 0.03,
     automatic: true,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 pub const PHANTOM: WeaponStats = WeaponStats {
@@ -428,6 +476,7 @@ pub const PHANTOM: WeaponStats = WeaponStats {
     recoil_rot: 0.03,
     automatic: true,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 pub const ZMG: WeaponStats = WeaponStats {
@@ -451,6 +500,7 @@ pub const ZMG: WeaponStats = WeaponStats {
     recoil_rot: 0.03,
     automatic: true,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 // ─── Rifles (automatic) ───────────────────────────────────────────────────────
@@ -476,6 +526,7 @@ pub const RCP90: WeaponStats = WeaponStats {
     recoil_rot: 0.03,
     automatic: true,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 pub const AR33: WeaponStats = WeaponStats {
@@ -499,6 +550,7 @@ pub const AR33: WeaponStats = WeaponStats {
     recoil_rot: 0.03,
     automatic: true,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 /// KF7 Soviet — also the hunter's rifle (see `world`'s `ENEMY_*` overrides, which
@@ -526,6 +578,7 @@ pub const KF7: WeaponStats = WeaponStats {
     recoil_rot: 0.03,
     automatic: true,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 // ─── Shotguns ─────────────────────────────────────────────────────────────────
@@ -552,6 +605,7 @@ pub const SHOTGUN: WeaponStats = WeaponStats {
     recoil_rot: 0.06,
     automatic: false,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 /// Automatic shotgun — full-auto (JS `AUTO_SHOTGUN`).
@@ -576,6 +630,7 @@ pub const AUTO_SHOTGUN: WeaponStats = WeaponStats {
     recoil_rot: 0.06,
     automatic: true,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 // ─── Special ──────────────────────────────────────────────────────────────────
@@ -603,6 +658,7 @@ pub const SNIPER: WeaponStats = WeaponStats {
     recoil_rot: 0.03,
     automatic: false,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 /// Moonraker Laser — full-auto, huge mag (JS `LASER`).
@@ -627,6 +683,7 @@ pub const LASER: WeaponStats = WeaponStats {
     recoil_rot: 0.03,
     automatic: true,
     fire_kind: FireKind::Hitscan,
+    secondary: None,
 };
 
 // ─── Explosives (projectile) ────────────────────────────────────────────────
@@ -671,6 +728,7 @@ pub const ROCKET_LAUNCHER: WeaponStats = WeaponStats {
         explosion: Explosion { radius: 5.0, max_damage: 200.0 },
         model: "", // no rocket projectile mesh → procedural streak
     }),
+    secondary: None,
 };
 
 /// Grenade Launcher — lobs a grenade in an arc that detonates on impact (like the
@@ -706,6 +764,7 @@ pub const GRENADE_LAUNCHER: WeaponStats = WeaponStats {
         explosion: Explosion { radius: 4.0, max_damage: 150.0 },
         model: "Grenade", // the launched round is a grenade
     }),
+    secondary: None,
 };
 
 /// Hand Grenade — thrown by hand in a high arc, bounces, detonates on a longer
@@ -743,6 +802,7 @@ pub const GRENADE: WeaponStats = WeaponStats {
         explosion: Explosion { radius: 4.0, max_damage: 150.0 },
         model: "Grenade", // reuse the equipped grenade GLB as the thrown round
     }),
+    secondary: None,
 };
 
 // ─── Explosives (mines) ───────────────────────────────────────────────────────
@@ -793,6 +853,7 @@ pub const PROXIMITY_MINE: WeaponStats = WeaponStats {
         arm_time: MINE_ARM_TIME,
         explosion: Explosion { radius: MINE_RADIUS, max_damage: MINE_DAMAGE },
     }),
+    secondary: None,
 };
 
 /// Timed Mine — detonates a fixed delay after it arms, no matter what's nearby.
@@ -821,6 +882,7 @@ pub const TIMED_MINE: WeaponStats = WeaponStats {
         arm_time: MINE_ARM_TIME,
         explosion: Explosion { radius: MINE_RADIUS, max_damage: MINE_DAMAGE },
     }),
+    secondary: None,
 };
 
 /// Remote Mine — inert until the player triggers a detonation (pad A+B together, or
@@ -851,6 +913,7 @@ pub const REMOTE_MINE: WeaponStats = WeaponStats {
         arm_time: MINE_ARM_TIME,
         explosion: Explosion { radius: MINE_RADIUS, max_damage: MINE_DAMAGE },
     }),
+    secondary: None,
 };
 
 // (No Detonator weapon slot — remote mines are set off by a player input, not a
