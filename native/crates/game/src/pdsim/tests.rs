@@ -540,6 +540,7 @@ fn a_simulant_acquires_converges_and_fires() {
             query: Some((0, true, 8.0)),
             bearing_to_target: Some(0.0),
             target_in_sight: true,
+            aim_offset: 0.0,
             dial_frac: 0.5,
         });
         if out.want_fire && fired_at.is_none() {
@@ -574,6 +575,7 @@ fn a_pacifist_never_fires_no_matter_how_good_its_aim() {
             query: Some((0, true, 4.0)),
             bearing_to_target: Some(0.0),
             target_in_sight: true,
+            aim_offset: 0.0,
             dial_frac: 1.0,
         });
         assert!(!out.want_fire, "a PeaceSim must never pull the trigger");
@@ -592,6 +594,7 @@ fn a_dark_sim_is_lethal_immediately() {
         query: Some((0, true, 6.0)),
         bearing_to_target: Some(0.0),
         target_in_sight: true,
+        aim_offset: 0.0,
         dial_frac: 1.0,
     });
     assert!(out.want_fire, "a DarkSim fires on the first frame it sees you");
@@ -609,6 +612,7 @@ fn losing_the_target_stops_the_bot_firing() {
         query: Some((0, false, 6.0)),
         bearing_to_target: Some(0.0),
         target_in_sight: false,
+        aim_offset: 0.0,
         dial_frac: 1.0,
     });
     assert!(!out.want_fire);

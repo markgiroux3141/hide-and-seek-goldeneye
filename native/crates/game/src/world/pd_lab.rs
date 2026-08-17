@@ -1,21 +1,30 @@
-//! **PD simulant lab** — `PD_LAB=1`, a spike that runs our hunters on Perfect
-//! Dark's bot model instead of ours, in a bare room, so the difference can be
-//! judged by eye.
+//! **The Perfect Dark hunter model** — how every hunter in this game aims and shoots.
+//!
+//! This started as `PD_LAB=1`, a spike that ran our hunters on Perfect Dark's bot model
+//! in a bare room so the difference could be judged by eye. It won that comparison and
+//! **graduated**: [`PdHunters`] is on every `World`, every hunter carries a
+//! [`Simulant`], and `PD_LAB` now means only "the bare test room plus the debug
+//! overlay". See `DESIGN_PD_SIMULANT_AI.md` §17 for what the promotion moved and what it
+//! retired.
 //!
 //! The model itself lives in [`crate::pdsim`] and knows nothing about this game.
-//! This module is the seam: it decides which hunters are simulants, feeds the
-//! model world state each step, and applies its two outputs — **where the weapon
-//! points** and **whether to pull the trigger**.
+//! This module is the seam: it feeds the model world state each step and applies its two
+//! outputs — **where the weapon points** and **whether to pull the trigger**.
 //!
-//! # What changes when a hunter is a simulant
+//! # What the model replaced
 //!
-//! | | Our hunter | PD simulant |
+//! The right-hand column is the game today; the left is what it was before the
+//! promotion, and none of it is reachable any more.
+//!
+//! | | The old hunter | Every hunter now |
 //! |---|---|---|
 //! | Aim | body faces the AI heading, eased at a fixed rate | body yaw is the *model's* yaw, including its live aim error |
 //! | Shot | `rand() < accuracy * (1 - dist/range)` | real hitscan down the barrel, no roll |
 //! | Fire gate | FSM entered `Attack` | reaction served + target within 45° of the barrel |
 //! | Reaction | one `AiTuning::alert` constant | `shootdelaytimer` that decays rather than resets |
 //! | Speed | difficulty multiplier | difficulty tier, or a personality override |
+//! | Lethality ceiling | `MAX_HIT_RATE`, a global 4 hits/s cap | PD's burst gap, on the cadence |
+//! | Body + clips | GoldenEye | Perfect Dark, with the directional fire table |
 //!
 //! # What deliberately does not change
 //!
@@ -35,6 +44,40 @@ use crate::pdsim::difficulty::{tier_for_dial, BotDifficulty};
 use crate::pdsim::personality::{BotType, Candidate, Threat};
 use crate::pdsim::{SimInput, SimOutput, Simulant};
 
+/// **How every hunter fights.** Perfect Dark's bot model, and the game's AI rather than
+/// a spike: this is present on every `World` whether or not the lab is on.
+///
+/// The lab ([`PdLabConfig`]) still exists and still overrides these knobs, but it now
+/// configures the *room and the instrumentation* around the model — a bare box, a pinned
+/// tier, the debug overlay — not whether the model runs.
+#[derive(Clone, Copy, Debug)]
+pub struct PdHunters {
+    /// Fixed tier, or `None` to follow the live difficulty dial (the normal game).
+    pub difficulty: Option<BotDifficulty>,
+    /// Personality applied to every hunter.
+    ///
+    /// `General` in the normal game, deliberately. Half of [`BotType`] would stop a
+    /// hunter hunting — `Peace` never fires, `Coward` flees unless it out-guns you — so
+    /// the varied-personality squad is a lab toy (`PD_LAB_TYPE`) until personalities are
+    /// picked per hunter rather than per wave.
+    pub bot_type: BotType,
+    /// Teams off — see [`PdLabConfig::free_for_all`]. Off in the normal game: the
+    /// hunters are a squad.
+    pub free_for_all: bool,
+}
+
+impl Default for PdHunters {
+    fn default() -> Self {
+        Self { difficulty: None, bot_type: BotType::General, free_for_all: false }
+    }
+}
+
+impl From<PdLabConfig> for PdHunters {
+    fn from(c: PdLabConfig) -> Self {
+        Self { difficulty: c.difficulty, bot_type: c.bot_type, free_for_all: c.free_for_all }
+    }
+}
+
 /// How the lab was configured at boot.
 #[derive(Clone, Copy, Debug)]
 pub struct PdLabConfig {
@@ -44,6 +87,17 @@ pub struct PdLabConfig {
     pub difficulty: Option<BotDifficulty>,
     /// Personality applied to every simulant.
     pub bot_type: BotType,
+    /// **Teams off** — every character is every other character's enemy, so the pack
+    /// fights itself as well as the player. This is `MPOPTION_TEAMSENABLED` inverted:
+    /// PD's free-for-all is not a separate mode, it is a team check that passes for
+    /// everybody (`chr_compare_teams`, `chraction.c:14880`).
+    ///
+    /// **Off by default**, because the hunters are a squad. With it on, a hunter's
+    /// nearest packmate is nearly always the closest thing it can see, so
+    /// `bot_choose_general_target`'s ascending-distance walk picks a packmate over the
+    /// player almost every time — and now that the FSM manoeuvres against its target
+    /// (§14), the pack stops coming for the player at all. See [`is_friend`].
+    pub free_for_all: bool,
 }
 
 impl Default for PdLabConfig {
@@ -52,7 +106,7 @@ impl Default for PdLabConfig {
     /// The environment path ([`Self::from_env`]) deliberately does **not** use this
     /// count; see there for why.
     fn default() -> Self {
-        Self { count: 1, difficulty: None, bot_type: BotType::General }
+        Self { count: 1, difficulty: None, bot_type: BotType::General, free_for_all: false }
     }
 }
 
@@ -66,6 +120,8 @@ impl PdLabConfig {
     ///   rather than following the `=` / `-` dial.
     /// * `PD_LAB_TYPE=general|peace|coward|prey|feud|kaze|speed|turtle|…` — the
     ///   personality axis.
+    /// * `PD_LAB_FFA=1` — **teams off**: the hunters fight each other as well as the
+    ///   player. Off by default; see [`Self::free_for_all`].
     ///
     /// Returns `None` when `PD_LAB` is unset, which is the normal game.
     ///
@@ -89,6 +145,7 @@ impl PdLabConfig {
                 log::warn!("PD_LAB_DIFFICULTY='{d}' not recognised — following the dial");
             }
         }
+        cfg.free_for_all = std::env::var("PD_LAB_FFA").is_ok();
         if let Ok(t) = std::env::var("PD_LAB_TYPE") {
             match parse_bot_type(&t) {
                 Some(ty) => cfg.bot_type = ty,
@@ -118,13 +175,19 @@ pub(crate) fn tier_for_dial_frac(frac: f32) -> BotDifficulty {
     tier_for_dial(frac, 1.0)
 }
 
-/// The tier the lab boots at.
+/// **The tier the game boots at**, lab or not.
 ///
-/// **Normal, not Dark.** A DarkSim owes no reaction delay and never mis-aims, so it
-/// kills on sight from across the arena — which shows the top of the difficulty table
-/// and nothing else. Normal has a 0.5 s reaction and wanders ~8°, so the zeroing model
-/// is actually visible as behaviour: it swings past you, corrects, and closes.
-pub(crate) const LAB_TIER: BotDifficulty = BotDifficulty::Normal;
+/// **Normal, not Dark.** A DarkSim owes no reaction delay and never mis-aims, so it kills
+/// on sight from across the room — which shows the top of the difficulty table and
+/// nothing else. Normal has a 0.5 s reaction and wanders ~8°, so the zeroing model is
+/// actually visible as behaviour: it swings past you, corrects, and closes.
+///
+/// This mattered only to the lab while the hit roll was still the game's shot model,
+/// because the dial's own boot position was `DIFFICULTY_MAX` and max meant "1.6× accuracy
+/// on a probability". Now that the roll is retired (§17), max means **DarkSim** — perfect
+/// aim, no reaction — so booting the real game there would make it unplayable rather than
+/// hard. The `=` / `-` keys still sweep the whole table live.
+pub(crate) const HUNT_TIER: BotDifficulty = BotDifficulty::Normal;
 
 /// The lowest dial position (0..=`max`) whose tier is `want` — so the lab can boot at
 /// a named tier while the `=` / `-` keys keep working, rather than pinning the tier
@@ -182,6 +245,22 @@ pub struct PdDebug {
     /// The hunter's index in the roster, so the overlay and the radar agree on who
     /// `#3` is even once some of them are corpses.
     pub id: usize,
+    /// **Who it is manoeuvring against** — the free-for-all readout. `None` means the
+    /// player (or nothing picked yet); `Some(j)` is packmate `#j`. Filled in by the
+    /// caller from [`PdTarget`].
+    ///
+    /// With teams on (the default) this is always `None`, and that is the point: a
+    /// packmate showing up here means either `PD_LAB_FFA=1` or a broken team check.
+    pub target_hunter: Option<usize>,
+    /// Whether teams are off ([`PdLabConfig::free_for_all`]) — shown in the overlay so
+    /// "they are ignoring me and fighting each other" can be read as the mode rather
+    /// than as a bug.
+    pub free_for_all: bool,
+    /// Which attack animation the **current burst** is playing (`ANIM_xxxx`), and how far
+    /// off the body's facing it aims — the direction-table readout. `None` between
+    /// bursts. A non-zero angle means the body is deliberately turned away from the
+    /// target; see `combat::attack_anim`.
+    pub fire_anim: Option<(&'static str, f32)>,
     /// What this hunter's FSM is doing — the readout for "why is it not moving".
     pub state: crate::enemy::AiState,
 }
@@ -233,14 +312,41 @@ pub(crate) struct PdActor {
     pub visible: bool,
 }
 
-/// The candidate list a simulant at `self_target` chooses from — everyone alive
-/// except itself. Weapon score is uniform: our hunters and the player all carry a
-/// gun, and PD's threat comparison is about *who is dangerous*, not which gun.
-pub(crate) fn candidates(self_target: PdTarget, actors: &[PdActor]) -> (Vec<Candidate>, Vec<PdTarget>) {
+/// Whether two characters are on the same side, given whether teams are enabled —
+/// `chr_compare_teams(.., COMPARE_FRIENDS)` (`chraction.c:14860`).
+///
+/// The hunters are one team and the player is the other, which is the shape PD's
+/// campaign has (`chr->team` versus Bond) and its team multiplayer has
+/// (`MPOPTION_TEAMSENABLED`). With `free_for_all` the check passes for nobody, which is
+/// exactly how PD implements free-for-all: `COMPARE_ENEMIES` returns true whenever
+/// `(g_MpSetup.options & MPOPTION_TEAMSENABLED) == 0`, regardless of team.
+pub(crate) fn is_friend(a: PdTarget, b: PdTarget, free_for_all: bool) -> bool {
+    if free_for_all {
+        return false;
+    }
+    matches!((a, b), (PdTarget::Hunter(_), PdTarget::Hunter(_)))
+}
+
+/// The candidate list a simulant at `self_target` chooses from — every alive **enemy**.
+/// Weapon score is uniform: our hunters and the player all carry a gun, and PD's threat
+/// comparison is about *who is dangerous*, not which gun.
+///
+/// Teammates are excluded here rather than vetoed later, because
+/// `bot_choose_general_target` does the same thing in the same place: its
+/// ascending-distance walk skips any chr failing
+/// `chr_compare_teams(botchr, trychr, COMPARE_ENEMIES)`, and separately drops an
+/// existing target that turns out to be a friend. Leaving packmates in the list and
+/// hoping distance sorts it out does not work — a packmate is nearly always the closest
+/// visible character there is.
+pub(crate) fn candidates(
+    self_target: PdTarget,
+    actors: &[PdActor],
+    free_for_all: bool,
+) -> (Vec<Candidate>, Vec<PdTarget>) {
     let mut cands = Vec::with_capacity(actors.len());
     let mut who = Vec::with_capacity(actors.len());
     for a in actors {
-        if a.who == self_target {
+        if a.who == self_target || is_friend(self_target, a.who, free_for_all) {
             continue;
         }
         cands.push(Candidate {
@@ -276,6 +382,10 @@ pub(crate) fn candidates(self_target: PdTarget, actors: &[PdActor]) -> (Vec<Cand
 /// The round-robin amortisation in [`Perception`](crate::pdsim::targeting::Perception)
 /// still governs which candidate the simulant *believes* it can see, which is the
 /// behaviourally interesting half.
+///
+/// `aim_offset` is the playing attack animation's `angleoffset` (0 when not firing, or
+/// when the animation aims straight ahead). It biases the body's turn goal rather than
+/// the barrel — see [`Simulant::yaw`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn step_simulant(
     sim: &mut Simulant,
@@ -285,15 +395,17 @@ pub(crate) fn step_simulant(
     actors: &[PdActor],
     dial_frac: f32,
     follow_dial: bool,
+    aim_offset: f32,
+    free_for_all: bool,
 ) -> (SimOutput, PdDebug, Option<PdTarget>) {
     if follow_dial {
         sim.difficulty = tier_for_dial(dial_frac, 1.0);
     }
 
-    // Everyone this simulant could shoot at, with the distance from where it is
+    // Every ENEMY this simulant could shoot at, with the distance from where it is
     // standing. `candidates` cannot fill distance itself — it does not know whose
     // list it is building.
-    let (mut candidates, who) = candidates(self_target, actors);
+    let (mut candidates, who) = candidates(self_target, actors, free_for_all);
     let pos_of = |t: PdTarget| actors.iter().find(|a| a.who == t).map(|a| a.pos);
     for (c, t) in candidates.iter_mut().zip(&who) {
         if let Some(p) = pos_of(*t) {
@@ -333,6 +445,7 @@ pub(crate) fn step_simulant(
         query,
         bearing_to_target: bearing,
         target_in_sight,
+        aim_offset,
         dial_frac,
     });
     let chosen = out.target_index.and_then(|i| who.get(i).copied());
@@ -361,6 +474,9 @@ pub(crate) fn step_simulant(
         max_health: 0.0,
         dead: false,
         id: 0,
+        target_hunter: None,
+        free_for_all,
+        fire_anim: None,
         state: crate::enemy::AiState::Idle,
     };
     (out, debug, chosen)

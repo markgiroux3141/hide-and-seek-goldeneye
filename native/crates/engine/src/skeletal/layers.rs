@@ -570,6 +570,22 @@ impl ClipOverlayLayer {
         }
     }
 
+    /// Swap the posing clip, keeping the mask and the cached seam. Used when the same
+    /// masked subtree has to play a *different* authored pose without rebuilding the
+    /// layer stack — a hunter switching between Perfect Dark's per-bearing attack
+    /// animations mid-fight. The seam is a property of the mask and the skeleton, not
+    /// of the clip, so it stays valid; the caller is responsible for re-deriving
+    /// anything it measured off the old pose (e.g. a downstream aim axis).
+    pub fn set_clip(&mut self, clip: AnimationClip) {
+        self.clip = clip;
+    }
+
+    /// The clip currently posing the mask, so a caller can size a sample time against
+    /// it (or check what it swapped in).
+    pub fn clip(&self) -> &AnimationClip {
+        &self.clip
+    }
+
     /// The topmost masked joint + its (unmasked) parent — the seam the root
     /// reconciliation acts on. Cached on first use because it needs the skeleton.
     fn seam(&mut self, sk: &Skeleton) -> Option<(usize, usize)> {

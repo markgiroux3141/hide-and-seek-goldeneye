@@ -44,8 +44,11 @@ pub struct EnemyWeaponDef {
     pub fire_sound: &'static str,
     /// Damage per hit (JS `EnemyManager` uniform override — all hunters deal this).
     pub damage: f32,
-    /// Base hit chance 0–1 (scaled by distance at the shot; JS `accuracy`).
-    pub accuracy: f32,
+    // `accuracy` (base hit chance 0–1, JS `accuracy`) lived here and is **retired** with
+    // the hit roll that read it (`DESIGN_PD_SIMULANT_AI.md` §17). How well a hunter
+    // shoots is a property of the shooter now — its Perfect Dark difficulty tier and how
+    // far its zeroing has converged — not of the gun. What the gun still contributes is
+    // [`Self::spread`], PD's own per-weapon cone, which is a different and real thing.
     /// Effective range in metres (the hit roll goes to 0 beyond it, and the FSM
     /// [`Self::standoff`] is derived from it).
     pub range: f32,
@@ -211,13 +214,13 @@ pub fn enemy_def_for(w: &WeaponStats) -> EnemyWeaponDef {
 
     // Class-default AI stats + offsets (pp7 for pistols, kf7 for rifles). The class
     // default `range` / `fire_rate` are refined below by the weapon's identity.
-    let (accuracy, class_range, class_fire_rate, r_off, r_rot, l_off, l_rot) = match class {
-        EnemyWeaponClass::Pistol => (
-            0.85, 8.0, 2.0, PISTOL_R_OFF, PISTOL_R_ROT, PISTOL_L_OFF, PISTOL_L_ROT,
-        ),
-        EnemyWeaponClass::Rifle => (
-            0.75, 12.0, 8.0, RIFLE_R_OFF, RIFLE_R_ROT, RIFLE_L_OFF, RIFLE_L_ROT,
-        ),
+    let (class_range, class_fire_rate, r_off, r_rot, l_off, l_rot) = match class {
+        EnemyWeaponClass::Pistol => {
+            (8.0, 2.0, PISTOL_R_OFF, PISTOL_R_ROT, PISTOL_L_OFF, PISTOL_L_ROT)
+        }
+        EnemyWeaponClass::Rifle => {
+            (12.0, 8.0, RIFLE_R_OFF, RIFLE_R_ROT, RIFLE_L_OFF, RIFLE_L_ROT)
+        }
     };
 
     // Effective engagement range — CQC guns close in, snipers hang back (drives both
@@ -235,31 +238,31 @@ pub fn enemy_def_for(w: &WeaponStats) -> EnemyWeaponDef {
 
     // Bespoke overrides for the four source-defined guns (exact EnemyWeaponConfig.ts
     // values). `None` → keep the class defaults above.
-    let bespoke: Option<(f32, f32, f32, Vec3, Vec3, Vec3, Vec3)> = match w.name {
+    let bespoke: Option<(f32, f32, Vec3, Vec3, Vec3, Vec3)> = match w.name {
         "PP7" => Some((
-            0.85, 8.0, 2.0,
+            8.0, 2.0,
             Vec3::new(-150.0, 30.0, 115.0), Vec3::new(-0.39, -1.49, -1.84),
             Vec3::new(175.0, -30.0, 115.0), Vec3::new(3.11, 1.66, -1.49),
         )),
         "KF7 Soviet" => Some((
-            0.75, 12.0, 8.0,
+            12.0, 8.0,
             Vec3::new(-90.0, 0.0, 145.0), Vec3::new(0.0, -1.49, -1.69),
             RIFLE_L_OFF, RIFLE_L_ROT, // no source dual data → mirrored default
         )),
         "AR33" => Some((
-            0.8, 10.0, 6.0,
+            10.0, 6.0,
             Vec3::new(-90.0, 0.0, 145.0), Vec3::new(0.0, -1.49, -1.69),
             RIFLE_L_OFF, RIFLE_L_ROT,
         )),
         "RC-P90" => Some((
-            0.7, 8.0, 12.0,
+            8.0, 12.0,
             Vec3::new(145.0, 0.0, 0.0), Vec3::new(0.0, -1.59, -1.59),
             Vec3::new(-145.0, 0.0, 0.0), Vec3::new(0.26, 1.56, 1.26),
         )),
         _ => None,
     };
-    let (accuracy, range, fire_rate, r_off, r_rot, l_off, l_rot) =
-        bespoke.unwrap_or((accuracy, range, fire_rate, r_off, r_rot, l_off, l_rot));
+    let (range, fire_rate, r_off, r_rot, l_off, l_rot) =
+        bespoke.unwrap_or((range, fire_rate, r_off, r_rot, l_off, l_rot));
 
     EnemyWeaponDef {
         name: w.name,
@@ -268,7 +271,6 @@ pub fn enemy_def_for(w: &WeaponStats) -> EnemyWeaponDef {
         muzzle_path: w.muzzle_path,
         fire_sound: w.fire_sound,
         damage: ENEMY_DAMAGE,
-        accuracy,
         range,
         fire_rate,
         standoff: standoff_for(range),

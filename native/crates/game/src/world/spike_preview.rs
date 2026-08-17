@@ -249,7 +249,7 @@ impl World {
     pub(crate) fn preview_weapon_draw(&self, vp: Mat4) -> Option<(&'static str, Mat4)> {
         let p = self.procedural_preview.as_ref()?;
         let g9 = *p.globals.get(p.bone9)?;
-        let world = self.char_transform(p.feet, p.yaw, 0) * g9 * p.attach;
+        let world = self.char_transform(p.feet, p.yaw, 0, true) * g9 * p.attach;
         Some((p.weapon_name, vp * world))
     }
 }

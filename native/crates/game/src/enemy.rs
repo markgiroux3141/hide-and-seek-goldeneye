@@ -26,7 +26,7 @@
 //! Scope note (2026-08-17): a hunter can be flagged [`Enemy::set_omniscient`], which
 //! swaps the *knowledge* rule (not the perception one) for Perfect Dark's — it always
 //! knows where the player is and walks to the live position instead of a last-known
-//! spot. See [`Enemy::known_player_pos`].
+//! spot. See [`Enemy::known_target_pos`].
 
 use glam::Vec3;
 use rapier3d::prelude::ColliderHandle;
@@ -104,6 +104,57 @@ const FLANK_CLOSE_FRAC: f32 = 0.6;
 /// suppressing-fire band, scaled by `suppress` (0 at difficulty 0). Kept modest so
 /// suppressing fire reads as "firing as it closes," not sniping from across the map.
 const SUPPRESS_BAND: f32 = 6.0; // m
+
+/// **Who a hunter is currently engaging.** Every movement, cover and perception
+/// decision in [`Enemy::update`] measures against this, so the FSM can hunt a
+/// packmate the way it hunts the player.
+///
+/// The FSM used to take the player's position directly, which made hunter-on-hunter
+/// combat half-real: a Perfect Dark simulant that picked a packmate would *shoot* it
+/// (the round resolves against whoever is on the line — see `World::emit_pd_shot`) but
+/// keep manoeuvring against the player, so it fired from wherever it happened to be
+/// standing instead of closing, holding a standoff and taking cover. Threading the
+/// target through instead is what turns that into an actual free-for-all.
+///
+/// A few rules stay **player-specific on purpose** and are not routed through here:
+/// the catch check ([`Enemy::catches`]), the crosshair aim-sense that drives the
+/// reactive dodge (there is no packmate crosshair), the `detectable` invisibility
+/// toggle (see [`Enemy::can_see`]), and the `World`-level squad alert, footstep noise
+/// and grenade flush.
+#[derive(Clone, Copy, Debug)]
+pub struct EngageTarget {
+    /// The target's feet in world space.
+    pub pos: Vec3,
+    /// Which character that is.
+    pub id: TargetId,
+}
+
+/// Which character an [`EngageTarget`] refers to. Hunters are identified by their
+/// index in the `World`'s roster, matching `world::pd_lab::PdTarget`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TargetId {
+    Player,
+    Hunter(usize),
+}
+
+impl EngageTarget {
+    /// The player, at `pos` — the default for every hunter that has not picked
+    /// something else, and what the whole game was before free-for-all.
+    pub fn player(pos: Vec3) -> Self {
+        EngageTarget { pos, id: TargetId::Player }
+    }
+
+    /// Hunter `i`, at `pos`.
+    pub fn hunter(i: usize, pos: Vec3) -> Self {
+        EngageTarget { pos, id: TargetId::Hunter(i) }
+    }
+
+    /// Whether this is the player, which is what the deliberately player-only rules
+    /// key off.
+    pub fn is_player(&self) -> bool {
+        matches!(self.id, TargetId::Player)
+    }
+}
 
 /// The outcome of one enemy step, reported back to [`crate::world::World`].
 #[derive(Default)]
@@ -459,7 +510,7 @@ pub struct Enemy {
     /// to the *live* position rather than a last-known one and never searches. The
     /// `World` sets it each step (PD-lab hunters only, see `World::pd_omniscience`).
     /// Perception is deliberately untouched: it still only *sees* what the raycast +
-    /// cone allow. See [`Self::known_player_pos`]. Defaults `false`.
+    /// cone allow. See [`Self::known_target_pos`]. Defaults `false`.
     omniscient: bool,
 }
 
@@ -540,7 +591,7 @@ impl Enemy {
     }
 
     /// Enable/disable **omniscience** — Perfect Dark's knowledge rule. See
-    /// [`Self::omniscient`] and [`Self::known_player_pos`]. The `World` sets it each
+    /// [`Self::omniscient`] and [`Self::known_target_pos`]. The `World` sets it each
     /// step; `false` is our original perceive-then-remember behaviour (kill-switch).
     pub fn set_omniscient(&mut self, on: bool) {
         self.omniscient = on;
@@ -570,9 +621,9 @@ impl Enemy {
     /// (fed a real raycast on purpose — see `world::pd_lab`) and the LOS-gated `Attack`
     /// state keep the contract they were tuned against. An omniscient hunter with no
     /// sightline knows exactly where to walk and still cannot shoot through the wall.
-    fn known_player_pos(&self, player_feet: Vec3) -> Option<Vec3> {
+    fn known_target_pos(&self, target_pos: Vec3) -> Option<Vec3> {
         if self.omniscient {
-            Some(player_feet)
+            Some(target_pos)
         } else {
             self.last_known
         }
@@ -890,37 +941,77 @@ impl Enemy {
         self.moving = false;
     }
 
-    /// Face the player instantly (JS `faceTarget`).
-    fn face(&mut self, player_feet: Vec3) {
-        let flat = Vec3::new(player_feet.x - self.pos.x, 0.0, player_feet.z - self.pos.z);
+    /// Whether the hunter has clear line-of-sight to what it is engaging.
+    ///
+    /// The `detectable` invisibility toggle (`N`) applies **only to the player**: it is
+    /// a dev/observe aid for watching hunters work without being shot, and extending it
+    /// to packmates would blind the whole squad to each other whenever it was on.
+    fn can_see(&self, target: EngageTarget, physics: &mut PhysicsWorld) -> bool {
+        (!target.is_player() || self.detectable)
+            && perception_los(physics, self.pos, target.pos)
+    }
+
+    /// Whether the **player** is within catch range (the melee fallback). Deliberately
+    /// not routed through [`EngageTarget`]: a hunter cannot "catch" a packmate, and
+    /// this is the check that ends the hunt.
+    fn catches(&self, player_feet: Vec3) -> bool {
+        self.dist_to(player_feet) < CATCH_DIST
+            && (player_feet.y - self.pos.y).abs() < CATCH_VERT
+    }
+
+    /// Face the engage target instantly (JS `faceTarget`).
+    fn face(&mut self, target_pos: Vec3) {
+        let flat = Vec3::new(target_pos.x - self.pos.x, 0.0, target_pos.z - self.pos.z);
         if flat.length_squared() > 1e-6 {
             self.heading = flat.normalize();
         }
     }
 
-    /// Horizontal (XZ) distance to the player.
-    fn dist_to(&self, player_feet: Vec3) -> f32 {
-        Vec3::new(player_feet.x - self.pos.x, 0.0, player_feet.z - self.pos.z).length()
+    /// Horizontal (XZ) distance to a point — `prop_get_lateral_distance_to_prop`
+    /// (`chraction.c:14030`). This is the arrival test: "have I got to that nav cell",
+    /// where height is the floor's business and not the decision's.
+    fn dist_to(&self, target_pos: Vec3) -> f32 {
+        Vec3::new(target_pos.x - self.pos.x, 0.0, target_pos.z - self.pos.z).length()
     }
 
-    /// Whether the hunter perceives the player this step, given whether it has clear
-    /// line-of-sight. Two LOS-gated ways in: the 120° detection cone out to
+    /// **Full 3D distance** to a point — `prop_get_distance_to_prop`
+    /// (`chraction.c:14021`), which is what `botcmd_tick_dist_mode` measures the attack
+    /// band against (`botcmd.c:98`).
+    ///
+    /// Perfect Dark has both functions and uses this one for engagement, deliberately.
+    /// We used the lateral one everywhere, and the consequence is visible the moment a
+    /// level has floors: a hunter one storey below its target reads a comfortable 5 m,
+    /// decides it is exactly at its standoff, plants — and has no shot, because the real
+    /// separation is 5 m across and 3 m up, through a floor slab. It then holds there
+    /// indefinitely instead of taking the stairs.
+    ///
+    /// Perception is left lateral on purpose: [`DETECTION_RANGE`] and the cone were
+    /// tuned as a ground-plane reach and PD's own sight check is a raycast, not a
+    /// distance. What moves to 3D here is the *engagement band* — enter, hold, back off,
+    /// re-acquire — which is the part that was making decisions about a target it could
+    /// not reach.
+    fn engage_dist(&self, target_pos: Vec3) -> f32 {
+        (target_pos - self.pos).length()
+    }
+
+    /// Whether the hunter perceives its engage target this step, given whether it has
+    /// clear line-of-sight. Two LOS-gated ways in: the 120° detection cone out to
     /// [`DETECTION_RANGE`], or bare proximity within [`PROXIMITY_RANGE`] regardless of
     /// facing (can't sneak past a guard you're standing next to).
-    fn perceives(&self, player_feet: Vec3, has_los: bool, sense: f32, look: Vec3, half_cone: f32) -> bool {
+    fn perceives(&self, target_pos: Vec3, has_los: bool, sense: f32, look: Vec3, half_cone: f32) -> bool {
         if !has_los {
             return false;
         }
-        let dist = self.dist_to(player_feet);
+        let dist = self.dist_to(target_pos);
         dist < PROXIMITY_RANGE * sense
-            || (dist < DETECTION_RANGE * sense && self.in_cone(player_feet, look, half_cone))
+            || (dist < DETECTION_RANGE * sense && self.in_cone(target_pos, look, half_cone))
     }
 
     /// Whether the player is inside the perception cone of half-angle `half_cone` about
     /// the view axis `look` (JS `isTargetInCone`). `look` is the facing for an engaged
     /// hunter, or the sweeping scan axis while searching.
-    fn in_cone(&self, player_feet: Vec3, look: Vec3, half_cone: f32) -> bool {
-        let to = Vec3::new(player_feet.x - self.pos.x, 0.0, player_feet.z - self.pos.z);
+    fn in_cone(&self, target_pos: Vec3, look: Vec3, half_cone: f32) -> bool {
+        let to = Vec3::new(target_pos.x - self.pos.x, 0.0, target_pos.z - self.pos.z);
         if to.length_squared() < 1e-6 {
             return true;
         }
@@ -945,17 +1036,21 @@ impl Enemy {
         }
     }
 
-    /// Advance the FSM one step. `standoff` is the distance (m) this hunter holds at
-    /// while attacking — the weapon's ([`crate::combat::EnemyWeaponDef::standoff`]),
-    /// threaded in so a sniper hangs back and a shotgunner charges in. `fire_anim` =
-    /// a fire one-shot is currently playing on the shared mixer (the JS
-    /// `enemyState === 'action'` proxy, disambiguated from hit/death by the caller).
-    /// Returns `want_fire` when it wants the caller to start a fire burst this step,
-    /// and `needs_search_target` when it's searching and needs the `World` to hand it
-    /// a fresh point.
+    /// Advance the FSM one step against `target` — whoever this hunter is engaging (see
+    /// [`EngageTarget`]). `player_feet` is passed separately and used **only** for the
+    /// player-specific catch check, so a hunter chasing a packmate cannot end the hunt.
+    ///
+    /// `standoff` is the distance (m) this hunter holds at while attacking — the
+    /// weapon's ([`crate::combat::EnemyWeaponDef::standoff`]), threaded in so a sniper
+    /// hangs back and a shotgunner charges in. `fire_anim` = a fire one-shot is
+    /// currently playing on the shared mixer (the JS `enemyState === 'action'` proxy,
+    /// disambiguated from hit/death by the caller). Returns `want_fire` when it wants
+    /// the caller to start a fire burst this step, and `needs_search_target` when it's
+    /// searching and needs the `World` to hand it a fresh point.
     pub fn update(
         &mut self,
         dt: f32,
+        target: EngageTarget,
         player_feet: Vec3,
         standoff: f32,
         tuning: AiTuning,
@@ -974,6 +1069,9 @@ impl Enemy {
         // perception range (it can't engage what it can't see). Both the standoff and
         // this attack range now scale with the equipped weapon.
         let attack_range = (standoff + ATTACK_FIRE_BAND).min(perception);
+        // Every geometric decision below is against the ENGAGE TARGET, which is the
+        // player for an ordinary hunter and may be a packmate for a simulant.
+        let target_pos = target.pos;
         self.moving = false;
         self.move_speed = 0.0;
         self.desired_vel = Vec3::ZERO;
@@ -991,11 +1089,11 @@ impl Enemy {
         // position fresh while chasing/attacking. Two ways in, both LOS-gated: the
         // 120° detection cone out to `DETECTION_RANGE`, OR close proximity regardless
         // of facing (`PROXIMITY_RANGE`).
-        let has_los = self.detectable && perception_los(physics, self.pos, player_feet);
+        let has_los = self.can_see(target, physics);
         let (look, half_cone) = self.perception_view(dt);
-        let perceived = self.perceives(player_feet, has_los, tuning.sense, look, half_cone);
+        let perceived = self.perceives(target_pos, has_los, tuning.sense, look, half_cone);
         if perceived {
-            self.last_known = Some(player_feet);
+            self.last_known = Some(target_pos);
             self.since_seen = 0.0;
         } else {
             self.since_seen += dt;
@@ -1037,13 +1135,10 @@ impl Enemy {
         // kept verbatim as the `utility == false` kill-switch.
         if self.utility {
             self.util_step(
-                &mut step, dt, player_feet, standoff, attack_range, tuning, nav,
+                &mut step, dt, target, standoff, attack_range, tuning, nav,
                 physics, fire_anim, self_collider, perceived,
             );
-            step.caught = {
-                let horiz = self.dist_to(player_feet);
-                horiz < CATCH_DIST && (player_feet.y - self.pos.y).abs() < CATCH_VERT
-            };
+            step.caught = self.catches(player_feet);
             return step;
         }
         // Acquisition gate for the three BLIND states. An omniscient hunter is never
@@ -1101,7 +1196,7 @@ impl Enemy {
                 }
             }
             AiState::Alert => {
-                self.face(player_feet);
+                self.face(target_pos);
                 self.alert_timer += dt;
                 if self.alert_timer >= tuning.alert {
                     self.state = AiState::Chase;
@@ -1109,10 +1204,14 @@ impl Enemy {
                 }
             }
             AiState::Chase => {
-                let dist = self.dist_to(player_feet);
-                let los = self.detectable && perception_los(physics, self.pos, player_feet);
-                if dist <= attack_range && !fire_anim && los {
-                    self.face(player_feet);
+                let dist = self.engage_dist(target_pos);
+                let los = self.can_see(target, physics);
+                // `!fire_anim` is deliberately NOT a condition here — see the matching
+                // note in `util_score`. A Perfect Dark simulant fires near-continuously,
+                // so gating the Attack entry on "no burst in flight" left it in `Chase`
+                // forever, running the player down to point-blank while shooting.
+                if dist <= attack_range && los {
+                    self.face(target_pos);
                     self.enter_attack();
                     self.path.clear();
                 } else {
@@ -1152,7 +1251,7 @@ impl Enemy {
                     // at the spot, curve in from an offset bearing on this hunter's
                     // assigned side — 0 swing at difficulty 0 (unchanged straight chase),
                     // wider with `flank`, and packmates split sides so the pack surrounds.
-                    let base = self.known_player_pos(player_feet).unwrap_or(player_feet);
+                    let base = self.known_target_pos(target_pos).unwrap_or(target_pos);
                     let flank_angle = FLANK_MAX_ANGLE * tuning.flank * self.flank_dir;
                     let target = flank_point(base, self.pos, flank_angle);
                     // Arriving at the believed spot without eyes on = they got away →
@@ -1164,8 +1263,8 @@ impl Enemy {
                 }
             }
             AiState::Attack => {
-                let dist = self.dist_to(player_feet);
-                let los = self.detectable && perception_los(physics, self.pos, player_feet);
+                let dist = self.engage_dist(target_pos);
+                let los = self.can_see(target, physics);
                 // Debounce the LOS bail: only a *sustained* loss ([`ATTACK_LOS_GRACE`])
                 // drops us to Chase, so a one-frame corner-seam flicker doesn't thrash
                 // Attack↔Chase (the ORCA-exposed jank the lab caught).
@@ -1188,16 +1287,27 @@ impl Enemy {
                     // inside the band → plant and hold. Always face the player so the
                     // procedural aim points the gun at them (backpedal look while
                     // retreating).
-                    if self.holding {
+                    if !los {
+                        // **No sight line → close, whatever the distance says.** PD's
+                        // rule, stated twice in `botcmd_tick_dist_mode` (`botcmd.c:135`
+                        // and `:163`): an out-of-sight target turns both `OK` (hold) and
+                        // `BACKUP` (give ground) into `ADVANCE`. Without it a hunter
+                        // whose sightline flickers — heads bobbing over a floor edge,
+                        // a corner seam — sits inside its standoff band forever,
+                        // holding a distance it has no shot along, because
+                        // `ATTACK_LOS_GRACE` keeps resetting before it can bail.
+                        self.holding = false;
+                        self.move_toward(dt, target_pos, nav, SPEED_ADVANCE * tuning.speed_mult);
+                    } else if self.holding {
                         // Leave the hold only when the player pulls clearly outside the
                         // band on either side.
                         if !(standoff - STANDOFF_HYST..=standoff + STANDOFF_HYST).contains(&dist) {
                             self.holding = false;
                         }
                     } else if dist > standoff {
-                        self.move_toward(dt, player_feet, nav, SPEED_ADVANCE * tuning.speed_mult); // jog in
+                        self.move_toward(dt, target_pos, nav, SPEED_ADVANCE * tuning.speed_mult); // jog in
                     } else if dist < standoff - STANDOFF_HYST {
-                        self.back_off(dt, player_feet, nav, SPEED_ADVANCE * tuning.speed_mult); // give ground
+                        self.back_off(dt, target_pos, nav, SPEED_ADVANCE * tuning.speed_mult); // give ground
                     } else {
                         self.holding = true;
                     }
@@ -1207,9 +1317,9 @@ impl Enemy {
                     // facing is re-set to the player right after so the gun stays on
                     // target while the body jukes off the shot line.
                     if self.evade_burst > 0.0 {
-                        self.evade_step(dt, player_feet, nav);
+                        self.evade_step(dt, target_pos, nav);
                     }
-                    self.face(player_feet);
+                    self.face(target_pos);
                     // Request a fire burst once per attack entry.
                     if !fire_anim && !self.is_attacking {
                         self.is_attacking = true;
@@ -1229,7 +1339,7 @@ impl Enemy {
                         let want_cover = tuning.cover > 0.0
                             && (self.is_hurt() || tuning.cover >= COVER_UNHURT_MIN);
                         let cover = if want_cover {
-                            self.sample_cover_cell(self.pos, player_feet, nav, physics, self_collider, false)
+                            self.sample_cover_cell(self.pos, target_pos, nav, physics, self_collider, false)
                         } else {
                             None
                         };
@@ -1245,7 +1355,7 @@ impl Enemy {
                                 // alternate sides, then pick the open reposition spot.
                                 self.strafe_dir = -self.strafe_dir;
                                 self.enter_cooldown_reposition(
-                                    player_feet, standoff, nav, physics, self_collider,
+                                    target_pos, standoff, nav, physics, self_collider,
                                 );
                             }
                         }
@@ -1261,7 +1371,7 @@ impl Enemy {
                 let arrived = match self.reposition_target {
                     Some(t) => self.move_toward(dt, t, nav, REPOSITION_SPEED * tuning.speed_mult),
                     None => {
-                        self.face(player_feet);
+                        self.face(target_pos);
                         true
                     }
                 };
@@ -1269,9 +1379,9 @@ impl Enemy {
                 // player, and re-evaluate the engagement exactly as before.
                 if arrived || self.cooldown_timer >= tuning.cooldown {
                     self.reposition_target = None;
-                    self.face(player_feet);
-                    let dist = self.dist_to(player_feet);
-                    let los = self.detectable && perception_los(physics, self.pos, player_feet);
+                    self.face(target_pos);
+                    let dist = self.engage_dist(target_pos);
+                    let los = self.can_see(target, physics);
                     if dist <= attack_range && los {
                         self.enter_attack();
                     } else if dist <= perception {
@@ -1292,9 +1402,9 @@ impl Enemy {
                     Some(t) => self.move_toward(dt, t, nav, SPEED_ADVANCE * tuning.speed_mult),
                     None => true,
                 };
-                let hidden = !(self.detectable && perception_los(physics, self.pos, player_feet));
+                let hidden = !(self.can_see(target, physics));
                 if arrived || hidden {
-                    self.face(player_feet); // ready to pop back out
+                    self.face(target_pos); // ready to pop back out
                     self.cover_timer += dt;
                     let dwell = COVER_DWELL_LO + (COVER_DWELL_HI - COVER_DWELL_LO) * tuning.cover;
                     if self.cover_timer >= dwell {
@@ -1304,7 +1414,7 @@ impl Enemy {
                         // investigate where they were.
                         let base = self.cover_target.unwrap_or(self.pos);
                         self.peek_target =
-                            self.sample_cover_cell(base, player_feet, nav, physics, self_collider, true);
+                            self.sample_cover_cell(base, target_pos, nav, physics, self_collider, true);
                         if self.peek_target.is_some() {
                             self.state = AiState::Peek;
                             self.is_attacking = false;
@@ -1323,15 +1433,15 @@ impl Enemy {
                     Some(t) => self.move_toward(dt, t, nav, SPEED_ADVANCE * tuning.speed_mult),
                     None => true,
                 };
-                let los = self.detectable && perception_los(physics, self.pos, player_feet);
+                let los = self.can_see(target, physics);
                 if arrived {
                     // Keep dodging while exposed at the peek: if the player has a bead
                     // on us, juke off the shot line (same reactive evade as Attack), so
                     // a peeking hunter doesn't stand still to be shot.
                     if self.evade_burst > 0.0 {
-                        self.evade_step(dt, player_feet, nav);
+                        self.evade_step(dt, target_pos, nav);
                     }
-                    self.face(player_feet);
+                    self.face(target_pos);
                     if los {
                         // Pop-out volley: one burst on the same want_fire/fire_started
                         // lifecycle as Attack, then duck back to fresh cover.
@@ -1345,7 +1455,7 @@ impl Enemy {
                         }
                         if self.is_attacking && self.fire_started && !fire_anim {
                             self.is_attacking = false;
-                            self.duck_to_cover(player_feet, nav, physics, self_collider);
+                            self.duck_to_cover(target_pos, nav, physics, self_collider);
                         }
                     } else {
                         // Popped out but the player isn't there any more — re-engage if
@@ -1363,10 +1473,7 @@ impl Enemy {
             }
         }
 
-        step.caught = {
-            let horiz = self.dist_to(player_feet);
-            horiz < CATCH_DIST && (player_feet.y - self.pos.y).abs() < CATCH_VERT
-        };
+        step.caught = self.catches(player_feet);
         step
     }
 
@@ -1411,7 +1518,6 @@ impl Enemy {
         engaged: bool,
         dist: f32,
         los_hold: bool,
-        firing: bool,
         attack_range: f32,
         tuning: AiTuning,
     ) -> f32 {
@@ -1454,17 +1560,25 @@ impl Enemy {
             AiState::Attack => {
                 if self.alert_served && los_hold {
                     if dist <= attack_range {
-                        // Don't INITIATE the plant mid-suppress-burst (mirror the FSM's
-                        // `!fire_anim` Chase→Attack gate): keep closing + suppressing while
-                        // a burst is in flight, so the pack pushes through chokepoints
-                        // instead of stopping to shoot the instant it's barely in range.
-                        if firing && self.state != AiState::Attack {
-                            0.0
-                        } else {
-                            // Clearly beats Chase(0.7)+inertia so a closing hunter hands off
-                            // to the standoff hold (else it runs the player to point-blank).
-                            1.0
-                        }
+                        // Clearly beats Chase(0.7)+inertia so a closing hunter hands off
+                        // to the standoff hold (else it runs the player to point-blank).
+                        //
+                        // **A burst in flight is deliberately NOT an input here.** It used
+                        // to zero this score — "don't initiate the plant mid-suppress-burst,
+                        // so the pack pushes through chokepoints instead of stopping to
+                        // shoot the instant it's barely in range". That was written when
+                        // only the FSM pulled the trigger, so a burst meant "mid-approach
+                        // volley" and came in short bursts with gaps to plant in. The
+                        // Perfect Dark model owns the trigger now and fires near-continuously
+                        // at the top tiers, so the exemption never lifted: `Chase` (0.7) won
+                        // forever and the hunter ran the player down to point-blank, firing.
+                        //
+                        // Nothing is lost by dropping it, because `Attack` advances to its
+                        // standoff on its own (see the Attack arm) — entering it early does
+                        // not stop the hunter, it just closes at a jog instead of a run. And
+                        // it matches `botcmd_tick_dist_mode`, where whether the bot is
+                        // shooting is not an input to the distance mode at all.
+                        1.0
                     } else if dist <= attack_range * 1.3 && self.state == AiState::Attack {
                         0.9 // exit hysteresis: hold out to 1.3× once already attacking
                     } else {
@@ -1506,7 +1620,6 @@ impl Enemy {
         engaged: bool,
         dist: f32,
         los_hold: bool,
-        firing: bool,
         attack_range: f32,
         tuning: AiTuning,
     ) -> AiState {
@@ -1522,7 +1635,7 @@ impl Enemy {
         ];
         let mut best = (AiState::Idle, f32::MIN);
         for s in CANDIDATES {
-            let mut sc = self.util_score(s, perceived, engaged, dist, los_hold, firing, attack_range, tuning);
+            let mut sc = self.util_score(s, perceived, engaged, dist, los_hold, attack_range, tuning);
             if s == self.state {
                 sc += UTIL_INERTIA;
             }
@@ -1540,12 +1653,13 @@ impl Enemy {
     fn util_enter(
         &mut self,
         next: AiState,
-        player_feet: Vec3,
+        target: EngageTarget,
         standoff: f32,
         nav: &NavWorld,
         physics: &mut PhysicsWorld,
         self_collider: ColliderHandle,
     ) {
+        let target_pos = target.pos;
         self.state = next;
         match next {
             AiState::Alert => {
@@ -1556,7 +1670,7 @@ impl Enemy {
             AiState::Attack => self.enter_attack(),
             AiState::Investigate => self.scan_timer = 0.0,
             AiState::TakeCover => {
-                match self.sample_cover_cell(self.pos, player_feet, nav, physics, self_collider, false) {
+                match self.sample_cover_cell(self.pos, target_pos, nav, physics, self_collider, false) {
                     Some(spot) => {
                         self.cover_target = Some(spot);
                         self.peek_target = None;
@@ -1565,13 +1679,13 @@ impl Enemy {
                     None => {
                         // No cover → the FSM's fallback: flip the weave + open reposition.
                         self.strafe_dir = -self.strafe_dir;
-                        self.enter_cooldown_reposition(player_feet, standoff, nav, physics, self_collider);
+                        self.enter_cooldown_reposition(target_pos, standoff, nav, physics, self_collider);
                     }
                 }
             }
             AiState::Cooldown => {
                 self.strafe_dir = -self.strafe_dir;
-                self.enter_cooldown_reposition(player_feet, standoff, nav, physics, self_collider);
+                self.enter_cooldown_reposition(target_pos, standoff, nav, physics, self_collider);
             }
             _ => {}
         }
@@ -1584,7 +1698,7 @@ impl Enemy {
         &mut self,
         step: &mut EnemyStep,
         dt: f32,
-        player_feet: Vec3,
+        target: EngageTarget,
         standoff: f32,
         attack_range: f32,
         tuning: AiTuning,
@@ -1594,8 +1708,9 @@ impl Enemy {
         self_collider: ColliderHandle,
         perceived: bool,
     ) {
-        let dist = self.dist_to(player_feet);
-        let has_los = self.detectable && perception_los(physics, self.pos, player_feet);
+        let target_pos = target.pos;
+        let dist = self.engage_dist(target_pos);
+        let has_los = self.can_see(target, physics);
         // Debounced LOS for the attack hysteresis (a one-frame flicker mustn't drop it).
         if has_los {
             self.attack_los_lost = 0.0;
@@ -1609,10 +1724,6 @@ impl Enemy {
         // makes those behaviours unreachable for it without a special case.
         let engaged = self.omniscient
             || (self.last_known.is_some() && self.since_seen < ENGAGE_MEMORY);
-        // A burst in flight (suppress or attack) — gates the plant-initiation so a
-        // closing hunter keeps advancing while it fires (mirrors the FSM).
-        let firing = fire_anim || self.is_attacking;
-
         // The sequential combat sub-cycle is COMMITTED once entered — it runs to
         // completion in its executor and hands back to the scorer — so the scorer only
         // governs the reactive choice + INITIATING the between-bursts move (post_burst).
@@ -1623,10 +1734,10 @@ impl Enemy {
         let next = if committed {
             self.state
         } else {
-            self.util_choose(perceived, engaged, dist, los_hold, firing, attack_range, tuning)
+            self.util_choose(perceived, engaged, dist, los_hold, attack_range, tuning)
         };
         if next != self.state {
-            self.util_enter(next, player_feet, standoff, nav, physics, self_collider);
+            self.util_enter(next, target, standoff, nav, physics, self_collider);
         }
         self.post_burst = false; // consume the edge (may be re-armed by Attack below)
 
@@ -1647,7 +1758,7 @@ impl Enemy {
                 }
                 None => step.needs_search_target = true,
             },
-            AiState::Investigate => match self.known_player_pos(player_feet) {
+            AiState::Investigate => match self.known_target_pos(target_pos) {
                 Some(t) if self.dist_to(t) > ARRIVE_DIST => {
                     self.move_toward(dt, t, nav, SPEED_SEARCH);
                 }
@@ -1662,7 +1773,7 @@ impl Enemy {
                 }
             },
             AiState::Alert => {
-                self.face(player_feet);
+                self.face(target_pos);
                 self.alert_timer += dt;
                 if self.alert_timer >= tuning.alert {
                     self.alert_served = true;
@@ -1677,7 +1788,7 @@ impl Enemy {
                     self.pump_fire(fire_anim, step); // Chase bursts just cycle (no reposition)
                 }
                 let chase_speed = if firing { SPEED_ADVANCE } else { SPEED_CHASE };
-                let base = self.known_player_pos(player_feet).unwrap_or(player_feet);
+                let base = self.known_target_pos(target_pos).unwrap_or(target_pos);
                 let flank_angle = FLANK_MAX_ANGLE * tuning.flank * self.flank_dir;
                 let target = flank_point(base, self.pos, flank_angle);
                 self.move_toward(dt, target, nav, chase_speed * tuning.speed_mult);
@@ -1686,21 +1797,25 @@ impl Enemy {
                 // Standoff in/out/hold with a hysteresis dead-band, reactive evade, and
                 // the fire pump; a finished burst arms `post_burst` so next tick's scorer
                 // breaks to cover / repositions.
-                if self.holding {
+                // Out of sight → close, whatever the distance says (see the FSM arm).
+                if !has_los {
+                    self.holding = false;
+                    self.move_toward(dt, target_pos, nav, SPEED_ADVANCE * tuning.speed_mult);
+                } else if self.holding {
                     if !(standoff - STANDOFF_HYST..=standoff + STANDOFF_HYST).contains(&dist) {
                         self.holding = false;
                     }
                 } else if dist > standoff {
-                    self.move_toward(dt, player_feet, nav, SPEED_ADVANCE * tuning.speed_mult);
+                    self.move_toward(dt, target_pos, nav, SPEED_ADVANCE * tuning.speed_mult);
                 } else if dist < standoff - STANDOFF_HYST {
-                    self.back_off(dt, player_feet, nav, SPEED_ADVANCE * tuning.speed_mult);
+                    self.back_off(dt, target_pos, nav, SPEED_ADVANCE * tuning.speed_mult);
                 } else {
                     self.holding = true;
                 }
                 if self.evade_burst > 0.0 {
-                    self.evade_step(dt, player_feet, nav);
+                    self.evade_step(dt, target_pos, nav);
                 }
-                self.face(player_feet);
+                self.face(target_pos);
                 if self.pump_fire(fire_anim, step) {
                     self.post_burst = true;
                 }
@@ -1710,13 +1825,13 @@ impl Enemy {
                 let arrived = match self.reposition_target {
                     Some(t) => self.move_toward(dt, t, nav, REPOSITION_SPEED * tuning.speed_mult),
                     None => {
-                        self.face(player_feet);
+                        self.face(target_pos);
                         true
                     }
                 };
                 if arrived || self.cooldown_timer >= tuning.cooldown {
                     self.reposition_target = None;
-                    self.face(player_feet);
+                    self.face(target_pos);
                     // Leave the committed set → the scorer re-evaluates next tick.
                     self.state = AiState::Chase;
                 }
@@ -1726,15 +1841,15 @@ impl Enemy {
                     Some(t) => self.move_toward(dt, t, nav, SPEED_ADVANCE * tuning.speed_mult),
                     None => true,
                 };
-                let hidden = !(self.detectable && perception_los(physics, self.pos, player_feet));
+                let hidden = !(self.can_see(target, physics));
                 if arrived || hidden {
-                    self.face(player_feet);
+                    self.face(target_pos);
                     self.cover_timer += dt;
                     let dwell = COVER_DWELL_LO + (COVER_DWELL_HI - COVER_DWELL_LO) * tuning.cover;
                     if self.cover_timer >= dwell {
                         let base = self.cover_target.unwrap_or(self.pos);
                         self.peek_target =
-                            self.sample_cover_cell(base, player_feet, nav, physics, self_collider, true);
+                            self.sample_cover_cell(base, target_pos, nav, physics, self_collider, true);
                         if self.peek_target.is_some() {
                             self.state = AiState::Peek;
                             self.is_attacking = false;
@@ -1751,15 +1866,15 @@ impl Enemy {
                     Some(t) => self.move_toward(dt, t, nav, SPEED_ADVANCE * tuning.speed_mult),
                     None => true,
                 };
-                let los = self.detectable && perception_los(physics, self.pos, player_feet);
+                let los = self.can_see(target, physics);
                 if arrived {
                     if self.evade_burst > 0.0 {
-                        self.evade_step(dt, player_feet, nav);
+                        self.evade_step(dt, target_pos, nav);
                     }
-                    self.face(player_feet);
+                    self.face(target_pos);
                     if los {
                         if self.pump_fire(fire_anim, step) {
-                            self.duck_to_cover(player_feet, nav, physics, self_collider);
+                            self.duck_to_cover(target_pos, nav, physics, self_collider);
                         }
                     } else {
                         // Popped out but they're gone → leave the cycle; scorer re-decides.
@@ -1831,8 +1946,8 @@ impl Enemy {
     /// floor — it won't moonwalk through a wall or off a ledge (it just holds there
     /// instead, and the reposition juke will find a better angle next burst). The
     /// caller re-faces the player, so the model backpedals while covering you.
-    fn back_off(&mut self, dt: f32, player_feet: Vec3, nav: &NavWorld, speed: f32) {
-        let away = Vec3::new(self.pos.x - player_feet.x, 0.0, self.pos.z - player_feet.z);
+    fn back_off(&mut self, dt: f32, target_pos: Vec3, nav: &NavWorld, speed: f32) {
+        let away = Vec3::new(self.pos.x - target_pos.x, 0.0, self.pos.z - target_pos.z);
         if away.length_squared() < 1e-6 {
             return; // standing on the player — no direction to back toward
         }
@@ -1851,8 +1966,8 @@ impl Enemy {
     /// A committed reactive juke (player is aiming — see the evade trigger): a fast
     /// lateral burst in `evade_dir` at [`EVADE_SPEED`]. Flips the direction if blocked
     /// so it slides the other way rather than grinding the wall.
-    fn evade_step(&mut self, dt: f32, player_feet: Vec3, nav: &NavWorld) {
-        if !self.lateral_step(dt, player_feet, nav, self.evade_dir, EVADE_SPEED) {
+    fn evade_step(&mut self, dt: f32, target_pos: Vec3, nav: &NavWorld) {
+        if !self.lateral_step(dt, target_pos, nav, self.evade_dir, EVADE_SPEED) {
             self.evade_dir = -self.evade_dir;
         }
     }
@@ -1861,8 +1976,8 @@ impl Enemy {
     /// `speed` m/s this frame. Nav/LOS-gated like [`Self::back_off`] so it never clips
     /// a wall or walks off a ledge; returns `false` if the step was blocked (the caller
     /// flips its direction). Moves sideways only — roughly holding the standoff radius.
-    fn lateral_step(&mut self, dt: f32, player_feet: Vec3, nav: &NavWorld, dir: f32, speed: f32) -> bool {
-        let to = Vec3::new(player_feet.x - self.pos.x, 0.0, player_feet.z - self.pos.z);
+    fn lateral_step(&mut self, dt: f32, target_pos: Vec3, nav: &NavWorld, dir: f32, speed: f32) -> bool {
+        let to = Vec3::new(target_pos.x - self.pos.x, 0.0, target_pos.z - self.pos.z);
         if to.length_squared() < 1e-6 {
             return false;
         }
@@ -1975,7 +2090,7 @@ impl Enemy {
     /// keeps LOS, or `None` if there's nowhere standable to go (→ plain hold-and-face).
     fn pick_reposition(
         &self,
-        player_feet: Vec3,
+        target_pos: Vec3,
         standoff: f32,
         nav: &NavWorld,
         physics: &mut PhysicsWorld,
@@ -1991,12 +2106,12 @@ impl Enemy {
             (self.strafe_dir, REPOSITION_ARC * 0.5),
             (-self.strafe_dir, REPOSITION_ARC * 0.5),
         ] {
-            let ideal = reposition_point(player_feet, self.pos, dir, arc, min_r, max_r);
+            let ideal = reposition_point(target_pos, self.pos, dir, arc, min_r, max_r);
             if let Some(spot) = nav.nearest_standable(ideal.x, ideal.y.max(0.1), ideal.z, 3) {
                 if fallback.is_none() {
                     fallback = Some(spot);
                 }
-                if perception_los(physics, spot, player_feet) {
+                if perception_los(physics, spot, target_pos) {
                     return Some(spot);
                 }
             }
@@ -2009,7 +2124,7 @@ impl Enemy {
     /// first so successive bursts alternate sides.
     fn enter_cooldown_reposition(
         &mut self,
-        player_feet: Vec3,
+        target_pos: Vec3,
         standoff: f32,
         nav: &NavWorld,
         physics: &mut PhysicsWorld,
@@ -2018,7 +2133,7 @@ impl Enemy {
         self.state = AiState::Cooldown;
         self.cooldown_timer = 0.0;
         self.reposition_target =
-            self.pick_reposition(player_feet, standoff, nav, physics, self_collider);
+            self.pick_reposition(target_pos, standoff, nav, physics, self_collider);
     }
 
     /// Duck back to a fresh no-LOS cell after a peek volley (#4). If no cover is
@@ -2026,12 +2141,12 @@ impl Enemy {
     /// loop and fight in the open from `Attack`.
     fn duck_to_cover(
         &mut self,
-        player_feet: Vec3,
+        target_pos: Vec3,
         nav: &NavWorld,
         physics: &mut PhysicsWorld,
         self_collider: ColliderHandle,
     ) {
-        match self.sample_cover_cell(self.pos, player_feet, nav, physics, self_collider, false) {
+        match self.sample_cover_cell(self.pos, target_pos, nav, physics, self_collider, false) {
             Some(spot) => {
                 self.cover_target = Some(spot);
                 self.peek_target = None;
@@ -2054,7 +2169,7 @@ impl Enemy {
     fn sample_cover_cell(
         &self,
         from: Vec3,
-        player_feet: Vec3,
+        target_pos: Vec3,
         nav: &NavWorld,
         physics: &mut PhysicsWorld,
         _self_collider: ColliderHandle,
@@ -2071,7 +2186,7 @@ impl Enemy {
                 };
                 // The snapped cell must genuinely match the wanted visibility (the
                 // snap can pull a candidate back around a corner, so re-check it).
-                if perception_los(physics, spot, player_feet) != want_los {
+                if perception_los(physics, spot, target_pos) != want_los {
                     continue;
                 }
                 let d = spot.distance(from);
@@ -2088,8 +2203,8 @@ impl Enemy {
 /// `dir · arc` radians around the player from the hunter's current bearing, at the
 /// current player-distance clamped to `[min_r, max_r]` (the standoff-relative band).
 /// Pure (the nav snap + LOS preference live in [`Enemy::pick_reposition`]).
-fn reposition_point(player_feet: Vec3, pos: Vec3, dir: f32, arc: f32, min_r: f32, max_r: f32) -> Vec3 {
-    let to = Vec3::new(pos.x - player_feet.x, 0.0, pos.z - player_feet.z);
+fn reposition_point(target_pos: Vec3, pos: Vec3, dir: f32, arc: f32, min_r: f32, max_r: f32) -> Vec3 {
+    let to = Vec3::new(pos.x - target_pos.x, 0.0, pos.z - target_pos.z);
     let r = to.length();
     if r < 1e-3 {
         return pos; // sitting on the player — no meaningful bearing to arc from
@@ -2097,9 +2212,9 @@ fn reposition_point(player_feet: Vec3, pos: Vec3, dir: f32, arc: f32, min_r: f32
     let ang = to.z.atan2(to.x) + dir * arc;
     let nr = r.clamp(min_r, max_r);
     Vec3::new(
-        player_feet.x + ang.cos() * nr,
+        target_pos.x + ang.cos() * nr,
         pos.y,
-        player_feet.z + ang.sin() * nr,
+        target_pos.z + ang.sin() * nr,
     )
 }
 
@@ -2122,38 +2237,17 @@ fn flank_point(target: Vec3, pos: Vec3, angle: f32) -> Vec3 {
     Vec3::new(target.x + ang.cos() * nr, pos.y, target.z + ang.sin() * nr)
 }
 
-/// Rapier line-of-sight from `from_feet` to `to_feet`, cast between chest heights
-/// (JS `EnemyAI.hasLineOfSight`). This hunter's own capsule (`self_collider`) is
-/// excluded so it doesn't block its own view; another hunter's capsule in the way
-/// legitimately does. Clear when nothing is hit (the native player has no
-/// collider), or when the only hit is at essentially the target distance. A wall
-/// in between blocks the shot.
-pub(crate) fn line_of_sight(
-    physics: &mut PhysicsWorld,
-    from_feet: Vec3,
-    to_feet: Vec3,
-    self_collider: ColliderHandle,
-) -> bool {
-    let from = from_feet + Vec3::new(0.0, 1.0, 0.0);
-    let to = to_feet + Vec3::new(0.0, 0.8, 0.0);
-    let d = to - from;
-    let dist = d.length();
-    if dist < 1e-4 {
-        return true;
-    }
-    let dir = d / dist;
-    match physics.raycast_excluding(from, dir, dist, Some(self_collider)) {
-        None => true,
-        Some(hit) => (hit.point - from).length() >= dist - 0.1,
-    }
-}
-
 /// **Perception** line-of-sight from `from_feet` to `to_feet`, cast between chest
 /// heights but blocked ONLY by world geometry — friendly capsules are ignored (see
 /// [`PhysicsWorld::raycast_world_only`]). This is what every FSM engagement / cover
 /// decision uses, so a packmate crossing the ray can't make a hunter lose sight of
-/// the player (the "gives up for a bit" / engage-flicker bug). Shooting still uses
-/// [`line_of_sight`], so a friendly in the line blocks a shot.
+/// the player (the "gives up for a bit" / engage-flicker bug).
+///
+/// It is now the **only** sight test. A capsule-blocking variant (`line_of_sight`) used
+/// to sit beside it for *shooting*, so a friendly in the line blocked a shot — but the
+/// Perfect Dark shot model resolves whoever is on the line instead of being stopped by
+/// them (`World::emit_pd_shot`), and `chr_has_los_to_chr` (`chraction.c:6533`) does not
+/// put `CDTYPE_CHRS` in its mask either, so nothing wanted it any more.
 pub(crate) fn perception_los(physics: &mut PhysicsWorld, from_feet: Vec3, to_feet: Vec3) -> bool {
     let from = from_feet + Vec3::new(0.0, 1.0, 0.0);
     let to = to_feet + Vec3::new(0.0, 0.8, 0.0);
@@ -2338,10 +2432,243 @@ mod tests {
         fire_anim: bool,
         collider: ColliderHandle,
     ) -> EnemyStep {
-        let step = e.update(dt, player, standoff, tuning, aimed, nav, physics, fire_anim, collider);
+        let step = e.update(
+            dt,
+            EngageTarget::player(player),
+            player,
+            standoff,
+            tuning,
+            aimed,
+            nav,
+            physics,
+            fire_anim,
+            collider,
+        );
         let dv = e.desired_vel;
         e.integrate_move(dv, dt, nav);
         step
+    }
+
+    /// Drive one step against an arbitrary [`EngageTarget`], with the player somewhere
+    /// else — the free-for-all path.
+    #[allow(clippy::too_many_arguments)]
+    fn drive_target(
+        e: &mut Enemy,
+        dt: f32,
+        target: EngageTarget,
+        player: Vec3,
+        standoff: f32,
+        tuning: AiTuning,
+        nav: &NavWorld,
+        physics: &mut PhysicsWorld,
+        collider: ColliderHandle,
+    ) -> EnemyStep {
+        let step = e.update(
+            dt, target, player, standoff, tuning, false, nav, physics, false, collider,
+        );
+        let dv = e.desired_vel;
+        e.integrate_move(dv, dt, nav);
+        step
+    }
+
+    /// **A target one floor up is not "at standoff".**
+    ///
+    /// The engagement band used to be measured laterally, so a hunter on the storey
+    /// below its target read a comfortable horizontal distance, decided it was exactly
+    /// where it wanted to be, and planted — with a floor slab between it and the shot.
+    /// Perfect Dark measures this band with the 3D `chr_get_distance_to_coord`
+    /// (`botcmd.c:98`) and keeps a separate lateral function for arrival tests, which is
+    /// the split this mirrors.
+    ///
+    /// The numbers are the ones from the playtest that found it: a hunter 5.3 m away
+    /// horizontally and one storey (3 m) down, holding a pistol standoff of 4.8 m.
+    #[test]
+    fn a_target_a_floor_above_is_out_of_the_standoff_band() {
+        let e = Enemy::new(Vec3::new(0.0, 0.0, 0.0), Vec3::Z);
+        let above = Vec3::new(5.3, 3.0, 0.0);
+        let standoff = 4.8; // `standoff_for(8.0)` — the PP7
+        let band = standoff - STANDOFF_HYST..=standoff + STANDOFF_HYST;
+
+        let lateral = e.dist_to(above);
+        assert!((lateral - 5.3).abs() < 1e-3, "the lateral reach is unchanged");
+        assert!(band.contains(&lateral), "…and it looks like a perfect firing distance");
+
+        let real = e.engage_dist(above);
+        assert!((real - 6.09).abs() < 0.02, "the real separation is 6.1 m, got {real:.2}");
+        assert!(!band.contains(&real), "which is outside the band, so the hunter closes");
+
+        // Same floor, and the two agree — the fix cannot have moved the flat case.
+        let level = Vec3::new(5.3, 0.0, 0.0);
+        assert!((e.engage_dist(level) - e.dist_to(level)).abs() < 1e-4);
+    }
+
+    /// **A hunter that cannot see its target closes, whatever the distance says.**
+    ///
+    /// `botcmd_tick_dist_mode` says this twice (`botcmd.c:135` and `:163`): an
+    /// out-of-sight target turns both `OK` (hold at standoff) and `BACKUP` (give ground)
+    /// into `ADVANCE`. We had no such rule — only `ATTACK_LOS_GRACE`, a *debounce* on the
+    /// Attack→Chase bail. Where the sightline flickers rather than cleanly breaking —
+    /// heads bobbing over a floor edge, a corner seam — the grace keeps resetting, so the
+    /// hunter never bails and never advances: it stands inside its standoff band
+    /// indefinitely, holding a distance it has no shot along. Which is exactly what the
+    /// playtest screenshot showed.
+    ///
+    /// `detectable = false` is the sightline block here: it is the one input that makes
+    /// `can_see` false without needing level geometry in the test.
+    #[test]
+    fn an_attacking_hunter_with_no_sightline_advances_instead_of_holding() {
+        let nav = open_room();
+        let dt = 1.0 / 60.0;
+        let standoff = 4.8;
+        let player = Vec3::new(10.0, 0.05, 15.0);
+        // Planted at exactly its standoff — the state the stall was observed in.
+        let start = Vec3::new(10.0, 0.05, 15.0 - standoff);
+
+        let run = |can_see: bool| -> (bool, f32, f32) {
+            let mut physics = PhysicsWorld::new(); // empty → geometry never blocks
+            let collider = physics.add_enemy_collider(start, 0.24, 0.48);
+            let mut e = Enemy::new(start, player);
+            e.state = AiState::Attack;
+            e.holding = true;
+            e.set_detectable(can_see);
+            // One step, so the Attack arm runs before the LOS grace can bail it to Chase.
+            drive(&mut e, dt, player, standoff, AiTuning::default(), false, &nav, &mut physics, false, collider);
+            (e.holding, e.desired_vel.length(), e.dist_to(player))
+        };
+
+        let (holding, speed, _) = run(false);
+        assert!(!holding, "a hunter with no sightline must not hold its standoff");
+        assert!(speed > 0.1, "it advances; desired speed was {speed:.3} m/s");
+
+        // The control: with a clear sightline at the same distance it plants, which is
+        // the behaviour the standoff exists for and must not have been broken.
+        let (holding, speed, _) = run(true);
+        assert!(holding, "with a clear sightline it holds at standoff");
+        assert!(speed < 0.1, "and stands still; desired speed was {speed:.3} m/s");
+    }
+
+    /// **A hunter engaging a packmate manoeuvres against the packmate, not the player.**
+    ///
+    /// This is the free-for-all seam. Before it, `update` took the player's position and
+    /// nothing else, so a Perfect Dark simulant that picked a packmate would shoot it
+    /// (the round resolves against whoever is on the line) while still closing on,
+    /// standing off from and taking cover against the *player* — it fired from wherever
+    /// it happened to be standing.
+    ///
+    /// The hunter starts between the two, with the packmate 9 m along `+X` and the
+    /// player 9 m along `−X`, so "closed on its target" and "closed on the player" are
+    /// opposite signs and no amount of tuning can make one look like the other.
+    #[test]
+    fn a_hunter_closes_on_the_packmate_it_is_engaging_not_on_the_player() {
+        let nav = open_room();
+        let dt = 1.0 / 60.0;
+        let start = Vec3::new(10.0, 0.05, 10.0);
+        let packmate = Vec3::new(19.0, 0.05, 10.0);
+        let player = Vec3::new(1.0, 0.05, 10.0);
+        let tuning = AiTuning::default();
+
+        let mut physics = PhysicsWorld::new(); // empty → LOS always clear
+        let collider = physics.add_enemy_collider(start, 0.24, 0.48);
+        let mut e = Enemy::new(start, packmate); // watching toward the packmate
+        for _ in 0..400 {
+            drive_target(
+                &mut e,
+                dt,
+                EngageTarget::hunter(1, packmate),
+                player,
+                3.0,
+                tuning,
+                &nav,
+                &mut physics,
+                collider,
+            );
+        }
+        let to_packmate = e.dist_to(packmate);
+        let to_player = e.dist_to(player);
+        assert!(
+            to_packmate < 9.0 - 2.0,
+            "it should have closed on the packmate; {to_packmate:.2} m away (started 9)"
+        );
+        assert!(
+            to_player > 9.0,
+            "and moved AWAY from the player; {to_player:.2} m away (started 9)"
+        );
+        // It engaged: the packmate became its knowledge, and it wants to shoot it.
+        assert_eq!(
+            e.last_known.map(|p| p.x > start.x),
+            Some(true),
+            "the last-known position is the packmate's side of the room",
+        );
+
+        // The control: the same hunter handed the PLAYER instead goes the other way.
+        let mut physics = PhysicsWorld::new();
+        let collider = physics.add_enemy_collider(start, 0.24, 0.48);
+        let mut e = Enemy::new(start, player);
+        for _ in 0..400 {
+            drive(&mut e, dt, player, 3.0, tuning, false, &nav, &mut physics, false, collider);
+        }
+        assert!(
+            e.dist_to(player) < 9.0 - 2.0 && e.dist_to(packmate) > 9.0,
+            "the player-targeted control closes the other way ({:.2} m from the player)",
+            e.dist_to(player),
+        );
+    }
+
+    /// The catch check stays **player-only**: a hunter standing on top of a packmate it
+    /// is engaging has not caught anybody, or a free-for-all would end the hunt the
+    /// moment two simulants collided.
+    #[test]
+    fn catching_a_packmate_does_not_end_the_hunt() {
+        let nav = open_room();
+        let mut physics = PhysicsWorld::new();
+        let here = Vec3::new(10.0, 0.05, 10.0);
+        let collider = physics.add_enemy_collider(here, 0.24, 0.48);
+        let mut e = Enemy::new(here, here);
+        let far_player = Vec3::new(10.0, 0.05, 25.0);
+        let step = drive_target(
+            &mut e,
+            1.0 / 60.0,
+            EngageTarget::hunter(1, here), // right on top of it
+            far_player,
+            3.0,
+            AiTuning::default(),
+            &nav,
+            &mut physics,
+            collider,
+        );
+        assert!(!step.caught, "a packmate at zero range is not a caught player");
+        // …and the player at zero range still is.
+        let step = drive_target(
+            &mut e,
+            1.0 / 60.0,
+            EngageTarget::hunter(1, here),
+            here,
+            3.0,
+            AiTuning::default(),
+            &nav,
+            &mut physics,
+            collider,
+        );
+        assert!(step.caught, "the player at zero range is");
+    }
+
+    /// The `N` invisibility toggle is a **player** aid: it must not blind a hunter to a
+    /// packmate it is engaging, or turning it on would freeze every simulant fight.
+    #[test]
+    fn the_invisibility_toggle_does_not_hide_packmates() {
+        let mut physics = PhysicsWorld::new(); // empty → geometry never blocks
+        let here = Vec3::new(10.0, 0.05, 10.0);
+        let mut e = Enemy::new(here, here);
+        e.set_detectable(false);
+        let packmate = Vec3::new(14.0, 0.05, 10.0);
+        assert!(
+            e.can_see(EngageTarget::hunter(1, packmate), &mut physics),
+            "a packmate is still visible with the player hidden"
+        );
+        assert!(
+            !e.can_see(EngageTarget::player(packmate), &mut physics),
+            "…while the player at the same spot is not"
+        );
     }
 
     /// Player-visibility toggle (the `N` dev/observe aid): with `detectable` false, a
@@ -2534,7 +2861,7 @@ mod tests {
             .sample_cover_cell(behind, player, &nav, &mut physics, collider, false)
             .expect("a cell behind the pillar breaks LOS");
         assert!(
-            !line_of_sight(&mut physics, cover, player, collider),
+            !perception_los(&mut physics, cover, player),
             "the cover cell truly has no LOS to the player"
         );
 
@@ -2544,7 +2871,7 @@ mod tests {
             .sample_cover_cell(open, player, &nav, &mut physics, collider, true)
             .expect("a cell in the open sees the player");
         assert!(
-            line_of_sight(&mut physics, peek, player, collider),
+            perception_los(&mut physics, peek, player),
             "the peek cell truly has LOS to the player"
         );
     }
@@ -2576,7 +2903,7 @@ mod tests {
             match e.state() {
                 AiState::TakeCover => {
                     took_cover = true;
-                    if !line_of_sight(&mut physics, e.pos, player, collider) {
+                    if !perception_los(&mut physics, e.pos, player) {
                         hidden = true;
                     }
                 }

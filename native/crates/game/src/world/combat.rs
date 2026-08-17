@@ -5,6 +5,7 @@
 //! every entry point below no-ops outside HUNT.
 
 use super::*;
+use crate::combat::attack_anim;
 
 /// The looping background-music track (asset-relative under `native/assets/audio/`).
 /// The JS default (`Game.ts`: `/music/102 Facility.mp3`). Plays in both BUILD and
@@ -1287,7 +1288,8 @@ impl World {
             Some(i) => (i.body, i.enemy.pos, i.yaw()),
             None => return None,
         };
-        let feet_off = self.body_feet_offset(body);
+        let pd_clips = self.enemies.get(idx).is_some_and(|i| i.pd_anims);
+        let feet_off = self.body_feet_offset(body, pd_clips);
         let m = self.char_models.get(body)?;
         let sk = &m.skeleton;
         // Model-space bone globals of the current pose (post-stack if it exists).
@@ -1364,7 +1366,8 @@ impl World {
         // shot). Needs this hunter's body model (immut) + its pose/blood (mut) —
         // disjoint fields, split-borrowed. Body id + its feet offset read out first.
         let body = self.enemies.get(idx).map(|i| i.body).unwrap_or(0);
-        let feet_offset = self.body_feet_offset(body);
+        let pd_clips = self.enemies.get(idx).is_some_and(|i| i.pd_anims);
+        let feet_offset = self.body_feet_offset(body, pd_clips);
         // The bone the shot actually landed on, for Perfect Dark's per-hit-part
         // reaction tables. Resolved from the SAME posed skeleton the blood painting
         // uses, so the part and the stain agree by construction.
@@ -1440,6 +1443,7 @@ impl World {
             inst.enemy.stun(dur);
             let hp = inst.enemy.health();
             log::info!("hunter hit — {zone:?} {dmg:.0} dmg, {hp:.0} hp left (PD injury table)");
+            self.stop_enemy_fire(idx); // `chr_stop_firing` before `ACT_ARGH`
         } else if self.ragdoll {
             // Phase 3 default: a brief physics-ragdoll stagger blended into the run-and-
             // gun animation + a short stun, then the hunter resumes fighting. Flat across
@@ -1453,6 +1457,7 @@ impl World {
             if let Some(inst) = self.enemies.get_mut(idx) {
                 inst.enemy.stun(REACTION_STUN);
             }
+            self.stop_enemy_fire(idx); // a stagger is a flinch: drop the trigger
             let hp = self.enemies.get(idx).map(|i| i.enemy.health()).unwrap_or(0.0);
             log::info!("hunter staggered — {zone:?} {dmg:.0} dmg, {hp:.0} hp left");
         } else if self.hit_reactions {
@@ -1471,6 +1476,7 @@ impl World {
             inst.enemy.stun(dur);
             let hp = inst.enemy.health();
             log::info!("hunter hit — {zone:?} {dmg:.0} dmg, {hp:.0} hp left ({name})");
+            self.stop_enemy_fire(idx); // `chr_stop_firing` before `ACT_ARGH`
         } else {
             // Perfect-Dark "sim" style (default): no flinch animation or stun — the
             // hunter keeps chasing + firing through the hit. The pain vocal + the
@@ -1480,12 +1486,87 @@ impl World {
         }
     }
 
-    /// Start a fire burst on hunter `idx`'s mixer — it entered `attack` (A3). Plays
-    /// its weapon-class fire one-shot (rifle / pistol / dual) with that clip's
-    /// FIRE_TIMING window; the per-shot cadence + damage roll run in
-    /// [`Self::enemy_combat_step`]. Resets the cadence so the first shot waits for
-    /// the window's `fireStart`.
+    /// Where hunter `idx` is currently trying to engage: whoever its simulant has
+    /// picked, or the player. `None` in BUILD, or when neither exists.
+    ///
+    /// A simulant's target is already resolved every step (`pd_lab::step_simulant` →
+    /// [`EnemyInstance::pd_target`]), so this is a read, not a decision.
+    pub(crate) fn engage_target_pos(&self, idx: usize) -> Option<Vec3> {
+        let player = self.character.as_ref().map(|c| c.pos);
+        match self.enemies.get(idx).and_then(|i| i.pd_target) {
+            Some(pd_lab::PdTarget::Player) | None => player,
+            Some(pd_lab::PdTarget::Hunter(j)) => {
+                self.enemies.get(j).filter(|e| !e.enemy.is_dead()).map(|e| e.enemy.pos).or(player)
+            }
+        }
+    }
+
+    /// The attack animation Perfect Dark would start for hunter `idx` right now.
+    ///
+    /// `chr_attack` (`chraction.c:2825`) does not pick by weapon — it picks by the
+    /// **bearing to the target at the instant the burst begins**, out of a 32-slot
+    /// table per stance, and then holds that row for the whole animation. So this is
+    /// evaluated once here rather than per frame, exactly as PD stores it in
+    /// `chr->act_attack.animcfg`.
+    ///
+    /// `None` for a GoldenEye hunter (one hand-timed clip, fixed at spawn) or when
+    /// there is nothing to bear on.
+    fn pd_fire_row(&mut self, idx: usize) -> Option<&'static attack_anim::AttackAnimConfig> {
+        let (pd, pos, yaw, class, dual) = {
+            let inst = self.enemies.get(idx)?;
+            (inst.pd_anims, inst.enemy.pos, inst.yaw(), inst.weapon.class, inst.dual)
+        };
+        if !pd {
+            return None;
+        }
+        let target = self.engage_target_pos(idx)?;
+        let to = Vec3::new(target.x - pos.x, 0.0, target.z - pos.z);
+        if to.length_squared() < 1e-8 {
+            return None;
+        }
+        let rel = attack_anim::relative_angle(to.x.atan2(to.z), yaw);
+        // PD's `index = random() % len`; the group applies the modulo, so any draw does.
+        let roll = self.rand_below(1 << 16);
+        Some(attack_anim::select(attack_anim::table_for(class, dual), rel, roll))
+    }
+
+    /// **Cancel hunter `idx`'s fire burst** — `chr_stop_firing` (`chraction.c:9414`).
+    ///
+    /// Perfect Dark calls this immediately before entering `ACT_ARGH`, at both injury sites
+    /// (`chraction.c:3476` and `:3520`): a character that flinches drops both triggers, its
+    /// aim-end is reset and its fire slots are freed. Leaving `actiontype` also stops
+    /// `chr_tick_attack` pumping shots at all.
+    ///
+    /// We needed it because **firing here is a timer**, not an animation: `fire_elapsed`
+    /// runs in `enemy_combat_step` and knows nothing about the mixer or the stun, so a
+    /// hunter mid-flinch kept shooting out of an in-flight burst. Visible the moment the
+    /// authored reactions went on by default.
+    ///
+    /// (PD's own simulants never reach the injury code — `chr->aibot` returns early at
+    /// `chraction.c:3427`, which is the "sim style" no-flinch behaviour `hit_enemy`'s last
+    /// branch still offers. Ours flinch *and* stop firing, which is the guard's half of PD
+    /// paired with the simulant's aim; the alternative is not flinching at all.)
+    fn stop_enemy_fire(&mut self, idx: usize) {
+        let Some(inst) = self.enemies.get_mut(idx) else { return };
+        inst.fire_elapsed = None;
+        inst.shot_timer = 0.0;
+        inst.burst_shot = 0;
+    }
+
+    /// Start a fire burst on hunter `idx` — it entered `attack` (A3), or its simulant
+    /// pulled the trigger. The per-shot cadence + damage roll run in
+    /// [`Self::enemy_combat_step`]; this resolves *which* attack animation the burst
+    /// plays and resets the cadence so the first shot waits for its `shootstartframe`.
+    ///
+    /// A Perfect Dark hunter re-resolves the animation here from the bearing to its
+    /// target ([`Self::pd_fire_row`]), which is what makes a guard taken from behind
+    /// visibly slower to shoot than one you walk up to. A GoldenEye hunter keeps the
+    /// single clip its stack was built with.
     pub(crate) fn start_enemy_fire(&mut self, idx: usize) {
+        let row = self.pd_fire_row(idx);
+        if let Some(row) = row {
+            self.install_fire_row(idx, row);
+        }
         let Some(inst) = self.enemies.get_mut(idx) else { return };
         // Firing is a timer, not a full-body clip: the hunter keeps its locomotion
         // (legs running) while the procedural stack aims the arm + kicks recoil. The
@@ -1495,6 +1576,36 @@ impl World {
         inst.fire_elapsed = Some(inst.fire.start);
         inst.shot_timer = 0.0;
         log::info!("hunter firing ({})", inst.weapon.name);
+    }
+
+    /// Point hunter `idx`'s whole fire pipeline at one [`AttackAnimConfig`] row: the
+    /// timing windows, the authored aim cone, the aim-overlay clip and hold frame, and
+    /// the barrel axis the chest-aim swings against (looked up from the spawn-time
+    /// [`EnemyInstance::fire_axes`] measurement — see `lifecycle::spawn_wave`).
+    ///
+    /// The axis is the part that cannot be skipped: each animation holds the gun its
+    /// own way, and re-using the previous clip's axis would leave the chest-aim
+    /// correcting for a pose that is no longer on the body. If the row's clip or its
+    /// measurement is missing, the row is refused outright rather than half-applied.
+    ///
+    /// [`AttackAnimConfig`]: attack_anim::AttackAnimConfig
+    fn install_fire_row(&mut self, idx: usize, row: &'static attack_anim::AttackAnimConfig) {
+        let Some(inst) = self.enemies.get_mut(idx) else { return };
+        let Some(clip) = inst.anim.clip(row.slot).cloned() else { return };
+        let Some(&(_, axis)) = inst.fire_axes.iter().find(|(s, _)| *s == row.slot) else {
+            return;
+        };
+        inst.fire = attack_anim::FireTiming::from_pd(row, clip.duration);
+        let hold = inst.fire.shoot.0;
+        let cone = inst.fire.cone;
+        if let Some(ov) = inst.stack.layer_as::<ClipOverlayLayer>(ENEMY_AIM_OVERLAY_LAYER) {
+            ov.set_clip(clip);
+            ov.time = hold;
+        }
+        if let Some(ca) = inst.stack.layer_as::<AimOffsetLayer>(ENEMY_CHEST_AIM_LAYER) {
+            ca.forward = axis;
+            ca.cone = cone;
+        }
     }
 
     /// Per-frame enemy combat + player damage-feedback (HUNT only). Pumps EACH
@@ -1515,13 +1626,10 @@ impl World {
         if self.hud_show_timer > 0.0 {
             self.hud_show_timer = (self.hud_show_timer - dt).max(0.0);
         }
-        // Per-hunter muzzle + damage-cooldown decay (blood is persistent — no decay).
+        // Per-hunter muzzle-flash decay (blood is persistent — no decay).
         for inst in &mut self.enemies {
             if inst.muzzle_timer > 0.0 {
                 inst.muzzle_timer = (inst.muzzle_timer - dt).max(0.0);
-            }
-            if inst.damage_cooldown > 0.0 {
-                inst.damage_cooldown = (inst.damage_cooldown - dt).max(0.0);
             }
         }
         if self.player_dead {
@@ -1534,6 +1642,9 @@ impl World {
         // The visual cadence is the weapon's own fire rate (difficulty no longer scales
         // it — the damage that lands is capped by MAX_HIT_RATE in `emit_enemy_shot`).
         let mut shots: Vec<usize> = Vec::new();
+        // Hunters whose burst just ended on a sideways attack animation, to be handed
+        // back to their stance's forward one (see the loop after the shots).
+        let mut ended_sideways: Vec<usize> = Vec::new();
         for (i, inst) in self.enemies.iter_mut().enumerate() {
             let Some(t) = inst.fire_elapsed else {
                 inst.shot_timer = 0.0;
@@ -1569,9 +1680,26 @@ impl World {
             // own `endframe` if it keeps the animation running longer than that.
             let over = t >= inst.fire.shoot.1 + ENEMY_FIRE_TAIL && t >= inst.fire.end;
             inst.fire_elapsed = if over { None } else { Some(t) };
+            if over && inst.fire.angle_offset != 0.0 {
+                ended_sideways.push(i);
+            }
         }
         for i in shots {
             self.emit_enemy_shot(i);
+        }
+        // A burst that played a **sideways** attack animation has to hand the hold back
+        // to the forward one. Between bursts a hunter keeps its weapon up and tracking
+        // (`advance_animation`), and a clip drawn firing 90° off the body would leave the
+        // chest-aim pinned at its cone limit — the gun visibly held past the target,
+        // for as long as the hunter went without firing again. The next burst re-picks
+        // from the bearing anyway, so this is purely about the gap between them.
+        for i in ended_sideways {
+            let default = self.enemies.get(i).map(|inst| {
+                attack_anim::config_for(inst.weapon.class, inst.dual)
+            });
+            if let Some(row) = default {
+                self.install_fire_row(i, row);
+            }
         }
     }
 
@@ -1602,41 +1730,27 @@ impl World {
         if let Some(audio) = self.audio.as_mut() {
             audio.play(weapon.fire_sound, ENEMY_FIRE_VOL);
         }
-        // ── PD simulant: a real shot down a real barrel ──
-        // No hit roll. The bullet leaves along the body yaw the zeroing model
-        // produced, and connects only if that yaw actually points at the player.
-        // Every "accuracy" behaviour is emergent from where the barrel is.
-        if self.enemies.get(idx).is_some_and(|i| i.pdsim.is_some()) {
-            self.emit_pd_shot(idx, epos, ppos, collider, weapon);
-            return;
-        }
-
-        // Walls (and other hunters) block the shot (re-checked per shot).
-        if !crate::enemy::line_of_sight(&mut self.physics, epos, ppos, collider) {
-            return;
-        }
-        // Hit-rate cap: even mid-spray, a hunter can only LAND a shot every
-        // 1/MAX_HIT_RATE seconds — so full-auto can't one-shot you. Shots fired while
-        // the cooldown is up still flash + report, they just can't damage.
-        let ready = self.enemies.get(idx).map(|i| i.damage_cooldown <= 0.0).unwrap_or(false);
-        if !ready {
-            return;
-        }
-        // Difficulty scales accuracy up (capped at a full hit) and eases out the
-        // distance falloff, so a high-difficulty hunter lands shots at range too.
-        let dp = self.difficulty_params();
-        let dist = Vec3::new(ppos.x - epos.x, 0.0, ppos.z - epos.z).length();
-        let acc = (weapon.accuracy * dp.accuracy_mult).min(1.0);
-        let dist_factor = (1.0 - dist / weapon.range).max(0.0);
-        let eased = dist_factor + (1.0 - dist_factor) * dp.falloff_ease;
-        let hit_chance = acc * eased;
-        if self.rand_float() < hit_chance {
-            self.take_player_damage(weapon.damage);
-            // Start the hit-rate cooldown only on a shot that actually landed.
-            if let Some(inst) = self.enemies.get_mut(idx) {
-                inst.damage_cooldown = 1.0 / MAX_HIT_RATE;
-            }
-        }
+        // ── A real shot down a real barrel ──
+        //
+        // **There is no hit roll any more.** The bullet leaves along the yaw the zeroing
+        // model produced — which carries the hunter's live aim error — and connects only
+        // if that yaw was actually pointing at the player. Every "accuracy" behaviour is
+        // emergent from where the barrel is.
+        //
+        // What this retired, deliberately and together (see `DESIGN_PD_SIMULANT_AI.md`
+        // §9 and §17):
+        //
+        // * `rand() < accuracy · (1 − dist/range)` — the probability model,
+        // * `MAX_HIT_RATE` — the global landed-hit ceiling that existed *because* of it,
+        //   since a rolled full-auto would otherwise delete the player in one burst,
+        // * `DiffParams::accuracy_mult` / `falloff_ease` — the difficulty levers that
+        //   scaled the roll.
+        //
+        // Keeping the ceiling on top of the zeroing model would have clipped the top of
+        // exactly the range the difficulty table expresses: Hard and Dark both saturate
+        // it and become indistinguishable. The honest ceiling is the burst gap, which
+        // `enemy_combat_step` applies to the cadence rather than to the damage.
+        self.emit_pd_shot(idx, epos, ppos, collider, weapon);
     }
 
     /// One shot from a **PD simulant** — a genuine hitscan, no probability roll.
@@ -1681,7 +1795,12 @@ impl World {
         collider: ColliderHandle,
         weapon: EnemyWeaponDef,
     ) {
-        let Some(yaw) = self.enemies.get(idx).and_then(|i| i.pdsim.as_ref()).map(|s| s.yaw) else {
+        // The BARREL yaw, not the body's: a hunter mid-sideways attack animation has
+        // its torso deliberately turned off the target (see `Simulant::yaw`), and the
+        // round leaves along the gun.
+        let Some(yaw) =
+            self.enemies.get(idx).and_then(|i| i.pdsim.as_ref()).map(|s| s.barrel_yaw())
+        else {
             return;
         };
         let dual = self.enemies.get(idx).is_some_and(|i| i.dual);
@@ -1732,17 +1851,19 @@ impl World {
             hits.push((along, who));
         };
         consider(ppos, None, &mut hits);
-        if self.pd_lab.is_some() {
-            for (j, other) in self.enemies.iter().enumerate() {
-                if j == idx || other.enemy.is_dead() {
-                    continue;
-                }
-                consider(other.enemy.pos, Some(j), &mut hits);
+        // Packmates are on the line too, always. Hunters no longer *target* each other
+        // (the team check, §16.1), but a round that crosses one still hits it — which is
+        // what Perfect Dark's teammates do to each other, and it is the half of the
+        // emergent-friendly-fire behaviour worth keeping.
+        for (j, other) in self.enemies.iter().enumerate() {
+            if j == idx || other.enemy.is_dead() {
+                continue;
             }
+            consider(other.enemy.pos, Some(j), &mut hits);
         }
         // Nearest body along the line takes it, if a **wall** does not stop the round
         // first. The wall test is `perception_los` (world geometry only) rather than
-        // `line_of_sight` (which capsules also block): a body in the way is not an
+        // a capsule-blocking cast: a body in the way is not an
         // obstruction here, it is the thing that gets shot, and the nearest-hit sort
         // above has already decided which. `collider` is unused for the same reason.
         let _ = collider;

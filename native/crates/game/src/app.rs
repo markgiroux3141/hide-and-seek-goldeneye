@@ -432,14 +432,13 @@ impl App {
             .map(|w| w.pd_debug())
             .unwrap_or_default();
 
-        // PD-style radar: the lab's navigation aid. Same borrow discipline again —
-        // the whole frame is projected into the radar's own frame by the `World` and
-        // handed over as plain values.
-        let radar: Option<crate::world::RadarView> = self
-            .world
-            .as_ref()
-            .filter(|w| w.pd_lab_active())
-            .and_then(|w| w.radar(RADAR_RANGE_M));
+        // PD-style radar — a **player-facing feature now**, not the lab's navigation aid,
+        // so it is no longer gated on `pd_lab_active`. Same borrow discipline as the
+        // overlay: the whole frame is projected into the radar's own frame by the `World`
+        // and handed over as plain values. `radar` returns `None` outside HUNT, which is
+        // what keeps it off the BUILD screen.
+        let radar: Option<crate::world::RadarView> =
+            self.world.as_ref().and_then(|w| w.radar(RADAR_RANGE_M));
 
         let selected = self.shop_selected.min(rows.len().saturating_sub(1));
         let mut actions: Vec<ShopAction> = Vec::new();
@@ -1102,6 +1101,24 @@ fn draw_pd_radar(ctx: &egui::Context, view: &crate::world::RadarView) {
         });
 }
 
+/// Whether a boolean boot flag is on: set, and not set to something that plainly means
+/// *off*.
+///
+/// Presence alone is the older convention here (`PD_LAB`, `PD_LAB_FFA`), and it has a sharp
+/// edge — `GE_CLIPS=0` would switch the flag **on**, which is the opposite of what anyone
+/// typing it means. Reading the value costs nothing and removes the surprise. Note that
+/// PowerShell deletes a variable assigned `""`, so `$env:GE_CLIPS = ""` genuinely unsets it
+/// there; the empty case is handled anyway for the shells where it does not.
+fn env_flag(name: &str) -> bool {
+    match std::env::var(name) {
+        Err(_) => false,
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "" | "0" | "false" | "no" | "off"
+        ),
+    }
+}
+
 fn draw_pd_lab_overlay(ctx: &egui::Context, sims: &[crate::world::pd_lab::PdDebug]) {
     if sims.is_empty() {
         return;
@@ -1225,6 +1242,13 @@ fn draw_pd_lab_overlay(ctx: &egui::Context, sims: &[crate::world::pd_lab::PdDebu
                     .monospace(),
                 );
 
+                // WHO it is fighting. A packmate here is the free-for-all working: the
+                // hunter should also be *moving* toward `#j`, not toward you.
+                let who = match s.target_hunter {
+                    Some(j) => format!("→ #{j}"),
+                    None if s.has_target => "→ PLAYER".to_string(),
+                    None => String::new(),
+                };
                 let target = match (s.has_target, s.sticky) {
                     (false, _) => "no target",
                     (true, true) => "target (held)",
@@ -1232,6 +1256,14 @@ fn draw_pd_lab_overlay(ctx: &egui::Context, sims: &[crate::world::pd_lab::PdDebu
                 };
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(target).color(SHOP_DIM).monospace());
+                    if !who.is_empty() {
+                        let c = if s.target_hunter.is_some() {
+                            egui::Color32::from_rgb(230, 160, 60) // friendly fire — stands out
+                        } else {
+                            SHOP_TEXT
+                        };
+                        ui.label(egui::RichText::new(who).color(c).monospace().strong());
+                    }
                     if s.firing {
                         ui.label(
                             egui::RichText::new("FIRING")
@@ -1240,9 +1272,37 @@ fn draw_pd_lab_overlay(ctx: &egui::Context, sims: &[crate::world::pd_lab::PdDebu
                         );
                     }
                 });
+
+                // Which of Perfect Dark's per-bearing attack animations the current burst
+                // is playing, and how far off the body's facing it aims. A non-zero angle
+                // is a sideways clip: the torso should visibly be turned away from the
+                // target while the arms fire across it.
+                if let Some((anim, off)) = s.fire_anim {
+                    let c = if off.abs() > 1.0 {
+                        egui::Color32::from_rgb(120, 200, 240) // a directional pick
+                    } else {
+                        SHOP_DIM
+                    };
+                    let off = if off > 180.0 { off - 360.0 } else { off };
+                    ui.label(
+                        egui::RichText::new(format!("{anim}  aim {off:+.0}°"))
+                            .color(c)
+                            .monospace(),
+                    );
+                }
             }
             });
             ui.separator();
+            // Which side everyone is on. With teams on (the default) a hunter targeting
+            // a packmate is a bug; with them off it is the mode — so say which.
+            if sims.first().is_some_and(|s| s.free_for_all) {
+                ui.label(
+                    egui::RichText::new("TEAMS OFF - free-for-all (PD_LAB_FFA)")
+                        .color(egui::Color32::from_rgb(230, 160, 60))
+                        .small()
+                        .strong(),
+                );
+            }
             ui.label(
                 egui::RichText::new("= / -  difficulty tier    N  invisible    I  invincible")
                     .color(SHOP_DIM)
@@ -1319,10 +1379,15 @@ impl ApplicationHandler for App {
 
         // Build the world, upload its initial region meshes.
         let mut world = World::new();
-        // Pin the difficulty dial to a fixed level at boot so it doesn't have to be
-        // managed by hand while evaluating the AI (the `=`/`-` keys still nudge it).
-        // Max = the full expression of the lethality/health/evasion + aim-dodge work.
-        world.set_difficulty(crate::world::DIFFICULTY_MAX);
+        // Pin the difficulty dial at boot so it doesn't have to be managed by hand (the
+        // `=`/`-` keys still sweep it). **Not max any more:** the dial now selects a
+        // Perfect Dark zeroing tier rather than multiplying a hit probability, and max is
+        // DarkSim — no reaction delay, no aim error, kills on sight from across the room.
+        // `HUNT_TIER` is the position where the model is visible as behaviour.
+        world.set_difficulty(crate::world::pd_lab::dial_for_tier(
+            crate::world::pd_lab::HUNT_TIER,
+            crate::world::DIFFICULTY_MAX,
+        ));
         // Restore a small pack at boot (the code default stays at duel = 1 so the
         // duel-mode tests are unaffected) — the coordinated AI (flanking, squad
         // suppression, cover) only reads with more than one hunter on the field.
@@ -1339,22 +1404,55 @@ impl ApplicationHandler for App {
                     for rm in &meshes {
                         renderer.set_region_textured(rm.id, &rm.mesh);
                     }
-                    // Boot the lab at NormalSim rather than the dial's pinned max
-                    // (which is DarkSim — instant reaction, zero aim error, so it
-                    // just kills on sight and shows nothing). Done by moving the
-                    // dial, not by pinning the tier, so `=` / `-` still sweep the
-                    // whole table live. An explicit `PD_LAB_DIFFICULTY=` wins.
-                    if cfg.difficulty.is_none() {
-                        world.set_difficulty(crate::world::pd_lab::dial_for_tier(
-                            crate::world::pd_lab::LAB_TIER,
-                            crate::world::DIFFICULTY_MAX,
-                        ));
-                    }
+                    // The tier is already the boot dial's (`HUNT_TIER`), so the lab
+                    // inherits it and only `PD_LAB_DIFFICULTY=` changes it.
                     world.enable_pd_lab(cfg);
                 }
                 Err(e) => log::error!("PD_LAB: could not build the lab room: {e}"),
             }
         }
+        // ── The roster, applied LAST so an explicit choice always wins ──
+        //
+        // Both families by default — 44 GoldenEye bodies plus the 6 Perfect Dark ones,
+        // every one of them on Perfect Dark's animations. The two knobs are orthogonal:
+        // `BODIES` picks who shows up, `GE_CLIPS` picks what animates them.
+        //
+        // * `BODIES=ge|pd` — one family only. They look completely different, so this is
+        //   an aesthetic switch as much as a debugging one.
+        // * `GE_CLIPS=1` — put GoldenEye-bodied hunters back on the legacy GoldenEye clip
+        //   set: hand-set `FIRE_TIMING` windows, height-zone hit picks, canned flinches,
+        //   no directional fire table. The A/B the whole Perfect Dark track was measured
+        //   against. Narrows the bodies to GoldenEye too, since a Perfect Dark body cannot
+        //   take a GoldenEye clip.
+        //
+        // **Order matters, and it used to be wrong.** This block ran *before* the `PD_LAB`
+        // block above, and `enable_pd_lab` pins `BodySet::PerfectDark` — so with `PD_LAB`
+        // still set in the shell (they persist for a session, and the lab is usable on a
+        // real level, not just its own bare room) `BODIES=ge` was silently discarded and
+        // the wave stayed Perfect Dark. Applying the explicit choice last is the fix:
+        // whatever the environment asks for outranks a mode default.
+        let body_env = std::env::var("BODIES").unwrap_or_default();
+        match body_env.trim().to_ascii_lowercase().as_str() {
+            "" | "all" | "both" => {}
+            "ge" | "goldeneye" => {
+                log::info!("BODIES=ge: GoldenEye bodies only");
+                world.set_body_set(crate::world::BodySet::GoldenEye);
+            }
+            "pd" | "perfectdark" => {
+                log::info!("BODIES=pd: Perfect Dark bodies only");
+                world.set_body_set(crate::world::BodySet::PerfectDark);
+            }
+            other => log::warn!("BODIES='{other}' not recognised — using every body"),
+        }
+        if env_flag("GE_CLIPS") {
+            log::info!("GE_CLIPS: the legacy GoldenEye animation set (GoldenEye bodies)");
+            world.set_goldeneye_clips(true);
+            world.set_body_set(crate::world::BodySet::GoldenEye);
+        }
+        // Say what was actually resolved, unconditionally. The wave itself logs its body
+        // spread at spawn, but that is not until G — and "which hunters am I about to get"
+        // is exactly the question a boot flag silently losing a fight makes unanswerable.
+        log::info!("HUNTERS: {}", world.roster_summary());
         // Optional: boot straight into a saved level slot (`LOAD_SLOT=N`), so a
         // generated level can be explored immediately without pressing F-keys.
         // Starts in BUILD (fly) mode; press G for HUNT (FPS), I for invincible.

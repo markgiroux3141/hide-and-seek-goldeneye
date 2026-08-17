@@ -263,7 +263,10 @@ Key functions: `bot_tick` :909 · `bot_calculate_max_speed` :1096 · `bot_passes
 :1537 · `bot_passes_coward_check` :1557 · `bot_choose_general_target` :1589 ·
 `bot_find_pickup` :1865 · `bot_tick_unpaused` :2445
 
-## 9. What the port actually does (`PD_LAB=1`)
+## 9. What the port actually does
+
+*(Written while this was `PD_LAB=1`. It is the shipped hunter AI now — see §17 for what
+the promotion moved, and read the `PD_LAB` references below as "every hunter".)*
 
 `native/crates/game/src/pdsim/` — the model, which knows nothing about this game and is unit
 tested against the PD constants (29 tests):
@@ -288,12 +291,14 @@ tested against the PD constants (29 tests):
 
 ### Animation is no longer left out
 
-The original note below said animation stayed on our stack. Two pieces of Perfect
+The original note below said animation stayed on our stack. Three pieces of Perfect
 Dark's animation *logic* have since been ported, on top of PD's own clips:
 
 * **`attackanimconfig`** (`game/src/combat/attack_anim.rs`) — the authored per-animation
   aim / shoot / recoil windows and aim limits, replacing our hand-set `FIRE_TIMING`
   guesses. See `DESIGN_PD_WEAPON_MECHANICS.md` §10.5.
+* **The 32-slot direction tables** (same file) — *which* attack animation a burst plays,
+  chosen from the bearing to the target rather than from the weapon alone. See §13.
 * **Per-hit-part reaction tables** (`game/src/combat/hit_anim.rs`) — `g_DeathAnimsHuman*`
   and `g_InjuryAnimsHuman*` keyed by which body part the shot hit, with each row's own
   playback `speed` and `endframe`. That last field is the interesting one: a PD flinch
@@ -349,11 +354,13 @@ separation is produced entirely by where the barrel is pointing.
   not special-cased, and it runs through the same `hit_enemy` a player shot does. Measured
   in a 6-DarkSim lab run: 62 hunter-on-hunter hits and 2 deaths inside ~20 s.
 
-  **What is still missing is movement, not damage.** The FSM only knows how to move toward
-  *the player*, so a simulant that picks a packmate shoots it from wherever it happens to be
-  standing rather than hunting it. A true free-for-all means teaching engagement, standoff,
-  cover and search to take an arbitrary target; `EnemyInstance::pd_target` is the seam that
-  would feed them.
+  *(Amended — that measurement was taken with **no team check**, which §16.1 has since
+  ported. Hunters no longer pick each other as targets unless `PD_LAB_FFA=1`; a stray round
+  crossing a packmate still hits it, which is the PD-faithful half of the above.)*
+
+  ~~**What is still missing is movement, not damage.**~~ **Closed** — see §14. `Enemy::update`
+  takes an `EngageTarget` now, so the whole chase / standoff / cover / search chain runs
+  against a packmate the way it runs against the player.
 - `SHIELD` / `TURTLE`'s double shield and the tranq `dizzyamount` degradation are still
   unported, for the same reason as before: no shield system, no tranquilliser.
 - Cloak handling is present in the model (`zerocloakspeed`) but nothing drives it.
@@ -467,14 +474,11 @@ The question behind this section was "PD has waypoints, standoff points etc. tha
 Half of that turns out to be false — see the standoff note above — and the other half is real.
 Ordered by how much behaviour each buys per unit of work.
 
-**1. An arbitrary-target engagement (the free-for-all seam).** Our whole FSM is written against
-`player_feet`: chase, standoff, cover sampling, flanking and catch all take the player's
-position as an argument. PD's takes a `targetprop` that happens to *usually* be a player. Until
-this changes, a simulant that picks a packmate — which it already does, `EnemyInstance::pd_target`
-is populated and the hitscan already produces friendly fire — shoots it from wherever it is
-standing rather than hunting it. Concretely: thread an `EngageTarget { pos, id }` through
-`Enemy::update` in place of `player_feet`, and have the `World` resolve it from `pd_target`.
-This is the single largest structural difference and it is what unlocks a real combat simulator.
+**1. An arbitrary-target engagement (the free-for-all seam).** ~~Our whole FSM is written against
+`player_feet`.~~ **Done — see §14.** `Enemy::update` takes an `EngageTarget { pos, id }` that the
+`World` resolves from `pd_target`, so chase, standoff, cover sampling, flanking and perception
+all measure against whoever the simulant picked. The catch check, the crosshair aim-sense and the
+`detectable` toggle stayed player-specific on purpose; §14 says why for each.
 
 **2. Authored cover points instead of runtime sampling.** PD's cover is level data
 (`setupcover.c`), unpacked by `cover_unpack`, with per-point flags (`COVERFLAG_OMNIDIRECTIONAL`,
@@ -628,3 +632,519 @@ now, in `pd_the_hit_fraction_is_set_by_tier_not_by_the_weapon`.
   If the lab needs a ceiling for playability, armour is the faithful lever.
 * PD's `bot_tick` also lets a *dizzy* bot (tranquillised past `dizzyamount`) fire at anything in
   sight, zeroed or not. No tranquilliser, so nothing drives it.
+
+---
+
+## 13. The 32-slot direction table (2026-08-17)
+
+Perfect Dark does not have one fire animation per weapon. It has 32 animation *groups*
+per stance, indexed by the bearing from the character to its target — `chr_attack`
+(`chraction.c:2825`):
+
+```c
+angle = chr_get_attack_entity_relative_angle(chr, attackflags, entityid);
+groupindex = angle * 5.0937690734863f + 0.5f;   // 5.09377 == 32 / BADDTOR(360)
+if (groupindex < 0 || groupindex > 31) groupindex = 0;
+index = random() % animgroups[groupindex]->len;
+animcfg = &animgroups[groupindex]->animcfg[index];
+```
+
+We had exactly one clip per weapon class, used at every bearing.
+
+### What the bearing actually buys: time
+
+Adjacent slots share a group in runs, so the three human standing tables resolve to
+4–6 distinct groups each — not 32. The thing that varies across them is
+`shootstartframe`, and it grows with the turn the guard has to make:
+
+| where you are | animation | first round on frame |
+|---|---|---|
+| dead ahead | `ANIM_0002` | 23 |
+| flank | `ANIM_0032` | 30 |
+| behind | `ANIM_0006` | 39 (of 121) |
+
+So **coming at a rifleman from behind is worth 16 frames — over half a second — and
+that number is authored, not tuned.** That is the gameplay reason the table is worth
+fifteen extra animations, and it is the thing to watch for in a playtest.
+
+### `angleoffset` is a turn tolerance, not an aim correction
+
+Each row states how far its animation's aim-zero sits off the body's facing. PD does not
+correct for that — it *targets* it: the row's `angleoffset` is passed to `chr_turn` as
+the turn **tolerance** (`chraction.c:10758`), so the body settles at
+`bearing − angleoffset` and the animation's own authored aim lands on the target. A
+`DTOR(90)` animation is played with the torso deliberately left facing 90° away.
+
+That maps onto our stack cleanly, because the simulant already owns its yaw:
+`Simulant::yaw` is now the **body** yaw and turns toward `bearing + error − angleoffset`,
+while `Simulant::barrel_yaw()` (`yaw + angleoffset`) is what the round is fired along and
+what the firing cone is measured against. `SimOutput` carries both.
+
+### Which way is positive
+
+`chr_get_angle_to_pos` (`chraction.c:13787`) returns `atan2f(dx, dz) − theta` wrapped
+into `[0, BADDTOR(360))` — the same `atan2(x, z)` convention this game uses for yaw, so
+the two are directly comparable. **Positive is the character's left**, which the source
+states outright at `chraction.c:9313` (`// aimendsideback positive is aiming left`).
+
+Three independent things agree with that, which is why it is not being taken on trust:
+
+1. The tables put the `DTOR(90)` rows at slots 10–15 (bearings 112°–169°) and their
+   `DTOR(270)` mirror partners at 16–21.
+2. Every table is exactly symmetric under `i -> 31 - i` — not under `i -> -i`, because
+   `group_index`'s `+ 0.5` puts the slot boundaries half a slot off the axis.
+3. **The assets themselves.** `world::tests::each_fire_animation_aims_where_pd_says_it_does`
+   measures each clip's barrel yaw through the real layer stack and compares it to the
+   `angleoffset` read out of `chraction.c`. Eighteen agreements, worst case 14.9°, and
+   the `DTOR(270)` rows come out on the character's right. The C table and the ROM
+   animations were transcribed independently; they had no way to agree by accident.
+
+### The asset job
+
+`pd_roster.json` gained 15 clips at slots **36–50** — appended, never inserted, because
+`FIRE_*_IDX` / `CHAR_HIT_START` / `+ HIT_CLIPS.len()` are arithmetic on the frozen 0–35
+layout. `AttackAnimConfig::slot` joins each transcribed row to its exported file, pinned
+by `world::tests::direction_table_rows_point_at_the_clips_they_name`.
+
+Every `endframe` in the transcribed table falls inside its clip's real frame count — an
+independent check on the field-order reading of the C struct literal, since a
+mis-assigned column would have produced windows past the end of the animation.
+
+### What runs per burst
+
+`chr_attack` picks the row **once, at the instant the burst begins**, and holds it for
+the whole animation (`chr->act_attack.animcfg`). `World::start_enemy_fire` does the same:
+resolve the bearing, index the table, roll within the group, then `install_fire_row`
+points the timing windows, the authored aim cone, the aim-overlay clip and hold frame,
+and the barrel axis at that row together. The axis is the part that cannot be skipped —
+each animation holds the gun its own way — so every clip a hunter might play is measured
+against **its own body** at spawn into `EnemyInstance::fire_axes`.
+
+A burst that ends on a sideways clip hands the hold back to the forward one, because
+between bursts our hunters keep the weapon up and tracking (PD's chr leaves the attack
+action entirely), and a 90°-off clip would otherwise leave the chest-aim pinned at its
+cone limit until the hunter fired again.
+
+### Deliberately not ported
+
+* **The `flip` path.** `chr_attack` mirrors the group index for the other-handed case;
+  we have no pose mirroring. Same reason the `flip` rows are dropped from the hit tables.
+* **The kneel and lie tables** (`g_Kneel*AttackAnims`, `g_LieAttackAnims`) and
+  `g_RollAttackAnims` / `g_WalkAttackAnims` — no kneel, prone or roll posture here. The
+  rows are read and understood; there is nothing to attach them to.
+* **`RACE_SKEDAR`.** One group of `ANIM_034A` at all 32 slots; no Skedar, nothing
+  directional in it.
+* **Heavy's missing right-hand mirror.** PD authored one sideways two-handed animation
+  (`ANIM_0004`, drawn left) and no twin, so where the light table mirrors it the heavy
+  table uses the aim-forward turn-around row instead. That asymmetry is transcribed as
+  found and asserted, so nobody "fixes" it by inventing a mirror.
+
+## 14. The free-for-all seam (2026-08-17)
+
+§9's known gaps said hunter-on-hunter damage worked but **movement did not**:
+`Enemy::update` took the player's position, so a simulant that picked a packmate shot it
+from wherever it happened to be standing rather than hunting it.
+
+`update` now takes an `EngageTarget { pos, id }` — the player by default, a packmate when
+a simulant has chosen one — and every geometric decision measures against it:
+`known_target_pos`, the `Chase` approach and its `flank_point`, the `Attack`
+standoff/`back_off`, `evade_step`, `sample_cover_cell`, `pick_reposition`, `perceives` /
+`in_cone`, and the LOS gate. So the full chase → standoff → cover → peek → reposition
+chain runs against an arbitrary target.
+
+Four rules stay **player-specific**, and the reasons are not symmetry:
+
+| rule | why |
+|---|---|
+| the catch check (`Enemy::catches`) | a hunter cannot catch a packmate, and this is what ends the hunt |
+| the `aimed_at` crosshair sense | there is no packmate crosshair to feel |
+| `detectable` (the `N` invisibility toggle) | it is an observe aid for watching hunters work; extending it would blind the whole squad to each other |
+| `squad_alert`, `alert_enemies_to_movement`, `grenade_flush_step` | `World`-level, all about the player |
+
+`Enemy::can_see` is where the third one lives — one function, so the exemption is stated
+once instead of repeated at nine call sites.
+
+**The target is one frame stale**, because `pd_lab::step_simulant` runs after the FSM.
+That matches PD's own ordering (`bot_tick` picks the target, then the action layer acts on
+it) and the alternative is running target selection twice per step.
+
+## 15. The barrel axis (2026-08-17)
+
+`EnemyWeaponAsset::barrel_axis` derived from `muzzle_offset`, which came from the
+muzzle-flash mesh centroid *when there was one and the gun mesh centroid when there was
+not*. The second branch was wrong: measured across the arsenal it put the Sniper Rifle
+22° high and the Rocket Launcher **backwards** (`(-0.06, -0.03, -0.998)`).
+
+The fix is not a cleverer estimator. The eighteen weapons that *do* carry a flash mesh
+give the ground truth — all resolve to `+Z` within 4° — and against that every
+mesh-derived estimator fails on a third of them:
+
+| estimator | worst error on a known-answer gun |
+|---|---|
+| gun-mesh centroid (the old fallback) | 176° (Moonraker Laser) |
+| furthest vertex from the origin | 178° (Phantom) |
+| longest bounding-box axis, signed by the centroid | 180° (six guns) |
+| furthest vertex along `+Z` | 91° (Moonraker Laser) |
+
+Because the models are not placed consistently relative to their origin: the DD44
+occupies `z` in `[-269, 0.2]` with its flash at `z = +64` — modelled entirely *behind* a
+muzzle-at-the-origin — while the AR33 sits entirely in front of a grip-at-the-origin.
+Both point `+Z`, and nothing about the vertices distinguishes the two cases.
+
+**Perfect Dark does not derive a direction from the gun either.**
+`chr_calculate_aimend` (`chraction.c:9200`) reads a named node for the muzzle *position*
+(`MODELPART_CHRGUN_GUNFIRE`, falling back to `MODELPART_CHRGUN_0001`) and takes the firing
+*direction* from the character's own aim angle (`sinf(aimangle)`, `chraction.c:9254`),
+using the muzzle point only to offset the ray's origin.
+
+So the axis is a **convention of the asset set**, measured where a weapon declares it and
+inherited from `BARREL_MODEL_AXIS` where it does not — and that constant was `-Z`, the
+exact opposite, which is how the rocket launcher ended up backwards. Nothing caught it
+because the old fallback never reached the constant; it produced a per-weapon wrong
+answer instead. Now asserted for all 23 weapons, with both branches required to stay
+populated so neither becomes untested.
+
+## 16. "They don't come and get me" — three defects the playtest found (2026-08-17)
+
+Reported from the first playtest of §13–15: hunters on a lower floor, heads showing above
+the edge, that neither climbed the stairs nor shot. *"It's like they can see me, so
+they're just waiting there, but they can't shoot me either."*
+
+Three independent causes, each with a decomp answer. The first was made visible by §14
+rather than caused by it; the other two were latent from before and only bite in a level
+with floors.
+
+### 16.1 There was no team check
+
+`bot_choose_general_target` walks candidates in ascending distance and takes the first
+acceptable one — but only after
+`chr_compare_teams(botchr, trychr, COMPARE_ENEMIES)` (`bot.c:1699`), and it separately
+invalidates an existing target that turns out to be a friend (`bot.c:1675`). We ported the
+distance walk and the vetoes and **not the team check**, so every hunter was every other
+hunter's enemy.
+
+A packmate is nearly always the closest visible character there is. So the
+ascending-distance walk picked a packmate essentially every time, and once §14 made the FSM
+manoeuvre against its chosen target, the pack stopped coming for the player at all — which
+is what the overlay in the playtest screenshot showed: `#0 → #2`, `#2 → #3`, one already
+dead.
+
+§9 called the old behaviour "friendly fire is emergent, not special-cased". That was true,
+and it was harmless while it only affected *shooting*. It was also, without anyone saying
+so, a **free-for-all configuration applied unconditionally**.
+
+The fix restores PD's own distinction, which is not a mode switch but a predicate:
+`COMPARE_ENEMIES` returns true whenever `(g_MpSetup.options & MPOPTION_TEAMSENABLED) == 0`
+*or* the teams differ (`chraction.c:14880`). So free-for-all in Perfect Dark is literally
+teams-disabled. `pd_lab::is_friend` is that predicate: hunters are one team, the player is
+the other, and `PdLabConfig::free_for_all` (`PD_LAB_FFA=1`) turns the check off to get the
+old behaviour back deliberately. Default **off**, because the hunters are a squad.
+
+Teammates are excluded from the candidate list rather than vetoed downstream, in the same
+place PD excludes them. Leaving them in and trusting the distance sort does not work, for
+the reason above.
+
+**Stray-round friendly fire is unchanged.** `emit_pd_shot` still resolves whoever is on the
+line, so a round that crosses a packmate hits it. That is PD-faithful — teammates there can
+absolutely shoot each other by accident, they just do not *target* each other — and it is
+what the §9 measurement was really demonstrating.
+
+### 16.2 The engagement band was measured laterally
+
+Perfect Dark has both `prop_get_distance_to_prop` (3D) and
+`prop_get_lateral_distance_to_prop` (XZ), and `botcmd_tick_dist_mode` — the function that
+decides BACKUP / OK / ADVANCE / GOTO against `g_BotDistConfigs` — measures with the **3D**
+one (`botcmd.c:98`). We used the lateral one for everything.
+
+A hunter one storey below its target therefore read a comfortable 5.3 m, concluded it was
+sitting exactly at its 4.8 m pistol standoff, and planted — when the real separation was
+6.1 m through a floor slab. `Enemy::engage_dist` is the 3D version and now drives the band:
+the `Chase`→`Attack` entry gate, the `Attack` hold / advance / back-off, the `Attack`
+distance bail and the `Cooldown` re-acquisition, in both the FSM and the utility layer.
+
+`dist_to` stays lateral and stays the **arrival** test (`Search` / `Investigate` waypoints),
+which is the split PD keeps its two functions for. Perception also stays lateral on purpose:
+`DETECTION_RANGE` and the cone were tuned as a ground-plane reach, and PD's own sight test
+is a raycast rather than a distance, so nothing there was making a decision about an
+unreachable target.
+
+### 16.3 A hunter with no sightline held its standoff
+
+`botcmd_tick_dist_mode` says this twice, in both version branches (`botcmd.c:135`
+and `:163`): an out-of-sight target turns `BOTDISTMODE_OK` (hold) **and**
+`BOTDISTMODE_BACKUP` (give ground) into `BOTDISTMODE_ADVANCE`. A PD bot never holds a
+distance it cannot see along.
+
+We had no such rule. What we had was `ATTACK_LOS_GRACE` — a 0.3 s *debounce* on the
+`Attack`→`Chase` bail, added because the AI lab caught an Attack↔Chase thrash once ORCA
+could settle a hunter on a corner seam. That debounce is right for what it was for and
+wrong as a substitute for this: where the sightline **flickers** rather than cleanly
+breaking — heads bobbing over a floor edge is the perfect generator — the grace resets
+before it can expire, so the hunter neither bails to `Chase` (which would path it up the
+stairs) nor advances. It stands in its standoff band indefinitely. Exactly the report.
+
+`Attack` now advances whenever `!los`, before consulting the band at all, in both the FSM
+and the utility arm. The grace keeps its original job of debouncing the *state* bail; it no
+longer implies standing still.
+
+### What this changes outside the lab
+
+16.2 and 16.3 are in the shared FSM, so **GoldenEye hunters in the normal game get them
+too**. Both are strictly better and neither is behind a flag: a hunter that closes when it
+cannot see you is the behaviour the standoff was always meant to express, and an engagement
+band that ignores height was never intentional. 16.1 is `PD_LAB`-only, since `pd_target` is
+only populated for simulants.
+
+The regression tests are `enemy::tests::a_target_a_floor_above_is_out_of_the_standoff_band`,
+`enemy::tests::an_attacking_hunter_with_no_sightline_advances_instead_of_holding`, and the
+team halves of `world::tests::simulants_can_target_and_shoot_each_other`.
+
+## 17. Out of the spike: this is the game's AI now (2026-08-17)
+
+Everything above was behind `PD_LAB=1`. It is not any more. `PdHunters` is on every
+`World`, every hunter carries a `Simulant`, wears a Perfect Dark body driven by
+`PD_TEMPLATE_CLIPS`, and shoots a real hitscan down a possibly-mis-aimed barrel.
+
+`PD_LAB` still exists and still means something — a bare test room, a pinned tier, the
+per-simulant debug overlay — but it no longer decides *which AI runs*.
+
+### What the flag used to gate, and where each piece went
+
+| gate | before | now |
+|---|---|---|
+| `PD_LAB=1` → `designs::pd_lab()` | replaced the level with a bare box | still does, and that is all it does |
+| `spawn_family` | Perfect Dark **in the lab**, GoldenEye everywhere else | Perfect Dark whenever its assets loaded; GoldenEye is the fallback |
+| `pdsim: pd_lab.map(..)` | only lab hunters carried a simulant | every hunter does — the model is family-agnostic |
+| `pd_actors` | built only in the lab | always built |
+| `emit_pd_shot`'s packmate victims | lab only | always |
+| the debug overlay | lab only | still lab only |
+| the radar | lab only | **always in HUNT** — a player-facing feature |
+
+The one genuine blocker the old handoff named — "`spawn_family` picks GoldenEye *or*
+Perfect Dark for the whole wave, a mixed roster needs the clip template resolved per
+hunter" — turned out not to be on the path. A mixed roster is only needed if both families
+should appear *in one wave*, and the decision was that they should not: the directional
+fire table and the authored per-hit-part reactions name PD clips, so the body and the
+animation fidelity travel together and the all-one-family rule is the thing keeping them
+consistent. `World::set_force_ge_family` (`GE_BODIES=1`) flips the whole wave the other
+way, which is what keeps the A/B tests and the no-PD-assets fallback alive.
+
+### The hit roll is retired
+
+Every hunter fires a real shot. Three things went at once, and they had to go together:
+
+* `rand() < accuracy · (1 − dist/range)` — the probability model,
+* `MAX_HIT_RATE` — the global 4 hits/s ceiling, which existed *because* of the roll (a
+  rolled full-auto would otherwise delete the player in one burst),
+* `DiffParams::accuracy_mult` / `falloff_ease` and `EnemyWeaponDef::accuracy` — the
+  difficulty and per-weapon levers that scaled it.
+
+Keeping the ceiling on top of the zeroing model would have clipped the top of exactly the
+range the difficulty table expresses: Hard and Dark both saturate 4/s and become
+indistinguishable. The honest ceiling is Perfect Dark's burst gap, which
+`enemy_combat_step` applies to the *cadence* rather than to the damage.
+
+**How well a hunter shoots is no longer on `DiffParams` at all.** The dial still has one
+lethality axis — the same position now selects a PD zeroing tier through
+`tier_for_dial_frac` instead of multiplying a probability. `difficulty_params_ramp_from_baseline_to_brutal`
+asserts that ordering where it now lives.
+
+### The boot dial moved down
+
+The app pinned `DIFFICULTY_MAX` at boot. Under the roll that meant "1.6× accuracy"; under
+zeroing it means **DarkSim** — zero reaction delay, zero aim error, kills on sight from
+across the room. So the boot position is now `dial_for_tier(HUNT_TIER, ..)`, i.e. Normal:
+a 0.5 s reaction and ~8° of wander, which is where the model reads as behaviour rather
+than as an execution. `=` / `-` still sweep the whole table live.
+
+### Two defects the promotion exposed
+
+Neither was caused by it. Both were latent in the lab and became the game's behaviour.
+
+**A burst in flight blocked the plant.** `util_score`'s `Attack` arm scored 0 when
+`firing && state != Attack` — "don't initiate the plant mid-suppress-burst, so the pack
+pushes through chokepoints instead of stopping to shoot the instant it's barely in range".
+Written when only the FSM pulled the trigger, so a burst meant "mid-approach volley" and
+came in short bursts with gaps to plant in. The PD model owns the trigger and fires
+near-continuously at the top tiers, so the exemption never lifted: `Chase` (0.7) won
+forever and the hunter ran the player down to point-blank, firing. The FSM's
+`Chase`→`Attack` gate had the same `!fire_anim` hole.
+
+Dropped from both. Nothing is lost, because `Attack` advances to its standoff on its own —
+entering it early does not stop a hunter, it just closes at a jog instead of a run. And it
+matches `botcmd_tick_dist_mode`, where whether the bot is shooting is not an input to the
+distance mode at all.
+
+This is also what `orca_a_pack_funnels_through_a_doorway` had been passing on: its pack
+crossed the doorway because firing kept them in `Chase`. The scenario now puts the player
+**off-axis from the gap** so the wall blocks the sightline, which is what should force a
+funnel — sightline, not distance.
+
+**Packmates blocked each other's line of sight.** The simulant sight check used the
+capsule-blocking cast, so in a converging pack the front hunter occluded the ones behind
+it and they stood in `Attack` without firing (the AI lab measured 663 occluded frames on
+one hunter in 15 s). `chr_has_los_to_chr` (`chraction.c:6533`) tests
+`CDTYPE_OBJS | DOORS | PATHBLOCKER | BG | AIOPAQUE` — **`CDTYPE_CHRS` is not in the
+mask** — and disables both characters' own perimeters for the cast. Another body never
+breaks a PD bot's sight. Switched to the world-geometry cast, which also makes the sight
+check agree with `emit_pd_shot`, where a body on the line is not an obstruction but the
+thing that gets shot. The capsule-blocking variant had no callers left and is deleted.
+
+### What a player will notice
+
+* Hunters are Perfect Dark characters, and they turn-and-shoot directionally (§13).
+* They shoot properly rather than rolling dice, with no damage ceiling — a well-zeroed
+  hunter with an automatic kills fast, and that is the intended consequence.
+* **They flinch.** PD's authored per-hit-part reactions are on by default for a PD body,
+  so a hit plays the reaction for the part that was hit. The old sim-style
+  no-flinch behaviour is the GoldenEye family's (`hit_reactions`), and
+  `hits_flinch_only_when_hit_reactions_enabled` pins it there.
+* The radar is always up in HUNT.
+* ~~The body roster is 6, down from 44.~~ **Not a cost after all — see §18.** A GoldenEye
+  body plays the Perfect Dark clip set correctly, so the roster is all 44 of them plus the
+  6 Perfect Dark ones, every hunter on PD's animations.
+
+## 18. The roster widened: 44 GoldenEye bodies on Perfect Dark's animations (2026-08-17)
+
+§17 said the body roster dropping from 44 to 6 was "the one real cost of the decision".
+It was not a cost — it was an assumption, and the assumption was wrong.
+
+`PD_TEMPLATE_CLIPS` claimed "PD's bind pose is not GoldenEye's, and driving a PD body with
+a GE clip produces a confidently-posed wrong figure". Measured, in
+`tests::a_goldeneye_body_can_play_the_perfect_dark_clips`:
+
+* **The bind orientations are identical** — `0.0°` apart on all 15 shared bones.
+* Only the rest *lengths* differ (1.00–1.27×, i.e. body proportions), which a
+  rotation-driven clip is indifferent to. 38 differently-proportioned GoldenEye bodies
+  already share one clip set.
+* **Every one of the 51 Perfect Dark clips drives a GoldenEye skeleton**: 15/15 bones
+  bound, finite person-sized figure through the whole clip, on all 38 GoldenEye bodies.
+  The 15 appended directional fire clips included.
+
+And the check that makes those numbers trustworthy rather than merely reassuring: the two
+games share an animation bank, so posing one GoldenEye body with slot *n* of each template
+is the same animation twice, decoded from two different ROMs. **30 of the 36 shared slots
+agree to within 0.3°.** The six that do not — 19, 20, 23, 25, 26, 27, at 28–104° apart —
+are exactly the six `pd_roster.json` documents as deliberately *different* animations. A
+transform error could not produce that pattern.
+
+### What the asymmetry actually was
+
+The doc's conclusion held in one direction only, and not for the stated reason. A
+**GoldenEye clip on a Perfect Dark body** does break (9° mean, 62° worst joint-axis error):
+the PD rig carries 15 extra `Blend_*` joints — its seam-hiding half-rotation frames — that
+a GoldenEye clip has no channels for, so they stay at bind while their owning bones rotate.
+That is what the one-family rule was really protecting, and it is why
+`World::goldeneye_clips` is ignored for a Perfect Dark body.
+
+### What changed
+
+* `PD_TEMPLATE_CLIPS` is loaded **twice** — `pd_anim_template` bound to a PD rig,
+  `pd_anim_template_ge` bound to body 0's. A clip binds its channels to one skeleton, so
+  the same animation data needs one template per rig.
+* `spawn_family` is replaced by `wave_bodies` (which bodies a wave draws from — **all** of
+  them) and `body_clips` (which template drives a given body). The wave resolves the
+  template **per hunter** instead of per wave.
+* `EnemyInstance::pd_anims` now means "is on the Perfect Dark clip set" rather than "wears
+  a Perfect Dark body". It is true for both families.
+* The old single `force_ge_family` flag conflated two things that are now orthogonal, and
+  is split: `BodySet` (who spawns) and `goldeneye_clips` (what animates them).
+
+| | bodies | clips | directional table |
+|---|---|---|---|
+| default | 44 GE + 6 PD | Perfect Dark | yes |
+| `BODIES=ge` | 44 GE | Perfect Dark | yes |
+| `BODIES=pd` | 6 PD | Perfect Dark | yes |
+| `GE_CLIPS=1` | 44 GE | GoldenEye (legacy) | no |
+| `PD_LAB=1` | 6 PD | Perfect Dark | yes |
+
+`PD_LAB` pins Perfect Dark bodies, because the lab exists to look at Perfect Dark
+specifically — and it gives the headless scenarios a one-call way to get a PD-bodied hunter.
+
+**That pin ate the flag it should have deferred to.** The app applied `BODIES` *before* the
+`PD_LAB` block, so `enable_pd_lab`'s `BodySet::PerfectDark` clobbered an explicit
+`BODIES=ge` and the wave stayed Perfect Dark with nothing to say why. It survived a whole
+playtest because environment variables persist for a shell session and the lab is usable on
+a real level — so "the lab is still on from an hour ago" is invisible in a way "the lab
+replaced my level with a bare box" would not have been.
+
+The roster block runs **last** now: whatever the environment asks for outranks a mode
+default. And the boot log states the resolved answer unconditionally
+(`World::roster_summary`), because a flag losing a silent fight with a default is exactly
+the class of bug that has no symptom until the hunters are on screen. Pinned by
+`tests::an_explicit_body_set_outranks_the_lab_pin`.
+
+A 12-hunter wave measured: 11 GoldenEye bodies + 1 Perfect Dark, all 12 on the PD clips,
+51 template slots each, 5 measured fire axes each. The families appear in proportion to the
+catalog (38:6), so Perfect Dark bodies are the rarer sight — exporting more of the 65
+shared-rig PD bodies is what would even that up, and it is still just an asset job.
+
+### Two tests whose premise this invalidated
+
+Recorded because both were *correct* checks that stopped meaning anything, which is a
+different thing from a broken test.
+
+* `the_chest_aim_axis_is_measured_per_body` required a GoldenEye hunter and a Perfect Dark
+  one to measure *different* barrel axes, on the grounds that equal axes would mean the
+  calibration had become a constant. Both families run the same clips now, and identical
+  bind orientations mean the same clip through either rig yields the same chest-local
+  direction — legitimately equal. Rewritten as `..._per_clip`: the axis has to vary with
+  the **animation**, which is the property `fire_axes` and `install_fire_row` actually
+  depend on.
+* `hit_zones_scale_damage_by_impact_height` probed for blood at a height derived from a zone
+  boundary. That is a statement about where the *mesh* is, and it broke the moment bodies
+  changed size. It now probes the centre of the body's own posed bounds, measured the way
+  `hit_enemy` measures it.
+
+## 19. Two playtest findings on the widened roster (2026-08-17)
+
+### 19.1 The GoldenEye bodies floated 1.09 m
+
+Immediately visible, and the exact number is the tell: **1301.7 units × `CHAR_SCALE`**.
+
+A Perfect Dark clip carries an *absolute* root translation of `1301.7` — PD's rest hip
+height — on top of the animation's own vertical motion. A GoldenEye clip carries `0` and
+relies on the bind. That pedestal is **load-bearing** for a Perfect Dark body, whose
+vertices are stored bone-local so the root lift is what puts the geometry in place, and
+**pure double-counting** on a GoldenEye body, whose vertices are model-space with real
+inverse-bind matrices. `tools/pd-assets/pd_gltf.py` documents both conventions; what it does
+not say is that the clips are therefore not interchangeable *for position*, only for pose.
+
+So the feet-seating offset is a property of the **(body, clip set)** pair. The sweep in
+`World::new` chose its seating idle by body *family* — correct while a family implied its own
+clips, wrong the moment GoldenEye bodies started playing Perfect Dark's. It now measures both
+and `body_feet_offset(body, pd_clips)` picks, with the hunter's own `pd_anims` selecting.
+
+Measured on GoldenEye body 0: `0.909 m` on the GoldenEye clips, `-0.178 m` on the Perfect
+Dark ones. The difference is the pedestal.
+
+**The pedestal cannot simply be stripped**, which was the first idea. The same channel
+carries the deaths' fall: it swings 1071–1193 units over a death clip, 76 over a walk, 106
+over a fire. It is real animation, not a constant.
+
+Pinned by `tests::a_hunters_feet_are_on_the_floor_on_either_clip_set`, which asserts the
+thing a player sees — the lowest skinned vertex sits at the hunter's feet — across both clip
+sets on both body families.
+
+### 19.2 Hunters fired through their hurt animations
+
+Not new with the GoldenEye bodies; it predates them and applied to Perfect Dark ones equally.
+
+Perfect Dark calls **`chr_stop_firing`** (`chraction.c:9414`) immediately before entering
+`ACT_ARGH`, at both injury sites (`:3476` and `:3520`): both hands drop, the aim-end resets,
+the fire slots are freed. And leaving `ACT_ATTACK` stops `chr_tick_attack` pumping shots at
+all.
+
+Ours kept firing because **firing is a timer**. `fire_elapsed` runs in `enemy_combat_step`,
+which knows nothing about the mixer or `Enemy::stun` — so the FSM correctly froze while
+stunned and the shot pump carried on regardless. `World::stop_enemy_fire` is the port, called
+wherever a hit reaction stuns: the authored injury table, the ragdoll stagger, and the canned
+GoldenEye flinch.
+
+**A detail worth recording, because it says the mix was ours rather than PD's:** the injury
+handler returns early for `chr->aibot` (`chraction.c:3427`), so **PD's own simulants never
+flinch**. They take the hit and keep shooting — which is exactly the "sim style" branch
+`hit_enemy` still offers with `authored_reactions` off. What we had was a guard's flinch
+paired with a simulant's trigger discipline, which is neither. The two coherent options are
+"flinch and stop firing" (a PD guard) or "neither" (a PD simulant); the flinch is worth
+having, so the trigger now drops with it.

@@ -68,10 +68,19 @@ pub struct Simulant {
     pub grudge: Grudge,
     /// The id of the currently selected target, if any.
     pub target: Option<u32>,
-    /// Body yaw (rad), the direction the weapon actually points. This is the
-    /// value a shot is fired along — the aim error lives in here, not in a
-    /// separate accuracy term.
+    /// **Body** yaw (rad) — where the torso faces. The aim error lives in here, not
+    /// in a separate accuracy term.
+    ///
+    /// This is *not* always the direction a shot goes: PD's attack animations each
+    /// declare an `angleoffset`, how far their aim-zero sits off the body's facing,
+    /// and the body is deliberately turned to `bearing - angleoffset` so the
+    /// animation's own aim lands on the target (`chr_turn`'s tolerance argument,
+    /// `chraction.c:10758`). [`Self::barrel_yaw`] is what the round follows.
     pub yaw: f32,
+    /// The `angleoffset` of the attack animation currently playing (rad, `+` left),
+    /// as handed in by [`SimInput::aim_offset`]. `0` whenever the body is aiming
+    /// straight down its own facing, which is every case except a sideways clip.
+    pub aim_offset: f32,
     /// The angular rate the body turned last step (rad/s), fed back into the
     /// zeroing model so correcting the aim costs zero progress.
     pub turn_rate: f32,
@@ -97,6 +106,11 @@ pub struct SimInput<'a> {
     /// Whether the current target is in sight *right now* (the caller's own
     /// authority, since it owns the physics world).
     pub target_in_sight: bool,
+    /// `angleoffset` (rad, `+` left) of the attack animation currently playing, or `0`
+    /// when none is. The body turns to `bearing - this`, so a sideways animation keeps
+    /// the torso turned away while the barrel still points at the target — PD's
+    /// `chr_turn(..., toleranceangle = animcfg->angleoffset)`.
+    pub aim_offset: f32,
     /// Position on the 0..=`max_dial` difficulty dial, used only to decide the
     /// oblivious-targeting cutover. The tier itself comes from `difficulty`.
     pub dial_frac: f32,
@@ -107,8 +121,12 @@ pub struct SimInput<'a> {
 pub struct SimOutput {
     /// Index into the candidate slice of the chosen target.
     pub target_index: Option<usize>,
-    /// Body yaw after turning (rad) — fire along this.
+    /// Body yaw after turning (rad) — what the model is rendered at.
     pub yaw: f32,
+    /// Where the **weapon** points after turning (rad) — `yaw + aim_offset`. Fire
+    /// along this; it is the same as [`Self::yaw`] unless a sideways attack animation
+    /// is playing.
+    pub barrel_yaw: f32,
     /// Signed aim error still on the weapon (rad). Zero means dead on.
     pub aim_error: f32,
     /// Zero progress, 0..1, for the debug HUD.
@@ -130,6 +148,7 @@ impl Simulant {
             grudge: Grudge::default(),
             target: None,
             yaw: 0.0,
+            aim_offset: 0.0,
             turn_rate: 0.0,
             sticky: false,
             rng: seed | 1,
@@ -138,6 +157,13 @@ impl Simulant {
 
     pub fn tuning(&self) -> BotTuning {
         self.difficulty.tuning()
+    }
+
+    /// Where the weapon points: the body yaw plus the playing animation's
+    /// `angleoffset`. Every shot goes along this, and it equals [`Self::yaw`] unless a
+    /// sideways attack animation is running. See [`Self::aim_offset`].
+    pub fn barrel_yaw(&self) -> f32 {
+        self.yaw + self.aim_offset
     }
 
     /// Movement speed multiplier (`bot_calculate_max_speed`, `bot.c:1096`).
@@ -200,11 +226,15 @@ impl Simulant {
             self.zero.update(dt, &tuning, in_sight, turn_rate, false, || Self::draw(&mut rng));
         self.rng = rng;
 
-        // Turn the body toward the bearing plus the error. The error is added to
-        // the *true* bearing, so the body chases a target that is itself
-        // wandering — the bot is never told where the mistake is.
+        // Turn the body toward the bearing plus the error, LESS the playing
+        // animation's `angleoffset`. The error is added to the *true* bearing, so the
+        // body chases a target that is itself wandering — the bot is never told where
+        // the mistake is. Subtracting the offset is PD's turn tolerance: the body
+        // stops short by exactly as far as the animation aims off its own facing, so
+        // the two compose onto the target.
+        self.aim_offset = input.aim_offset;
         if let Some(bearing) = input.bearing_to_target {
-            let goal = bearing + aim_error;
+            let goal = bearing + aim_error - self.aim_offset;
             let (yaw, rate) = zeroing::turn_toward(self.yaw, goal, dt);
             self.yaw = yaw;
             self.turn_rate = rate;
@@ -215,10 +245,13 @@ impl Simulant {
         // ── Fire decision ──
         // Reaction served, in sight, and the true bearing within the firing cone
         // of where the barrel actually points. The bot is not asked whether it
-        // will hit.
+        // will hit. The cone is measured off the BARREL, not the body: a hunter
+        // mid-sideways-animation has its torso turned away on purpose, and gating on
+        // the torso would stop it firing exactly when the animation says it should.
         let want_fire = match (input.bearing_to_target, self.target) {
             (Some(bearing), Some(_)) if in_sight && !self.bot_type.pacifist() => {
-                self.zero.may_shoot(&tuning) && angle_delta(self.yaw, bearing).abs() <= FIRE_FOV_HALF_ANGLE
+                self.zero.may_shoot(&tuning)
+                    && angle_delta(self.barrel_yaw(), bearing).abs() <= FIRE_FOV_HALF_ANGLE
             }
             _ => false,
         };
@@ -226,6 +259,7 @@ impl Simulant {
         SimOutput {
             target_index: selection.index,
             yaw: self.yaw,
+            barrel_yaw: self.barrel_yaw(),
             aim_error,
             zero_progress: self.zero.progress(&tuning),
             want_fire,

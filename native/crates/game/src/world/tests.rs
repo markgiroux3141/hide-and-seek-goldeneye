@@ -223,11 +223,16 @@ use super::editing::find_room_brushes;
         }
         world.advance_animation(1.0 / 60.0);
 
-        // One skinned instance per hunter; each a real 15-joint pose, opaque alive.
+        // One skinned instance per hunter; each a real full-rig pose, opaque alive.
+        // The joint count is the SPAWNED BODY's own — 15 on a GoldenEye rig, 30 on a
+        // Perfect Dark one (15 bones plus its blend joints) — so this cannot be a
+        // constant now that a wave wears Perfect Dark by default.
         let instances = world.character_instances();
         assert_eq!(instances.len(), world.enemies.len(), "one instance per hunter");
-        let (_body, _model, joints, opacity, colors) = &instances[0];
-        assert_eq!(joints.len(), 15);
+        let (body, _model, joints, opacity, colors) = &instances[0];
+        let rig = world.char_models[*body].skeleton.joint_count();
+        assert_eq!(joints.len(), rig, "posed against its own body's rig");
+        assert!(joints.len() >= 15, "a real skeleton, not a box");
         assert_eq!(*opacity, 1.0, "alive hunter is opaque");
         assert!(colors.iter().all(|&c| c == 1.0), "un-shot hunter is clean (white blood)");
     }
@@ -367,30 +372,78 @@ use super::editing::find_room_brushes;
     /// separately rigged — a clip stores absolute local rotations, so PD's animations
     /// only mean what they should against PD's bind pose and GoldenEye's against
     /// GoldenEye's — and mixing them yields a confidently-posed wrong figure that no
-    /// numeric check notices. So the rule is per-wave, not per-hunter: the `PD_LAB`
-    /// spawns Perfect Dark bodies and nothing else, every other mode spawns GoldenEye
-    /// bodies and nothing else.
+    /// numeric check notices. So the rule is per-wave, not per-hunter.
     ///
-    /// This replaces `hunters_never_wear_a_pd_body`, which pinned the old boundary
-    /// (PD bodies were showcase-only because their clip set had not been identified).
+    /// **The rule the promotion left, and then the roster-widening replaced.** A wave used
+    /// to be all one *family* because there was one Perfect Dark template and it was bound
+    /// to a Perfect Dark rig. The PD clip set is bound to both rigs now
+    /// (`a_goldeneye_body_can_play_the_perfect_dark_clips` is why that is sound), so:
+    ///
+    /// * the wave draws from **every** body, both families, and
+    /// * **every hunter is on Perfect Dark's animations** whichever body it wears.
+    ///
+    /// What is still all-or-nothing is the *clip set*, and only in one direction: a
+    /// GoldenEye clip on a Perfect Dark body is the invalid combination (the PD rig's extra
+    /// `Blend_*` joints would sit at bind), so `set_goldeneye_clips` is ignored for a PD
+    /// body. Both narrowings stay reachable — `set_body_set` for who spawns,
+    /// `set_goldeneye_clips` for what animates them.
+    ///
+    /// This replaces `hunters_never_wear_a_pd_body`, which pinned the boundary two
+    /// revisions ago (PD bodies were showcase-only because their clip set had not been
+    /// identified).
     #[test]
-    fn each_wave_wears_one_family_and_the_lab_wears_perfect_dark() {
-        // Normal game: GoldenEye bodies only, even though PD bodies are loaded.
-        let mut ge = World::new();
-        ge.set_wave_size(8);
-        ge.initial_meshes();
-        ge.toggle_mode(); // HUNT: spawn the wave
-        if ge.enemies.is_empty() || ge.pd_bodies().is_empty() {
-            eprintln!("skipping: no hunters spawned / no PD bodies loaded");
+    fn a_wave_mixes_both_body_families_on_the_perfect_dark_clips() {
+        // The normal game: a big wave, drawing from everything.
+        let mut game = World::new();
+        game.set_wave_size(12);
+        game.initial_meshes();
+        game.toggle_mode(); // HUNT: spawn the wave
+        if game.enemies.is_empty() || game.pd_bodies().is_empty() || game.ge_bodies().is_empty() {
+            eprintln!("skipping: need hunters and both body families loaded");
             return;
         }
+        assert!(!game.pd_lab_active(), "no lab flag — this is the shipped game");
+        for inst in &game.enemies {
+            assert!(inst.body < game.char_models.len(), "body id in range");
+            assert!(inst.pd_anims, "every hunter is on the Perfect Dark animation tables");
+            assert!(inst.pdsim.is_some(), "…and carries a simulant");
+        }
+        // The spread reaches across the families rather than stopping at one of them.
+        // (12 hunters over ~44 bodies, spread evenly, so both ends are represented.)
+        let ge_n = game.enemies.iter().filter(|e| game.ge_bodies().contains(&e.body)).count();
+        let pd_n = game.enemies.iter().filter(|e| game.pd_bodies().contains(&e.body)).count();
+        assert!(ge_n > 0, "the wave includes GoldenEye bodies");
+        assert!(pd_n > 0, "…and Perfect Dark ones ({ge_n} GE / {pd_n} PD)");
+
+        // `BodySet::GoldenEye` narrows the bodies but keeps the Perfect Dark animations —
+        // this is the whole point: the fidelity no longer costs body variety.
+        let mut ge = World::new();
+        ge.set_body_set(super::BodySet::GoldenEye);
+        ge.set_wave_size(8);
+        ge.initial_meshes();
+        ge.toggle_mode();
         let ge_bodies = ge.ge_bodies();
         for inst in &ge.enemies {
             assert!(
                 ge_bodies.contains(&inst.body),
-                "hunter outside the lab wears body {} — GoldenEye bodies are {ge_bodies:?}",
+                "GoldenEye-only hunter wears body {} — GoldenEye bodies are {ge_bodies:?}",
                 inst.body,
             );
+            assert!(inst.pd_anims, "…and is STILL on the Perfect Dark animation tables");
+        }
+
+        // `set_goldeneye_clips` is the other knob, and it is the one that takes a hunter
+        // off the PD tables.
+        let mut legacy = World::new();
+        legacy.set_goldeneye_clips(true);
+        legacy.set_body_set(super::BodySet::GoldenEye);
+        legacy.set_wave_size(4);
+        legacy.initial_meshes();
+        legacy.toggle_mode();
+        for inst in &legacy.enemies {
+            assert!(ge_bodies.contains(&inst.body), "legacy wave is GoldenEye-bodied");
+            assert!(!inst.pd_anims, "…and off the Perfect Dark animation tables");
+            assert!(inst.pdsim.is_some(), "…but still carries a simulant (family-agnostic)");
         }
 
         // The lab: Perfect Dark bodies only, driven by the PD template.
@@ -470,10 +523,21 @@ use super::editing::find_room_brushes;
                 visible: true,
             },
         ];
-        let (cands, who) = candidates(PdTarget::Hunter(0), &actors);
+        // **Teams off** (PD's free-for-all): everyone but itself is a candidate.
+        let (cands, who) = candidates(PdTarget::Hunter(0), &actors, true);
         assert_eq!(cands.len(), 2, "the player and the other hunter, not itself");
         assert!(!who.contains(&PdTarget::Hunter(0)), "a simulant never targets itself");
         assert!(who.contains(&PdTarget::Player) && who.contains(&PdTarget::Hunter(1)));
+        // **Teams on** (the default, and the hunt): packmates are not candidates at all.
+        // This is the check that stops a pack ignoring the player to duel itself — a
+        // packmate is nearly always the closest visible character, so leaving them in
+        // the list and trusting the distance sort does not work.
+        let (team_cands, team_who) = candidates(PdTarget::Hunter(0), &actors, false);
+        assert_eq!(team_cands.len(), 1, "only the player is an enemy of a hunter");
+        assert_eq!(team_who, vec![PdTarget::Player]);
+        // …and the player's own list is every hunter, since they are all its enemies.
+        let (p_cands, _) = candidates(PdTarget::Player, &actors, false);
+        assert_eq!(p_cands.len(), 2, "the player is enemy to the whole squad");
         // Ids are stable and distinct, which is what the grudge memory holds.
         assert_eq!(PdTarget::Player.id(), 0);
         assert_eq!(PdTarget::Hunter(0).id(), 1);
@@ -527,13 +591,20 @@ use super::editing::find_room_brushes;
     #[test]
     fn pd_hunters_prefer_authored_reactions_over_the_ragdoll() {
         use crate::combat::hit_anim::HitPart;
-        let kill = |lab: bool, authored: bool| -> Option<(bool, usize)> {
+        // `pd == false` now needs the **override**: Perfect Dark is what a wave wears by
+        // default, so the GoldenEye side of the A/B has to be asked for (§17).
+        let kill = |pd: bool, authored: bool| -> Option<(bool, usize)> {
             let mut world = World::new();
-            if lab {
+            if pd {
                 if world.pd_anim_template.is_none() || world.pd_bodies().is_empty() {
                     return None;
                 }
-                world.enable_pd_lab(super::pd_lab::PdLabConfig::default());
+            } else {
+                // The legacy clip set, which is now the only way to reach the
+                // pre-promotion reaction path — a GoldenEye *body* is on Perfect Dark's
+                // animations too since the roster widened.
+                world.set_goldeneye_clips(true);
+                world.set_body_set(super::BodySet::GoldenEye);
             }
             assert!(world.ragdoll(), "the ragdoll is on — that is the point of this test");
             world.set_authored_reactions(authored);
@@ -694,9 +765,15 @@ use super::editing::find_room_brushes;
     fn pd_hunters_fire_on_the_authored_window_not_the_guess() {
         use crate::combat::attack_anim;
 
-        let spawn_pistol_hunter = |lab: bool| -> Option<(super::EnemyInstance, f32)> {
+        let spawn_pistol_hunter = |pd: bool| -> Option<(super::EnemyInstance, f32)> {
             let mut world = World::new();
-            if lab {
+            if !pd {
+                // The legacy `FIRE_TIMING` windows live on the GoldenEye clip set, which a
+                // GoldenEye body no longer takes by default.
+                world.set_goldeneye_clips(true);
+                world.set_body_set(super::BodySet::GoldenEye);
+            }
+            if pd {
                 if world.pd_anim_template.is_none() || world.pd_bodies().is_empty() {
                     return None;
                 }
@@ -834,41 +911,515 @@ use super::editing::find_room_brushes;
     /// So this asserts the measurement is per-body and not a constant: both families
     /// come out with a usable forward axis, and the two axes are *not* the same — if
     /// they ever were, the calibration would have quietly become a hard-coded value.
+    /// **Can a GoldenEye body play Perfect Dark's clips?** Measurement probe.
+    ///
+    /// `PD_TEMPLATE_CLIPS` asserts they cannot ("PD's bind pose is not GoldenEye's, and
+    /// driving a PD body with a GE clip produces a confidently-posed wrong figure"). This
+    /// measures it instead of trusting it, and the control is exact: PD slot 0 and GE slot
+    /// 0 are the **same animation** (`ANIM_TWO_GUN_HOLD`, 163 frames in both banks), so
+    /// Second half of the cross-family probe: load the **whole Perfect Dark template**
+    /// **The two rigs are the same rig, and a GoldenEye body plays Perfect Dark's clips.**
+    ///
+    /// `PD_TEMPLATE_CLIPS` used to say the opposite — "PD's bind pose is not GoldenEye's,
+    /// and driving a PD body with a GE clip produces a confidently-posed wrong figure" —
+    /// and half of that is true but the stated reason is not. Measured here rather than
+    /// asserted, because the *body roster* depends on it: if a GoldenEye body can play the
+    /// PD clip set, then Perfect Dark's animation fidelity costs nothing in body variety.
+    ///
+    /// Three things are checked, and the third is what makes the first two trustworthy.
+    ///
+    /// 1. **The bind orientations are identical** — `0.0°` on every one of the 15 shared
+    ///    bones. Only the rest *lengths* differ (1.00–1.27×, i.e. body proportions), and a
+    ///    rotation-driven clip does not care: 38 differently-proportioned GoldenEye bodies
+    ///    already share one clip set.
+    /// 2. **Every PD slot drives a GoldenEye skeleton**: all 15 bones bound, a finite
+    ///    person-sized figure through the whole clip. Including the 15 appended directional
+    ///    fire clips, which GoldenEye ships no equivalent of.
+    /// 3. **The slots that should agree, agree to a fifth of a degree.** Perfect Dark and
+    ///    GoldenEye share an animation bank, so posing one GoldenEye body with slot `n` of
+    ///    each template is the same animation twice, decoded from two different ROMs — and
+    ///    it comes out within `0.3°`. The exceptions are exactly the six slots
+    ///    `pd_roster.json` documents as deliberately *different* animations (the deaths PD
+    ///    has that GoldenEye does not), which come out 28–104° apart. A transform error
+    ///    could not produce that pattern; only a correct decode of both banks can.
+    ///
+    /// The one direction that *does* break is the reverse — a GoldenEye clip on a Perfect
+    /// Dark body, measured at 9° mean / 62° worst — and the cause is not the bind pose
+    /// either: the PD rig carries 15 extra `Blend_*` joints (its seam-hiding half-rotation
+    /// frames) that a GoldenEye clip has no channels for, so they stay at bind while their
+    /// owning bones rotate. That asymmetry is why the all-one-family rule still stands.
     #[test]
-    fn the_chest_aim_axis_is_measured_per_body() {
-        let axis_for = |lab: bool| -> Option<glam::Vec3> {
-            let mut world = World::new();
-            if lab {
-                if world.pd_anim_template.is_none() || world.pd_bodies().is_empty() {
-                    return None;
+    fn a_goldeneye_body_can_play_the_perfect_dark_clips() {
+        let world = World::new();
+        let (Some(ge_t), Some(_)) =
+            (world.char_anim_template.as_ref(), world.pd_anim_template.as_ref())
+        else {
+            eprintln!("skipping: both clip templates needed");
+            return;
+        };
+        if world.ge_bodies().is_empty() || world.pd_bodies().is_empty() {
+            eprintln!("skipping: both body families needed");
+            return;
+        }
+        let ge = &world.char_models[world.ge_bodies().start];
+        let pd = &world.char_models[world.pd_bodies().start];
+
+        // 1. Same joints, same names, same bind orientation.
+        for i in 1..=15 {
+            let n = format!("Bone_{i}");
+            let (Some(gi), Some(pi)) = (ge.skeleton.index_of(&n), pd.skeleton.index_of(&n))
+            else {
+                panic!("{n} is missing from one of the two rigs");
+            };
+            let dr = ge.skeleton.bind_r[gi].angle_between(pd.skeleton.bind_r[pi]).to_degrees();
+            assert!(dr < 1.0, "{n} binds {dr:.1} deg apart between the families");
+        }
+
+        // Posed height + every joint's world axis, for comparing two clips on one body.
+        let measure = |m: &engine::skeletal::gltf_skin::SkinnedModel,
+                       c: &engine::skeletal::clip::AnimationClip,
+                       t: f32|
+         -> (f32, Vec<Vec3>) {
+            let mats = c.skinning_matrices(t, &m.skeleton);
+            let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+            for v in &m.vertices {
+                let src = Vec3::from(v.pos);
+                let mut pw = Vec3::ZERO;
+                for k in 0..4 {
+                    if v.weights[k] != 0.0 {
+                        pw += v.weights[k] * mats[v.joints[k] as usize].transform_point3(src);
+                    }
                 }
-                world.enable_pd_lab(super::pd_lab::PdLabConfig::default());
+                lo = lo.min(pw.y);
+                hi = hi.max(pw.y);
             }
-            world.set_wave_size(1);
+            let dirs = (0..m.skeleton.joint_count())
+                .map(|j| mats[j].transform_vector3(Vec3::Y).normalize_or_zero())
+                .collect();
+            (hi - lo, dirs)
+        };
+
+        // 2 + 3. Every PD slot against GoldenEye body 0. The six slots `pd_roster.json`
+        // fills with deaths GoldenEye has no counterpart for; every other shared slot is
+        // the same animation in both banks.
+        const DIFFERENT_ANIMATIONS: [usize; 6] = [19, 20, 23, 25, 26, 27];
+        let own_height = measure(ge, ge_t.clip(0).expect("GE idle"), 0.0).0;
+        let mut agreed = 0;
+        for (slot, file) in super::PD_TEMPLATE_CLIPS.iter().enumerate() {
+            let path =
+                format!("{}/../../assets/enemies/pd/animations/{file}", env!("CARGO_MANIFEST_DIR"));
+            let c = engine::skeletal::clip::load(&path, &ge.skeleton)
+                .unwrap_or_else(|e| panic!("{file} does not load against a GoldenEye rig: {e}"));
+            assert_eq!(c.bound_joints(), 15, "{file} binds every GoldenEye bone");
+            for k in 0..6 {
+                let (h, dirs) = measure(ge, &c, c.duration * k as f32 / 6.0);
+                assert!(dirs.iter().all(|d| d.is_finite()), "{file} poses finite");
+                // A standing clip stays near full height; a death drops but never
+                // collapses to nothing or explodes — the figure stays a person.
+                assert!(
+                    (own_height * 0.1..own_height * 1.4).contains(&h),
+                    "{file} frame {k} poses a {h:.0}-tall figure on a {own_height:.0} body",
+                );
+            }
+            let Some(g) = ge_t.clip(slot) else { continue }; // 36+ has no GE counterpart
+            let worst = measure(ge, g, 0.0)
+                .1
+                .iter()
+                .zip(&measure(ge, &c, 0.0).1)
+                .map(|(a, b)| a.angle_between(*b).to_degrees())
+                .fold(0.0f32, f32::max);
+            if DIFFERENT_ANIMATIONS.contains(&slot) {
+                assert!(
+                    worst > 10.0,
+                    "slot {slot} ({file}) is supposed to be a DIFFERENT animation from \
+                     GoldenEye's, but the two poses agree to {worst:.1} deg",
+                );
+            } else {
+                assert!(
+                    worst < 1.0,
+                    "slot {slot} ({file}) should be the same animation in both banks, \
+                     but the poses are {worst:.1} deg apart",
+                );
+                agreed += 1;
+            }
+        }
+        assert!(agreed >= 25, "only {agreed} slots cross-validated between the two banks");
+
+        // The fire clips on EVERY GoldenEye body, since the roster is the point.
+        for body in world.ge_bodies() {
+            let m = &world.char_models[body];
+            for slot in [4usize, 5, 6, 38, 44, 50] {
+                let file = super::PD_TEMPLATE_CLIPS[slot];
+                let path = format!(
+                    "{}/../../assets/enemies/pd/animations/{file}",
+                    env!("CARGO_MANIFEST_DIR")
+                );
+                let c = engine::skeletal::clip::load(&path, &m.skeleton)
+                    .unwrap_or_else(|e| panic!("body {body} cannot load {file}: {e}"));
+                assert_eq!(c.bound_joints(), 15, "body {body} binds all of {file}");
+                let (h, dirs) = measure(m, &c, c.duration * 0.5);
+                assert!(h > 1.0 && dirs.iter().all(|d| d.is_finite()), "body {body} poses {file}");
+            }
+        }
+    }
+
+    /// **Every weapon in the arsenal aims down its own barrel** — asserted per weapon,
+    /// because the failure this replaces was silent and per weapon.
+    ///
+    /// The barrel axis used to be "the muzzle-flash mesh centroid, or the **gun** mesh
+    /// centroid when there is no flash mesh". The five weapons with no flash mesh came
+    /// out of that second branch wrong: the sniper 22° high, the rocket launcher
+    /// pointing **backwards**. Nothing noticed, because none of them is in
+    /// `ENEMY_ROSTER` today and a wrong axis just makes the chest-aim swing the hold to
+    /// the wrong place — a hunter that misses, not a hunter that crashes.
+    ///
+    /// So the property is pinned for the whole arsenal rather than for the roster: the
+    /// axis is `+Z` to within a few degrees for every weapon, whether it declares that
+    /// with a flash mesh or inherits it from the convention.
+    #[test]
+    fn every_weapon_aims_down_its_barrel() {
+        let world = World::new();
+        if world.enemy_weapon_lib.is_empty() {
+            eprintln!("skipping: weapon assets not loaded");
+            return;
+        }
+        let mut with_flash = 0;
+        let mut without = 0;
+        for a in world.enemy_weapon_lib.iter() {
+            let axis = a.barrel_axis();
+            assert!(
+                (axis.length() - 1.0).abs() < 1e-3,
+                "{}'s barrel axis is not normalised: {axis:?}",
+                a.name,
+            );
+            let off = axis.angle_between(Vec3::Z).to_degrees();
+            assert!(
+                off < 6.0,
+                "{} aims {off:.1}° off the arsenal's +Z barrel convention ({axis:?})",
+                a.name,
+            );
+            // Whichever branch it came from, it must be forward. A sign error here is
+            // the rocket-launcher bug.
+            assert!(axis.z > 0.9, "{} aims backwards or sideways: {axis:?}", a.name);
+            match a.muzzle_offset {
+                Some(_) => with_flash += 1,
+                None => without += 1,
+            }
+        }
+        // Both branches are actually exercised — if the arsenal ever gained a flash mesh
+        // for every gun, the convention constant would stop being covered and this test
+        // would quietly become a test of one code path.
+        assert!(with_flash >= 15, "only {with_flash} weapons measure their own axis");
+        assert!(without >= 4, "only {without} weapons fall back to the convention");
+
+        // The two that were provably wrong before, named so the regression is legible.
+        for name in ["Sniper Rifle", "Rocket Launcher"] {
+            let a = world
+                .enemy_weapon_lib
+                .iter()
+                .find(|w| w.name == name)
+                .unwrap_or_else(|| panic!("{name} loaded"));
+            assert!(a.muzzle_offset.is_none(), "{name} still ships no flash mesh");
+            assert_eq!(a.barrel_axis(), super::BARREL_MODEL_AXIS);
+        }
+    }
+
+    /// The gun mesh's own geometry is **not** a usable source for the barrel axis, which
+    /// is the reason the fix is a convention and not a cleverer estimator. Measured
+    /// against the flash-bearing weapons — where the answer is known — the old
+    /// gun-centroid rule is wrong by more than a right angle on several of them, because
+    /// the models are not consistently placed relative to their origin (the DD44 is
+    /// modelled entirely *behind* a muzzle-at-the-origin; the AR33 entirely in front of
+    /// a grip-at-the-origin, and both point `+Z`).
+    ///
+    /// If this ever starts failing, someone has re-authored the gun GLBs around a
+    /// consistent origin and a mesh-derived axis becomes possible — worth knowing.
+    #[test]
+    fn the_gun_mesh_centroid_is_not_the_barrel() {
+        let world = World::new();
+        let mut worst: (f32, &str) = (0.0, "");
+        for a in world.enemy_weapon_lib.iter().filter(|w| w.muzzle_offset.is_some()) {
+            if a.gun.vertices.is_empty() {
+                continue;
+            }
+            let n = a.gun.vertices.len() as f32;
+            let centroid =
+                a.gun.vertices.iter().fold(Vec3::ZERO, |s, v| s + Vec3::from(v.pos)) / n;
+            let err = centroid.normalize_or_zero().angle_between(a.barrel_axis()).to_degrees();
+            if err > worst.0 {
+                worst = (err, a.name);
+            }
+        }
+        if worst.1.is_empty() {
+            eprintln!("skipping: weapon assets not loaded");
+            return;
+        }
+        assert!(
+            worst.0 > 90.0,
+            "the gun centroid is now within {:.0}° of the barrel on every measurable \
+             weapon (worst: {}) — the models may have been re-origined, in which case a \
+             mesh-derived axis is worth revisiting",
+            worst.0,
+            worst.1,
+        );
+    }
+
+    /// **An explicit body choice outranks a mode default.**
+    ///
+    /// `enable_pd_lab` pins Perfect Dark bodies, because the lab is about Perfect Dark.
+    /// That is right, and it silently ate `BODIES=ge` for a whole playtest: the app applied
+    /// the environment *before* the lab block, so with `PD_LAB` still set in the shell —
+    /// they persist for a session, and the lab runs on a real level, not only its own bare
+    /// room — the wave stayed Perfect Dark and nothing said why.
+    ///
+    /// The app applies the roster last now. This pins the property that made the ordering
+    /// matter: whichever order a caller uses, an explicit `set_body_set` after
+    /// `enable_pd_lab` wins, and `roster_summary` reports what will actually spawn.
+    #[test]
+    fn an_explicit_body_set_outranks_the_lab_pin() {
+        let mut world = World::new();
+        if world.pd_bodies().is_empty() || world.ge_bodies().is_empty() {
+            eprintln!("skipping: both body families needed");
+            return;
+        }
+        // The lab on its own pins Perfect Dark.
+        world.enable_pd_lab(super::pd_lab::PdLabConfig::default());
+        assert!(world.roster_summary().contains("0 GoldenEye"), "{}", world.roster_summary());
+
+        // …and an explicit choice after it wins, which is the order the app now uses.
+        world.set_body_set(super::BodySet::GoldenEye);
+        world.set_wave_size(6);
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT
+        let summary = world.roster_summary();
+        assert!(summary.contains("0 Perfect Dark"), "roster says: {summary}");
+        assert!(summary.contains("[PD_LAB]"), "…and still reports the lab: {summary}");
+        assert!(!world.enemies.is_empty(), "hunters spawned");
+        for inst in &world.enemies {
+            assert!(
+                world.ge_bodies().contains(&inst.body),
+                "hunter wears body {} — expected a GoldenEye body",
+                inst.body,
+            );
+            assert!(inst.pd_anims, "…on Perfect Dark's clips, which is the whole point");
+            assert!(inst.pdsim.is_some(), "…and carrying a simulant");
+        }
+    }
+
+    /// **Every hunter's feet are on the floor, whichever clip set drives it.**
+    ///
+    /// The roster widening shipped a 1.09 m float, and this is the shape of it: a Perfect
+    /// Dark clip carries an **absolute root translation of 1301.7 units** — PD's rest hip
+    /// height — on top of its own vertical motion, where a GoldenEye clip carries `0` and
+    /// relies on the bind. That pedestal is load-bearing for a Perfect Dark body, whose
+    /// vertices are stored bone-local so the root lift is what puts the geometry in place,
+    /// and pure double-counting on a GoldenEye body, whose vertices are model-space with
+    /// real inverse-bind matrices (`tools/pd-assets/pd_gltf.py` documents both conventions).
+    ///
+    /// So the feet offset is a property of the **(body, clip set)** pair, not of the body,
+    /// and the old code chose the seating idle by body *family* — correct while a family
+    /// implied its own clips, wrong the moment GoldenEye bodies started playing Perfect
+    /// Dark's animations. The pedestal cannot simply be stripped either: the same channel
+    /// carries the deaths' fall, swinging 1071–1193 units over a death clip.
+    ///
+    /// Asserted as the thing a player sees — the lowest skinned vertex sits at the
+    /// hunter's feet — for both clip sets, on both body families.
+    #[test]
+    fn a_hunters_feet_are_on_the_floor_on_either_clip_set() {
+        // (label, the world, expected pd_anims)
+        let mut cases: Vec<(&str, World, bool)> = Vec::new();
+        {
+            let mut w = World::new();
+            w.set_body_set(super::BodySet::GoldenEye);
+            cases.push(("GoldenEye body, PD clips", w, true));
+        }
+        {
+            let mut w = World::new();
+            w.set_body_set(super::BodySet::PerfectDark);
+            cases.push(("Perfect Dark body, PD clips", w, true));
+        }
+        {
+            let mut w = World::new();
+            w.set_goldeneye_clips(true);
+            w.set_body_set(super::BodySet::GoldenEye);
+            cases.push(("GoldenEye body, GoldenEye clips", w, false));
+        }
+
+        let mut checked = 0;
+        for (label, mut world, want_pd) in cases {
+            world.set_wave_size(3);
             world.initial_meshes();
             world.toggle_mode(); // HUNT
-            let inst = world.enemies.first_mut()?;
-            let layer = inst
-                .stack
-                .layer_as::<engine::skeletal::layers::AimOffsetLayer>(super::ENEMY_CHEST_AIM_LAYER)?;
-            assert!(layer.enabled, "the chest-aim layer is live on a spawned hunter");
-            Some(layer.forward)
-        };
-        let Some(ge) = axis_for(false) else {
+            world.advance_animation(1.0 / 60.0); // pose the stack for real
+            if world.enemies.is_empty() {
+                eprintln!("skipping {label}: no hunters spawned");
+                continue;
+            }
+            for inst in &world.enemies {
+                assert_eq!(inst.pd_anims, want_pd, "{label}: wrong clip set");
+                let m = &world.char_models[inst.body];
+                let joints = inst.anim.skinning_matrices(&m.skeleton);
+                let ct = world.char_transform(inst.enemy.pos, inst.yaw(), inst.body, inst.pd_anims);
+                // Lowest skinned vertex in WORLD space — the sole of the planted foot.
+                let mut lowest = f32::INFINITY;
+                for v in &m.vertices {
+                    let src = Vec3::from(v.pos);
+                    let mut local = Vec3::ZERO;
+                    for k in 0..4 {
+                        if v.weights[k] != 0.0 {
+                            local +=
+                                v.weights[k] * joints[v.joints[k] as usize].transform_point3(src);
+                        }
+                    }
+                    lowest = lowest.min(ct.transform_point3(local).y);
+                }
+                let float = lowest - inst.enemy.pos.y;
+                // A tenth of a metre either way: the idle has its own vertical motion and
+                // the seating is the loop's *lowest* point, so a mid-loop frame sits a
+                // little high. 1.09 m does not fit in that.
+                assert!(
+                    float.abs() < 0.12,
+                    "{label}: body {} floats {float:+.3} m above its feet (lowest {lowest:.3}, \
+                     feet {:.3})",
+                    inst.body,
+                    inst.enemy.pos.y,
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 3, "only {checked} hunters checked");
+    }
+
+    /// **A hunter that flinches drops its trigger.**
+    ///
+    /// Reported from playtest: hunters kept firing through their hurt animations. Perfect
+    /// Dark does not — `chr_stop_firing` (`chraction.c:9414`) is called immediately before
+    /// `ACT_ARGH` at both injury sites, dropping both hands, resetting the aim-end and
+    /// freeing the fire slots; and leaving `ACT_ATTACK` stops `chr_tick_attack` pumping
+    /// shots at all.
+    ///
+    /// It happened here because **firing is a timer**: `fire_elapsed` runs in
+    /// `enemy_combat_step`, which knows nothing about the mixer or `Enemy::stun`, so a
+    /// stunned hunter mid-flinch kept emitting rounds from an in-flight burst. Not new with
+    /// the GoldenEye bodies — it predates them and applied to Perfect Dark ones equally.
+    #[test]
+    fn a_flinching_hunter_stops_firing() {
+        let mut world = World::new();
+        world.weapon_index = 0; // PP7 — non-lethal on a full-health hunter
+        world.set_wave_size(1);
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT
+        world.advance_animation(1.0 / 60.0);
+        if world.enemies.is_empty() {
             eprintln!("skipping: no hunters spawned");
             return;
+        }
+        // Put a burst in flight the way the combat pump does.
+        world.start_enemy_fire(0);
+        assert!(world.enemies[0].fire_elapsed.is_some(), "a burst is running");
+
+        let torso = {
+            let p = world.enemies[0].enemy.pos;
+            let (head_min, _) = world.body_hit_zones(world.enemies[0].body);
+            Vec3::new(p.x, p.y + head_min * 0.7, p.z)
         };
-        assert!(ge.is_finite() && ge.length() > 0.5, "GE barrel axis {ge:?} is a real direction");
-        let Some(pd) = axis_for(true) else {
-            eprintln!("skipping the PD half: PD assets not loaded");
-            return;
-        };
-        assert!(pd.is_finite() && pd.length() > 0.5, "PD barrel axis {pd:?} is a real direction");
+        world.hit_enemy(0, torso);
+        assert!(!world.enemies[0].enemy.is_dead(), "one PP7 round is not lethal");
         assert!(
-            ge.distance(pd) > 1e-3,
-            "both families measured the same barrel axis {ge:?} — the per-body \
-             calibration has become a constant, and one of them now holds its gun wrong",
+            world.enemies[0].fire_elapsed.is_none(),
+            "the flinch must drop the trigger (chr_stop_firing)",
         );
+        assert_eq!(world.enemies[0].burst_shot, 0, "and reset the burst counter");
+
+        // The "sim style" branch is the documented exception: no reaction, no stun, so the
+        // burst survives — that is the behaviour PD gives its own simulants, which never
+        // reach the injury code at all.
+        let mut sim = World::new();
+        sim.weapon_index = 0;
+        sim.set_wave_size(1);
+        sim.set_ragdoll(false);
+        sim.set_hit_reactions(false);
+        sim.set_authored_reactions(false);
+        sim.initial_meshes();
+        sim.toggle_mode();
+        sim.advance_animation(1.0 / 60.0);
+        sim.start_enemy_fire(0);
+        let torso = {
+            let p = sim.enemies[0].enemy.pos;
+            let (head_min, _) = sim.body_hit_zones(sim.enemies[0].body);
+            Vec3::new(p.x, p.y + head_min * 0.7, p.z)
+        };
+        sim.hit_enemy(0, torso);
+        assert!(
+            sim.enemies[0].fire_elapsed.is_some(),
+            "with no reaction at all the hunter fights through the hit",
+        );
+    }
+
+    /// **The chest-aim axis is measured, not assumed** — and what it varies with is the
+    /// *clip*, not the body.
+    ///
+    /// It used to be asserted the other way round: measure the axis on a GoldenEye hunter
+    /// and on a Perfect Dark one and require them to *differ*, on the grounds that "if they
+    /// ever were the same, the calibration would have quietly become a hard-coded value".
+    /// That check stopped meaning anything when the roster widened, because both families
+    /// are on the same clips now — and the two rigs have identical bind orientations, so
+    /// the same clip through either rig genuinely produces the same chest-local barrel
+    /// direction. Bone *lengths* differ between bodies, and a chain of rotations does not
+    /// care about lengths when all you want out of it is a direction.
+    ///
+    /// So the property that is actually load-bearing is the one `EnemyInstance::fire_axes`
+    /// depends on: the axis tracks the **animation**. Each fire clip holds the gun its own
+    /// way, so a directional clip must measure differently from the forward one — that is
+    /// the number `install_fire_row` swaps per burst, and a constant there would leave the
+    /// chest-aim correcting for a pose that is no longer on the body.
+    #[test]
+    fn the_chest_aim_axis_is_measured_per_clip() {
+        let mut world = World::new();
+        world.set_wave_size(1);
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT
+        if world.enemies.first().is_none_or(|i| i.fire_axes.len() < 2) {
+            eprintln!("skipping: no hunters / assets or arm rig not loaded");
+            return;
+        }
+        // Live on the spawned hunter, and a real direction rather than a fallback.
+        let live = {
+            let inst = world.enemies.first_mut().expect("hunter");
+            let layer = inst
+                .stack
+                .layer_as::<engine::skeletal::layers::AimOffsetLayer>(super::ENEMY_CHEST_AIM_LAYER)
+                .expect("chest-aim layer");
+            assert!(layer.enabled, "the chest-aim layer is live on a spawned hunter");
+            layer.forward
+        };
+        assert!(live.is_finite() && (live.length() - 1.0).abs() < 1e-3, "{live:?} is a unit axis");
+
+        let inst = world.enemies.first().expect("hunter");
+        for (slot, a) in &inst.fire_axes {
+            assert!(
+                a.is_finite() && (a.length() - 1.0).abs() < 1e-3,
+                "slot {slot} axis {a:?} is not a unit direction",
+            );
+        }
+        // The measured axes are not all the same value — the per-clip calibration has not
+        // collapsed into a constant.
+        let first = inst.fire_axes[0].1;
+        let spread = inst
+            .fire_axes
+            .iter()
+            .map(|(_, a)| a.angle_between(first).to_degrees())
+            .fold(0.0f32, f32::max);
+        assert!(
+            spread > 5.0,
+            "all {} fire clips measured within {spread:.1} deg of each other — the per-clip \
+             barrel calibration has become a constant",
+            inst.fire_axes.len(),
+        );
+        // And the forward clip's axis is the one installed at spawn.
+        let default = crate::combat::attack_anim::config_for(inst.weapon.class, inst.dual);
+        let spawn_axis = inst.fire_axes.iter().find(|(s, _)| *s == default.slot).map(|(_, a)| *a);
+        assert_eq!(spawn_axis, Some(live), "spawn installs the forward clip's measured axis");
     }
 
     /// **A hunter's hit capsule fits the body that is drawn.** Perfect Dark bodies are
@@ -976,6 +1527,11 @@ use super::editing::find_room_brushes;
     /// combat code indexes arithmetically. If PD's set ever loads short, the fire
     /// index would land in the hit block and a death index past the end — so the
     /// loader refuses a partial set, and this pins the count and the boundaries.
+    ///
+    /// Slots 0–35 are the shared layout **both** families use; 36+ is the Perfect Dark
+    /// directional fire set, which GoldenEye has no exported clips for. That boundary
+    /// is asserted rather than assumed, because it is the reason the directional table
+    /// is gated on `pd_anims` and not on the lab flag.
     #[test]
     fn pd_template_matches_the_fixed_slot_layout() {
         let world = World::new();
@@ -983,26 +1539,339 @@ use super::editing::find_room_brushes;
             eprintln!("skipping: PD assets not loaded");
             return;
         };
-        let expected = super::CHAR_HIT_START
+        let shared = super::CHAR_HIT_START
             + engine::skeletal::anim_set::HIT_CLIPS.len()
             + engine::skeletal::anim_set::DEATH_CLIPS.len();
-        assert_eq!(
-            super::PD_TEMPLATE_CLIPS.len(),
-            expected,
-            "the PD clip list is the same length as the layout the combat code assumes",
+        assert_eq!(shared, 36, "the shared layout is the frozen 36 slots");
+        let total = super::PD_TEMPLATE_CLIPS.len();
+        assert!(
+            total > shared,
+            "the PD list extends the shared layout with the directional fire set",
         );
-        for slot in 0..expected {
+        for slot in 0..total {
             assert!(t.clip(slot).is_some(), "PD template slot {slot} is filled");
         }
-        assert!(t.clip(expected).is_none(), "and nothing past the death block");
-        // The GoldenEye template agrees, which is what makes one set of index
-        // constants correct for both.
+        assert!(t.clip(total).is_none(), "and nothing past the directional set");
+        // Every extra slot really is a fire clip the direction tables name, so an
+        // appended clip cannot drift out of the one block that is allowed to grow.
+        for slot in shared..total {
+            assert!(
+                crate::combat::attack_anim::slot_is_fire(slot),
+                "PD template slot {slot} ({}) is past the shared layout but is not a \
+                 directional fire clip",
+                super::PD_TEMPLATE_CLIPS[slot],
+            );
+        }
+        // The GoldenEye template agrees on the shared block, which is what makes one
+        // set of index constants correct for both. It stops there.
         if let Some(ge) = world.char_anim_template.as_ref() {
-            for slot in 0..expected {
+            for slot in 0..shared {
                 assert!(ge.clip(slot).is_some(), "GE template slot {slot} is filled");
             }
-            assert!(ge.clip(expected).is_none());
+            assert!(ge.clip(shared).is_none(), "GoldenEye has no directional fire clips");
         }
+    }
+
+    /// **Every row of the direction tables points at the clip it names.**
+    /// `AttackAnimConfig::slot` is a raw index into [`super::PD_TEMPLATE_CLIPS`], so a
+    /// re-numbered template would silently repoint the whole table at the wrong
+    /// animations — and every row would still be a valid index playing a real clip.
+    /// The filenames carry the PD animation id for exactly this check.
+    #[test]
+    fn direction_table_rows_point_at_the_clips_they_name() {
+        use crate::combat::attack_anim;
+        let files = super::PD_TEMPLATE_CLIPS;
+        for row in attack_anim::ALL_ROWS {
+            assert!(row.slot < files.len(), "{} slot {} in range", row.anim, row.slot);
+            let name = files[row.slot];
+            // `ANIM_0032` → the filename ends `…-0032.glb`; the three defaults predate
+            // the convention and are named by role, so they are pinned by number.
+            let id = row.anim.trim_start_matches("ANIM_");
+            let by_id = name.contains(id);
+            let default = matches!(row.slot, 4 | 5 | 6);
+            assert!(
+                by_id || default,
+                "{} is at slot {} which holds {name}",
+                row.anim,
+                row.slot,
+            );
+        }
+        assert_eq!(files[attack_anim::RIFLE.slot], "04-fire-rifle.glb");
+        assert_eq!(files[attack_anim::PISTOL.slot], "05-fire-pistol.glb");
+        assert_eq!(files[attack_anim::DUAL.slot], "06-fire-dual.glb");
+    }
+
+    /// **Every fire animation aims where Perfect Dark says it does.**
+    ///
+    /// This is the measurement that validates the whole direction-table transcription,
+    /// and it is falsifiable: `angleoffset` is a number read out of `chraction.c` with
+    /// no reference to any asset, and the barrel yaw below is measured out of the
+    /// exported clip with no reference to the table. If the field-order reading of the
+    /// C struct literal were wrong, or the left/right sign backwards, or a filename
+    /// mapped to the wrong animation id, these two would not agree.
+    ///
+    /// The measurement runs through the **real layer stack** rather than off the raw
+    /// clip, which is the lesson of the aim-overlay bug: the same asset measured
+    /// `+1.6°` alone and `−78.2°` composed, because the overlay grafts an upper body
+    /// across two unrelated root yaws. The chest-aim layer is left disabled, because
+    /// its entire job is to *cancel* what is being measured here.
+    ///
+    /// What it measured when the table landed (`cargo test -p game fire_animation --
+    /// --nocapture` prints it):
+    ///
+    /// | stance | animation | authored | measured |
+    /// |---|---|---|---|
+    /// | heavy | `ANIM_0002` / `0032` / `0003` / `0006` | 0° | +1.9 / +6.2 / −2.1 / +0.8 |
+    /// | heavy | `ANIM_0004` | **+90°** | **+89.9** |
+    /// | light | `ANIM_0041` / `0044` / `0045` / `0046` | 0° | −2.8 / +1.2 / −3.1 / −2.1 |
+    /// | light | `ANIM_0049` / `004A` | **+90°** | **+87.9 / +75.1** |
+    /// | light | `ANIM_0047` / `0048` | **−90°** | **−96.3 / −88.2** |
+    /// | dual | `ANIM_007A` | 0° | −0.2 |
+    /// | dual | `ANIM_007B` / `007D` | **+90°** | **+90.4 / +92.4** |
+    /// | dual | `ANIM_007C` / `007E` | **−90°** | **−89.8 / −84.6** |
+    ///
+    /// Eighteen independent agreements, worst case 14.9°. In particular the `DTOR(270)`
+    /// rows come out on the character's **right**, which is the whole sign question
+    /// settled by the assets rather than by the comment in `chraction.c` that predicted
+    /// it.
+    #[test]
+    fn each_fire_animation_aims_where_pd_says_it_does() {
+        use crate::combat::attack_anim;
+        use crate::combat::enemy_weapons::enemy_def_for;
+        use engine::skeletal::layers::{ClipOverlayLayer, LayerCtx, Pose};
+
+        let world = World::new();
+        let Some(template) = world.pd_anim_template.as_ref() else {
+            eprintln!("skipping: PD assets not loaded");
+            return;
+        };
+        let Some(body) = world.pd_bodies().next() else {
+            eprintln!("skipping: no PD body loaded");
+            return;
+        };
+        let (Some(m), Some(Some(arm))) = (world.char_models.get(body), world.enemy_arm.get(body))
+        else {
+            eprintln!("skipping: no PD body / arm rig");
+            return;
+        };
+        let sk = &m.skeleton;
+        let loco: Vec<(f32, engine::skeletal::clip::AnimationClip)> = {
+            let mut v = Vec::new();
+            for (speed, slot) in [
+                (0.0, 0),
+                (engine::skeletal::anim_set::SPEED_WALK, 1),
+                (engine::skeletal::anim_set::SPEED_JOG, 2),
+                (engine::skeletal::anim_set::SPEED_RUN, 3),
+            ] {
+                let Some(c) = template.clip(slot) else {
+                    eprintln!("skipping: locomotion clip {slot} missing");
+                    return;
+                };
+                v.push((speed, c.clone()));
+            }
+            v
+        };
+
+        // One representative weapon per stance, because the attach rotation that puts
+        // the gun in the hand is per class — a pistol row measured through the rifle
+        // grip would be meaningless.
+        let stances: [(&str, EnemyWeaponClass, bool); 3] = [
+            ("heavy", EnemyWeaponClass::Rifle, false),
+            ("light", EnemyWeaponClass::Pistol, false),
+            ("dual", EnemyWeaponClass::Rifle, true),
+        ];
+        let mut checked = 0;
+        for (stance, class, dual) in stances {
+            let cfg = match class {
+                EnemyWeaponClass::Pistol => crate::combat::config::PP7,
+                EnemyWeaponClass::Rifle => crate::combat::config::KF7,
+            };
+            let weapon = enemy_def_for(&cfg);
+            let Some(asset) = world.enemy_weapon_lib.iter().find(|w| w.name == weapon.name) else {
+                eprintln!("skipping {stance}: weapon assets not loaded");
+                continue;
+            };
+            let attach = Quat::from_euler(
+                EulerRot::XYZ,
+                weapon.right_rot.x,
+                weapon.right_rot.y,
+                weapon.right_rot.z,
+            );
+            let default = attack_anim::config_for(class, dual);
+            let Some(aim_clip) = template.clip(default.slot).cloned() else { continue };
+            let mut stack = arm.build_stack(loco.clone(), aim_clip);
+
+            for row in attack_anim::table_for(class, dual).rows() {
+                let Some(clip) = template.clip(row.slot).cloned() else {
+                    panic!("{} names slot {} which is empty", row.anim, row.slot)
+                };
+                let hold = attack_anim::FireTiming::from_pd(row, clip.duration);
+                if let Some(ov) = stack.layer_as::<ClipOverlayLayer>(ENEMY_AIM_OVERLAY_LAYER) {
+                    ov.set_clip(clip);
+                    ov.time = hold.shoot.0;
+                    ov.weight = 1.0;
+                }
+                let pose = stack.evaluate(Pose::bind(sk), &LayerCtx { skeleton: sk, dt: 0.0 });
+                // The barrel in MODEL space (the body faces +Z at yaw 0), so its yaw is
+                // directly comparable to `angleoffset`.
+                let g = pose.joint_global_transforms(sk);
+                let hand = g[sk.index_of(crate::combat::enemy_weapons::RIGHT_HAND_BONE).unwrap()]
+                    .to_scale_rotation_translation()
+                    .1;
+                let barrel = (hand * (attach * asset.barrel_axis())).normalize();
+                let measured = barrel.x.atan2(barrel.z).to_degrees();
+                let authored = {
+                    let d = row.angle_offset.to_degrees();
+                    if d > 180.0 { d - 360.0 } else { d }
+                };
+                let mut err = measured - authored;
+                while err > 180.0 {
+                    err -= 360.0;
+                }
+                while err < -180.0 {
+                    err += 360.0;
+                }
+                println!(
+                    "{stance:>5} {:>9} slot {:>2}  authored {authored:>6.1}°  \
+                     measured {measured:>7.1}°  Δ {err:>6.1}°",
+                    row.anim, row.slot,
+                );
+                // A generous tolerance on purpose. The authored value is a design
+                // intent quantised to 90°, and the barrel is the end of a chain of
+                // hand-authored poses through a hand-tuned attach rotation — the claim
+                // being tested is "this animation aims the way the table says", not
+                // "the two agree to a degree". Half a slot band (45°) is the width at
+                // which a wrong sign or a swapped animation could still pass, so the
+                // bound is set inside it.
+                assert!(
+                    err.abs() < 40.0,
+                    "{stance} {} aims {measured:.1}° but PD authored {authored:.1}° \
+                     (Δ {err:.1}°) — the table, the sign convention, or the filename \
+                     → animation-id mapping is wrong",
+                    row.anim,
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 14, "measured only {checked} rows — assets missing?");
+    }
+
+    /// **The direction table is actually wired into the live burst.** Everything above
+    /// tests the table and the assets; this tests that `start_enemy_fire` consults it,
+    /// which is the part that could be dead code while every other assertion passed —
+    /// the `MAX_JOINTS` lesson.
+    ///
+    /// The hunter is turned so its target sits 135° to its left, which lands in the
+    /// hard-left group of all three stance tables. It must come out holding a clip drawn
+    /// to the left (`angle_offset` +90°) from the appended block, with its aim-overlay
+    /// clip and barrel axis moved with it; turned back onto the target it must go back to
+    /// its stance's forward row.
+    #[test]
+    fn starting_a_burst_facing_away_installs_a_sideways_animation() {
+        use crate::combat::attack_anim;
+        let mut world = World::new();
+        world.enable_pd_lab(super::pd_lab::PdLabConfig::default());
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT
+        let Some(player) = world.player_pos() else {
+            eprintln!("skipping: no player");
+            return;
+        };
+        if world.enemies.is_empty() || world.enemies[0].fire_axes.is_empty() {
+            eprintln!("skipping: PD assets not loaded");
+            return;
+        }
+        // Bearing from the hunter to the player, in the game's `atan2(x, z)` yaw.
+        let bearing = {
+            let p = world.enemies[0].enemy.pos;
+            (player.x - p.x).atan2(player.z - p.z)
+        };
+        let deg = |d: f32| d * attack_anim::BAD_TAU / 360.0;
+
+        // ── Turned 135° away (target on its left) ──
+        world.enemies[0].render_yaw = Some(bearing - deg(135.0));
+        world.start_enemy_fire(0);
+        let inst = &world.enemies[0];
+        let off = inst.fire.angle_offset.to_degrees();
+        assert!(
+            (off - 90.0).abs() < 1.0,
+            "a target 135° left should pick a left-drawn animation, got angle_offset {off:.1}°",
+        );
+        let slot = inst.fire.slot.expect("an authored row names its slot");
+        assert!(slot >= 36, "and it comes from the appended directional block, got {slot}");
+        assert!(inst.fire.authored, "on PD's authored timing");
+        // The whole pipeline moved with it, not just the numbers.
+        let clip_len = inst.anim.clip(slot).expect("that clip is loaded").duration;
+        let axis = inst.fire_axes.iter().find(|(s, _)| *s == slot).map(|(_, a)| *a);
+        assert!(axis.is_some(), "and its barrel axis was measured at spawn");
+        let installed = {
+            let mut e = world.enemies[0].stack.layer_as::<ClipOverlayLayer>(ENEMY_AIM_OVERLAY_LAYER);
+            e.as_mut().map(|ov| (ov.clip().duration, ov.time))
+        };
+        let (dur, hold) = installed.expect("the aim overlay is present");
+        assert!(
+            (dur - clip_len).abs() < 1e-3,
+            "the aim overlay is posing the chosen clip ({dur:.2}s vs {clip_len:.2}s)",
+        );
+        assert!(
+            (hold - world.enemies[0].fire.shoot.0).abs() < 1e-3,
+            "held at that row's own shoot frame",
+        );
+
+        // ── Turned back onto the target ──
+        world.enemies[0].fire_elapsed = None;
+        world.enemies[0].render_yaw = Some(bearing);
+        world.start_enemy_fire(0);
+        let inst = &world.enemies[0];
+        assert_eq!(inst.fire.angle_offset, 0.0, "facing it, the body aims straight");
+        let default = attack_anim::config_for(inst.weapon.class, inst.dual);
+        let table = attack_anim::table_for(inst.weapon.class, inst.dual);
+        let forward = table.0[0];
+        assert!(
+            forward.0.iter().any(|r| r.slot == inst.fire.slot.unwrap()),
+            "and the row comes from the dead-ahead group",
+        );
+        // Heavy's dead-ahead group is ANIM_0002, not the spawn default ANIM_0032, so this
+        // only holds where the two coincide — asserted rather than assumed either way.
+        if forward.0.iter().any(|r| r.slot == default.slot) {
+            assert_eq!(inst.fire.slot, Some(default.slot));
+        }
+    }
+
+    /// **A hunter is calibrated for every animation it can play.** The chest-aim layer
+    /// swings a measured barrel axis, and a Perfect Dark hunter swaps fire clip per
+    /// burst — so a missing measurement means a burst whose barrel axis belongs to a
+    /// pose that is no longer on the body, which reads on screen as a guard shooting
+    /// past you and shows up in no other assertion.
+    #[test]
+    fn a_pd_hunter_is_calibrated_for_every_clip_its_bearing_can_pick() {
+        use crate::combat::attack_anim;
+        let mut world = World::new();
+        world.enable_pd_lab(super::pd_lab::PdLabConfig::default());
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT
+        let Some(inst) = world.enemies.first() else {
+            eprintln!("skipping: no hunter spawned");
+            return;
+        };
+        if inst.fire_axes.is_empty() {
+            eprintln!("skipping: PD assets / arm rig not loaded");
+            return;
+        }
+        assert!(inst.pd_anims, "the lab hunter is on the PD tables");
+        let table = attack_anim::table_for(inst.weapon.class, inst.dual);
+        for row in table.rows() {
+            let axis = inst.fire_axes.iter().find(|(s, _)| *s == row.slot);
+            let (_, a) = axis.unwrap_or_else(|| panic!("no barrel axis for {}", row.anim));
+            assert!(
+                (a.length() - 1.0).abs() < 1e-3,
+                "{}'s barrel axis is normalised, got {a:?}",
+                row.anim,
+            );
+        }
+        // The spawn clip is measured too, and it is the stance default.
+        let default = attack_anim::config_for(inst.weapon.class, inst.dual);
+        assert!(inst.fire_axes.iter().any(|(s, _)| *s == default.slot));
     }
 
     /// Multi-body spawn: a flooded-in wave wears a spread of bodies across the catalog
@@ -1028,10 +1897,11 @@ use super::editing::find_room_brushes;
             let m = world.char_models.get(inst.body).expect("hunter body in range");
             assert_eq!(inst.blood.len(), m.vertices.len() * 3, "blood sized to the body");
         }
-        // Each render instance carries the hunter's body id.
+        // Each render instance carries the hunter's body id, posed against that body's
+        // own rig (see `hunter_drives_the_animated_model_not_a_box` for why not 15).
         for (body, _model, joints, _opacity, _colors) in world.character_instances() {
             assert!(body < world.char_models.len(), "instance body id in range");
-            assert_eq!(joints.len(), 15);
+            assert_eq!(joints.len(), world.char_models[body].skeleton.joint_count());
         }
     }
 
@@ -1055,7 +1925,6 @@ use super::editing::find_room_brushes;
         world.change_difficulty(100); // clamps to DIFFICULTY_MAX
         assert_eq!(world.difficulty(), DIFFICULTY_MAX);
         let hard = world.difficulty_params();
-        assert!(hard.accuracy_mult > 1.0, "more accurate");
         assert!(hard.speed_mult > 1.0, "moves faster");
         assert!(hard.cooldown_mult < 1.0, "shorter burst cooldown");
         assert!(hard.reaction_mult < 1.0, "reacts faster");
@@ -1069,6 +1938,26 @@ use super::editing::find_room_brushes;
         // Clamps at both ends.
         world.change_difficulty(-100);
         assert_eq!(world.difficulty(), 0, "clamped at the floor");
+
+        // **Aim is no longer on this struct.** `accuracy_mult` / `falloff_ease` scaled a
+        // hit roll that no longer exists (§17); the same dial position now selects a
+        // Perfect Dark zeroing tier instead, so the lethality ramp has to be asserted
+        // there. That is the one axis whose ordering the dial must never lose.
+        let mut tier_at = |d: u32| {
+            world.set_difficulty(d);
+            super::pd_lab::tier_for_dial_frac(world.difficulty_frac())
+        };
+        let floor = tier_at(0);
+        let top = tier_at(DIFFICULTY_MAX);
+        assert_ne!(floor, top, "the dial still sweeps the lethality axis");
+        assert!(
+            floor.tuning().shoot_delay > top.tuning().shoot_delay,
+            "a harder tier reacts faster: {floor:?} vs {top:?}",
+        );
+        assert!(
+            floor.tuning().max_zero_speed > top.tuning().max_zero_speed,
+            "…and mis-aims less: {floor:?} vs {top:?}",
+        );
     }
 
     /// #6 footstep noise: a *moving* player pulls a blind (searching) hunter within
@@ -1236,12 +2125,22 @@ use super::editing::find_room_brushes;
         );
     }
 
-    /// Sim-style hits (default): a non-lethal hit plays NO flinch/hurt animation, so
-    /// the hunter keeps fighting through it. Turning hit reactions on (the GoldenEye
-    /// mode flag) restores the authored flinch one-shot.
+    /// Sim-style hits: a non-lethal hit plays NO flinch/hurt animation, so the hunter
+    /// keeps fighting through it. Turning hit reactions on (the GoldenEye mode flag)
+    /// restores the canned flinch one-shot.
+    ///
+    /// **GoldenEye-family only**, and that is the point of the override here. A Perfect
+    /// Dark hunter — which is what a wave wears now — takes its reaction from PD's
+    /// authored per-hit-part tables instead, and those are on by default because being
+    /// seen is why they were ported (§9). So a shipped hunter *does* flinch; this pins the
+    /// other family's behaviour, which is still what the `hit_reactions` flag governs.
     #[test]
     fn hits_flinch_only_when_hit_reactions_enabled() {
         let mut world = World::new();
+        // The canned flinch is a GoldenEye *clip set* behaviour; a GoldenEye body is on
+        // Perfect Dark's animations (and so its authored reactions) by default now.
+        world.set_goldeneye_clips(true);
+        world.set_body_set(super::BodySet::GoldenEye);
         world.weapon_index = 0; // PP7, 25 dmg — non-lethal on a 100-hp hunter
         world.set_ragdoll(false); // isolate the canned-flinch path (ragdoll would supersede it)
         world.initial_meshes();
@@ -1455,6 +2354,11 @@ use super::editing::find_room_brushes;
         let mut world = World::new();
         world.weapon_index = 0; // PP7, 25 dmg hitscan
         assert!(world.ragdoll(), "ragdoll death is on by default");
+        // A Perfect Dark hunter prefers its authored death table over the physics, and a
+        // wave wears Perfect Dark now — so the ragdoll has to be isolated to be tested.
+        // It is still a live path (it is what a hunter with no authored row falls back to,
+        // and what the whole GoldenEye family uses).
+        world.set_authored_reactions(false);
         world.initial_meshes();
         world.toggle_mode(); // HUNT: bake nav + spawn the (single) hunter
         assert!(!world.enemies.is_empty(), "hunter spawned");
@@ -1512,6 +2416,7 @@ use super::editing::find_room_brushes;
         let mut world = World::new();
         world.weapon_index = 0; // PP7, 25 dmg — non-lethal on a 100-hp hunter
         assert!(world.ragdoll(), "ragdoll feature on by default");
+        world.set_authored_reactions(false); // isolate the physics stagger (see above)
         world.initial_meshes();
         world.toggle_mode(); // HUNT
         world.advance_animation(1.0 / 60.0); // seed the pose the reaction reads
@@ -1563,6 +2468,7 @@ use super::editing::find_room_brushes;
     fn ragdoll_bodies_are_cleared_on_mode_switch() {
         let mut world = World::new();
         world.weapon_index = 0;
+        world.set_authored_reactions(false); // isolate the physics death
         world.initial_meshes();
         world.toggle_mode(); // HUNT
         world.advance_animation(1.0 / 60.0);
@@ -1797,26 +2703,67 @@ use super::editing::find_room_brushes;
         world.set_wave_size(6); // need a couple of hunters (gameplay default is 1)
         world.initial_meshes();
         world.toggle_mode(); // HUNT: spawn the roster
-        assert!(world.enemies.len() >= 2, "roster spawned at least two hunters");
+        // One animation frame, so the blood paint below skins against a real pose rather
+        // than whatever the mixer holds before its first update.
+        world.advance_animation(1.0 / 60.0);
+        assert!(world.enemies.len() >= 3, "roster spawned at least three hunters");
 
-        // Head-height impact on hunter 0 → ×4 → lethal in one PP7 shot.
+        // The zone boundaries **scale with the body's own height**
+        // (`World::body_hit_zones`), because a 1.73 m Perfect Dark hunter's head is not
+        // where a 1.50 m GoldenEye one's is. So the probe heights are derived from each
+        // hunter's own zones rather than being the fixed 1.2 m / 0.3 m that only ever
+        // meant "head" and "leg" on a GoldenEye body.
+        let (head_min, leg_max) = world.body_hit_zones(world.enemies[0].body);
+        assert!(head_min > leg_max, "the zones are ordered: legs below, head above");
+
+        // Head-zone impact on hunter 0 → ×4 → lethal in one PP7 shot.
         let head = {
             let p = world.enemies[0].enemy.pos;
-            Vec3::new(p.x, p.y + 1.2, p.z)
+            Vec3::new(p.x, p.y + head_min + 0.05, p.z)
         };
         world.hit_enemy(0, head);
         assert!(world.enemies[0].enemy.is_dead(), "a headshot one-shots with the PP7");
 
-        // Leg-height impact on hunter 1 → ×0.6 → 15 dmg, and it paints blood.
+        // Leg-zone impact on hunter 1 → ×0.6 → 15 dmg, and it paints blood.
+        let (_, leg_max) = world.body_hit_zones(world.enemies[1].body);
+        // Just under the top of the leg zone — a thigh rather than an ankle, so there is
+        // mesh nearby for the blood paint to redden.
         let leg = {
             let p = world.enemies[1].enemy.pos;
-            Vec3::new(p.x, p.y + 0.3, p.z)
+            Vec3::new(p.x, p.y + leg_max * 0.9, p.z)
         };
         world.hit_enemy(1, leg);
         assert_eq!(world.enemies[1].enemy.health(), 100.0 - 15.0, "a leg shot does 0.6×");
-        // Painting reddens vertices near the impact → some g/b channels drop below 1.
+
+        // Blood paint, on a third hunter. Deliberately not folded into the leg shot above:
+        // the paint reddens vertices within [`BLOOD_RADIUS`] of the impact in WORLD space,
+        // so it is a statement about where the posed mesh *is* — and a limb probe derived
+        // from a zone boundary is a fragile way to find mesh (it was, and it broke the
+        // moment the bodies changed size). So the probe is the centre of the body's own
+        // posed bounds, measured the same way `hit_enemy` measures it.
+        let chest = {
+            let inst = &world.enemies[2];
+            let m = &world.char_models[inst.body];
+            let joints = inst.anim.skinning_matrices(&m.skeleton);
+            let ct = world.char_transform(inst.enemy.pos, inst.yaw(), inst.body, inst.pd_anims);
+            let (mut lo, mut hi) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+            for v in &m.vertices {
+                let src = Vec3::from(v.pos);
+                let mut local = Vec3::ZERO;
+                for k in 0..4 {
+                    if v.weights[k] != 0.0 {
+                        local += v.weights[k] * joints[v.joints[k] as usize].transform_point3(src);
+                    }
+                }
+                let w = ct.transform_point3(local);
+                lo = lo.min(w);
+                hi = hi.max(w);
+            }
+            (lo + hi) * 0.5
+        };
+        world.hit_enemy(2, chest);
         assert!(
-            world.enemies[1].blood.iter().any(|&c| c < 0.999),
+            world.enemies[2].blood.iter().any(|&c| c < 0.999),
             "the hit painted blood onto the body"
         );
     }

@@ -125,11 +125,19 @@ pub(crate) fn fire_window_for(class: EnemyWeaponClass, dual: bool) -> (f32, f32)
     anim_set::fire_window(hex).unwrap_or(anim_set::FIRE_WINDOW)
 }
 
-/// Whether a clip index is one of the (class-specific) fire clips — the
-/// `enemyState === 'action'` proxy the FSM's attack→cooldown transition needs,
-/// disambiguated from hit/death one-shots.
+/// Whether a clip index is one of the fire clips — the `enemyState === 'action'`
+/// proxy the FSM's attack→cooldown transition needs, disambiguated from hit/death
+/// one-shots.
+///
+/// That is the three per-stance defaults *and* the directional set at slots 36+, which
+/// a Perfect Dark hunter's burst switches to by bearing
+/// ([`crate::combat::attack_anim::slot_is_fire`]). Asking the table rather than
+/// comparing three constants is what keeps this honest as the set grows.
 pub(crate) fn is_fire_clip(idx: usize) -> bool {
-    idx == FIRE_RIFLE_IDX || idx == FIRE_PISTOL_IDX || idx == FIRE_DUAL_IDX
+    idx == FIRE_RIFLE_IDX
+        || idx == FIRE_PISTOL_IDX
+        || idx == FIRE_DUAL_IDX
+        || crate::combat::attack_anim::slot_is_fire(idx)
 }
 
 impl EnemyInstance {
@@ -323,7 +331,12 @@ impl World {
                 continue; // no body for this hunter → nothing to pose
             };
             let sk = &m.skeleton;
-            let feet_off = feet_offs.get(inst.body).copied().unwrap_or(0.0);
+            // Seated for the clip set THIS hunter plays — the two differ by the Perfect
+            // Dark root pedestal (see `World::body_feet_offset`).
+            let feet_off = feet_offs
+                .get(inst.body)
+                .map(|p| p[if inst.pd_anims { 0 } else { 1 }])
+                .unwrap_or(0.0);
             // A hit/death one-shot takes over the whole body: feed its pose as the
             // base and bypass locomotion + aim. `is_fire_clip` guard is vestigial
             // (fire is a timer, never on the mixer) but keeps the check honest.
@@ -660,15 +673,22 @@ impl World {
 
     /// The feet-seating Y offset for a given body id (0 if the body id is out of
     /// range, e.g. no assets loaded).
-    pub(crate) fn body_feet_offset(&self, body: usize) -> f32 {
-        self.char_feet_offset.get(body).copied().unwrap_or(0.0)
+    /// This body's feet-seating offset for the clip set it is playing.
+    ///
+    /// `pd_clips` is the hunter's own [`EnemyInstance::pd_anims`]. It is not cosmetic: a
+    /// Perfect Dark clip carries an absolute root pedestal that a GoldenEye clip does not,
+    /// so the same body needs a different offset depending on which set drives it — 1.09 m
+    /// of difference, i.e. the whole figure off the floor. See `World::new`'s sweep.
+    pub(crate) fn body_feet_offset(&self, body: usize, pd_clips: bool) -> f32 {
+        let pair = self.char_feet_offset.get(body).copied().unwrap_or([0.0, 0.0]);
+        pair[if pd_clips { 0 } else { 1 }]
     }
 
     /// World transform placing a character of body `body` (feet at `feet`, facing
     /// `yaw`) with that body's feet-seating offset + `CHAR_SCALE` — the model root the
     /// skinned pose + any bone-attached weapon are expressed under.
-    pub(crate) fn char_transform(&self, feet: Vec3, yaw: f32, body: usize) -> Mat4 {
-        char_transform_raw(feet, yaw, self.body_feet_offset(body))
+    pub(crate) fn char_transform(&self, feet: Vec3, yaw: f32, body: usize, pd_clips: bool) -> Mat4 {
+        char_transform_raw(feet, yaw, self.body_feet_offset(body, pd_clips))
     }
 
     /// Every skinned character to draw this frame as `(body id, model, joint matrices,
@@ -687,7 +707,7 @@ impl World {
             if let Some(p) = self.procedural_preview.as_ref() {
                 pd.push((
                     0,
-                    self.char_transform(p.feet, p.yaw, 0),
+                    self.char_transform(p.feet, p.yaw, 0, true),
                     p.joints.clone(),
                     1.0,
                     p.blood.as_slice(),
@@ -712,7 +732,7 @@ impl World {
                     Some(p) => p.skinning_matrices(&m.skeleton),
                     None => inst.anim.skinning_matrices(&m.skeleton),
                 };
-                let model = self.char_transform(inst.enemy.pos, inst.yaw(), inst.body);
+                let model = self.char_transform(inst.enemy.pos, inst.yaw(), inst.body, inst.pd_anims);
                 Some((inst.body, model, joints, inst.opacity(), inst.blood.as_slice()))
             }));
         pd
@@ -743,6 +763,7 @@ impl World {
         def: &EnemyWeaponDef,
         left: bool,
         body: usize,
+        pd_clips: bool,
     ) -> Option<Mat4> {
         let m = self.char_models.get(body)?;
         let bone_name = if left { LEFT_HAND_BONE } else { RIGHT_HAND_BONE };
@@ -755,7 +776,7 @@ impl World {
         };
         let offset = Mat4::from_translation(off)
             * Mat4::from_euler(EulerRot::XYZ, rot.x, rot.y, rot.z);
-        Some(self.char_transform(feet, yaw, body) * bone_global * offset)
+        Some(self.char_transform(feet, yaw, body, pd_clips) * bone_global * offset)
     }
 
     /// The enemy weapon draws this frame: `(weapon name, view_proj · world)` for
@@ -776,11 +797,11 @@ impl World {
                 continue; // drop the gun on death
             }
             let globals = self.inst_bone_globals(inst);
-            if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, false, inst.body) {
+            if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, false, inst.body, inst.pd_anims) {
                 out.push((inst.weapon.name, vp * w));
             }
             if inst.dual {
-                if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, true, inst.body) {
+                if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, true, inst.body, inst.pd_anims) {
                     out.push((inst.weapon.name, vp * w));
                 }
             }
@@ -837,11 +858,11 @@ impl World {
                 continue;
             }
             let globals = self.inst_bone_globals(inst);
-            if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, false, inst.body) {
+            if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, false, inst.body, inst.pd_anims) {
                 out.push((inst.weapon.name, vp * w));
             }
             if inst.dual {
-                if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, true, inst.body) {
+                if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, true, inst.body, inst.pd_anims) {
                     out.push((inst.weapon.name, vp * w));
                 }
             }

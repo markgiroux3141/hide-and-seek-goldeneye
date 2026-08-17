@@ -165,6 +165,10 @@ impl TestArena {
             count: wave,
             difficulty: Some(tier),
             bot_type: crate::pdsim::personality::BotType::General,
+            // The jank lab is about hunters versus the player, so teams stay on —
+            // free-for-all would have half the pack duelling each other and the
+            // player-approach metrics would measure nothing.
+            free_for_all: false,
         });
         world.camera.pos = Vec3::new(player_m.x, player_m.y.max(1.5), player_m.z);
         world.initial_meshes();
@@ -637,6 +641,15 @@ fn orca_a_stacked_pack_fans_out_without_interpenetrating() {
 /// case (hunters converging on the gap shoved each other sideways into the walls and
 /// ground in place); ORCA should queue them through. Assert they cross to the far side
 /// with no stacking / grinding / thrash and stay on legal ground.
+///
+/// **The player is deliberately off-axis from the gap**, so the wall blocks the sightline
+/// from the pack's starting corner and crossing is the only way to engage. It used to sit
+/// dead in front of the gap, and the pack crossed for the wrong reason: a burst in flight
+/// suppressed the Attack score, so a firing hunter stayed in `Chase` and ran the player
+/// down through the doorway. That hole is fixed (see `Enemy::util_score`) and a hunter
+/// that can see its target now stops at its standoff — which, from the near side of a
+/// 7 m-deep room, is short of the wall. Sightline, not distance, is what has to force the
+/// funnel, and now it does.
 #[test]
 fn orca_a_pack_funnels_through_a_doorway() {
     // Room 60×60 WT (15×15 m) split at z∈[28,32] WT by two wall segments leaving a
@@ -645,7 +658,8 @@ fn orca_a_pack_funnels_through_a_doorway() {
         [0.0, 0.0, 28.0, 27.0, 16.0, 4.0],  // left wall  (x 0..6.75 m)
         [33.0, 0.0, 28.0, 27.0, 16.0, 4.0], // right wall (x 8.25..15 m)
     ];
-    let mut arena = TestArena::build([60.0, 16.0, 60.0], &walls, 5, Vec3::new(7.5, 0.0, 11.0));
+    // Player far side AND off to the left, so the left wall is between it and the pack.
+    let mut arena = TestArena::build([60.0, 16.0, 60.0], &walls, 5, Vec3::new(2.0, 0.0, 11.0));
     // Cluster the pack tight on the near side, dead in front of the gap.
     for i in 0..arena.world.enemies.len() {
         let col = (i % 3) as f32 - 1.0;
@@ -661,8 +675,25 @@ fn orca_a_pack_funnels_through_a_doorway() {
     }
     mon.report();
     // At least one hunter made it through the gap to the player's side (z past the wall).
-    let crossed = arena.world.enemies.iter().filter(|e| e.enemy.pos.z > 9.0).count();
-    assert!(crossed >= 1, "at least one hunter funnelled through the gap (crossed={crossed})");
+    // Through the gap = past the wall's FAR face. The walls occupy z 28..32 WT = 7..8 m,
+    // so 8.2 is "clear of it" with a hand's margin — derived from the geometry rather than
+    // picked. It used to be a flat 9.0, which quietly became 5 cm too strict when the
+    // engagement distance went 3D and the standoff started holding hunters closer to the
+    // pinch: three of five were at z 8.25–8.95, i.e. through, and the assertion said no.
+    let crossed = arena.world.enemies.iter().filter(|e| e.enemy.pos.z > 8.2).count();
+    let closest = arena
+        .world
+        .enemies
+        .iter()
+        .map(|e| e.enemy.pos.distance(arena.world.player_pos().unwrap()))
+        .fold(f32::MAX, f32::min);
+    assert!(
+        crossed >= 1,
+        "at least one hunter funnelled through the gap (crossed={crossed}, closest {closest:.2} m)",
+    );
+    // The property the crossing is a proxy for: the pack got to the player. Stated
+    // directly so a geometry change cannot make the test vacuous.
+    assert!(closest < 6.0, "the pack pressured the player through the pinch ({closest:.2} m)");
     assert!(mon.violations_of("overlap").is_empty(), "hunters jammed/stacked at the pinch");
     assert!(mon.violations_of("walk_in_place").is_empty(), "a hunter ground in place at the pinch");
     assert!(mon.violations_of("thrash").is_empty(), "a hunter thrashed states at the pinch");
@@ -1015,17 +1046,57 @@ fn pd_omniscience_kill_switch_restores_the_search() {
     assert!(searched, "without omniscience a blind hunter must fall back to Search/Investigate");
 }
 
-/// Omniscience is PD-lab-only: a GoldenEye hunter in the same arena is never flagged,
-/// so the normal game keeps its perceive-then-remember AI untouched.
+/// **Omniscience is family-agnostic**, and the only thing gating it is the kill-switch.
+///
+/// This test used to assert the opposite — that a GoldenEye hunter was *never*
+/// omniscient, because the policy was gated per hunter on `pdsim.is_some()` and only lab
+/// hunters carried a simulant. Every hunter carries one now (§17), so that gate is
+/// vestigial and the knowledge rule reaches the whole roster. Asserted against a
+/// **forced-GoldenEye** wave, because that is the case the old gate would have excluded:
+/// the body it wears has nothing to do with what it knows.
 #[test]
-fn a_goldeneye_hunter_is_never_omniscient() {
-    let (mut arena, player) = omniscience_arena(false);
-    assert!(arena.world.pd_omniscience(), "the world flag is still on…");
-    omniscience_run(&mut arena, 2.0, player);
+fn omniscience_reaches_a_goldeneye_bodied_hunter_too() {
+    let walls = [
+        [0.0, 0.0, 28.0, 27.0, 16.0, 4.0],
+        [33.0, 0.0, 28.0, 27.0, 16.0, 4.0],
+    ];
+    let player = Vec3::new(11.0, 0.0, 12.0);
+    let mut world = World::new();
+    world.set_body_set(super::BodySet::GoldenEye);
+    let mut region = Region::new(0);
+    region.brushes.push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 60.0, 16.0, 60.0));
+    for (k, o) in walls.iter().enumerate() {
+        region
+            .brushes
+            .push(Brush::new(2 + k as u32, Op::Add, o[0], o[1], o[2], o[3], o[4], o[5]));
+    }
+    world.regions = vec![region];
+    world.set_difficulty(DIFFICULTY_MAX);
+    world.set_wave_size(1);
+    world.camera.pos = Vec3::new(player.x, 1.5, player.z);
+    world.initial_meshes();
+    world.toggle_mode();
+    world.toggle_invulnerable();
+    let floor_y = world.player_pos().map(|p| p.y).unwrap_or(0.0);
+    let mut arena = TestArena { world, floor_y };
     assert!(
-        !arena.world.enemies[0].enemy.is_omniscient(),
-        "…but it must not reach a hunter with no simulant model"
+        arena.world.enemies[0].pdsim.is_some(),
+        "every hunter carries a simulant now, whatever body it wears"
     );
+    assert!(
+        arena.world.ge_bodies().contains(&arena.world.enemies[0].body),
+        "…and this one wears a GoldenEye body (it is on PD's clips like everything else)",
+    );
+    arena.place_hunter(0, 2.0, 3.0); // near-side corner, wall between it and the player
+
+    assert!(arena.world.pd_omniscience(), "the world flag is on");
+    let (closest, searched) = omniscience_run(&mut arena, 20.0, player);
+    assert!(
+        arena.world.enemies[0].enemy.is_omniscient(),
+        "the knowledge policy reaches it regardless of family"
+    );
+    assert!(closest < 6.0, "and it comes to find the player (got no closer than {closest:.2} m)");
+    assert!(!searched, "an omniscient hunter has nothing to search for");
 }
 
 // ─── Per-shot spread + burst cadence (why an automatic isn't an instant kill) ───
@@ -1179,6 +1250,7 @@ fn pd_a_dark_pacifist_never_fires() {
         count: 1,
         difficulty: Some(crate::pdsim::difficulty::BotDifficulty::Dark),
         bot_type: crate::pdsim::personality::BotType::Peace,
+        free_for_all: false,
     });
     world.camera.pos = Vec3::new(7.5, 1.5, 2.5);
     world.initial_meshes();
