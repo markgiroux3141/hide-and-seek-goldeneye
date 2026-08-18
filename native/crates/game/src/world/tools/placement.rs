@@ -145,6 +145,14 @@ impl World {
         let (min_x, max_x) = (brush.x, brush.x + brush.w);
         let (min_y, max_y) = (brush.y, brush.y + brush.h);
         let (min_z, max_z) = (brush.z, brush.z + brush.d);
+        // **The footprint has to fit the brush it stands on.** Otherwise the clamps below
+        // get `min > max` and `f32::clamp` *panics*, taking the editor with it. Not
+        // hypothetical: a doorframe / protoroom carve is only `WALL_THICKNESS` (1 WT)
+        // deep, so aiming at one with the default 2 WT pillar crashed the editor.
+        // `resolve_opening_placement` already guards its own clamps the same way.
+        if ps > max_x - min_x || ps > max_z - min_z {
+            return None;
+        }
         // Snap the cursor to WT and center the (integer) footprint on it.
         let x0 = (hit_wt.x.round() - (ps / 2.0).floor()).clamp(min_x, max_x - ps);
         let z0 = (hit_wt.z.round() - (ps / 2.0).floor()).clamp(min_z, max_z - ps);
@@ -179,6 +187,19 @@ impl World {
         let (iy0, iy1) = (brush.y, brush.y + brush.h);
         let (iz0, iz1) = (brush.z, brush.z + brush.d);
         let ih = iy1 - iy0;
+        // **The arch has to fit the brush it spans.** The width clamp below panics on
+        // `min > max` otherwise — `f32::clamp` does, not saturate — and takes the editor
+        // down. A doorframe / protoroom carve is only `WALL_THICKNESS` (1 WT) deep, so its
+        // *side* face gives a 1 WT span along the arch's width axis, and the default 2 WT
+        // brace overruns it: aiming at one crashed with `min = 48, max = 47`.
+        //
+        // The height check is a lesser cousin — with `bd >= ih` the ceiling strip would sit
+        // at or below the floor, which is broken output rather than a crash, but "the tool
+        // doesn't fit" is the same answer.
+        let span_w = if sel.axis == Axis::X { iz1 - iz0 } else { ix1 - ix0 };
+        if bw > span_w || bd >= ih {
+            return None;
+        }
 
         let boxes = if sel.axis == Axis::X {
             // Arch spans across X; U runs along Z (position from the cursor Z).
@@ -198,5 +219,98 @@ impl World {
             ]
         };
         Some((sel.region_id, boxes))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::super::*;
+
+    /// A world holding one **1 WT thin** subtract brush at x = 48 — the shape of a
+    /// doorframe / protoroom carve (`WALL_THICKNESS` deep), which is what a real level is
+    /// full of. The camera sits inside it looking at a face whose in-plane span is that
+    /// single tile.
+    ///
+    /// These coordinates reproduce the reported panic exactly: `clamp(48, 48 + 1 - 2)` →
+    /// `min = 48.0, max = 47.0`.
+    fn world_with_a_thin_brush() -> World {
+        let mut world = World::new();
+        let id = world.next_brush_id;
+        world.next_brush_id += 1;
+        world.regions[0]
+            .brushes
+            .push(Brush::new(id, Op::Subtract, 48.0, 0.0, 48.0, 1.0, 16.0, 24.0));
+        world.recluster_all();
+        world.initial_meshes();
+        world
+    }
+
+    /// Aiming the brace at a brush too narrow for it refuses instead of panicking.
+    ///
+    /// `f32::clamp` **panics** on `min > max` rather than saturating, so an ill-fitting
+    /// placement was not a cosmetic glitch — it killed the editor mid-session. Pressing `R`
+    /// while looking at a doorframe was enough.
+    #[test]
+    fn a_brace_aimed_at_a_brush_narrower_than_itself_refuses_instead_of_panicking() {
+        let mut world = world_with_a_thin_brush();
+        // Inside the thin brush, looking down −Z at its Z-Min face. That face's width axis
+        // is X, where the brush spans a single tile.
+        world.camera.pos = Vec3::new(48.5, 8.0, 60.0) * WORLD_SCALE;
+        world.camera.yaw = 0.0;
+        world.camera.pitch = 0.0;
+        world.brace_tool_key();
+        assert!(world.is_placing(), "brace armed");
+
+        let (sel, _) = world.pick_face_hit().expect("the thin brush's face");
+        assert_eq!(sel.axis, Axis::Z, "aimed at a Z face, so width runs along X");
+        assert!(
+            world.resolve_brace().is_none(),
+            "a 2 WT brace does not fit a 1 WT span — refuse, don't panic"
+        );
+        // The ghost and the placement both go through the same resolver.
+        assert!(world.update_place_preview().is_none(), "and no ghost is drawn");
+        assert!(world.confirm_place().is_none(), "and nothing is placed");
+    }
+
+    /// Same guard for the pillar, whose footprint has to fit the floor it stands on in
+    /// *both* horizontal axes.
+    #[test]
+    fn a_pillar_aimed_at_a_floor_smaller_than_itself_refuses_instead_of_panicking() {
+        let mut world = world_with_a_thin_brush();
+        // Inside the thin brush, looking down at its floor: 1 WT across in X.
+        world.camera.pos = Vec3::new(48.5, 8.0, 60.0) * WORLD_SCALE;
+        world.camera.yaw = 0.0;
+        world.camera.pitch = -1.4;
+        world.pillar_tool_key();
+        assert!(world.is_placing(), "pillar armed");
+
+        let (sel, _) = world.pick_face_hit().expect("the thin brush's floor");
+        assert_eq!((sel.axis, sel.side), (Axis::Y, Side::Min), "aimed at a floor");
+        assert!(
+            world.resolve_pillar().is_none(),
+            "a 2 WT pillar does not fit a 1 WT wide floor — refuse, don't panic"
+        );
+        assert!(world.update_place_preview().is_none());
+        assert!(world.confirm_place().is_none());
+    }
+
+    /// The guards must not have made the tools useless: both still place on a normal room
+    /// wall / floor, which is the case they exist for.
+    #[test]
+    fn both_tools_still_place_on_an_ordinary_room_surface() {
+        let mut world = World::new();
+        world.initial_meshes();
+
+        world.camera.pitch = -1.4; // the default room's floor
+        world.pillar_tool_key();
+        assert!(world.resolve_pillar().is_some(), "pillar fits a 24×24 floor");
+        assert!(world.confirm_place().is_some(), "and places");
+
+        let mut world = World::new();
+        world.initial_meshes();
+        world.camera.pitch = 0.0; // the −Z wall
+        world.brace_tool_key();
+        assert!(world.resolve_brace().is_some(), "brace fits a 24-wide wall");
+        assert!(world.confirm_place().is_some(), "and places");
     }
 }

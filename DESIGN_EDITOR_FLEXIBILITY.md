@@ -330,6 +330,40 @@ end to end.
 
 ---
 
+## Tried and rejected — group push/pull across a coplanar surface
+
+**Do not re-propose this.** Built 2026-08-18 and reverted the same day (user call).
+
+The idea was the obvious symmetry: the draw tool learned that a *surface* is not a brush's
+face, so make full-face push/pull move every coplanar contiguous face too — which would
+also have made a drawn shape raise/lower as one unit for free, since its rectangles' top
+faces are coplanar. It worked, it was atomic (refusing a pull no member could absorb rather
+than tearing the face into a notch), and the surface tint showed the affected extent up
+front. All green.
+
+**It still has to go, because of the doorframe.** Cut a door, push the protoroom out into a
+new room, then select one of *that room's side walls* — the wall perpendicular to the door.
+The frame carve's side face lies on the same plane, on the same side, with the same op, and
+touches the room in-plane at the wall thickness. So it joins the group, and pushing the
+room's wall widens the doorframe along with it.
+
+Worth noting the near-miss in reasoning: frames *are* correctly excluded for a wall
+**parallel** to the door (there the room's `Max` face and the frame's `Min` face share a
+plane but face opposite ways, so the side-match rejects them). Checking only that case makes
+the whole thing look safe. It is the perpendicular wall that breaks it.
+
+That could be patched — exclude `frame` brushes, bound the group by
+[`find_room_brushes`](native/crates/game/src/world/editing.rs) — but each patch is another
+special case guarding the most-used operation in the editor, and the payoff is small: if an
+extrude is wrong, undo and redraw it. The per-brush selection limitation is a real
+limitation and it is the right one to live with.
+
+The reverted work is recoverable from the git stash on `feat/editor-draw-tool` if the
+calculus ever changes. `Brush::group` remains stamped-but-unread, which costs nothing and
+keeps a delete-as-a-unit option open without any live code path.
+
+---
+
 ## Other directions, ranked by payoff-per-risk
 
 1. **Copy/paste + mirror of brush groups.** `Brush` is `Copy` + serde; cloning a set with an
