@@ -50,6 +50,7 @@ impl World {
             self.opening_tool = None;
             self.opening_preview = None;
             self.place_tool = None;
+            self.clear_draw_state();
             self.selected = None;
             self.platform_size_x = PLATFORM_SIZE;
             self.platform_size_z = PLATFORM_SIZE;

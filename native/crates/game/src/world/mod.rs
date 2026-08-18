@@ -1354,6 +1354,79 @@ pub(crate) enum PlaceKind {
     Brace,
 }
 
+/// The freeform draw tool's phase (see `world::tools::draw`). `None` on [`World`] =
+/// the tool is off entirely; `Some(_)` = armed. Esc walks back down this ladder one
+/// rung (and one vertex) at a time, following [`World::platform_escape`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum DrawPhase {
+    /// Armed, nothing drawn — the crosshair previews the first vertex and which face
+    /// the polygon would be drawn on.
+    Idle,
+    /// At least one vertex down; the crosshair previews the next axis-locked segment.
+    /// Clicking the first vertex again closes the loop.
+    Drawing,
+    /// The loop is closed and decomposed into rectangles; the scroll wheel sets the
+    /// signed depth (out of the face / into it) and a click commits.
+    Depth,
+}
+
+/// The **surface** a freeform polygon is being drawn on, resolved once at the first
+/// click and then **frozen**.
+///
+/// Frozen rather than re-picked per frame because subsequent vertices project onto
+/// this stored plane by ray/plane intersection: re-picking would let the polygon jump
+/// to a different face mid-draw the moment the crosshair crossed an edge, and would
+/// lose the plane entirely whenever the ray pointed out of an opening.
+///
+/// A surface, not *a brush's face*. One continuous floor or wall is routinely made of
+/// several brushes — pushing a wall out to enlarge a room, or carving an adjoining
+/// area, leaves a seam the player can't see but which a per-brush face rect would stop
+/// the tool dead at. So this holds the whole coplanar, co-facing, contiguous group
+/// (see `draw::coplanar_face_group`): `rects` are its members and the `u/v_min/max`
+/// bounds are their union.
+#[derive(Clone, Debug)]
+pub(crate) struct DrawFace {
+    /// The region the picked brush belongs to; the emitted brushes join it. Every group
+    /// member is necessarily in the same region — coplanar faces that overlap or touch
+    /// in-plane also overlap in 3D, so `brushes_overlap_or_touch` always clusters them
+    /// together.
+    pub(crate) region_id: u32,
+    pub(crate) axis: Axis,
+    pub(crate) side: Side,
+    /// The face plane's coordinate along `axis`, in WT.
+    pub(crate) position: f32,
+    /// The face's two in-plane axes. Per [`Axis::orthogonals`], `v_axis` is world-up
+    /// Y for both wall orientations and `u_axis` is never Y.
+    pub(crate) u_axis: Axis,
+    pub(crate) v_axis: Axis,
+    /// Union bounding box of the whole group, in integer WT — what the crosshair is
+    /// clamped to, so drawing ranges over every brush in the surface.
+    pub(crate) u_min: i32,
+    pub(crate) u_max: i32,
+    pub(crate) v_min: i32,
+    pub(crate) v_max: i32,
+    /// Each group member's in-plane rect `[u0, u1, v0, v1]` in integer WT. The union of
+    /// these is the *real* surface, which for an L-shaped group is smaller than the
+    /// bounding box — so this, not the bbox, is what the built shape gets masked to.
+    pub(crate) rects: Vec<[i32; 4]>,
+    /// The picked brush's texture scheme, inherited by everything the tool emits so
+    /// drawn geometry wears the room's texture rather than the default. Taken from the
+    /// brush the crosshair actually hit and applied uniformly, so a shape spanning a
+    /// seam between two differently-schemed brushes reads as one thing.
+    pub(crate) scheme: usize,
+}
+
+impl DrawFace {
+    /// Whether the unit WT cell at `(u, v)` lies on the real surface — i.e. inside some
+    /// group member, not merely inside the union bounding box. Members are integer-
+    /// aligned, so a cell can never straddle two of them and this needs no tolerance.
+    pub(crate) fn covers_cell(&self, u: i32, v: i32) -> bool {
+        self.rects
+            .iter()
+            .any(|&[u0, u1, v0, v1]| u >= u0 && u < u1 && v >= v0 && v < v1)
+    }
+}
+
 /// The free-standing platform/stair-run tool's phase (JS `state.platformPhase`).
 /// `None` on `World` = the tool is off entirely; `Some(_)` = armed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -2272,6 +2345,39 @@ pub struct World {
     /// tool; extrude / pillar reuse it later). Room brush is id 1.
     next_brush_id: u32,
 
+    // ─── Freeform draw tool (see `world::tools::draw`) ────────────────────────
+    /// The draw tool's phase, or `None` when the tool is off. Mutually exclusive
+    /// with the opening / placement / platform tools.
+    draw_phase: Option<DrawPhase>,
+    /// The frozen face the in-progress polygon is being drawn on.
+    draw_face: Option<DrawFace>,
+    /// The committed polygon vertices, in **integer** face-UV WT.
+    ///
+    /// Integer rather than float on purpose: every vertex is grid-snapped anyway, and
+    /// exact arithmetic is what lets the self-intersection test and the rasterizing
+    /// decomposition be epsilon-free.
+    draw_verts: Vec<(i32, i32)>,
+    /// The axis-locked vertex the crosshair is currently over — what the next click
+    /// would commit. Recomputed by the per-frame preview.
+    draw_cursor: Option<(i32, i32)>,
+    /// The rectangles the closed polygon decomposed into, in integer face-UV WT
+    /// `(u0, v0, w, h)`. Computed once at close, then reused by both the ghost and the
+    /// commit so the two can't disagree.
+    draw_rects: Vec<(i32, i32, i32, i32)>,
+    /// Which of the crosshair's candidate surfaces the first corner will land on — the
+    /// author's cycle offset, advanced by the scroll wheel while the tool is idle.
+    ///
+    /// On a flat face there is one candidate and this is inert. On an **edge** two faces
+    /// meet and on a **corner** three do; `Axis::dominant` resolves that from whichever
+    /// normal the physics engine happened to report, which is arbitrary. Taken modulo the
+    /// live candidate count, so index 0 is always physics' own answer and the tool behaves
+    /// exactly as before unless the author scrolls.
+    draw_candidate: usize,
+    /// Signed extrusion depth in WT during [`DrawPhase::Depth`]: positive protrudes
+    /// out of the face into the room (`Op::Add`), negative sinks into it
+    /// (`Op::Subtract`). Scroll-adjusted in ±1 WT steps.
+    draw_depth: f32,
+
     // ─── Free-standing platform + stair-run system (JS `Platform`/`StairRun`) ──
     /// The platform tool's phase, or `None` when the tool is off. Mutually
     /// exclusive with the opening/placement tools.
@@ -2731,6 +2837,13 @@ impl World {
             active: None,
             pending_stair: None,
             next_brush_id: 2,
+            draw_phase: None,
+            draw_face: None,
+            draw_verts: Vec::new(),
+            draw_cursor: None,
+            draw_rects: Vec::new(),
+            draw_candidate: 0,
+            draw_depth: 0.0,
             platform_phase: None,
             platforms: Vec::new(),
             stair_runs: Vec::new(),

@@ -167,21 +167,26 @@ use super::editing::find_room_brushes;
         );
     }
 
-    /// The fixed spawn point: the floor marker renders in BOTH modes, and entering
-    /// HUNT floods exactly [`ENEMY_COUNT`] hunters in clustered at the marker (snapped
-    /// to a standable cell) — independent of where the player is standing.
+    /// The fixed spawn fallback: with no pads authored, entering HUNT floods exactly
+    /// [`ENEMY_COUNT`] hunters in clustered at the legacy fixed point (snapped to a
+    /// standable cell) — independent of where the player is standing.
+    ///
+    /// No marker is drawn for it in either mode. The fallback is a compatibility shim
+    /// for un-authored levels, not level content — spawn *pads* are what an author
+    /// places now, and only those get markers (see
+    /// `world::tools::spawn_point::markers_only_render_for_authored_pads`).
     #[test]
     fn wave_floods_in_at_the_fixed_marker() {
         let mut world = World::new();
         world.set_wave_size(6); // a real wave (gameplay default is 1 — "duel mode")
         world.initial_meshes();
 
-        // The marker is visible while authoring (BUILD), before any hunt.
+        // Nothing authored, so nothing is drawn — the fresh room is bare floor.
         assert!(world.is_build());
-        assert!(world.spawn_marker_mesh().is_some(), "marker shows in BUILD");
+        assert!(world.spawn_marker_mesh().is_none(), "no marker in BUILD");
 
         world.toggle_mode(); // BUILD → HUNT
-        assert!(world.spawn_marker_mesh().is_some(), "marker still shows in HUNT");
+        assert!(world.spawn_marker_mesh().is_none(), "and none in HUNT");
 
         // The whole wave floods in, clustered at the fixed marker (not the player).
         assert_eq!(world.enemies.len(), 6, "the whole requested wave floods in");

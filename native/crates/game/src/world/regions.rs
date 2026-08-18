@@ -137,6 +137,24 @@ impl World {
                     self.brush_to_region.insert(b.id, rid);
                     region.brushes.push(b);
                 }
+                // **Restore authoring order.** `evaluate` folds a region's brushes in
+                // slice order and that order is load-bearing: a `Subtract` after an `Add`
+                // carves the added geometry away, which is what makes "punch a hole
+                // through a pillar" expressible. But `cluster_brush_indices` is a
+                // stack-based DFS, so the order it hands back is neither the authored
+                // order nor even stable — it visits the *last* touching neighbour first.
+                //
+                // Brush ids are allocated monotonically at creation, so ascending id **is**
+                // authoring order, and it is exactly the order the incremental edit path
+                // produces (tools append). Sorting here is therefore what makes a reclustered
+                // fold identical to the fold that was authored.
+                //
+                // Without this, load / undo / redo silently re-fold a level differently from
+                // how it was built: an additive brush spanning two subtract brushes (a
+                // drawn extrude across a widened room, a pillar in a room later extended)
+                // loses whichever part lies inside a subtract that DFS happened to order
+                // after it. It renders correctly until you save and reload.
+                region.brushes.sort_by_key(|b| b.id);
                 // A stair belongs to the region that owns its void brushes.
                 for s in &all_stairs {
                     if s.void_ids.iter().any(|id| ids_in.contains(id)) {

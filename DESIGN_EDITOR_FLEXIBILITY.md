@@ -5,8 +5,13 @@
 > Captures the 2026-08-17 discovery pass on two concrete editor features:
 > **(1) a freeform 90°-snapped draw tool that extrudes or insets into a face**, and
 > **(2) beveled rooms** — the 45° runner where floor meets wall, as in GoldenEye's Bunker.
-> Grounded in a full read of the CSG → classify → collider pipeline. Nothing here is
-> committed; this is a spec-shaped thinking document meant to be picked up cold.
+> Grounded in a full read of the CSG → classify → collider pipeline.
+>
+> **Status (2026-08-18): Idea 1 is BUILT** — `world::tools::draw`, key `Q` in BUILD.
+> See [What shipped](#what-shipped-idea-1) for the four things the build learned that
+> this document had wrong or missing. Idea 2 (bevels) and everything under
+> [Other directions](#other-directions-ranked-by-payoff-per-risk) are still unbuilt
+> spec.
 
 ---
 
@@ -135,6 +140,136 @@ Nav has no gravity for enemies (they move on grid-nav only — see the *Enemy na
 note). A raised section taller than one WT is a wall to a hunter but a step to the player.
 That is a *design* decision, not a bug, but the tool should probably surface the step height so
 the author knows when they have created a player-only shortcut.
+
+---
+
+### What shipped (Idea 1)
+
+`Q` in BUILD arms the tool. A cool translucent **tint** washes the surface you're about
+to draw on. Click a room surface to drop the first corner, click out corners (each segment
+axis-locks to whichever in-plane axis the crosshair moved further along — that *is* the 90°
+snap), click the first corner to close. Scroll then sets a **signed** depth: up protrudes
+out of the face (`Op::Add`), down sinks into it (`Op::Subtract`), through 0. A click builds.
+Esc walks back one rung at a time (depth step → outline → one corner per press); the tool
+stays armed after a commit.
+
+**Before the first corner, scroll cycles candidate surfaces.** On an edge two faces meet
+and on a corner three do, and `Axis::dominant(hit.normal)` resolves that from whichever
+normal the physics engine happened to report — arbitrary, and invisible to the author until
+the first segment ran down the wrong plane. `candidate_faces` enumerates every face the hit
+point lies on across all three axes and both sides, ordered so index 0 *is* the old
+dominant-normal pick (the cycle is purely additive). The tint is what makes the choice
+legible, so the two mechanisms only work as a pair.
+
+The tint needed a new renderer channel: `set_surface_tint`, a second fragment entry point
+(`fs_tint`) on the highlight pipeline's layout, drawn just before the highlight so the
+outline reads on top. Neither existing coloured channel fits — `gizmo` is `BlendState::REPLACE`
+with `depth_compare: Always`, i.e. opaque and x-ray, and the highlight's warm yellow is
+hardcoded in the shader with no uniform to vary it.
+
+The build order in this document's TL;DR was skipped — drag-select-a-rect was proposed
+as a stepping stone toward the crosshair→face-plane projection, but the draw tool
+subsumes it, so it was built directly. Everything else the analysis predicted held:
+decomposition to rectangles is a zero-line engine diff, extrude/inset really is just
+`Op::Add` vs `Op::Subtract` on the existing face anchor, and texturing was a non-issue.
+
+Four things the analysis above did **not** have right:
+
+1. **`floor_y` has to be *uniform* across the decomposed brushes, not merely "set".**
+   The note in [Two things to get right](#two-things-to-get-right) says to set `floor_y`
+   on inset brushes. That's necessary but not sufficient.
+   [`face_owner`](native/crates/engine/src/render/uv_zones.rs#L360) attributes each
+   triangle to the *smallest-volume* brush whose face plane it lies on and reads that
+   brush's `floor_y`. Left at the per-brush default (`Brush::new` sets `floor_y = y`), an
+   L drawn on a **wall** spans two heights, so its rects get different anchors and
+   texture-shift against each other — a visible seam along an internal decomposition
+   boundary the author never drew. The whole shape now shares one anchor (its lowest
+   point). Guarded by `a_wall_shape_spanning_heights_still_shares_one_anchor`.
+
+2. **The commit must return `Vec<RegionMesh>`, not `Option<RegionMesh>`.**
+   Every pre-existing tool ends with `rebuild_affected_regions(&ids).into_iter().next()`
+   — taking the first mesh and dropping the rest. That's survivable for a tool adding one
+   or two brushes inside a region, but this tool adds N at once across a footprint drawn
+   up against walls, so it routinely bridges regions and trips the full-recluster path,
+   which returns a mesh per region. Dropping the extras leaves stale geometry rendering.
+   Hence `World::with_undo_many` alongside `with_undo`.
+
+3. **Coincident internal faces between adjacent decomposed brushes fold away cleanly.**
+   This was the main risk to the whole approach — two extruded rects share a full
+   internal face, and a leftover wall there would be a slab standing inside the author's
+   shape. The kernel handles it (coplanar-opposed polygons route to `coplanar_back` in
+   [`split_polygon`](native/crates/csg/src/csg.rs#L77) and get clipped), and it's now
+   pinned by `adjacent_decomposed_brushes_leave_no_internal_wall`, which also asserts the
+   L's *outward* step face is present so it can't pass vacuously.
+
+4. **`region_hash` enumerates brush fields by hand**, so a new field is a decision, not
+   a default. `group` is deliberately **excluded** — it carries no CSG meaning, and
+   hashing it would invalidate a memoized bake on a pure regroup.
+
+5. **A drawable surface is not a brush's face** — found in the first playtest, and the
+   most important of the five. Every existing face tool (`pick_face_hit`, the hole tool,
+   `create_sub_face_brush`) works on *one brush's* face rect, and that's fine for them
+   because they place one rectangle centred on the crosshair. It is not fine for a tool
+   you drag across a room: enlarge a room by pushing a wall out, or extend it by carving
+   an adjoining area, and the floor becomes two or more subtract brushes forming one
+   continuous plane with an invisible seam across it. Clamped to the picked brush, the
+   outline stopped dead at that seam.
+
+   The fix is a **coplanar face group** (`draw::coplanar_face_group`): flood-fill from
+   the picked brush across subtracts whose face on the *same side* of the same axis lies
+   on the same plane and whose in-plane rect overlaps or touches a member already in.
+   Contiguity is required, so a different room's floor at the same height stays out; and
+   matching on `side` matters, because the ceiling of the room below shares the plane
+   with this floor but is a different surface. Frames are deliberately *not* excluded
+   (unlike `find_room_brushes`) — a doorway threshold really is part of the floor.
+
+   The group's union bounding box is what corners clamp to, which gives free rein across
+   the whole surface. But for an L-shaped group that box contains a corner of solid rock,
+   so what actually gets built is masked cell-by-cell to the real member rects
+   (`rect_decompose_where` + `DrawFace::covers_cell`). That trims a shape drawn over the
+   missing corner instead of carving into — or straight through — the solid, and it
+   avoids inventing a new refusal path in the middle of the author's drawing.
+
+   **Any future tool that drags across a surface hits this same wall.** Bevels (Idea 2)
+   already dodge it by deriving from the folded soup rather than from brush AABBs, which
+   is the same insight from the other direction.
+
+6. **The fold order was not preserved across a recluster — a pre-existing engine bug.**
+   Found in the second playtest: a shape extruded across a widened room's seam rendered
+   correctly, then lost everything past the seam on save/load.
+
+   `evaluate` folds a region's brushes in **slice order**, and that order is load-bearing
+   — a `Subtract` after an `Add` carves the added geometry away, which is what makes
+   "punch a hole through a pillar" expressible at all. At build time a region's order is
+   push order, i.e. ascending brush id, i.e. authoring order. But
+   [`cluster_brush_indices`](native/crates/engine/src/geometry/csg_runtime.rs#L975) is a
+   **stack-based DFS** — it pushes every touching neighbour then pops the *last* — so
+   every recluster (load, undo, redo, or a cross-region merge) rebuilt regions in an order
+   that was neither authored nor stable. The drawn `Op::Add` landed *before* the second
+   room brush, which then carved away everything inside its own volume.
+
+   Fixed by restoring ascending-id order in `rebuild_from_flat`: ids are allocated
+   monotonically at creation, so ascending id *is* authoring order, and it is exactly what
+   the incremental path produces. The invariant to hold onto: **a save/load round trip
+   must not change the folded geometry.**
+
+   This was never draw-tool-specific — a pillar or brace placed in a room that was later
+   extended would lose part of itself the same way. It went unnoticed because every other
+   tool places its additive geometry inside a *single* subtract brush.
+
+Decisions taken at build time: `group: u32` is on `Brush` now (`#[serde(default)]`, so
+old files load and it needs no migration later) but carries no re-select UX yet — a
+group takes the id of its first brush, which is unique by construction and so needs no
+allocator threaded through snapshot/save/load. Vertices are held as **integers** in
+face-UV WT, which is what lets the self-intersection test and the decomposition be
+epsilon-free. Drawing is restricted to `Op::Subtract` room faces, matching the
+pillar/brace tools, since "out of the face" is only defined relative to a room interior.
+The decomposition is rasterize-then-greedy-merge, not a sweep-line partition: grid
+alignment makes rasterizing exact, and concave corners need no handling at all.
+
+The [open question](#open-question) about step height was answered by surfacing it: a
+floor extrude taller than 1 WT logs that hunters climb at most `nav::MAX_STEP` = 1 WT, so
+the author is told when they've made a player-only shortcut.
 
 ---
 

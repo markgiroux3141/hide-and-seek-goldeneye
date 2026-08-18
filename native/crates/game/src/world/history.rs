@@ -104,6 +104,26 @@ impl World {
         out
     }
 
+    /// [`with_undo`](Self::with_undo) for an edit that can change **several** regions
+    /// at once, so it hands back a `Vec` instead of one mesh. Same contract: the
+    /// checkpoint is recorded only if something actually changed (a non-empty result).
+    ///
+    /// The freeform draw tool needs this — it adds N brushes across a footprint drawn
+    /// up against walls, which routinely bridges separate regions and makes
+    /// [`rebuild_affected_regions`](Self::rebuild_affected_regions) recluster the level
+    /// and return a mesh per region.
+    pub(crate) fn with_undo_many(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> Vec<RegionMesh>,
+    ) -> Vec<RegionMesh> {
+        let snap = self.snapshot();
+        let out = f(self);
+        if !out.is_empty() {
+            self.commit_snapshot(snap);
+        }
+        out
+    }
+
     /// Step back one edit (BUILD only — geometry is frozen in HUNT). Moves the
     /// current state onto the redo stack, restores the previous snapshot, and
     /// returns every rebuilt/removed mesh for the app to upload. `None` if the

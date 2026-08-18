@@ -286,6 +286,7 @@ impl World {
         self.opening_tool = None;
         self.opening_preview = None;
         self.place_tool = None;
+        self.clear_draw_state();
         self.prop_tool = None;
         self.prop_preview_pos = None;
         self.selected_prop = None;

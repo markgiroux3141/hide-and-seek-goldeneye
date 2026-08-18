@@ -324,6 +324,7 @@ impl App {
                 world.cancel_opening();
                 world.cancel_place();
                 world.cancel_platform_tool();
+                world.cancel_draw();
             }
             self.refresh_highlight();
         }
@@ -1516,6 +1517,16 @@ impl ApplicationHandler for App {
                     for rm in &meshes {
                         renderer.set_region_textured(rm.id, &rm.mesh);
                     }
+                    // Loud, because this **replaces the starting room** with the lab's
+                    // 4-pillar arena. `$env:PD_LAB` persists for a whole PowerShell
+                    // session, so it long outlives the run it was set for, and the
+                    // symptom ("why am I not in the plain room?") doesn't point at a
+                    // stale env var on its own.
+                    log::warn!(
+                        "PD_LAB is set — the starting room has been REPLACED by the lab \
+                         arena (64 WT, 4 pillars). Clear it with \
+                         `Remove-Item Env:PD_LAB` to boot into the plain editor room."
+                    );
                     // The tier is already the boot dial's (`HUNT_TIER`), so the lab
                     // inherits it and only `PD_LAB_DIFFICULTY=` changes it.
                     world.enable_pd_lab(cfg);
@@ -1789,6 +1800,21 @@ impl ApplicationHandler for App {
                 if self.world.as_ref().map(|w| !w.is_build()).unwrap_or(false) {
                     return;
                 }
+                // Grabbed + BUILD, draw tool armed: a click drops a corner, closes the
+                // outline, or (at the depth step) builds. It can change several regions
+                // at once, so upload every mesh it returns — see `World::draw_click`.
+                if self.world.as_ref().map(|w| w.is_draw_tool()).unwrap_or(false) {
+                    let meshes = self
+                        .world
+                        .as_mut()
+                        .map(|w| w.with_undo_many(|w| w.draw_click()))
+                        .unwrap_or_default();
+                    for rm in &meshes {
+                        self.upload(rm);
+                    }
+                    self.refresh_highlight();
+                    return;
+                }
                 // Grabbed + BUILD: confirm an armed opening (door/hole) or
                 // placement (pillar/brace), else select the crosshair face.
                 let opening = self.world.as_ref().map(|w| w.is_opening_arming()).unwrap_or(false);
@@ -1861,7 +1887,13 @@ impl ApplicationHandler for App {
                     // (attach point along the edge), else platform footprint, else
                     // placement (pillar/brace) sizing, else hole sizing, else the
                     // sub-face selection.
-                    if world.is_connect_sliding() {
+                    if world.is_draw_sizing() {
+                        world.adjust_draw_depth(step);
+                    } else if world.is_draw_choosing_face() {
+                        // Before the first corner, scroll disambiguates which surface the
+                        // crosshair means — two faces meet on an edge, three on a corner.
+                        world.cycle_draw_face(step);
+                    } else if world.is_connect_sliding() {
                         world.adjust_connect_slide(step);
                     } else if world.is_platform_placing() {
                         world.adjust_platform_size(du, dv);
@@ -2050,6 +2082,7 @@ impl ApplicationHandler for App {
                     let opening = self.world.as_ref().map(|w| w.is_opening_arming()).unwrap_or(false);
                     let placing = self.world.as_ref().map(|w| w.is_placing()).unwrap_or(false);
                     let platform = self.world.as_ref().map(|w| w.is_platform_tool()).unwrap_or(false);
+                    let drawing = self.world.as_ref().map(|w| w.is_draw_tool()).unwrap_or(false);
                     let pending_stair =
                         self.world.as_ref().map(|w| w.has_pending_stair()).unwrap_or(false);
                     // A pending stair suppresses the face highlight; its x-ray
@@ -2057,6 +2090,8 @@ impl ApplicationHandler for App {
                     let mesh = self.world.as_mut().and_then(|w| {
                         if pending_stair {
                             None
+                        } else if drawing {
+                            w.update_draw_preview()
                         } else if opening {
                             w.update_opening_preview()
                         } else if placing {
@@ -2069,6 +2104,20 @@ impl ApplicationHandler for App {
                     });
                     if let Some(r) = self.renderer.as_mut() {
                         r.set_highlight(mesh.as_ref());
+                    }
+                }
+                // Surface tint: which whole plane the draw tool is on. Its own overlay
+                // channel (cool, low alpha) rather than part of the yellow highlight,
+                // because the two have to be told apart where the outline crosses its own
+                // surface. Cleared whenever the tool isn't armed.
+                {
+                    let tint = self
+                        .world
+                        .as_mut()
+                        .filter(|w| w.is_build() && w.is_draw_tool())
+                        .and_then(|w| w.draw_surface_tint_mesh());
+                    if let Some(r) = self.renderer.as_mut() {
+                        r.set_surface_tint(tint.as_ref());
                     }
                 }
                 // Object mode: push this frame's cursor ray + snap modifier (Ctrl) to
@@ -2260,6 +2309,11 @@ impl App {
                 if w.has_pending_stair() {
                     w.cancel_stairs();
                     log::info!("stair cancelled");
+                    handled = true;
+                } else if w.draw_escape() {
+                    // Back out one rung of the draw ladder (depth step → outline →
+                    // one corner at a time). Idle returns false and falls through to
+                    // the cursor release, which disarms the tool.
                     handled = true;
                 } else {
                     let (consumed, mesh) = w.platform_escape();
@@ -2463,11 +2517,21 @@ impl App {
                 return;
             }
         }
-        // Q cycles the player's weapon (HUNT only; the JS `KeyQ` bind). BUILD leaves
-        // Q free for future editor use.
+        // Q cycles the player's weapon in HUNT (the JS `KeyQ` bind); in BUILD it arms
+        // the freeform draw tool — click out a 90°-snapped outline on a surface, close
+        // it, scroll a depth, click to extrude or inset (`world::tools::draw`).
         if code == KeyCode::KeyQ {
             if self.world.as_ref().map(|w| !w.is_build()).unwrap_or(false) {
                 self.begin_weapon_switch();
+                return;
+            }
+            if let Some(world) = self.world.as_mut() {
+                world.draw_tool_key();
+            }
+            // Disarming leaves a stale outline ghost; arming lets the next frame's
+            // preview repopulate it (same shape as the B/H opening handler).
+            if self.world.as_ref().map(|w| !w.is_draw_tool()).unwrap_or(true) {
+                self.refresh_highlight();
             }
             return;
         }

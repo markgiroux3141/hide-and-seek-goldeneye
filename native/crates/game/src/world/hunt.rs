@@ -900,6 +900,14 @@ impl World {
         };
         let authored = self.authored_spawn_pads();
         self.spawn_pads = if authored.is_empty() {
+            // A compatibility shim, not a level feature — nothing is drawn for it in
+            // BUILD (see `World::spawn_marker_mesh`), so say out loud that the level is
+            // un-authored rather than letting a wave appear at a point with no marker.
+            log::warn!(
+                "spawn: no spawn pads authored — falling back to the fixed point at \
+                 {SPAWN_MARKER_POS:?}. Place pads in BUILD (O → SPAWNS) to choose where \
+                 the player and the pack come in."
+            );
             vec![snap(spawn::SpawnPad { pos: SPAWN_MARKER_POS, yaw: 0.0 })]
         } else {
             authored.into_iter().map(snap).collect()

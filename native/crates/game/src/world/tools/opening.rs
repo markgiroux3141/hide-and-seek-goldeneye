@@ -32,6 +32,7 @@ impl World {
             // other armed tool.
             self.place_tool = None;
             self.clear_platform_state();
+            self.clear_draw_state();
             self.opening_tool = Some(kind);
             self.selected = None;
             if kind == OpeningKind::Hole {

@@ -376,8 +376,10 @@ pub struct Renderer {
 
     // Selection highlight (world-space quad over the picked face).
     highlight_pipeline: wgpu::RenderPipeline,
+    surface_tint_pipeline: wgpu::RenderPipeline,
     highlight_mesh: Option<GpuMesh>,
 
+    surface_tint_mesh: Option<GpuMesh>,
     // Pending-stair ghost (translucent step preview). Same look as the highlight
     // but depth-test disabled, so it shows *through* the wall the stair carves
     // into (the steps sit behind the wall until confirmed).
@@ -1024,6 +1026,53 @@ impl Renderer {
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
                 cull_mode: None, // visible from either side
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::LessEqual,
+                stencil: Default::default(),
+                bias: wgpu::DepthBiasState {
+                    constant: -1,
+                    slope_scale: -1.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        // ── Surface-tint pipeline: identical to the highlight above (same layout,
+        // same vertex format, same alpha blending and depth behaviour) but with the
+        // shader's cool low-alpha `fs_tint` colour instead of the warm yellow. Used to
+        // wash the whole surface a tool is operating on — which for the freeform draw
+        // tool is what disambiguates an edge or corner, where two or three faces meet
+        // and the picked one would otherwise be invisible. Drawn *before* the highlight
+        // so the outline reads on top of its own tint.
+        let surface_tint_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("surface-tint-pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &highlight_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[Vertex::LAYOUT],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &highlight_shader,
+                entry_point: Some("fs_tint"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
@@ -2028,7 +2077,9 @@ impl Renderer {
             _material_buffers: material_buffers,
             grid_mode: false,
             highlight_pipeline,
+            surface_tint_pipeline,
             highlight_mesh: None,
+            surface_tint_mesh: None,
             stair_ghost_pipeline,
             stair_ghost_mesh: None,
             entity_pipeline,
@@ -2099,6 +2150,15 @@ impl Renderer {
     /// Set (or clear) the selection-highlight quad mesh.
     pub fn set_highlight(&mut self, mesh: Option<&CpuMesh>) {
         self.highlight_mesh = match mesh {
+            Some(m) if !m.indices.is_empty() => Some(GpuMesh::upload(&self.device, m)),
+            _ => None,
+        };
+    }
+
+    /// Set (or clear) the surface-tint mesh — a cool translucent wash marking which
+    /// whole surface the active tool is operating on, drawn under the yellow highlight.
+    pub fn set_surface_tint(&mut self, mesh: Option<&CpuMesh>) {
+        self.surface_tint_mesh = match mesh {
             Some(m) if !m.indices.is_empty() => Some(GpuMesh::upload(&self.device, m)),
             _ => None,
         };
@@ -3412,6 +3472,16 @@ impl Renderer {
                 rp.set_vertex_buffer(0, dm.vertex_buf.slice(..));
                 rp.set_index_buffer(dm.index_buf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..dm.index_count, 0, 0..1);
+            }
+
+            // 2.9) Surface tint (translucent wash over the whole surface a tool acts
+            // on). Before the highlight so the outline reads on top of its own tint.
+            if let Some(t) = &self.surface_tint_mesh {
+                rp.set_pipeline(&self.surface_tint_pipeline);
+                rp.set_bind_group(0, &self.camera_bind_group, &[]);
+                rp.set_vertex_buffer(0, t.vertex_buf.slice(..));
+                rp.set_index_buffer(t.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..t.index_count, 0, 0..1);
             }
 
             // 3) Selection highlight (translucent, over the picked face).

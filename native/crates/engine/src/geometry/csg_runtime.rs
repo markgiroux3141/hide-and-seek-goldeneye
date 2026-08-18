@@ -153,6 +153,22 @@ pub struct Brush {
     /// number-key flood-fill retexture. Defaults to [`crate::render::textures::DEFAULT_SCHEME`].
     #[serde(default = "default_scheme")]
     pub scheme: usize,
+    /// Ties together the brushes that one authored shape decomposed into. The
+    /// freeform draw tool emits an arbitrary 90°-snapped polygon as N rectangles
+    /// (fan-triangulation is convex-only, so a concave footprint *must* be split),
+    /// and this is what lets the author's single drawn shape still be recognised as
+    /// one thing afterwards. `0` = ungrouped, which is every brush the other tools
+    /// make.
+    ///
+    /// A group takes the id of its first brush. Brush ids are unique and start at 1,
+    /// so that's collision-free against both `0` and every other group without an
+    /// allocator of its own to thread through snapshot/save/load.
+    ///
+    /// Carries **no** CSG meaning — the fold, the classifier and nav never read it,
+    /// and it is deliberately left out of `region_hash` so a regroup can't
+    /// invalidate a memoized bake.
+    #[serde(default)]
+    pub group: u32,
 }
 
 /// serde default for [`Brush::scheme`] on a file that predates the field.
@@ -168,6 +184,7 @@ impl Brush {
             frame: false,
             floor_y: y,
             scheme: crate::render::textures::DEFAULT_SCHEME,
+            group: 0,
         }
     }
 

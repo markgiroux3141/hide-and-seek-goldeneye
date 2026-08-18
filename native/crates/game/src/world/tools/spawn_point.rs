@@ -55,6 +55,7 @@ impl World {
         self.opening_preview = None;
         self.place_tool = None;
         self.clear_platform_state();
+        self.clear_draw_state();
         self.selected = None;
         self.prop_tool = None;
         self.prop_preview_pos = None;
@@ -154,35 +155,33 @@ impl World {
     /// authored around visible ingress points (and so you can see where the pack came
     /// from mid-hunt).
     ///
-    /// With no pads authored this falls back to a single square at the legacy fixed
-    /// [`SPAWN_MARKER_POS`], matching what the spawn path itself does — see
-    /// [`World::prepare_spawn`]. Perfect Dark guards the same way
-    /// (`if (g_NumSpawnPoints > 0)`, `playerreset.c:398`): an empty pool means "use the
-    /// default entry", never "nobody spawns".
+    /// **No pads authored → no markers.** A marker means "a pad is here", so a level
+    /// with none must show none: the fresh starting room is bare floor, and a red square
+    /// at the legacy [`SPAWN_MARKER_POS`] would read as an authored pad that can't be
+    /// selected, moved or deleted, and wouldn't be in the saved file.
+    ///
+    /// [`World::prepare_spawn`] still *falls back* to that fixed point at G so an
+    /// un-authored level (an older save, the AI lab's arenas, the levelgen harness)
+    /// spawns its wave somewhere rather than going quiet — Perfect Dark guards
+    /// identically, `if (g_NumSpawnPoints > 0)` (`playerreset.c:398`). That fallback is a
+    /// compatibility shim, not a level feature, so it warns instead of drawing itself.
     pub fn spawn_marker_mesh(&self) -> Option<ColoredMesh> {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
         let pads = self.authored_spawn_pads();
         if pads.is_empty() {
-            push_pad_marker(
-                &mut vertices,
-                &mut indices,
-                SPAWN_MARKER_POS,
-                None,
-                PAD_MARKER_COLOR,
-            );
-        } else {
-            // Highlight the selected pad so the gizmo target is unmistakable.
-            let sel_pos = self
-                .selected_prop
-                .filter(|&e| self.entity_is_spawn_point(e))
-                .and_then(|e| self.ecs.world().entity(e).ok())
-                .and_then(|r| r.get::<&Transform>().map(|t| t.pos));
-            for p in &pads {
-                let is_sel = sel_pos.is_some_and(|s| s.distance_squared(p.pos) < 1e-6);
-                let col = if is_sel { PAD_SELECTED_COLOR } else { PAD_MARKER_COLOR };
-                push_pad_marker(&mut vertices, &mut indices, p.pos, Some(p.yaw), col);
-            }
+            return None;
+        }
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        // Highlight the selected pad so the gizmo target is unmistakable.
+        let sel_pos = self
+            .selected_prop
+            .filter(|&e| self.entity_is_spawn_point(e))
+            .and_then(|e| self.ecs.world().entity(e).ok())
+            .and_then(|r| r.get::<&Transform>().map(|t| t.pos));
+        for p in &pads {
+            let is_sel = sel_pos.is_some_and(|s| s.distance_squared(p.pos) < 1e-6);
+            let col = if is_sel { PAD_SELECTED_COLOR } else { PAD_MARKER_COLOR };
+            push_pad_marker(&mut vertices, &mut indices, p.pos, Some(p.yaw), col);
         }
         Some(ColoredMesh { vertices, indices })
     }
@@ -443,27 +442,60 @@ pub(crate) mod tests {
         }
     }
 
-    /// The floor markers render in BOTH modes, and with no pads authored the mesh falls
-    /// back to a single square at the legacy fixed marker — so an old level still shows
-    /// its ingress and the empty pool never means "nothing is drawn".
+    /// A marker means "a pad is here", so an un-authored level draws none: the fresh
+    /// starting room is bare floor. Authored pads then render in BOTH modes.
+    ///
+    /// The old behaviour drew a square at the legacy fixed [`SPAWN_MARKER_POS`] whenever
+    /// the pool was empty, which read as an authored pad you couldn't select, move,
+    /// delete or find in the saved file. `prepare_spawn` still falls back to that point
+    /// so a wave has somewhere to enter (see
+    /// `the_fixed_fallback_still_spawns_a_wave_without_drawing_a_marker`) — it just no
+    /// longer advertises itself as level content.
     #[test]
-    fn markers_render_in_both_modes_and_fall_back_when_empty() {
+    fn markers_only_render_for_authored_pads() {
         let mut world = World::new();
         world.initial_meshes();
 
-        let empty = world.spawn_marker_mesh().expect("fallback marker in BUILD");
+        assert!(
+            world.spawn_marker_mesh().is_none(),
+            "a level with no pads authored draws no marker at all"
+        );
+
         place_pad(&mut world, Vec3::new(2.0, 0.0, 2.0), 0.0);
+        let one = world.spawn_marker_mesh().expect("pad markers in BUILD");
         place_pad(&mut world, Vec3::new(4.0, 0.0, 4.0), 0.0);
         let two = world.spawn_marker_mesh().expect("pad markers in BUILD");
-        // Two pads (square + facing nub each) is strictly more geometry than the one
-        // bare fallback square.
         assert!(
-            two.vertices.len() > empty.vertices.len(),
-            "authored pads draw more than the single fallback marker"
+            two.vertices.len() > one.vertices.len(),
+            "each authored pad adds its own marker"
         );
 
         world.toggle_mode(); // BUILD → HUNT
         assert!(!world.is_build());
         assert!(world.spawn_marker_mesh().is_some(), "markers still show in HUNT");
+    }
+
+    /// The fallback is behaviour-only: with no pads authored, entering HUNT still floods
+    /// the wave in at the fixed point (so an older save or a generated level isn't dead),
+    /// while nothing is drawn there. This is the pairing that makes dropping the phantom
+    /// marker safe rather than a silent regression.
+    #[test]
+    fn the_fixed_fallback_still_spawns_a_wave_without_drawing_a_marker() {
+        let mut world = World::new();
+        world.set_wave_size(4);
+        world.initial_meshes();
+        assert_eq!(world.spawn_pad_count(), 0, "nothing authored");
+
+        world.toggle_mode(); // BUILD → HUNT
+        assert_eq!(world.enemies.len(), 4, "the wave still enters the level");
+        assert!(
+            world.spawn_point.distance(SPAWN_MARKER_POS) < 1.0,
+            "at the fixed fallback point, got {:?}",
+            world.spawn_point
+        );
+        assert!(
+            world.spawn_marker_mesh().is_none(),
+            "but the fallback draws no marker for itself"
+        );
     }
 }
