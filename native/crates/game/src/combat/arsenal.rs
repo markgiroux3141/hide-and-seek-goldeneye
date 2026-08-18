@@ -267,6 +267,53 @@ fn view_offset(w: &PdWeapon) -> Vec3 {
     )
 }
 
+// ─── invaimsettings: the gun translates as you aim ───────────────────────────
+
+/// How far the gun slides when the crosshair leaves the centre of the screen, in
+/// PD centimetres — `invaimsettings.guntransup / guntransdown / guntransside`
+/// (`types.h:2877`, documented at `invitems.c:78`).
+///
+/// **These are global, not per-weapon.** All thirteen `invaimsettings_*` tables in
+/// the decomp carry the identical `3 / 8 / 15` (and the identical `aimdamp`
+/// 0.9767); the only field that varies between them is `zoomfov` — the MagSec 4's
+/// scope is 25°, the AR34's and K7's 20°, the Falcon 2 scope's 30°. So this is
+/// three constants rather than three columns on every weapon, which is a fact
+/// about PD's data and not a simplification of it.
+const GUNTRANS_UP: f32 = 3.0;
+const GUNTRANS_DOWN: f32 = 8.0;
+const GUNTRANS_SIDE: f32 = 15.0;
+
+/// The gun's view-space slide for a crosshair at `(aim_x, aim_y)` — a
+/// transliteration of `bgun_update_hand_pos` (`bondgun.c:7433-7439`).
+///
+/// PD scales the crosshair's distance from screen centre by the half-screen, then
+/// adds it to the hand position:
+///
+/// ```c
+/// hand->fspare1 = (crosspos2[0] - left - width*0.5f) * guntransside / (width*0.5f);
+/// hand->fspare2 = (crosspos2[1] - top - height*0.5f) * guntrans{down,up} / (height*0.5f);
+/// sp274.f[0] += fspare1;
+/// sp274.f[1] -= fspare2;
+/// ```
+///
+/// Which is why this needed no invention: our free aim is **the same control**.
+/// `aim_x`/`aim_y` are a floating crosshair in an isotropic NDC-like space with
+/// `aim_y` measured in half-heights (hence `/aspect` for the horizontal, matching
+/// [`crate::world::World::aim_offset`]), clamped to a rim past which the leftover
+/// motion pans the view — exactly PD's scheme, where a sustained turn parks the
+/// crosshair at the edge and the gun sits at full deflection for as long as you
+/// hold it.
+///
+/// The vertical is asymmetric on purpose: PD picks `guntransdown` when the
+/// crosshair is *below* centre and `guntransup` when above (8 vs 3), so the gun
+/// drops much further than it rises. `aim_y` is up-positive where PD's screen y is
+/// down-positive, which cancels PD's `-=` into a `+=` here.
+pub fn aim_translation(aim_x: f32, aim_y: f32, aspect: f32) -> Vec3 {
+    let sx = aim_x / aspect.max(1e-6);
+    let vertical = if aim_y < 0.0 { GUNTRANS_DOWN } else { GUNTRANS_UP };
+    Vec3::new(sx * GUNTRANS_SIDE * PD_CM_TO_M, aim_y * vertical * PD_CM_TO_M, 0.0)
+}
+
 // ─── The bridge ──────────────────────────────────────────────────────────────
 
 /// Build a [`WeaponStats`] from a PD weapon's **primary** function.
@@ -829,6 +876,65 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// PD's aim translation: the gun follows the crosshair, further down than up.
+    ///
+    /// The three numbers are the whole port (`invaimsettings` 3 / 8 / 15), so what
+    /// is worth pinning is the *shape* they produce — a centred crosshair moves
+    /// nothing, and the asymmetry survives the sign juggling between PD's
+    /// down-positive screen y and our up-positive aim space. That asymmetry is the
+    /// one thing a transcription error would silently flip.
+    #[test]
+    fn the_gun_follows_the_crosshair_further_down_than_up() {
+        let centred = aim_translation(0.0, 0.0, 16.0 / 9.0);
+        assert_eq!(centred, Vec3::ZERO, "a centred crosshair moves the gun nowhere");
+
+        let up = aim_translation(0.0, 0.6, 16.0 / 9.0);
+        let down = aim_translation(0.0, -0.6, 16.0 / 9.0);
+        assert!(up.y > 0.0 && down.y < 0.0, "the gun follows the aim: {up:?} {down:?}");
+        assert!(
+            down.y.abs() > up.y.abs() * 2.0,
+            "guntransdown (8) is far larger than guntransup (3): {} vs {}",
+            down.y,
+            up.y
+        );
+
+        // Horizontal is symmetric, follows the crosshair, and is aspect-corrected
+        // the same way the on-screen crosshair is (`World::aim_offset`).
+        let right = aim_translation(0.6, 0.0, 16.0 / 9.0);
+        assert!(right.x > 0.0);
+        assert_eq!(right.x, -aim_translation(-0.6, 0.0, 16.0 / 9.0).x);
+        assert!(
+            aim_translation(0.6, 0.0, 4.0 / 3.0).x > right.x,
+            "a narrower screen puts the same aim value further across it"
+        );
+
+        // Full deflection stays a slide, not a throw: PD's 15 cm scaled by the
+        // fraction of the half-screen our rim actually reaches.
+        assert!(right.x < 0.06, "{} m sideways at the rim", right.x);
+    }
+
+    /// Only the PD guns slide — the GoldenEye set is hand-placed and has no
+    /// `invaimsettings`, so it must render identically with the aim off-centre.
+    #[test]
+    fn the_aim_slide_is_perfect_dark_only() {
+        assert!(!config::PP7.is_perfect_dark());
+        let falcon = Arsenal::PerfectDark
+            .weapons()
+            .iter()
+            .find(|w| w.name == "Falcon 2")
+            .unwrap();
+        assert!(falcon.is_perfect_dark(), "gun_path {}", falcon.gun_path);
+
+        // The *slide* specifically. Every weapon already tilts toward the crosshair
+        // (`clip_transform`'s `aim_rot`, which predates this and applies to both
+        // families), so comparing whole transforms would only re-measure that.
+        let slide = |c: &config::WeaponStats| {
+            crate::combat::ViewModel::new(c.clone()).aim_slide(16.0 / 9.0, 0.6, -0.6)
+        };
+        assert_eq!(slide(&config::PP7), Vec3::ZERO, "a GoldenEye gun does not slide");
+        assert_ne!(slide(falcon), Vec3::ZERO, "a PD gun does");
     }
 
     /// A weapon whose firing function sets `FUNCFLAG_NOMUZZLEFLASH` shows no flash,

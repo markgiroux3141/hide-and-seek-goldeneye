@@ -118,23 +118,42 @@ Three claims in the previous handoff were wrong, and each cost less to check tha
 
 ## Remaining, in the order they are worth doing
 
-### 3. Viewmodel placement — a question for the user, not a task
+### 3. Viewmodel placement — `invaimsettings` ported, the rest awaits playtest
+
+**User's call (2026-08-18): port `invaimsettings` first, keep the authored offsets, judge
+after.** Done — the gun now slides with the crosshair.
 
 `weapondef.posx/posy/posz` is ported and correct (`gset_get_xpos`, `bgun_update_hand_pos`);
 **do not re-derive the sign**, it was got wrong once and put every gun behind the camera.
-With the scale question retired (above), what remains unported is **behaviour**, not size:
+
+The aim translation needed **no invention**, because our free aim is the same control PD
+uses: a floating crosshair clamped to a rim, past which the leftover motion pans the view.
+`bgun_update_hand_pos:7433-7439` scales the crosshair's offset from screen centre by the
+half-screen and adds it to the hand position; `arsenal::aim_translation` does exactly that,
+fed our `aim_x`/`aim_y`. Two things worth knowing:
+
+* **The numbers are global, not per-weapon.** All thirteen `invaimsettings_*` tables carry
+  the same `3 / 8 / 15` and the same `aimdamp` 0.9767. The only field that varies is
+  `zoomfov` — MagSec 4 25°, AR34 and K7 20°, Falcon 2 scope and the heavies 30°. **That is
+  the scope-zoom feature, and it is unported**; it is the one genuinely per-weapon thing in
+  the table.
+* **It only shows while free-aiming**, because that is the only time our crosshair leaves
+  the centre. Sustained turning parks it at the rim, which is where PD's sits during a turn,
+  so a held turn holds the gun at full deflection exactly as PD does. Our rim is 0.6 of a
+  half-height, so full deflection is ~5 cm sideways rather than PD's 15.
+
+Still unported, in rough order of effect:
 
 | thing | where | what it does |
 |---|---|---|
-| `invaimsettings.guntransup/down/side` | `types.h:2877` | the gun translates as you aim (3 / 8 / 15). A large part of why PD's gun feels attached to the view. |
+| `invaimsettings.zoomfov` | `types.h:2877` | per-weapon scope zoom (25°/20°/30° vs the default 60) |
 | `hand->damppos` / `adjustpos` | `bondgun.c:7411+` | per-frame damping and sway |
 | `weapondef.sway` | `types.h:3037` | per-weapon sway amount; transcribed, unused |
 | `weapondef.muzzlez` | `types.h:3033` | per-weapon muzzle depth; transcribed, unused |
 | `player->guncloseroffset` | `bondgun.c:7424` | the "hold gun closer" option |
 
-**The judgement call is the user's:** they hand-placed the GoldenEye guns and were happy.
-Keep PD's authored placement, or hand-tune 33 offsets like the GoldenEye set? Porting
-`invaimsettings` is worth doing either way — it is behaviour, not placement.
+**The remaining judgement is still the user's:** hand-tune the 33 offsets like the GoldenEye
+set, or leave PD's authored placement? Worth deciding *after* feeling the slide.
 
 ### 4. Reload animations — the `guncmd` bytecode
 
@@ -154,7 +173,7 @@ Note this is also where **the hand and the spare magazines come from** — the r
 shows them. Which is the other half of finding 1 above: PD only ever draws that hand during
 a reload, from a model we do not load.
 
-### 5. PD weapon sounds — self-contained, blocked on a VADPCM decoder
+### 5. PD weapon sounds — **the user picked this as the next track** (2026-08-18)
 
 Every PD gun still borrows the closest GoldenEye sound by role (`fire_sound_for`). The real
 `funcdef_shoot.shootsound` ids **are transcribed and unused** in `combat/pd_weapons.rs`.
@@ -183,7 +202,11 @@ Precedent for the second half: the repo already converted 375 GoldenEye AIFFs fo
 4. **CMP150** — its cartridge flap should be closed.
 5. **GoldenEye guns (`ARSENAL=ge`)** — unchanged except for the transparent-texel discard.
    Anything showing a new hole is that change.
-6. **Placement** — the question in item 3. Sizes are confirmed right; judge position only.
+6. **Hold right-mouse and move the crosshair around.** The PD guns should now slide with it —
+   noticeably further down than up (PD's 8 vs 3), and it should hold at full deflection while
+   you turn against the rim. GoldenEye guns must NOT do this (they still tilt, as before).
+7. **Placement** — the question left in item 3. Sizes are confirmed right; judge position
+   only, and judge it with the slide in hand.
 
 ## Traps that keep firing on this track
 

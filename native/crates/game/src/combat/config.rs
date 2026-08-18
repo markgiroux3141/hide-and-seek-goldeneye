@@ -193,6 +193,20 @@ pub struct WeaponStats {
     pub secondary: Option<SecondaryFire>,
 }
 
+impl WeaponStats {
+    /// Whether this weapon came from the Perfect Dark table rather than the
+    /// GoldenEye one.
+    ///
+    /// Asked where PD has **authored data the GoldenEye set simply does not have**
+    /// — currently `invaimsettings`' aim translation. Read off the asset path
+    /// because that is the real distinction (the PD exports live in their own
+    /// directory) and because the alternative, a flag on the struct, would mean
+    /// editing all 26 hand-tuned GoldenEye literals to say "not PD".
+    pub fn is_perfect_dark(&self) -> bool {
+        self.gun_path.starts_with("pd/")
+    }
+}
+
 // ─── Shared viewmodel placement ───────────────────────────────────────────────
 // Every weapon's muzzle_offset + model_scale matched these in `weapon-config.json`,
 // so they stay shared; model_offset / pivot_offset / model_rotation are per-weapon.

@@ -191,6 +191,21 @@ impl ViewModel {
     /// `(aim_x, aim_y)` is the free-aim crosshair offset in aim space; the gun
     /// rotates to point toward the crosshair (JS `WeaponViewmodel.setAimOffset`:
     /// `yaw = atan(aim·tan(fov/2))`), so it visually tracks where the bullet goes.
+    /// PD's authored aim translation for this frame's crosshair — the gun slides
+    /// with the aim (`invaimsettings`, see [`super::arsenal::aim_translation`]).
+    ///
+    /// Perfect Dark weapons only. The GoldenEye guns are hand-placed and have no
+    /// such table; giving them one would be changing an arsenal nobody asked to
+    /// change. Note this is a *translation* — every weapon already tilts toward the
+    /// crosshair in [`Self::clip_transform`], which is a different thing and older.
+    pub(crate) fn aim_slide(&self, aspect: f32, aim_x: f32, aim_y: f32) -> Vec3 {
+        if self.config.is_perfect_dark() {
+            super::arsenal::aim_translation(aim_x, aim_y, aspect)
+        } else {
+            Vec3::ZERO
+        }
+    }
+
     pub fn clip_transform(&self, aspect: f32, aim_x: f32, aim_y: f32) -> Mat4 {
         let c = &self.config;
         let proj = Mat4::perspective_rh(VIEWMODEL_FOV.to_radians(), aspect, 0.01, 10.0);
@@ -199,10 +214,12 @@ impl ViewModel {
         let yaw = (aim_x * tan).atan();
         let pitch = (aim_y * tan).atan();
         let aim_rot = Mat4::from_rotation_y(-yaw) * Mat4::from_rotation_x(pitch + self.recoil_rot);
+        let aim_slide = self.aim_slide(aspect, aim_x, aim_y);
         // The reload dip lowers the whole gun group in view space (Y down), like
         // recoil kick-back (Z) — both on the outer `model` translation.
         let model = Mat4::from_translation(
             c.model_offset
+                + aim_slide
                 + Vec3::new(0.0, self.reload_offset_y() + self.switch_offset_y(), self.recoil_z),
         )
             * aim_rot
