@@ -35,6 +35,74 @@ use engine::geometry::csg_runtime::WORLD_SCALE;
 use engine::sim::nav::NavWorld;
 use engine::sim::physics::PhysicsWorld;
 
+use crate::pdsim::difficulty::BotDifficulty;
+use crate::pdsim::distmode::{DistBand, DistMode, DistModeState};
+
+/// **Which engagement model the hunters run** — `AI=pd|ours`, resolved from the
+/// environment at boot exactly like `ARSENAL=` and `BODIES=`, and defaulting to ours.
+///
+/// Both AIs stay runnable; this picks between them, it does not delete either. What
+/// each one owns is audited in `DESIGN_AI_PD_VS_OURS.md`, and the short version is
+/// that they differ only in *what happens between the trigger and the feet*: the
+/// Perfect Dark aim/fire model (`pdsim`) drives the gun in **both** modes, and so do
+/// nav/A*, ORCA, wall clearance, foot IK, head look-at and animation.
+///
+/// ```text
+/// AI=ours   (default) our handcrafted hunter: perception cone, search + investigate,
+///                     a utility-scored FSM, standoff-and-hold combat, aim-dodge,
+///                     flanking, cover/peek, burst-and-reposition, suppressing fire.
+/// AI=pd               Perfect Dark's deathmatch simulant: omniscient, never searches,
+///                     four-mode distance-band combat (`botcmd_tick_dist_mode`) with
+///                     none of the evasive or tactical movement above, and PD's
+///                     reload rule.
+/// ```
+///
+/// `AI=pd` is a **faithful deathmatch AI in a hide-and-seek game**, which is a
+/// deliberate choice and not an oversight: it always knows where you are and walks the
+/// shortest path to your live position. That is what Perfect Dark's bots do, and
+/// seeing how it feels against ours is the entire reason the switch exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AiMode {
+    /// Our handcrafted hunter (the default, and the shipping behaviour).
+    Ours,
+    /// Perfect Dark's simulant engagement model.
+    Pd,
+}
+
+impl AiMode {
+    /// Resolve from the `AI` environment variable, defaulting to [`AiMode::Ours`].
+    ///
+    /// Applied **last** at boot and logged, which is trap #6 from the weapons handoff:
+    /// an explicit choice has to outrank a mode default, because `enable_pd_lab` once
+    /// pinned a body set and silently ate `BODIES=ge` for an entire playtest.
+    pub fn from_env() -> Self {
+        let raw = std::env::var("AI").unwrap_or_default();
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "pd" | "perfectdark" | "perfect-dark" | "sim" => AiMode::Pd,
+            "" | "ours" | "our" | "hs" => AiMode::Ours,
+            other => {
+                log::warn!("AI={other:?} is not pd|ours — falling back to ours");
+                AiMode::Ours
+            }
+        }
+    }
+
+    /// One line naming the resolved model, for the startup log. A resolved choice
+    /// nobody can see is a choice that will be argued about later.
+    pub fn summary(self) -> &'static str {
+        match self {
+            AiMode::Ours => "AI: ours — perception + search + utility FSM, standoff combat",
+            AiMode::Pd => {
+                "AI: Perfect Dark — omniscient, no search, distance-band combat (botcmd.c:39)"
+            }
+        }
+    }
+
+    pub fn is_pd(self) -> bool {
+        self == AiMode::Pd
+    }
+}
+
 /// Difficulty-scaled AI knobs threaded into [`Enemy::update`] each step (built by
 /// `World` from its difficulty dial). Level 0 reproduces the baseline constants;
 /// higher difficulty shortens the reaction + burst cooldown and raises `dodge`, the
@@ -72,6 +140,16 @@ pub struct AiTuning {
     /// takes cover, and at high values an unhurt one does too. Also shortens the dwell
     /// in cover (peeks more often). No effect where no cover cell exists.
     pub cover: f32,
+    /// **Which engagement model this step runs** (`AI=pd|ours`). Under
+    /// [`AiMode::Pd`] the `World` also zeroes `dodge` / `flank` / `cover` /
+    /// `suppress` above, because Perfect Dark's bots have no equivalent of any of
+    /// them — that is a flag, not a deletion, and flipping back to `ours` restores
+    /// the lot. See [`AiMode`].
+    pub mode: AiMode,
+    /// The Perfect Dark difficulty tier the dial currently selects. Only
+    /// [`AiMode::Pd`] reads it: `botcmd_tick_dist_mode` lets `MEAT`/`EASY` bots be
+    /// crowded much closer before they back off (`botcmd.c:103`).
+    pub tier: BotDifficulty,
 }
 
 impl Default for AiTuning {
@@ -85,6 +163,8 @@ impl Default for AiTuning {
             suppress: 0.0,
             flank: 0.0,
             cover: 0.0,
+            mode: AiMode::Ours,
+            tier: BotDifficulty::Normal,
         }
     }
 }
@@ -512,6 +592,17 @@ pub struct Enemy {
     /// Perception is deliberately untouched: it still only *sees* what the raycast +
     /// cone allow. See [`Self::known_target_pos`]. Defaults `false`.
     omniscient: bool,
+
+    // ─── Perfect Dark combat movement (`AI=pd` only) ──
+    /// `botcmd_tick_dist_mode`'s per-bot state — the current distance mode, the
+    /// anti-oscillation override and the 1 s command TTL. Advanced only by
+    /// [`Self::pd_step`]; inert (and unread) under `AI=ours`.
+    dist: DistModeState,
+    /// A tiny xorshift, seeded per hunter at spawn. Its only consumer is the random
+    /// 0.33–2.33 s `OK` hold PD arms when a backup loses sight (`botcmd.c:152`);
+    /// keeping it on the hunter (rather than reaching for the `World`'s RNG) is what
+    /// lets the headless AI lab replay a PD-mode run byte-for-byte.
+    rng: u32,
 }
 
 impl Enemy {
@@ -574,7 +665,22 @@ impl Enemy {
             alert_served: false,
             post_burst: false,
             omniscient: false,
+            dist: DistModeState::default(),
+            // Seeded from the spawn position so each hunter draws its own sequence and
+            // a replayed run reproduces exactly (spawns are deterministic); never zero,
+            // which is xorshift's fixed point.
+            rng: (feet.x.to_bits() ^ feet.z.to_bits().rotate_left(16) ^ 0x9E37_79B9) | 1,
         }
+    }
+
+    /// One uniform draw in `[0,1)` from this hunter's own xorshift. See [`Self::rng`].
+    fn rand01(&mut self) -> f32 {
+        let mut x = self.rng;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        self.rng = x;
+        (x >> 8) as f32 / (1u32 << 24) as f32
     }
 
     /// Set whether the player is perceivable by this hunter (the `World`'s
@@ -864,6 +970,21 @@ impl Enemy {
         self.state
     }
 
+    /// The Perfect Dark distance mode this hunter is in — meaningful only after a
+    /// step under `AI=pd` (see [`Self::pd_step`]). The AI lab reads it to check that
+    /// a PD-mode hunter actually *stands still in band* rather than orbiting.
+    #[allow(dead_code)] // the AI lab (`#[cfg(test)]`) is its only consumer
+    pub(crate) fn dist_mode(&self) -> DistMode {
+        self.dist.mode()
+    }
+
+    /// Seconds since this hunter last perceived its target (0 = seeing it now). PD's
+    /// reload rule needs it: below half a clip, a bot only reloads once the target has
+    /// been out of sight for 2 s (`bot.c:2470`).
+    pub(crate) fn time_since_seen(&self) -> f32 {
+        self.since_seen
+    }
+
     /// Whether the hunter is actively engaged with the player (has eyes on it or is
     /// running the engagement chain) — the squad-alert broadcaster.
     pub fn is_engaged(&self) -> bool {
@@ -1042,17 +1163,21 @@ impl Enemy {
     ///
     /// `standoff` is the distance (m) this hunter holds at while attacking — the
     /// weapon's ([`crate::combat::EnemyWeaponDef::standoff`]), threaded in so a sniper
-    /// hangs back and a shotgunner charges in. `fire_anim` = a fire one-shot is
+    /// hangs back and a shotgunner charges in. `band` is the same weapon's Perfect Dark
+    /// engagement band (`g_BotDistConfigs`), read **instead** of `standoff` under
+    /// `AI=pd`. `fire_anim` = a fire one-shot is
     /// currently playing on the shared mixer (the JS `enemyState === 'action'` proxy,
     /// disambiguated from hit/death by the caller). Returns `want_fire` when it wants
     /// the caller to start a fire burst this step, and `needs_search_target` when it's
     /// searching and needs the `World` to hand it a fresh point.
+    #[allow(clippy::too_many_arguments)]
     pub fn update(
         &mut self,
         dt: f32,
         target: EngageTarget,
         player_feet: Vec3,
         standoff: f32,
+        band: DistBand,
         tuning: AiTuning,
         aimed_at: bool,
         nav: &NavWorld,
@@ -1130,6 +1255,14 @@ impl Enemy {
         }
 
         let mut step = EnemyStep::default();
+        // ── `AI=pd`: Perfect Dark's action ladder, ahead of both of ours ──
+        // Neither the utility scorer nor the FSM runs; see `pd_step` for the ladder and
+        // for what PD has instead of each thing it skips.
+        if tuning.mode.is_pd() {
+            self.pd_step(&mut step, dt, target, band, tuning, nav, physics, fire_anim);
+            step.caught = self.catches(player_feet);
+            return step;
+        }
         // Utility-AI decision layer (roadmap #4, default ON via the World flag): a scored
         // behaviour selector replaces the hand-coded FSM transitions below. The FSM is
         // kept verbatim as the `utility == false` kill-switch.
@@ -1887,6 +2020,108 @@ impl Enemy {
         }
     }
 
+    // ─────────────────────────────────────────────────────────────────────────
+    // Perfect Dark's action ladder (`AI=pd`). `bot_tick_unpaused` (`bot.c:2445`)
+    // runs, each frame and in this order:
+    //
+    //   1. reload check ......... ported — but it lives in the `World`, which owns the
+    //                             magazine and the trigger (`EnemyInstance::reload`).
+    //   2. weapon switch ........ skipped: a hunter carries one gun and no inventory.
+    //   3. cloak / RCP120 ....... skipped: neither exists here.
+    //   4. scenario command ..... skipped: CTF / KOTH / Hill are PD game modes.
+    //   5. ATTACK THE TARGET .... this function — `botcmd_tick_dist_mode` over our nav.
+    //   6. follow a teammate .... unreachable, and faithfully so: PD falls to this rung
+    //                             only when `bot_choose_general_target` returns nothing,
+    //                             and with omniscience on there is always a target (the
+    //                             player, if a chosen packmate dies). Left unwritten
+    //                             rather than written and dead.
+    //   7. pick up a weapon ..... no pickups in this game.
+    //
+    // What is NOT in that ladder is as load-bearing as what is: no search, no
+    // investigate, no reaction-delay state, no cover, no strafe. A PD bot's answer to
+    // "the player is aiming at me" is to keep shooting.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// One tick of the Perfect Dark ladder: decide a distance mode, execute it over
+    /// the nav grid, and pull the trigger while the target is in sight.
+    ///
+    /// **The pathing is ours, the decisions are PD's.** Perfect Dark moves bots along
+    /// hand-authored pads and waypoint lists that our levels do not have, so
+    /// `chr_go_to_prop` becomes [`Self::move_toward`] (beeline where the line is clear,
+    /// grid A* where it is not) and `chr_run_from_pos` becomes [`Self::back_off`].
+    /// `DistDecision::reissue` is honoured by dropping the current path, which is what
+    /// re-issuing a movement command means here; between re-issues the hunter walks the
+    /// path it already has, exactly as PD's 1 s `distmodettl60` intends.
+    #[allow(clippy::too_many_arguments)]
+    fn pd_step(
+        &mut self,
+        step: &mut EnemyStep,
+        dt: f32,
+        target: EngageTarget,
+        band: DistBand,
+        tuning: AiTuning,
+        nav: &NavWorld,
+        physics: &mut PhysicsWorld,
+        fire_anim: bool,
+    ) {
+        let target_pos = target.pos;
+        // `aibot->targetinsight` is a raw line of sight, not a view cone: PD's 45° cone
+        // gates *firing* (in `pdsim`), never seeing. So this deliberately does not go
+        // through `perceives`.
+        let insight = self.can_see(target, physics);
+        // `chr_get_distance_to_coord` (`botcmd.c:98`) — the 3D separation, so a target
+        // one floor up is not "at the right distance".
+        let dist = self.engage_dist(target_pos);
+        // `chr->actiontype == ACT_STAND`: the feet are not currently travelling.
+        let standing = self.vel.length_squared() < 0.01;
+        let roll = self.rand01();
+        let decision = self.dist.tick(dist, band, insight, tuning.tier, standing, dt, roll);
+        if decision.reissue {
+            // Re-issue the movement command: drop the path in hand so the next
+            // `move_toward` plans a fresh one against the target's live position.
+            self.path.clear();
+            self.repath_timer = 0.0;
+        }
+
+        let speed = SPEED_CHASE * tuning.speed_mult; // every PD mode uses GOPOSFLAG_RUN
+        match decision.mode {
+            // `chr_run_from_pos(chr, GOPOSFLAG_RUN, 10000, &targetprop->pos)`.
+            DistMode::Backup => {
+                self.back_off(dt, target_pos, nav, speed);
+                self.face(target_pos);
+            }
+            // `chr_try_stop(chr)` — plant and shoot. This is the single most visible
+            // difference from our AI, which weaves between bursts and never stops.
+            DistMode::Ok => {
+                self.face(target_pos);
+            }
+            // `chr_go_to_prop(chr, targetprop, GOPOSFLAG_RUN)` — both modes, identically.
+            DistMode::Advance | DistMode::Goto => {
+                self.move_toward(dt, target_pos, nav, speed);
+            }
+        }
+        self.holding = decision.mode == DistMode::Ok;
+
+        // Pull the trigger whenever the target is in sight. In the shipping game the
+        // simulant owns this decision outright (`World::step` prefers its `want_fire`,
+        // which fires while still converging); this keeps a `pdsim`-less headless hunter
+        // behaving like a bot rather than like a statue.
+        if insight {
+            self.pump_fire(fire_anim, step);
+        } else if self.is_attacking && !fire_anim {
+            self.is_attacking = false;
+        }
+
+        // Report a state so the HUD, the squad broadcaster and the AI lab keep working.
+        // `Ok`/`Backup` are combat at distance (Attack); `Advance`/`Goto` are the run-in
+        // (Chase). The blind states are unreachable here — which is the point.
+        self.state = match decision.mode {
+            DistMode::Ok | DistMode::Backup => AiState::Attack,
+            DistMode::Advance | DistMode::Goto => AiState::Chase,
+        };
+        self.last_known = Some(target_pos); // a PD bot's knowledge never goes stale
+    }
+
     /// Begin the reaction delay after acquiring the player.
     fn enter_alert(&mut self) {
         self.state = AiState::Alert;
@@ -2437,6 +2672,7 @@ mod tests {
             EngageTarget::player(player),
             player,
             standoff,
+            DistBand::DEFAULT,
             tuning,
             aimed,
             nav,
@@ -2464,7 +2700,8 @@ mod tests {
         collider: ColliderHandle,
     ) -> EnemyStep {
         let step = e.update(
-            dt, target, player, standoff, tuning, false, nav, physics, false, collider,
+            dt, target, player, standoff, DistBand::DEFAULT, tuning, false, nav, physics, false,
+            collider,
         );
         let dv = e.desired_vel;
         e.integrate_move(dv, dt, nav);

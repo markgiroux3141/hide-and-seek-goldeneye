@@ -1464,10 +1464,21 @@ impl ApplicationHandler for App {
             world.set_goldeneye_clips(true);
             world.set_body_set(crate::world::BodySet::GoldenEye);
         }
+        // ── The engagement model, applied LAST for the same reason as the roster ──
+        //
+        // `AI=pd` swaps our hunter's whole post-contact behaviour for Perfect Dark's
+        // deathmatch simulant: omniscient, no search, four-mode distance-band combat,
+        // no dodge/flank/cover/suppress, PD's reload rule. `AI=ours` (the default) is
+        // everything we built. `World::new` already resolved this from the environment;
+        // re-applying it here is the belt to that braces — nothing between the two
+        // points may pin an AI mode without an explicit `AI=` losing, which is exactly
+        // how `PD_LAB` once ate `BODIES=ge` for a whole playtest.
+        world.set_ai_mode(crate::enemy::AiMode::from_env());
         // Say what was actually resolved, unconditionally. The wave itself logs its body
         // spread at spawn, but that is not until G — and "which hunters am I about to get"
         // is exactly the question a boot flag silently losing a fight makes unanswerable.
         log::info!("HUNTERS: {}", world.roster_summary());
+        log::info!("{}", world.ai_mode().summary());
         // Optional: boot straight into a saved level slot (`LOAD_SLOT=N`), so a
         // generated level can be explored immediately without pressing F-keys.
         // Starts in BUILD (fly) mode; press G for HUNT (FPS), I for invincible.

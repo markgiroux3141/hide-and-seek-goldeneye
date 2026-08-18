@@ -220,6 +220,22 @@ pub struct PdDistBand {
     pub name: &'static str,
     pub min_m: f32,
     pub max_m: f32,
+    /// The row's **third** value — `ADVANCE` below it, `GOTO` above. PD's own table
+    /// comment says it "doesn't appear to have any purpose", and that is right in the
+    /// sense that both modes issue the same `chr_go_to_prop`; it still decides which
+    /// mode a bot *reports*, so it is transcribed rather than dropped.
+    pub limit3_m: f32,
+}
+
+impl PdDistBand {
+    /// This row as the runtime band [`crate::pdsim::distmode`] measures against.
+    pub fn band(&self) -> crate::pdsim::distmode::DistBand {
+        crate::pdsim::distmode::DistBand {
+            min_m: self.min_m,
+            max_m: self.max_m,
+            limit3_m: self.limit3_m,
+        }
+    }
 }
 
 /// The AI's authored view of a weapon (`g_BotWeaponConfigs`, `botinv.c:21`).
@@ -329,15 +345,29 @@ impl PdWeapon {
 
 /// `g_BotDistConfigs` (`botcmd.c:29`), converted to metres.
 pub const PD_DIST_BANDS: [PdDistBand; 8] = [
-    PdDistBand { name: "BOTDISTCFG_CLOSE", min_m: 0.0, max_m: 1.2 },
-    PdDistBand { name: "BOTDISTCFG_PISTOL", min_m: 3.0, max_m: 4.5 },
-    PdDistBand { name: "BOTDISTCFG_DEFAULT", min_m: 3.0, max_m: 6.0 },
-    PdDistBand { name: "BOTDISTCFG_SHOOTEXPLOSIVE", min_m: 6.0, max_m: 12.0 },
-    PdDistBand { name: "BOTDISTCFG_KAZE", min_m: 1.5, max_m: 2.5 },
-    PdDistBand { name: "BOTDISTCFG_FARSIGHT", min_m: 10.0, max_m: 20.0 },
-    PdDistBand { name: "BOTDISTCFG_FOLLOW", min_m: 0.0, max_m: 2.5 },
-    PdDistBand { name: "BOTDISTCFG_THROWEXPLOSIVE", min_m: 4.5, max_m: 7.0 },
+    PdDistBand { name: "BOTDISTCFG_CLOSE", min_m: 0.0, max_m: 1.2, limit3_m: 100.0 },
+    PdDistBand { name: "BOTDISTCFG_PISTOL", min_m: 3.0, max_m: 4.5, limit3_m: 45.0 },
+    PdDistBand { name: "BOTDISTCFG_DEFAULT", min_m: 3.0, max_m: 6.0, limit3_m: 45.0 },
+    PdDistBand { name: "BOTDISTCFG_SHOOTEXPLOSIVE", min_m: 6.0, max_m: 12.0, limit3_m: 45.0 },
+    PdDistBand { name: "BOTDISTCFG_KAZE", min_m: 1.5, max_m: 2.5, limit3_m: 45.0 },
+    PdDistBand { name: "BOTDISTCFG_FARSIGHT", min_m: 10.0, max_m: 20.0, limit3_m: 30.0 },
+    PdDistBand { name: "BOTDISTCFG_FOLLOW", min_m: 0.0, max_m: 2.5, limit3_m: 100.0 },
+    PdDistBand { name: "BOTDISTCFG_THROWEXPLOSIVE", min_m: 4.5, max_m: 7.0, limit3_m: 45.0 },
 ];
+
+/// `g_BotDistConfigs` indices, by the names the decomp gives them. Used where a
+/// GoldenEye weapon has to be mapped onto a PD band by role (see
+/// `super::enemy_weapons::dist_config_for`).
+pub mod distcfg {
+    pub const CLOSE: u8 = 0;
+    pub const PISTOL: u8 = 1;
+    pub const DEFAULT: u8 = 2;
+    pub const SHOOT_EXPLOSIVE: u8 = 3;
+    pub const KAZE: u8 = 4;
+    pub const FARSIGHT: u8 = 5;
+    pub const FOLLOW: u8 = 6;
+    pub const THROW_EXPLOSIVE: u8 = 7;
+}
 
 
 /// One row of `g_ExplosionTypes` (`explosions.c:41`). The two fields our single

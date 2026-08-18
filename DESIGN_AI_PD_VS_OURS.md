@@ -168,3 +168,77 @@ is which of these the PD mode is *for*:
 The second is closer to what the game is, and is also strictly less work — it is items 2, 3
 and 5 without item 4. Worth choosing before any code is written, because item 4 is the one
 that changes what the game *is*.
+
+---
+
+## 6. What shipped (2026-08-18) — `AI=pd|ours`
+
+**Option A: the faithful PD deathmatch**, chosen deliberately over the "PD's fighting, our
+hunting" hybrid. All five items above, item 4 included, so a PD-mode hunter is a Perfect
+Dark simulant end to end and `Search`/`Investigate` are genuinely unreachable. Nothing was
+removed: `AI=ours` is the default and every behaviour below still runs under it.
+
+```text
+AI=ours   (default) everything in §2 — perception, search, the utility scorer, standoff
+                    combat, aim-dodge, flank, cover/peek, burst-and-reposition, suppress
+AI=pd               omniscient, no search, four-mode distance-band combat, none of the
+                    above evasive/tactical movement, PD's reload rule
+```
+
+Resolved from the environment in `World::new` and **re-applied last at boot** (`app.rs`,
+after the `PD_LAB` and `BODIES` blocks) so an explicit `AI=` cannot lose to a mode default,
+and logged unconditionally. `an_explicit_ai_mode_outranks_the_lab` pins it.
+
+| item | where it landed |
+|---|---|
+| the switch | `enemy::AiMode`, `AiTuning::mode`, `World::set_ai_mode` |
+| distance-mode movement | `pdsim/distmode.rs` (pure + unit-tested), executed by `Enemy::pd_step` |
+| the band per weapon | `EnemyWeaponDef::dist_cfg` + `enemy_weapons::dist_band_for`, off `g_BotDistConfigs` |
+| switching off what PD lacks | `World::ai_tuning` zeroes `dodge`/`flank`/`cover`/`suppress` |
+| the action ladder | `Enemy::pd_step`'s header comment maps all seven rungs |
+| the reload rule | `World::enemy_reload_step` + `EnemyInstance::{loaded, reload_timer}` |
+
+Unchanged in both modes, as promised: nav/A*, ORCA, wall clearance, foot IK, head look-at,
+animation, and the whole `pdsim` aim/fire model (which was already PD's).
+
+### What the AI lab measured
+
+`world/ai_testbed.rs`, one hunter against a stationary player in a 15 m room with a pillar,
+`BotDifficulty::Normal`, 20 s:
+
+| | engaged | still | in band | `OK` mode | band err | lateral | time to kill |
+|---|---|---|---|---|---|---|---|
+| `AI=ours` | 17.4 s | 94% | 79% | — | 0.61 m | **4.8 m** | 10.8 s |
+| `AI=pd` | 19.1 s | 100% | 100% | 100% | 0.64 m | **0.0 m** | 10.6 s |
+
+Three results worth keeping, each of which contradicted the expectation the tests were
+first written against:
+
+* **Standing still is not the discriminator.** Our hunter is *already* 94% stationary
+  against a stationary target — it reaches its standoff and its jukes are short. What
+  separates the models is **lateral travel**: ours weaves ~5 m around the bearing, PD's
+  moves sideways exactly 0.0 m. The assertion had to be rewritten around the orbit metric.
+* **The two rules land at nearly the same distance.** `standoff_for` (0.61 m off the band
+  centre) and `g_BotDistConfigs` (0.64 m) agree on the default roster, so "PD holds a
+  better distance" is not a property that holds. They diverge per weapon — see the sniper
+  row below — which is a playtest observation, not a unit test.
+* **PD's model is not more lethal.** 10.6 s vs 10.8 s to a kill. The difference is entirely
+  in how the fight *reads*, which is the thing CPU-side green cannot judge.
+
+### The one deliberate oddity
+
+**A PD-mode sniper charges you.** `botinv_get_dist_config` gives PD's own Sniper Rifle
+`BOTDISTCFG_DEFAULT` — 3–6 m — and scores it 28 out of a possible 188, because bot combat
+in Perfect Dark is a rush and not a duel at range. Our `standoff_for` hangs a sniper back
+at ~11 m. The GoldenEye guns are mapped onto PD's bands by role, taking whatever PD's
+nearest counterpart asks for rather than what looks sensible, so the sniper is ported as
+PD has it. `AI=ours` keeps the standoff. This is the clearest single case of the two models
+disagreeing, and it is left as PD wrote it.
+
+### Unreachable on purpose
+
+Rung 6 of the action ladder — "follow a teammate within 300 units" — is reached in PD only
+when `bot_choose_general_target` returns nothing. With omniscience there is always a target
+(the player, if a chosen packmate dies), so the rung is unreachable here and is left
+unwritten rather than written and dead. `Alert` goes the same way: PD has no reaction-delay
+*state*, it has `shootdelaytimer60`, which `pdsim/difficulty.rs` already ports.

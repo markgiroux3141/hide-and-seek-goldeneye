@@ -46,6 +46,10 @@ pub struct EnemySecondary {
     /// The engagement band (metres) PD wants this function used at
     /// (`g_BotDistConfigs[secdistconfig]`).
     pub band: (f32, f32),
+    /// That band's **index** into [`crate::combat::pd_weapons::PD_DIST_BANDS`] —
+    /// `secdistconfig` itself. `botinv_get_dist_config` is keyed by weapon *and*
+    /// `gunfunc`, so a hunter on its secondary fights at this band under `AI=pd`.
+    pub dist_cfg: u8,
 }
 
 /// A weapon as an enemy wields it: the shared gun/muzzle/sound assets (identical to
@@ -76,7 +80,22 @@ pub struct EnemyWeaponDef {
     /// Distance (m) the hunter advances to and holds at while attacking — derived
     /// from [`Self::range`] via [`standoff_for`], so a sniper hangs way back and a
     /// shotgunner charges in. Threaded into the FSM ([`crate::enemy::Enemy::update`]).
+    ///
+    /// **`AI=ours` only.** Under `AI=pd` the hunter fights to [`Self::dist_cfg`]'s
+    /// band instead — PD's own numbers rather than our fraction of them.
     pub standoff: f32,
+    /// The **primary** function's `g_BotDistConfigs` index (`pridistconfig`) — the
+    /// distance band `botcmd_tick_dist_mode` measures against under `AI=pd`. Authored
+    /// for a Perfect Dark weapon; mapped by role for a GoldenEye one (see
+    /// [`dist_config_for`]).
+    pub dist_cfg: u8,
+    /// Rounds in a magazine, straight off the player [`WeaponStats::magazine_size`].
+    /// Feeds PD's reload rule (`bot.c:2470`), which is the only thing that reads it —
+    /// a hunter has unlimited magazines, just like a PD bot.
+    pub clip: u32,
+    /// Seconds a reload takes ([`WeaponStats::reload_time`]); the hunter holds fire
+    /// for this long once PD's rule schedules one.
+    pub reload_time: f32,
     /// Perfect Dark's per-shot **spread** field for this weapon (see
     /// [`crate::pdsim::spread`]) — the width of the random cone each individual
     /// bullet is offset into, in PD's own units (`±spread/4` degrees per axis).
@@ -199,6 +218,66 @@ pub fn standoff_for(range: f32) -> f32 {
     (range * STANDOFF_FRAC).clamp(MIN_STANDOFF, MAX_STANDOFF)
 }
 
+/// Weapons that lob or launch an explosive — PD keeps bots further out with these
+/// so they do not blow themselves up.
+const LAUNCHER_NAMES: &[&str] = &["Rocket Launcher", "Grenade Launcher"];
+const THROWN_NAMES: &[&str] = &["Grenade", "Proximity Mine", "Timed Mine", "Remote Mine"];
+
+/// Which `g_BotDistConfigs` row a weapon fights at (`botinv_get_dist_config`,
+/// `botinv.c`) — the band `botcmd_tick_dist_mode` measures against under `AI=pd`.
+///
+/// A **Perfect Dark** weapon answers this itself: `g_BotWeaponConfigs` authors a
+/// `pridistconfig` per gun, and that is read straight off the transcribed table.
+///
+/// A **GoldenEye** weapon has no such row, so it is mapped by role — and the mapping
+/// is taken from what PD's own nearest counterpart asks for rather than from what
+/// looks sensible:
+///
+/// | our gun | band | because PD's… |
+/// |---|---|---|
+/// | pistols | `PISTOL` (3–4.5 m) | Falcon 2 / MagSec / DY357 are all `pridistconfig 1` |
+/// | Shotgun, Auto Shotgun | `PISTOL` | PD's own Shotgun is `1`, not a close-quarters row |
+/// | SMGs, rifles, laser | `DEFAULT` (3–6 m) | CMP150 / Cyclone / AR34 / Reaper are `2` |
+/// | Sniper Rifle | `DEFAULT` | **PD's Sniper Rifle is `2` as well** — see below |
+/// | Rocket / Grenade Launcher | `SHOOTEXPLOSIVE` (6–12 m) | Rocket Launcher + Devastator are `3` |
+/// | thrown explosives | `THROWEXPLOSIVE` (4.5–7 m) | grenades + mines are `7` |
+///
+/// The sniper row is the one that will read as wrong in a playtest and is correct:
+/// PD's bots take a sniper rifle to 3–6 m (and score it 28 out of 188 — they do not
+/// like it), because bot combat is a rush, not a duel at range. Our `standoff_for`
+/// hangs a sniper back at ~11 m instead. That difference is exactly what `AI=pd`
+/// exists to show, so it is ported rather than "fixed"; `AI=ours` keeps the standoff.
+pub fn dist_config_for(w: &WeaponStats) -> u8 {
+    use crate::combat::pd_weapons::distcfg;
+    if let Some(pd) = crate::combat::arsenal::pd_weapon_for(w.name) {
+        return pd.ai.band_pri;
+    }
+    if LAUNCHER_NAMES.contains(&w.name) {
+        distcfg::SHOOT_EXPLOSIVE
+    } else if THROWN_NAMES.contains(&w.name) {
+        distcfg::THROW_EXPLOSIVE
+    } else if PISTOL_NAMES.contains(&w.name) || SHOTGUN_NAMES.contains(&w.name) {
+        distcfg::PISTOL
+    } else {
+        distcfg::DEFAULT
+    }
+}
+
+/// The engagement band a hunter with this weapon fights to, as
+/// [`crate::pdsim::distmode`] measures it. `secondary` picks the second function's
+/// row, mirroring `botinv_get_dist_config`'s `gunfunc` argument.
+pub fn dist_band_for(def: &EnemyWeaponDef, secondary: bool) -> crate::pdsim::distmode::DistBand {
+    use crate::combat::pd_weapons::PD_DIST_BANDS;
+    let idx = match def.secondary {
+        Some(sec) if secondary => sec.dist_cfg,
+        _ => def.dist_cfg,
+    } as usize;
+    PD_DIST_BANDS
+        .get(idx)
+        .map(|b| b.band())
+        .unwrap_or(crate::pdsim::distmode::DistBand::DEFAULT)
+}
+
 /// Weapons that scatter like a shotgun rather than a rifle — PD gives its Shotgun a
 /// `spread` of 30 against the AR34's 8, and that cone is most of what a shotgun *is*.
 const SHOTGUN_NAMES: &[&str] = &["Shotgun", "Auto Shotgun"];
@@ -315,6 +394,7 @@ pub fn enemy_def_for(w: &WeaponStats) -> EnemyWeaponDef {
             damage: sec.damage * crate::combat::pd_weapons::PD_DAMAGE_TO_HP,
             automatic: sec.kind == PdFuncKind::Auto,
             band: pd.band_m(true),
+            dist_cfg: pd.ai.band_sec,
         })
     });
 
@@ -341,6 +421,9 @@ pub fn enemy_def_for(w: &WeaponStats) -> EnemyWeaponDef {
         range,
         fire_rate,
         standoff: standoff_for(range),
+        dist_cfg: dist_config_for(w),
+        clip: w.magazine_size,
+        reload_time: w.reload_time,
         spread: spread_for(w, class),
         secondary,
         automatic: w.automatic,

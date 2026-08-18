@@ -1706,6 +1706,55 @@ impl World {
         }
     }
 
+    /// **Perfect Dark's reload rule** (`bot.c:2470`), under `AI=pd` only.
+    ///
+    /// A bot schedules a reload when it is **out of ammo**, or when it holds **less
+    /// than half a clip and has not seen its target for 2 seconds** — so it tops up in
+    /// the lull after losing you rather than mid-firefight, and only runs dry when the
+    /// fight never let up. That second clause is the whole character of the rule: it is
+    /// why a PD bot occasionally *is* caught reloading, and it is the only opening the
+    /// distance-band model leaves you.
+    ///
+    /// Differences from the decomp, both structural:
+    ///
+    /// * PD schedules a reload (`bot_schedule_reload`) and performs it when the timer
+    ///   lapses; the timer here *is* the reload, because a hunter has no reload
+    ///   animation to wait on — it holds fire for the weapon's own `reload_time` and
+    ///   comes back full.
+    /// * PD tracks two hands (`for i = 0; i != 2`). A dual-wielding hunter here shares
+    ///   one magazine, since both copies fire off the same cadence.
+    ///
+    /// Under `AI=ours` this is a no-op and hunters have unlimited ammunition, exactly
+    /// as they always have.
+    fn enemy_reload_step(&mut self, dt: f32) {
+        if !self.ai_mode.is_pd() {
+            return;
+        }
+        for inst in &mut self.enemies {
+            if inst.enemy.is_dead() {
+                continue;
+            }
+            let clip = inst.weapon.clip;
+            if clip == 0 {
+                continue; // a thrown/unclipped weapon is never reloaded
+            }
+            if inst.reload_timer > 0.0 {
+                inst.reload_timer = (inst.reload_timer - dt).max(0.0);
+                if inst.reload_timer == 0.0 {
+                    inst.loaded = clip; // `botact_reload`
+                }
+                continue;
+            }
+            let unseen_2s = inst.enemy.time_since_seen() >= PD_RELOAD_UNSEEN;
+            if inst.loaded == 0 || (inst.loaded < clip / 2 && unseen_2s) {
+                inst.reload_timer = inst.weapon.reload_time.max(0.1);
+                inst.fire_elapsed = None; // drop the trigger while reloading
+                inst.shot_timer = 0.0;
+                inst.burst_shot = 0;
+            }
+        }
+    }
+
     /// Per-frame enemy combat + player damage-feedback (HUNT only). Pumps EACH
     /// hunter's shots while its fire animation is inside the FIRE_TIMING window —
     /// one shot per `1/fireRate` seconds, the JS `EnemyCharacter.tick` pump — and
@@ -1730,6 +1779,8 @@ impl World {
                 inst.muzzle_timer = (inst.muzzle_timer - dt).max(0.0);
             }
         }
+        // Perfect Dark's reload rule (`AI=pd` only) — rung 1 of the action ladder.
+        self.enemy_reload_step(dt);
         if self.player_dead {
             return;
         }
@@ -1743,6 +1794,9 @@ impl World {
         // Hunters whose burst just ended on a sideways attack animation, to be handed
         // back to their stance's forward one (see the loop after the shots).
         let mut ended_sideways: Vec<usize> = Vec::new();
+        // Rounds only come out of a magazine under `AI=pd`, where PD's reload rule puts
+        // them back — see `enemy_reload_step`.
+        let count_ammo = self.ai_mode.is_pd();
         for (i, inst) in self.enemies.iter_mut().enumerate() {
             let Some(t) = inst.fire_elapsed else {
                 inst.shot_timer = 0.0;
@@ -1763,9 +1817,20 @@ impl World {
                 _ => (inst.weapon.fire_rate, inst.weapon.automatic),
             };
             let burst = inst.pdsim.is_some() && auto;
+            // An empty magazine ends the burst on the spot; `enemy_reload_step` picks
+            // it up next frame and schedules the reload.
+            if count_ammo && inst.weapon.clip > 0 && inst.loaded == 0 {
+                inst.fire_elapsed = None;
+                inst.shot_timer = 0.0;
+                inst.burst_shot = 0;
+                continue;
+            }
             if inst.fire.shooting(t) {
                 inst.shot_timer -= dt;
                 if inst.shot_timer <= 0.0 {
+                    if count_ammo {
+                        inst.loaded = inst.loaded.saturating_sub(1);
+                    }
                     inst.shot_timer = if burst {
                         inst.burst_shot += 1;
                         if inst.burst_shot >= PD_BURST_ROUNDS {

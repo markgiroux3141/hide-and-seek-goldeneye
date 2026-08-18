@@ -932,6 +932,10 @@ pub(crate) const PD_BURST_ROUNDS: u32 = 3;
 pub(crate) const PD_BURST_SPACING: f32 = 5.0 / 60.0;
 /// Seconds between bursts (`unk24 + unk25 = 24` ticks at 60 Hz).
 pub(crate) const PD_BURST_GAP: f32 = 24.0 / 60.0;
+/// How long a bot's target must have been out of sight before a **partial** magazine
+/// is worth topping up — `lastseenanytarget60 < lvframe60 - TICKS(120)` (`bot.c:2470`).
+/// Out of ammo it reloads regardless. See `World::enemy_reload_step`.
+pub(crate) const PD_RELOAD_UNSEEN: f32 = 2.0;
 /// Speed (m/s) a hunter with no movement intent of its own may still use to yield
 /// ground to a packmate under ORCA — so a holding / attacking hunter shuffles aside
 /// to let one pass instead of being interpenetrated, without wandering off station.
@@ -1525,6 +1529,14 @@ pub(crate) struct EnemyInstance {
     /// Enemy-fire cadence: seconds until the next shot may leave during the fire
     /// window (spaced by `1/weapon.fire_rate`, or by the PD burst cadence).
     pub shot_timer: f32,
+    /// **Rounds left in the magazine** — `aibot->loadedammo[HAND_RIGHT]`. Only PD's
+    /// reload rule (`AI=pd`, see [`World::enemy_reload_step`]) reads or writes it; under
+    /// `AI=ours` a hunter has never had a magazine and still does not, so it sits at the
+    /// weapon's clip size and nothing consults it.
+    pub loaded: u32,
+    /// Seconds left of a scheduled reload (`aibot->timeuntilreload60`), or 0. While it
+    /// runs the hunter holds fire, and it refills [`Self::loaded`] when it lapses.
+    pub reload_timer: f32,
     /// Rounds already sent in the current PD burst (`aibot->burstsdone`). Counts up to
     /// [`PD_BURST_ROUNDS`], then the next shot waits [`PD_BURST_GAP`] and it resets.
     /// PD simulants with an automatic weapon only; zero everywhere else.
@@ -1925,6 +1937,12 @@ pub struct World {
     /// normal game is unchanged). A kill-switch / A-B baseline; see
     /// [`crate::enemy::Enemy::known_player_pos`] for what it does and does *not* change.
     pd_omniscience: bool,
+    /// **Which engagement model the hunters run** (`AI=pd|ours`, default ours). Unlike
+    /// the flags above this is not a kill-switch but a full A/B: `ours` is everything
+    /// this file has grown, `pd` is Perfect Dark's deathmatch simulant. Resolved from
+    /// the environment in [`Self::new`] and re-applied last at boot (`app.rs`) so an
+    /// explicit choice outranks any mode default. See [`crate::enemy::AiMode`].
+    ai_mode: crate::enemy::AiMode,
     /// Whether hunters may lob a **grenade to flush a camping player** (`#5`).
     ///
     /// **OFF by default (2026-08-17).** Turned off from playtest: hunters were killing
@@ -2557,6 +2575,7 @@ impl World {
             wall_clearance: true, // wall-clearance nudge on by default (kill-switch below)
             utility_ai: true, // utility-AI decision layer on by default (kill-switch below)
             pd_omniscience: true, // PD hunters always know where you are (kill-switch below)
+            ai_mode: crate::enemy::AiMode::from_env(),
             grenades: false, // OFF — hunters were blowing themselves up; see the field doc
             radar_cells: Vec::new(),
             char_feet_offset,
@@ -3063,16 +3082,44 @@ impl World {
     /// built from [`Self::difficulty_params`] + the enemy baseline constants.
     pub(crate) fn ai_tuning(&self) -> crate::enemy::AiTuning {
         let dp = self.difficulty_params();
+        // Under `AI=pd`, zero every knob Perfect Dark has no equivalent for. Measured,
+        // not assumed (`DESIGN_AI_PD_VS_OURS.md` §4b): `aibot->speedmultsideways` is
+        // written to zero in every branch that writes it, `chr_try_sidestep`'s only
+        // caller is a hand-authored single-player guard script, and there is no cover
+        // selection in the bot code at all. So: no aim-dodge, no flanking, no
+        // cover/peek, no suppressing fire. A flag, not a deletion — `AI=ours` hands the
+        // same dial back unchanged.
+        let pd = self.ai_mode.is_pd();
+        let off = |v: f32| if pd { 0.0 } else { v };
         crate::enemy::AiTuning {
             alert: crate::enemy::ALERT_DURATION * dp.reaction_mult,
             cooldown: crate::enemy::COOLDOWN_DURATION * dp.cooldown_mult,
-            dodge: dp.dodge,
+            dodge: off(dp.dodge),
             speed_mult: dp.speed_mult,
             sense: dp.sense_mult,
-            suppress: dp.suppress,
-            flank: dp.flank,
-            cover: dp.cover,
+            suppress: off(dp.suppress),
+            flank: off(dp.flank),
+            cover: off(dp.cover),
+            mode: self.ai_mode,
+            // The same tier the hunters' simulants carry, so the distance-band rule and
+            // the aim model agree about how good this bot is.
+            tier: self
+                .pd
+                .difficulty
+                .unwrap_or_else(|| pd_lab::tier_for_dial_frac(self.difficulty_frac())),
         }
+    }
+
+    /// Select the engagement model (`AI=pd|ours`). Applied last at boot so an explicit
+    /// environment choice outranks any mode default, and settable live from the AI lab
+    /// for an A/B on one arena. See [`crate::enemy::AiMode`].
+    pub fn set_ai_mode(&mut self, mode: crate::enemy::AiMode) {
+        self.ai_mode = mode;
+    }
+
+    /// Which engagement model the hunters are running.
+    pub fn ai_mode(&self) -> crate::enemy::AiMode {
+        self.ai_mode
     }
 
     /// Nudge the difficulty dial by `delta`, clamped to `0..=DIFFICULTY_MAX`, then

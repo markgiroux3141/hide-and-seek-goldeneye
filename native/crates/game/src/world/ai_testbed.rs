@@ -1274,3 +1274,388 @@ fn pd_a_dark_pacifist_never_fires() {
         "a PeaceSim landed damage — the personality veto is not reaching the trigger"
     );
 }
+
+// ═══ `AI=pd` vs `AI=ours` — the engagement-model A/B ════════════════════════
+//
+// The switch is a full alternative hunter, not a knob, so what it needs is not pass/fail
+// invariants but **comparative measurements**: the two models are both correct, and the
+// question a playtest is being set up to answer is which one feels better. These
+// scenarios produce the numbers that make that argument concrete, and assert only the
+// properties that would mean the port is *wrong* rather than merely different.
+//
+// The headline claim to check is the one that changes how a firefight reads: a Perfect
+// Dark bot in `BOTDISTMODE_OK` **stands still and shoots** (`chr_try_stop`), where ours
+// weaves between bursts and never stops moving. If PD mode still orbits, the distance
+// mode is not driving the feet and everything downstream of it is theatre.
+//
+// CPU-side green says nothing about feel — every AI defect this project has had passed
+// the full suite — so these are a floor, not a verdict.
+
+/// One run of the A/B, from hunter 0's point of view.
+#[derive(Debug, Clone, Copy)]
+struct AbMetrics {
+    /// Seconds of the run the hunter had line of sight to the player. Every fraction
+    /// below is measured over these frames only: how a hunter behaves *while fighting*
+    /// is the question, and the walk-in from spawn is common to both models.
+    engaged_s: f32,
+    /// Fraction of engaged time the feet were stationary. PD's `OK` mode is the only
+    /// thing in either model that plants them.
+    still_frac: f32,
+    /// Fraction of engaged time the hunter held a distance inside its weapon's
+    /// `g_BotDistConfigs` band.
+    in_band_frac: f32,
+    /// Fraction of engaged time in `BOTDISTMODE_OK` — the mode that issues
+    /// `chr_try_stop`. Reads the ported state directly rather than inferring it from
+    /// the feet. Always 0 under `AI=ours`, which never ticks the distance mode.
+    ok_frac: f32,
+    /// Mean |distance − band centre| (m) while engaged.
+    band_err_m: f32,
+    /// Total lateral (perpendicular-to-bearing) travel, m — the orbiting metric.
+    /// Circling the player racks this up; closing head-on and stopping does not.
+    lateral_m: f32,
+    /// Seconds until the player died, or `None` if they survived the run.
+    time_to_kill: Option<f32>,
+    /// Damage dealt to the player over the run (HP).
+    damage: f32,
+    /// Whether the hunter was ever caught mid-reload (PD's rule; `AI=ours` never
+    /// reloads at all).
+    reloaded: bool,
+}
+
+/// Run one hunter against a stationary player for `secs` under `mode`, and measure it.
+///
+/// The arena is a 15 m room with a single pillar — enough geometry for line of sight to
+/// be a real question, little enough that neither model is fighting the level. The
+/// hunter starts 9 m out, past every weapon band, so both models have to close first.
+/// `invulnerable` picks what the run is for: movement metrics want a fight that lasts
+/// the whole window, time-to-kill wants one that ends.
+fn ab_run(mode: crate::enemy::AiMode, secs: f32, invulnerable: bool) -> AbMetrics {
+    use crate::pdsim::difficulty::BotDifficulty;
+    let pillar = [28.0, 0.0, 28.0, 4.0, 16.0, 4.0]; // centre of the room
+    let (px, pz) = (7.5f32, 4.0f32);
+    let mut arena = TestArena::build_pd(
+        [60.0, 16.0, 60.0],
+        &[pillar],
+        1,
+        Vec3::new(px, 0.0, pz),
+        BotDifficulty::Normal,
+    );
+    arena.world.set_ai_mode(mode);
+    if invulnerable {
+        arena.world.toggle_invulnerable(); // `build_pd` leaves the player killable
+    }
+    arena.place_hunter(0, px, pz + 9.0);
+    let band = crate::combat::enemy_weapons::dist_band_for(
+        &arena.world.enemies[0].weapon,
+        arena.world.enemies[0].use_secondary,
+    );
+
+    let dt = 1.0 / 60.0;
+    let (mut engaged_s, mut still_s, mut in_band_s, mut err_sum, mut lateral_m) =
+        (0.0f32, 0.0f32, 0.0f32, 0.0f32, 0.0f32);
+    let mut ok_s = 0.0f32;
+    let (mut ttk, mut reloaded) = (None, false);
+    let start_hp = arena.world.player_health();
+    let mut prev = arena.world.enemies[0].enemy.pos;
+    let mut t = 0.0f32;
+    for _ in 0..(secs / dt) as usize {
+        arena.set_player(px, pz); // hold them put; only the hunter moves
+        arena.step(dt);
+        t += dt;
+        let Some(ppos) = arena.world.player_pos() else { break };
+        let inst = &arena.world.enemies[0];
+        let (epos, speed) = (inst.enemy.pos, inst.enemy.speed());
+        if inst.reload_timer > 0.0 {
+            reloaded = true;
+        }
+        if arena.world.is_player_dead() {
+            // Stop here: hunters keep manoeuvring against a corpse but never fire, so
+            // every frame past this point would drag the movement metrics toward
+            // "always moving" and say nothing about how the fight was fought.
+            ttk = Some(t);
+            break;
+        }
+        let los = crate::enemy::perception_los(&mut arena.world.physics, epos, ppos);
+        if los {
+            let dist = (ppos - epos).length();
+            engaged_s += dt;
+            if speed < 0.15 {
+                still_s += dt;
+            }
+            if band.contains(dist) {
+                in_band_s += dt;
+            }
+            if mode.is_pd() && inst.enemy.dist_mode() == crate::pdsim::distmode::DistMode::Ok {
+                ok_s += dt;
+            }
+            err_sum += (dist - band.centre_m()).abs() * dt;
+            // Lateral travel: the component of this step perpendicular to the bearing
+            // from the player — what orbiting is made of.
+            let bearing = Vec3::new(epos.x - ppos.x, 0.0, epos.z - ppos.z).normalize_or_zero();
+            let perp = Vec3::new(-bearing.z, 0.0, bearing.x);
+            let mv = epos - prev;
+            lateral_m += (mv.x * perp.x + mv.z * perp.z).abs();
+        }
+        prev = epos;
+    }
+    let over = engaged_s.max(1e-6);
+    AbMetrics {
+        engaged_s,
+        still_frac: still_s / over,
+        in_band_frac: in_band_s / over,
+        ok_frac: ok_s / over,
+        band_err_m: err_sum / over,
+        lateral_m,
+        time_to_kill: ttk,
+        damage: start_hp - arena.world.player_health(),
+        reloaded,
+    }
+}
+
+/// Print both models' numbers side by side. The A/B is the deliverable here; the
+/// assertions below only fence off the ways the port could be broken.
+fn ab_report(label: &str, ours: &AbMetrics, pd: &AbMetrics) {
+    eprintln!("── AI A/B: {label} ──");
+    for (name, m) in [("ours", ours), ("pd", pd)] {
+        eprintln!(
+            "  {name:>4}: engaged {:.1}s  still {:.0}%  in-band {:.0}%  OK-mode {:.0}%  \
+             band-err {:.2}m  lateral {:.1}m  ttk {}  dmg {:.0}  reloaded {}",
+            m.engaged_s,
+            m.still_frac * 100.0,
+            m.in_band_frac * 100.0,
+            m.ok_frac * 100.0,
+            m.band_err_m,
+            m.lateral_m,
+            m.time_to_kill.map_or("—".to_string(), |t| format!("{t:.1}s")),
+            m.damage,
+            m.reloaded,
+        );
+    }
+}
+
+/// **The headline: `AI=pd` plants its feet and never weaves.**
+///
+/// `botcmd_tick_dist_mode`'s `BOTDISTMODE_OK` issues `chr_try_stop` — a bot inside its
+/// weapon's band with a sightline stops moving and shoots. This asserts it against the
+/// ported state (`ok_frac`) as well as against the feet, so a pass means the distance
+/// mode is genuinely driving movement rather than the hunter happening to settle.
+///
+/// **A measured surprise, and the reason the assertions are shaped the way they are.**
+/// Against a *stationary* player in the open our own hunter is nearly as stationary as
+/// PD's — around 94% of engaged time, because it reaches its standoff and its
+/// burst-and-reposition jukes are short. Standing still is therefore *not* what separates
+/// the two models in this scenario. **Lateral travel is**: ours weaves several metres
+/// around the bearing, PD's does not move sideways at all. So the discriminating
+/// assertion is the orbit metric, not the stillness one — the stillness figure is
+/// asserted absolutely (PD must be still) rather than comparatively.
+#[test]
+fn pd_mode_stands_still_in_band_where_ours_weaves() {
+    use crate::enemy::AiMode;
+    let ours = ab_run(AiMode::Ours, 20.0, true);
+    let pd = ab_run(AiMode::Pd, 20.0, true);
+    ab_report("stationary player, 20 s, invulnerable", &ours, &pd);
+    assert!(pd.engaged_s > 5.0, "the PD run barely engaged ({:.1}s) — arena problem", pd.engaged_s);
+    assert!(ours.engaged_s > 5.0, "the ours run barely engaged ({:.1}s)", ours.engaged_s);
+    assert!(
+        pd.ok_frac > 0.8,
+        "a PD hunter spent only {:.0}% of the fight in BOTDISTMODE_OK — it should close \
+         once and then hold",
+        pd.ok_frac * 100.0
+    );
+    assert!(
+        pd.still_frac > 0.9,
+        "…and OK means chr_try_stop, so its feet must be still: got {:.0}%",
+        pd.still_frac * 100.0
+    );
+    assert!(
+        pd.lateral_m < ours.lateral_m.max(1.0) * 0.5,
+        "PD mode weaved {:.1}m laterally against ours' {:.1}m — PD bots do not strafe \
+         (speedmultsideways is zero in every branch that writes it)",
+        pd.lateral_m,
+        ours.lateral_m
+    );
+}
+
+/// **PD mode holds PD's distance, not ours.** `standoff_for` is a fraction of an invented
+/// range; `g_BotDistConfigs` is PD's own number. A PD-mode hunter should be found inside
+/// its band essentially whenever it can see you.
+///
+/// The *comparison* is reported and deliberately not asserted. Measured: against a
+/// stationary player our standoff lands close to PD's band for most weapons anyway
+/// (band error 0.61 m ours vs 0.64 m PD on the default roster), so "PD sits nearer the
+/// band centre" is not a property that holds — the two rules agree here and diverge on
+/// guns whose band and standoff disagree, which is a playtest observation and not a unit
+/// test. What must hold is that PD mode obeys its own band.
+#[test]
+fn pd_mode_holds_the_weapon_band() {
+    use crate::enemy::AiMode;
+    let ours = ab_run(AiMode::Ours, 20.0, true);
+    let pd = ab_run(AiMode::Pd, 20.0, true);
+    ab_report("band adherence", &ours, &pd);
+    assert!(
+        pd.in_band_frac > 0.9,
+        "a PD hunter spent only {:.0}% of the fight inside its own engagement band",
+        pd.in_band_frac * 100.0
+    );
+    assert!(
+        pd.band_err_m < 1.5,
+        "a PD hunter held {:.2}m off its band centre — it is not fighting to the band",
+        pd.band_err_m
+    );
+}
+
+/// Lethality, side by side, with the player killable — the number a playtest will
+/// actually argue about. **Deliberately not asserted as a threshold**: which model kills
+/// faster is the question being asked, not a property to lock in. All this fences off is
+/// that PD mode can still finish a fight at all.
+#[test]
+fn ai_ab_time_to_kill_is_reported_for_both_models() {
+    use crate::enemy::AiMode;
+    let ours = ab_run(AiMode::Ours, 25.0, false);
+    let pd = ab_run(AiMode::Pd, 25.0, false);
+    ab_report("time to kill, player killable", &ours, &pd);
+    assert!(pd.damage > 0.0, "a PD-mode hunter never landed a shot in 25 s");
+    assert!(ours.damage > 0.0, "an ours-mode hunter never landed a shot in 25 s");
+}
+
+/// **In PD mode, everything PD does not have is switched off** — and switched back on
+/// by returning to `ours`. Measured on the dial at maximum, where all four knobs are at
+/// their loudest, so a zero here cannot be the difficulty being low.
+///
+/// `aibot->speedmultsideways` is written to zero in every branch that writes it
+/// (`bot.c:206, 1063…`), `chr_try_sidestep`'s only caller is a hand-authored guard
+/// script, and there is no cover selection in the bot code at all
+/// (`DESIGN_AI_PD_VS_OURS.md` §4b).
+#[test]
+fn pd_mode_zeroes_the_behaviours_perfect_dark_does_not_have() {
+    use crate::enemy::AiMode;
+    let mut world = World::new();
+    world.set_difficulty(DIFFICULTY_MAX);
+
+    world.set_ai_mode(AiMode::Ours);
+    let ours = world.ai_tuning();
+    assert!(
+        ours.dodge > 0.0 && ours.flank > 0.0 && ours.cover > 0.0 && ours.suppress > 0.0,
+        "the dial at max should have all four knobs live: dodge {} flank {} cover {} suppress {}",
+        ours.dodge,
+        ours.flank,
+        ours.cover,
+        ours.suppress
+    );
+
+    world.set_ai_mode(AiMode::Pd);
+    let pd = world.ai_tuning();
+    assert_eq!(pd.dodge, 0.0, "PD bots do not dodge your crosshair");
+    assert_eq!(pd.flank, 0.0, "PD bots do not flank");
+    assert_eq!(pd.cover, 0.0, "PD bots do not take cover");
+    assert_eq!(pd.suppress, 0.0, "PD bots have no suppressing-fire behaviour");
+    // The knobs that are NOT PD-specific stay put — this is a flag, not a lobotomy.
+    assert_eq!(pd.speed_mult, ours.speed_mult, "movement speed still follows the dial");
+    assert_eq!(pd.sense, ours.sense, "perception reach still follows the dial");
+
+    world.set_ai_mode(AiMode::Ours);
+    let back = world.ai_tuning();
+    assert!(back.dodge > 0.0, "switching back must restore our behaviours — nothing was deleted");
+}
+
+/// A PD-mode hunter never searches, whatever the `pd_omniscience` flag says: PD's target
+/// selection has no visibility gate, so the model has no blind state to fall into. The
+/// kill-switch governs `AI=ours`, where omniscience is an experiment rather than the
+/// foundation.
+#[test]
+fn pd_mode_is_omniscient_even_with_the_kill_switch_off() {
+    use crate::enemy::AiMode;
+    let (mut arena, player) = omniscience_arena(true);
+    arena.world.set_ai_mode(AiMode::Pd);
+    arena.world.set_pd_omniscience(false);
+    let (closest, searched) = omniscience_run(&mut arena, 20.0, player);
+    println!("PD mode, omniscience kill-switch off: closest {closest:.2} m, searched {searched}");
+    assert!(
+        arena.world.enemies[0].enemy.is_omniscient(),
+        "AI=pd requires omniscience — bot_choose_general_target has no visibility gate"
+    );
+    assert!(!searched, "a PD-mode hunter has no Search/Investigate to reach");
+    assert!(closest < 6.0, "and it comes through the gap to find you ({closest:.2} m)");
+}
+
+/// **PD's reload rule, out of ammo.** A hunter in a sustained firefight empties its
+/// magazine and is briefly out of the fight — the one opening the distance-band model
+/// leaves you, and something `AI=ours` hunters (who carry infinite ammunition) never do.
+#[test]
+fn pd_mode_hunters_run_dry_and_reload() {
+    use crate::enemy::AiMode;
+    let pd = ab_run(AiMode::Pd, 20.0, true);
+    let ours = ab_run(AiMode::Ours, 20.0, true);
+    ab_report("reload rule", &ours, &pd);
+    assert!(pd.reloaded, "a PD-mode hunter fired for 20 s without ever reloading");
+    assert!(!ours.reloaded, "an ours-mode hunter reloaded — that rule is PD-mode only");
+}
+
+/// **PD's reload rule, the half-clip clause.** `bot.c:2470`: below half a clip *and* the
+/// target unseen for 2 s, a bot tops up rather than waiting to run dry. Held here by
+/// making the player unperceivable (the `N` observe toggle) after a burst — the hunter
+/// still knows where you are (omniscience is knowledge, not perception), so this isolates
+/// the "haven't seen you lately" clause from losing the target altogether.
+#[test]
+fn pd_mode_tops_up_a_partial_clip_once_you_are_out_of_sight() {
+    use crate::enemy::AiMode;
+    use crate::pdsim::difficulty::BotDifficulty;
+    let (px, pz) = (7.5f32, 4.0f32);
+    let mut arena =
+        TestArena::build_pd([60.0, 16.0, 60.0], &[], 1, Vec3::new(px, 0.0, pz), BotDifficulty::Normal);
+    arena.world.set_ai_mode(AiMode::Pd);
+    arena.world.toggle_invulnerable();
+    arena.place_hunter(0, px, pz + 4.0); // already inside every band → it opens fire at once
+    let dt = 1.0 / 60.0;
+    let clip = arena.world.enemies[0].weapon.clip;
+    if clip < 2 {
+        eprintln!("skipping: this hunter's weapon has no magazine to be half-empty");
+        return;
+    }
+    // Fire until the magazine is down but NOT empty, so only the half-clip clause can
+    // explain a reload.
+    let mut fired_frames = 0;
+    while arena.world.enemies[0].loaded > clip / 2 && fired_frames < 60 * 20 {
+        arena.set_player(px, pz);
+        arena.step(dt);
+        fired_frames += 1;
+    }
+    let loaded = arena.world.enemies[0].loaded;
+    if loaded == 0 || arena.world.enemies[0].reload_timer > 0.0 {
+        eprintln!("skipping: this weapon empties its clip faster than the clause can trigger");
+        return;
+    }
+    assert!(loaded < clip, "the hunter never fired a shot in 20 s");
+    // Now vanish. The 2 s clock starts, and the reload should be scheduled just after it.
+    arena.world.toggle_invisible();
+    let mut scheduled_at = None;
+    for f in 0..(60.0 * 4.0) as usize {
+        arena.set_player(px, pz);
+        arena.step(dt);
+        if scheduled_at.is_none() && arena.world.enemies[0].reload_timer > 0.0 {
+            scheduled_at = Some(f as f32 * dt);
+        }
+    }
+    let at = scheduled_at.expect("a partial magazine was never topped up after 4 s unseen");
+    println!("half-clip reload scheduled {at:.1}s after losing sight ({loaded}/{clip} loaded)");
+    assert!(
+        (super::PD_RELOAD_UNSEEN..3.5).contains(&at),
+        "the reload came {at:.1}s after losing sight; PD's clause is {:.0}s",
+        super::PD_RELOAD_UNSEEN
+    );
+}
+
+/// **An explicit `AI=` outranks any mode default**, whatever order a caller uses — the
+/// trap that ate `BODIES=ge` for a whole playtest when `enable_pd_lab` pinned a body set
+/// and the environment was applied first. Nothing here pins an AI mode today; this pins
+/// the property so nothing may start.
+#[test]
+fn an_explicit_ai_mode_outranks_the_lab() {
+    use crate::enemy::AiMode;
+    let mut world = World::new();
+    world.enable_pd_lab(super::pd_lab::PdLabConfig::default());
+    world.set_ai_mode(AiMode::Ours);
+    assert_eq!(world.ai_mode(), AiMode::Ours, "the lab must not pin the engagement model");
+    world.set_ai_mode(AiMode::Pd);
+    assert_eq!(world.ai_mode(), AiMode::Pd);
+}

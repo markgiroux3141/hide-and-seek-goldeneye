@@ -29,8 +29,14 @@
 //!
 //! [`zeroing`] is the aim model itself, and [`targeting`] is the shared selection
 //! algorithm the personalities veto against.
+//!
+//! [`distmode`] is the one exception to "this module does not move anything": it is
+//! PD's combat *movement decision* (`botcmd_tick_dist_mode`), which belongs with the
+//! rest of the bot model even though the execution is the hunter's. It is reached
+//! only under `AI=pd` — see [`crate::enemy::AiMode`].
 
 pub mod difficulty;
+pub mod distmode;
 pub mod personality;
 pub mod spread;
 pub mod targeting;

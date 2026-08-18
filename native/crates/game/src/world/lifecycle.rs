@@ -215,6 +215,13 @@ impl World {
                 // it travels with the model rather than with the mode — a GoldenEye
                 // hunter in the same wave would keep its own last-known/search behaviour.
                 let omniscient_on = self.pd_omniscience;
+                // Which engagement model this step runs. Under `AI=pd` omniscience is
+                // not optional: `bot_choose_general_target` (`bot.c:1589`) considers
+                // every living opponent regardless of visibility, and the whole ladder
+                // is built on always having a target. The `pd_omniscience` kill-switch
+                // still governs `AI=ours`, where it is an experiment rather than the
+                // model's foundation.
+                let pd_mode = self.ai_mode.is_pd();
                 // Difficulty dial as a fraction, for the PD simulant tier lookup.
                 let dial_frac = self.difficulty_frac();
                 // Everyone a simulant could shoot at, snapshotted before the loop —
@@ -252,7 +259,8 @@ impl World {
                     inst.enemy.set_utility(utility_on);
                     // Perfect Dark hunters always know where the player is (movement
                     // only — perception is untouched, see `Enemy::known_player_pos`).
-                    inst.enemy.set_omniscient(omniscient_on && inst.pdsim.is_some());
+                    inst.enemy
+                        .set_omniscient(pd_mode || (omniscient_on && inst.pdsim.is_some()));
                     // Is THIS hunter mid fire burst? (the JS `enemyState === 'action'`
                     // proxy the attack→cooldown transition needs). Firing is a timer
                     // now, so the hunter can move + aim through it.
@@ -297,12 +305,20 @@ impl World {
                             .unwrap_or_else(|| crate::enemy::EngageTarget::player(feet)),
                         _ => crate::enemy::EngageTarget::player(feet),
                     };
+                    // The weapon's Perfect Dark engagement band, for the active firing
+                    // function — `botinv_get_dist_config(weaponnum, gunfunc)`. Read only
+                    // under `AI=pd`; `AI=ours` fights to `weapon.standoff` as before.
+                    let band = crate::combat::enemy_weapons::dist_band_for(
+                        &inst.weapon,
+                        inst.use_secondary,
+                    );
                     let step = match self.nav.as_ref() {
                         Some(nav) => inst.enemy.update(
                             dt,
                             engage,
                             feet,
                             inst.weapon.standoff,
+                            band,
                             tuning,
                             aimed_at,
                             nav,
@@ -422,6 +438,11 @@ impl World {
                         Some(pd) => pd && inst.fire_elapsed.is_none(),
                         None => step.want_fire,
                     };
+                    // Rung 1 of PD's ladder: a bot that is reloading does not shoot.
+                    // `bot_tick_unpaused` runs the reload check before the attack, and
+                    // `botact_reload` is what refills — until it fires, `loadedammo` is
+                    // 0 and every trigger pull is a dry click.
+                    let wants_fire = wants_fire && !(pd_mode && inst.reload_timer > 0.0);
                     if wants_fire {
                         fire_requests.push(i);
                     }
@@ -955,6 +976,8 @@ impl World {
                 collider,
                 fade: None,
                 shot_timer: 0.0,
+                loaded: weapon.clip,
+                reload_timer: 0.0,
                 burst_shot: 0,
                 use_secondary: false,
                 fire_elapsed: None,
