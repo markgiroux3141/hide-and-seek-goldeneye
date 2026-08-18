@@ -402,6 +402,9 @@ impl App {
         let raw_input = state.take_egui_input(window);
 
         let shop_open = self.shop_open;
+        // Whether the mouse is grabbed this frame. Read up front like every other
+        // snapshot here, so the closure can hide egui's cursor without borrowing `self`.
+        let pointer_locked = self.input.pointer_locked;
         let credits = self.world.as_ref().map(|w| w.credits()).unwrap_or(0);
         // egui handle to the offscreen 3D weapon preview (rendered below in the render
         // block). Read here so the closure can draw it as an image.
@@ -931,6 +934,28 @@ impl App {
             draw_pd_lab_overlay(ctx, &pd_debug);
             if let Some(r) = radar.as_ref() {
                 draw_pd_radar(ctx, r);
+            }
+            // ── Who owns the mouse cursor ──
+            //
+            // Last thing in the pass, so it beats any widget that set a hover cursor.
+            //
+            // `set_pointer_lock` hides the cursor with `Window::set_cursor_visible(false)`,
+            // but that does not stick: this egui pass runs **every frame**, and
+            // `egui_winit::State::handle_platform_output` (below) re-applies visibility from
+            // egui's own requested icon — `CursorIcon::Default` translates to a real winit
+            // cursor, so it calls `set_cursor_visible(true)` again. It early-outs while the
+            // requested icon is unchanged, which is why the cursor only reappeared *after*
+            // something moved it (hovering a panel widget, or the pointer leaving and
+            // re-entering the window) — it looked intermittent rather than broken.
+            //
+            // So the fix is to agree with egui rather than fight it: while the pointer is
+            // locked, ask for `CursorIcon::None`, the one icon `translate_cursor` maps to
+            // `None` and therefore to `set_cursor_visible(false)`. egui then records
+            // "hidden" as the current state and stops re-showing it. Unlocked (the object
+            // panel is open, or Esc released the grab) we say nothing and egui manages the
+            // cursor normally — it is genuinely needed for the panel and the gizmos.
+            if pointer_locked {
+                ctx.set_cursor_icon(egui::CursorIcon::None);
             }
         });
 
