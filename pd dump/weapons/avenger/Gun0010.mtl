@@ -1,0 +1,812 @@
+newmtl m0
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd0B54.bmp
+
+newmtl m1EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m2EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m3
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m4TransparentClampSClampT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F3.bmp
+
+newmtl m5TransparentCullBothClampSClampT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03AB.bmp
+
+newmtl m6TransparentCullBothClampSClampT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03AC.bmp
+
+newmtl m7TransparentCullBothClampSClampT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03AD.bmp
+
+newmtl m8TransparentCullBothClampSClampT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03AE.bmp
+
+newmtl m9TransparentCullBothClampSClampT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EC.bmp
+
+newmtl m10
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EF.bmp
+
+newmtl m11
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EF.bmp
+
+newmtl m12
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EF.bmp
+
+newmtl m13
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EF.bmp
+
+newmtl m14
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EF.bmp
+
+newmtl m15
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EF.bmp
+
+newmtl m16
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EF.bmp
+
+newmtl m17
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EF.bmp
+
+newmtl m18
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EF.bmp
+
+newmtl m19
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EF.bmp
+
+newmtl m20
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EF.bmp
+
+newmtl m21
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EF.bmp
+
+newmtl m22
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F1.bmp
+
+newmtl m23
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F1.bmp
+
+newmtl m24ClampSClampT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F0.bmp
+
+newmtl m25ClampSClampT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F0.bmp
+
+newmtl m26ClampSClampT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F0.bmp
+
+newmtl m27ClampSClampT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F0.bmp
+
+newmtl m28ClampSClampT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F0.bmp
+
+newmtl m29ClampSClampT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F0.bmp
+
+newmtl m30ClampSClampT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F0.bmp
+
+newmtl m31ClampSClampT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F0.bmp
+
+newmtl m32
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F2.bmp
+
+newmtl m33
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F2.bmp
+
+newmtl m34
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F2.bmp
+
+newmtl m35
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F2.bmp
+
+newmtl m36
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F2.bmp
+
+newmtl m37
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F2.bmp
+
+newmtl m38EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m39EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m40EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m41EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m42EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m43EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m44EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m45EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m46EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m47EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m48EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m49EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m50EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m51EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m52EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m53EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m54EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m55EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m56EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m57EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m58EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m59EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m60EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m61EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m62EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m63EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m64EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m65EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m66EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m67EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m68EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m69EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m70EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m71EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m72EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m73EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m74EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m75EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m76EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m77EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m78EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m79EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m80EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m81EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m82EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m83EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m84EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m85EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m86EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m87EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m88EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m89EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m90EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m91EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m92EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m93EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m94EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m95EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m96EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m97EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m98EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m99TransparentClampSMirrorT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EE.bmp
+
+newmtl m100TransparentClampSMirrorT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EE.bmp
+
+newmtl m101TransparentClampSMirrorT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EE.bmp
+
+newmtl m102TransparentMirrorT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03E9.bmp
+
+newmtl m103TransparentMirrorT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03E9.bmp
+
+newmtl m104TransparentMirrorSMirrorT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03ED.bmp
+
+newmtl m105TransparentCullBothMirrorSMirrorT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03ED.bmp
+
+newmtl m106TransparentMirrorT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EA.bmp
+
+newmtl m107TransparentMirrorT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EA.bmp
+
+newmtl m108EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd0B54.bmp
+
+newmtl m109ClampSClampT
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F0.bmp
+
+newmtl m110
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03F2.bmp
+
+newmtl m111
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd05FF.bmp
+
+newmtl m112EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m113EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m114EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+
+newmtl m115EnvMappingTexScaleS0.031250TexScaleT0.031250
+Ka 0 0 0
+illum 2
+Ns 64
+d 1.000000
+map_Kd tempImgEd03EB.bmp
+

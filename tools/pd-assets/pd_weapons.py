@@ -848,6 +848,11 @@ def build() -> dict:
     mpweapon_names = {v: k for k, v in consts.by_prefix("MPWEAPON_").items()}
     weapon_names = {v: k for k, v in consts.by_prefix("WEAPON_").items()}
 
+    editor = editor_dump_index()
+    # Second pass key: fp model .bin -> folder, so the Falcon variants (which share
+    # `FILE_GFALCON2`) resolve to the plain Falcon's export.
+    editor_by_bin: dict[str, dict] = {}
+
     rows = []
     for mp_index, raw in enumerate(mp_rows_raw):
         inner = raw.strip()
@@ -936,6 +941,7 @@ def build() -> dict:
                     "source": f"mplayer.c:{mp_init['g_MpWeapons']['line'] + mp_index}",
                 },
                 "part_visibility": part_vis,
+                "editor": None,  # filled in below, once fp_model is known
                 "export": export_info(
                     w_slug(mp_index, name_text),
                     tp_bin,
@@ -948,6 +954,17 @@ def build() -> dict:
                 "functions": [expand_func(f) for f in funcs],
                 "ammo": [expand_ammo(wdef.get("pri_ammo")), expand_ammo(wdef.get("sec_ammo"))],
             }
+        )
+
+    # Resolve the editor dump per row, falling back to whichever gun shares the
+    # same first-person model file (the Falcon variants).
+    for r in rows:
+        e = editor.get(r["weaponnum"])
+        if e:
+            editor_by_bin.setdefault(r["assets"]["fp_model"] or "", e)
+    for r in rows:
+        r["editor"] = editor.get(r["weaponnum"]) or editor_by_bin.get(
+            r["assets"]["fp_model"] or ""
         )
 
     return {
@@ -1013,6 +1030,70 @@ def export_info(slug: str, tp_rel: str | None, has_flash: bool = False) -> dict:
         info["tp_muzzle"] = [float(v) for v in meta["muzzle"]]
     info["muzzle_is_authored"] = meta.get("muzzle_from") == "CHRGUNFIRE"
     return info
+
+
+#: Where the Perfect Gold / GoldenEye Setup Editor dump lives, relative to the repo.
+EDITOR_DUMP = os.path.join(REPO, "pd dump", "weapons")
+
+
+def editor_dump_index() -> dict[int, dict]:
+    """`weaponnum -> {folder, textures}` for the editor-exported gun assets.
+
+    The user exported the arsenal with Perfect Gold (the OBJ header says "SubDrag
+    and the GoldenEye Setup Editor"). Two things make that dump worth reading rather
+    than treating as a curiosity:
+
+    * **It decodes the textures we cannot.** PD's second texture codec
+      (`tex_inflate_non_zlib`) is unported, and every one of the 76 muzzle-flash
+      textures across the arsenal is on it. The dump covers 100% of them, as 32-bit
+      BMPs with real alpha — so the flash is a soft flame instead of an opaque
+      square, without porting the codec.
+    * **Its material NAMES carry the render intent**, in the exact convention our
+      engine already parses (`CullBoth`, `EnvMapping`, `ClampS/T`, `TexScaleS/T`,
+      `Transparent`) — because our GoldenEye weapon GLBs came out of this same tool.
+      `textured_model.rs` already looks for `*EnvMapping*`; `load_flash` already
+      filters on `CullBoth`.
+
+    The filename convention is `GunNNNN.obj` where NNNN is the **`WEAPON_*` enum
+    value in hex** — verified against all 31 folders, e.g. `Gun0002` = WEAPON_FALCON2
+    (0x02), `Gun000C` = WEAPON_CALLISTO (0x0c). Textures are `tempImgEdNNNN.bmp`,
+    NNNN being the texture number the model's own texconfig table uses, which is what
+    lets them be matched up without guessing.
+
+    31 folders cover all 33 MP guns: the Falcon 2 silencer and scope variants have no
+    folder of their own because they **share the plain Falcon's model file** and
+    differ only by `modelpartvisibility`, so callers should fall back to the folder of
+    whichever gun shares their `fp_model`.
+    """
+    out: dict[int, dict] = {}
+    if not os.path.isdir(EDITOR_DUMP):
+        return out
+    for folder in sorted(os.listdir(EDITOR_DUMP)):
+        path = os.path.join(EDITOR_DUMP, folder)
+        if not os.path.isdir(path):
+            continue
+        objs = [f for f in os.listdir(path) if f.lower().endswith(".obj")]
+        if not objs:
+            continue
+        stem = os.path.splitext(objs[0])[0]
+        if not stem.lower().startswith("gun"):
+            continue
+        try:
+            weaponnum = int(stem[3:], 16)
+        except ValueError:
+            continue
+        texes = sorted(
+            int(f[len("tempImgEd") : -4], 16)
+            for f in os.listdir(path)
+            if f.startswith("tempImgEd") and f.lower().endswith(".bmp")
+        )
+        out[weaponnum] = {
+            "folder": folder,
+            "obj": objs[0],
+            "mtl": stem + ".mtl",
+            "textures": texes,
+        }
+    return out
 
 
 def decode_flags(value: object, consts: Consts, prefix: str) -> list[str]:

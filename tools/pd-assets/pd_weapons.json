@@ -630,6 +630,22 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "falcon",
+        "obj": "Gun0002.obj",
+        "mtl": "Gun0002.mtl",
+        "textures": [
+          803,
+          804,
+          805,
+          806,
+          807,
+          808,
+          810,
+          814,
+          3271
+        ]
+      },
       "export": {
         "fp_glb": "pd/01-falcon-2-fp.glb",
         "tp_glb": "pd/01-falcon-2-tp.glb",
@@ -809,6 +825,22 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "falcon",
+        "obj": "Gun0002.obj",
+        "mtl": "Gun0002.mtl",
+        "textures": [
+          803,
+          804,
+          805,
+          806,
+          807,
+          808,
+          810,
+          814,
+          3271
+        ]
+      },
       "export": {
         "fp_glb": "pd/02-falcon-2-silencer-fp.glb",
         "tp_glb": "pd/02-falcon-2-silencer-tp.glb",
@@ -989,6 +1021,22 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "falcon",
+        "obj": "Gun0002.obj",
+        "mtl": "Gun0002.mtl",
+        "textures": [
+          803,
+          804,
+          805,
+          806,
+          807,
+          808,
+          810,
+          814,
+          3271
+        ]
+      },
       "export": {
         "fp_glb": "pd/03-falcon-2-scope-fp.glb",
         "tp_glb": "pd/03-falcon-2-scope-tp.glb",
@@ -1160,6 +1208,27 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "magsec",
+        "obj": "Gun0005.obj",
+        "mtl": "Gun0005.mtl",
+        "textures": [
+          173,
+          805,
+          806,
+          807,
+          808,
+          912,
+          913,
+          914,
+          916,
+          917,
+          918,
+          919,
+          1535,
+          2168
+        ]
+      },
       "export": {
         "fp_glb": "pd/04-magsec-4-fp.glb",
         "tp_glb": "pd/04-magsec-4-tp.glb",
@@ -1322,6 +1391,29 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "mauler",
+        "obj": "Gun0006.obj",
+        "mtl": "Gun0006.mtl",
+        "textures": [
+          1,
+          662,
+          929,
+          930,
+          931,
+          932,
+          933,
+          934,
+          935,
+          936,
+          937,
+          938,
+          2142,
+          2143,
+          2144,
+          2145
+        ]
+      },
       "export": {
         "fp_glb": "pd/05-mauler-fp.glb",
         "tp_glb": "pd/05-mauler-tp.glb",
@@ -1481,6 +1573,18 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "phoenix",
+        "obj": "Gun0007.obj",
+        "mtl": "Gun0007.mtl",
+        "textures": [
+          1024,
+          1026,
+          1031,
+          1539,
+          1540
+        ]
+      },
       "export": {
         "fp_glb": "pd/06-phoenix-fp.glb",
         "tp_glb": "pd/06-phoenix-tp.glb",
@@ -1665,6 +1769,24 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "dy357",
+        "obj": "Gun0008.obj",
+        "mtl": "Gun0008.mtl",
+        "textures": [
+          920,
+          921,
+          922,
+          923,
+          924,
+          925,
+          926,
+          1535,
+          2131,
+          2146,
+          2147
+        ]
+      },
       "export": {
         "fp_glb": "pd/07-dy357-magnum-fp.glb",
         "tp_glb": "pd/07-dy357-magnum-tp.glb",
@@ -1852,6 +1974,23 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "gold dy357",
+        "obj": "Gun0009.obj",
+        "mtl": "Gun0009.mtl",
+        "textures": [
+          923,
+          924,
+          925,
+          926,
+          927,
+          928,
+          1535,
+          2131,
+          2146,
+          2147
+        ]
+      },
       "export": {
         "fp_glb": "pd/08-dy357-lx-fp.glb",
         "tp_glb": "pd/08-dy357-lx-tp.glb",
@@ -2020,6 +2159,25 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "cmp",
+        "obj": "Gun000A.obj",
+        "mtl": "Gun000A.mtl",
+        "textures": [
+          803,
+          902,
+          992,
+          993,
+          994,
+          995,
+          996,
+          997,
+          998,
+          999,
+          1000,
+          1535
+        ]
+      },
       "export": {
         "fp_glb": "pd/09-cmp150-fp.glb",
         "tp_glb": "pd/09-cmp150-tp.glb",
@@ -2192,6 +2350,25 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "cyclone",
+        "obj": "Gun000B.obj",
+        "mtl": "Gun000B.mtl",
+        "textures": [
+          239,
+          955,
+          956,
+          961,
+          1580,
+          1581,
+          1582,
+          1583,
+          1584,
+          1585,
+          1586,
+          2901
+        ]
+      },
       "export": {
         "fp_glb": "pd/0a-cyclone-fp.glb",
         "tp_glb": "pd/0a-cyclone-tp.glb",
@@ -2361,6 +2538,16 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "callisto",
+        "obj": "Gun000C.obj",
+        "mtl": "Gun000C.mtl",
+        "textures": [
+          1024,
+          1032,
+          1539
+        ]
+      },
       "export": {
         "fp_glb": "pd/0b-callisto-ntg-fp.glb",
         "tp_glb": "pd/0b-callisto-ntg-tp.glb",
@@ -2534,6 +2721,34 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "rcp120",
+        "obj": "Gun000D.obj",
+        "mtl": "Gun000D.mtl",
+        "textures": [
+          1,
+          904,
+          905,
+          907,
+          909,
+          910,
+          993,
+          994,
+          995,
+          996,
+          997,
+          998,
+          999,
+          1000,
+          1015,
+          1587,
+          1588,
+          1589,
+          1590,
+          1591,
+          1592
+        ]
+      },
       "export": {
         "fp_glb": "pd/0c-rc-p120-fp.glb",
         "tp_glb": "pd/0c-rc-p120-tp.glb",
@@ -2693,6 +2908,29 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "laptop gun",
+        "obj": "Gun000E.obj",
+        "mtl": "Gun000E.mtl",
+        "textures": [
+          908,
+          909,
+          911,
+          939,
+          940,
+          941,
+          942,
+          1588,
+          2171,
+          2172,
+          2173,
+          2174,
+          2175,
+          2176,
+          2177,
+          2178
+        ]
+      },
       "export": {
         "fp_glb": "pd/0d-laptop-gun-fp.glb",
         "tp_glb": "pd/0d-laptop-gun-tp.glb",
@@ -2854,6 +3092,30 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "dragon",
+        "obj": "Gun000F.obj",
+        "mtl": "Gun000F.mtl",
+        "textures": [
+          902,
+          905,
+          923,
+          924,
+          925,
+          926,
+          1013,
+          1014,
+          1015,
+          1016,
+          1017,
+          1018,
+          1019,
+          1020,
+          1021,
+          1022,
+          1535
+        ]
+      },
       "export": {
         "fp_glb": "pd/0e-dragon-fp.glb",
         "tp_glb": "pd/0e-dragon-tp.glb",
@@ -3009,6 +3271,30 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "avenger",
+        "obj": "Gun0010.obj",
+        "mtl": "Gun0010.mtl",
+        "textures": [
+          939,
+          940,
+          941,
+          942,
+          1001,
+          1002,
+          1003,
+          1004,
+          1005,
+          1006,
+          1007,
+          1008,
+          1009,
+          1010,
+          1011,
+          1535,
+          2900
+        ]
+      },
       "export": {
         "fp_glb": "pd/0f-k7-avenger-fp.glb",
         "tp_glb": "pd/0f-k7-avenger-tp.glb",
@@ -3187,6 +3473,26 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "ar34",
+        "obj": "Gun0011.obj",
+        "mtl": "Gun0011.mtl",
+        "textures": [
+          902,
+          905,
+          923,
+          924,
+          925,
+          926,
+          1022,
+          1535,
+          1575,
+          1576,
+          1577,
+          1578,
+          1579
+        ]
+      },
       "export": {
         "fp_glb": "pd/10-ar34-fp.glb",
         "tp_glb": "pd/10-ar34-tp.glb",
@@ -3364,6 +3670,30 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "super dragon",
+        "obj": "Gun0012.obj",
+        "mtl": "Gun0012.mtl",
+        "textures": [
+          902,
+          905,
+          923,
+          924,
+          925,
+          926,
+          1013,
+          1014,
+          1015,
+          1016,
+          1017,
+          1018,
+          1019,
+          1020,
+          1021,
+          1022,
+          1535
+        ]
+      },
       "export": {
         "fp_glb": "pd/11-superdragon-fp.glb",
         "tp_glb": "pd/11-superdragon-tp.glb",
@@ -3549,6 +3879,40 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "shotgun",
+        "obj": "Gun0013.obj",
+        "mtl": "Gun0013.mtl",
+        "textures": [
+          1,
+          906,
+          939,
+          940,
+          941,
+          942,
+          974,
+          975,
+          976,
+          977,
+          978,
+          979,
+          980,
+          981,
+          982,
+          983,
+          984,
+          985,
+          986,
+          987,
+          988,
+          989,
+          990,
+          991,
+          1190,
+          2148,
+          2149
+        ]
+      },
       "export": {
         "fp_glb": "pd/12-shotgun-fp.glb",
         "tp_glb": "pd/12-shotgun-tp.glb",
@@ -3715,6 +4079,29 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "reaper",
+        "obj": "Gun0014.obj",
+        "mtl": "Gun0014.mtl",
+        "textures": [
+          1,
+          662,
+          930,
+          931,
+          932,
+          934,
+          943,
+          944,
+          945,
+          951,
+          952,
+          953,
+          2142,
+          2143,
+          2144,
+          2145
+        ]
+      },
       "export": {
         "fp_glb": "pd/13-reaper-fp.glb",
         "tp_glb": "pd/13-reaper-tp.glb",
@@ -3877,6 +4264,24 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "sniper rifle",
+        "obj": "Gun0015.obj",
+        "mtl": "Gun0015.mtl",
+        "textures": [
+          902,
+          903,
+          904,
+          905,
+          906,
+          907,
+          908,
+          909,
+          910,
+          911,
+          1535
+        ]
+      },
       "export": {
         "fp_glb": "pd/14-sniper-rifle-fp.glb",
         "tp_glb": "pd/14-sniper-rifle-tp.glb",
@@ -4023,6 +4428,26 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "far sight",
+        "obj": "Gun0016.obj",
+        "mtl": "Gun0016.mtl",
+        "textures": [
+          1023,
+          1024,
+          1025,
+          1026,
+          1027,
+          1028,
+          1029,
+          1030,
+          1031,
+          1032,
+          1033,
+          1034,
+          1035
+        ]
+      },
       "export": {
         "fp_glb": "pd/15-farsight-xr-20-fp.glb",
         "tp_glb": "pd/15-farsight-xr-20-tp.glb",
@@ -4176,6 +4601,25 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "devastator",
+        "obj": "Gun0017.obj",
+        "mtl": "Gun0017.mtl",
+        "textures": [
+          1,
+          954,
+          955,
+          956,
+          957,
+          958,
+          959,
+          960,
+          961,
+          962,
+          963,
+          964
+        ]
+      },
       "export": {
         "fp_glb": "pd/16-devastator-fp.glb",
         "tp_glb": "pd/16-devastator-tp.glb",
@@ -4357,6 +4801,23 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "rocket launcher",
+        "obj": "Gun0018.obj",
+        "mtl": "Gun0018.mtl",
+        "textures": [
+          690,
+          965,
+          966,
+          967,
+          968,
+          969,
+          970,
+          971,
+          972,
+          973
+        ]
+      },
       "export": {
         "fp_glb": "pd/17-rocket-launcher-fp.glb",
         "tp_glb": "pd/17-rocket-launcher-tp.glb",
@@ -4531,6 +4992,22 @@
         "source": "mplayer.c:79"
       },
       "part_visibility": [],
+      "editor": {
+        "folder": "skedar rocket launcher",
+        "obj": "Gun0019.obj",
+        "mtl": "Gun0019.mtl",
+        "textures": [
+          1,
+          931,
+          932,
+          943,
+          944,
+          945,
+          947,
+          951,
+          953
+        ]
+      },
       "export": {
         "fp_glb": "pd/18-slayer-fp.glb",
         "tp_glb": "pd/18-slayer-tp.glb",
@@ -4711,6 +5188,17 @@
         "source": "mplayer.c:80"
       },
       "part_visibility": [],
+      "editor": {
+        "folder": "knife",
+        "obj": "Gun001A.obj",
+        "mtl": "Gun001A.mtl",
+        "textures": [
+          803,
+          907,
+          1593,
+          1594
+        ]
+      },
       "export": {
         "fp_glb": "pd/19-combat-knife-fp.glb",
         "tp_glb": "pd/19-combat-knife-tp.glb",
@@ -4865,6 +5353,21 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "crossbow",
+        "obj": "Gun001B.obj",
+        "mtl": "Gun001B.mtl",
+        "textures": [
+          1,
+          813,
+          954,
+          963,
+          964,
+          1541,
+          1542,
+          1543
+        ]
+      },
       "export": {
         "fp_glb": "pd/1a-crossbow-fp.glb",
         "tp_glb": "pd/1a-crossbow-tp.glb",
@@ -5054,6 +5557,21 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "psychosis gun",
+        "obj": "Gun001C.obj",
+        "mtl": "Gun001C.mtl",
+        "textures": [
+          927,
+          966,
+          1534,
+          1535,
+          1544,
+          1545,
+          1546,
+          1547
+        ]
+      },
       "export": {
         "fp_glb": "pd/1b-tranquilizer-fp.glb",
         "tp_glb": "pd/1b-tranquilizer-tp.glb",
@@ -5209,6 +5727,21 @@
         "source": "mplayer.c:83"
       },
       "part_visibility": [],
+      "editor": {
+        "folder": "grenade",
+        "obj": "Gun001E.obj",
+        "mtl": "Gun001E.mtl",
+        "textures": [
+          1,
+          965,
+          1621,
+          2127,
+          2128,
+          2129,
+          2130,
+          2131
+        ]
+      },
       "export": {
         "fp_glb": "pd/1c-grenade-fp.glb",
         "tp_glb": "pd/1c-grenade-tp.glb",
@@ -5347,6 +5880,20 @@
         "source": "mplayer.c:84"
       },
       "part_visibility": [],
+      "editor": {
+        "folder": "n bomb",
+        "obj": "Gun001F.obj",
+        "mtl": "Gun001F.mtl",
+        "textures": [
+          965,
+          2127,
+          2128,
+          2129,
+          2130,
+          2131,
+          2291
+        ]
+      },
       "export": {
         "fp_glb": "pd/1d-n-bomb-fp.glb",
         "tp_glb": "pd/1d-n-bomb-tp.glb",
@@ -5483,6 +6030,18 @@
         "source": "mplayer.c:85"
       },
       "part_visibility": [],
+      "editor": {
+        "folder": "timed mine",
+        "obj": "Gun0020.obj",
+        "mtl": "Gun0020.mtl",
+        "textures": [
+          984,
+          1430,
+          2735,
+          2736,
+          2737
+        ]
+      },
       "export": {
         "fp_glb": "pd/1e-timed-mine-fp.glb",
         "tp_glb": "pd/1e-timed-mine-tp.glb",
@@ -5611,6 +6170,18 @@
         "source": "mplayer.c:86"
       },
       "part_visibility": [],
+      "editor": {
+        "folder": "proximity mine",
+        "obj": "Gun0021.obj",
+        "mtl": "Gun0021.mtl",
+        "textures": [
+          984,
+          1430,
+          2735,
+          2736,
+          2737
+        ]
+      },
       "export": {
         "fp_glb": "pd/1f-proximity-mine-fp.glb",
         "tp_glb": "pd/1f-proximity-mine-tp.glb",
@@ -5744,6 +6315,23 @@
           "visible": false
         }
       ],
+      "editor": {
+        "folder": "remote mine",
+        "obj": "Gun0022.obj",
+        "mtl": "Gun0022.mtl",
+        "textures": [
+          964,
+          984,
+          1430,
+          2731,
+          2732,
+          2733,
+          2734,
+          2735,
+          2736,
+          2737
+        ]
+      },
       "export": {
         "fp_glb": "pd/20-remote-mine-fp.glb",
         "tp_glb": "pd/20-remote-mine-tp.glb",
@@ -5880,6 +6468,22 @@
         "source": "mplayer.c:88"
       },
       "part_visibility": [],
+      "editor": {
+        "folder": "laser",
+        "obj": "Gun001D.obj",
+        "mtl": "Gun001D.mtl",
+        "textures": [
+          964,
+          1010,
+          1520,
+          1522,
+          1542,
+          1543,
+          2139,
+          2140,
+          2141
+        ]
+      },
       "export": {
         "fp_glb": "pd/21-laser-fp.glb",
         "tp_glb": "pd/21-laser-tp.glb",
@@ -6024,6 +6628,7 @@
         "source": "mplayer.c:89"
       },
       "part_visibility": [],
+      "editor": null,
       "export": {
         "fp_glb": "pd/22-x-ray-scanner-fp.glb",
         "tp_glb": "pd/22-x-ray-scanner-tp.glb",
@@ -6118,6 +6723,7 @@
         "source": "mplayer.c:90"
       },
       "part_visibility": [],
+      "editor": null,
       "export": {
         "fp_glb": "pd/23-cloaking-device-fp.glb",
         "tp_glb": "pd/23-cloaking-device-tp.glb",
@@ -6223,6 +6829,7 @@
         "source": "mplayer.c:91"
       },
       "part_visibility": [],
+      "editor": null,
       "export": {
         "fp_glb": "pd/24-combat-boost-fp.glb",
         "tp_glb": "pd/24-combat-boost-tp.glb",
@@ -6349,6 +6956,7 @@
         "source": "mplayer.c:92"
       },
       "part_visibility": [],
+      "editor": null,
       "export": {
         "fp_glb": "pd/25--fp.glb",
         "tp_glb": "pd/25--tp.glb",

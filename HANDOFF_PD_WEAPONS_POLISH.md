@@ -11,6 +11,11 @@ a real session on `ARSENAL=pd`. The recon below is done — every root cause nam
 traced to a decomp line or measured off the assets, so **start from the findings, not from
 the symptoms.**
 
+**Read item 0 first.** The user has since exported the arsenal from the Perfect Gold editor
+into `pd dump/weapons/`, and it changes the plan: it supplies 100% of the textures our decoder
+cannot handle (including every muzzle flash), plus the material render intent our engine
+already knows how to read.
+
 ```powershell
 $env:ARSENAL = "pd"; $env:OWN_ALL = "1"
 .\native\target\release\build-and-hide.exe
@@ -34,29 +39,73 @@ game yourself** — hand the user a specific brief instead.
 The order matters: item 1 unblocks item 2, and item 3 is the one that needs the user's eye
 rather than more code.
 
-### 1. Port `tex_inflate_non_zlib` — this is the muzzle flash
+### 0. START HERE: the editor dump already solves most of items 1 and 2
+
+**The user exported the arsenal from Perfect Gold** (the OBJ header says "SubDrag and the
+GoldenEye Setup Editor V4.4") into **`pd dump/weapons/`** — 31 folders, OBJ + MTL + 355 BMPs,
+5.8 MB. It is already wired into the pipeline: `pd_weapons.json` now carries an `editor`
+block per weapon (`folder`, `obj`, `mtl`, `textures`), resolved by
+`editor_dump_index()` in `pd_weapons.py`. **33/33 MP guns resolve.**
+
+The naming, verified across all 31 folders rather than assumed: `GunNNNN.obj` where NNNN is
+the **`WEAPON_*` enum value in hex** (`Gun0002` = WEAPON_FALCON2, `Gun000C` = WEAPON_CALLISTO),
+and `tempImgEdNNNN.bmp` where NNNN is the model's own texconfig texture number. 31 folders
+cover 33 guns because the Falcon 2 silencer and scope **share the plain Falcon's model file**
+and differ only by `modelpartvisibility` — the resolver falls back on shared `fp_model`.
+
+Three things it gives us, measured:
+
+1. **100% of the textures our decoder cannot do.** All **36** undecodable visible textures
+   and all **76** muzzle-flash textures are covered, as 32-bit BMPs with real alpha. The
+   Falcon's `0x325`–`0x328` are four soft-edged yellow-white flame frames. **So the muzzle
+   flash no longer needs the codec port** — see item 1.
+2. **Material render intent, in the convention our engine already parses.** The hints are in
+   the material *name*: `m0TransparentCullBothClampSClampT` for the flash,
+   `m4CullBothEnvMappingTexScaleS0.03125TexScaleT0.03125` for the gun body. That is not a
+   coincidence — our GoldenEye weapon GLBs came from this same tool, which is why
+   `engine::assets::textured_model` already looks for `*EnvMapping*` and
+   `combat::viewmodel::load_flash` already filters on `CullBoth`.
+3. **`0x323` is an ENVIRONMENT/REFLECTION map, not a surface texture.** It is a blue-grey
+   swirl, referenced by ~200 `EnvMapping` materials on the Falcon alone. **We have been
+   painting it on flat as base colour, which is exactly why the guns read as dull blue-grey
+   metal.** Sampled as a matcap by the surface normal — which `shader_viewmodel.wgsl` already
+   does for `*EnvMapping*` materials, and which now has real normals to work with — it
+   becomes polished metal. This is the user's "is there a metallic material that isn't being
+   applied", and the answer is yes.
+
+It also independently corroborates two of our findings, from a different direction: the
+Falcon exports 1479 normals and the Callisto **zero**, matching the per-node
+normals-or-colours split; and the Falcon's 565 faces match our extraction exactly.
+
+**What it does NOT give**, so the decomp pipeline stays authoritative for structure:
+`MODELPART` ids (the OBJ groups are the editor's generic `RoomNN`), the `CHRGUNFIRE` muzzle,
+the `POSITIONHELD` grip, and the **third-person `chr*` models hunters hold** (first-person
+only). So the shape of the work is a **hybrid: decomp for structure, editor dump for textures
+and material intent.**
+
+The pragmatic build order: teach `export_gun` to prefer the dump's BMP for a texture the
+codec cannot decode, carry the MTL's material-name hints onto the glTF material name (so the
+engine's existing `EnvMapping` / `CullBoth` paths light up), and bind `0x323` as the env
+texture rather than a base colour.
+
+### 1. The muzzle flash — no longer blocked on the codec
 
 **Symptom:** "the muzzle flash is just the entire white square muzzle mesh appearing for a
 second, it's not a texture with a transparency that looks like a flame."
 
-**Root cause, measured:** the flash geometry and its material are fine. **All 76 flash
-textures across all 17 guns that have one fail to decode** — 100% — because PD's second
-texture codec is not ported (`pd_tex.py` raises
+**Root cause, measured:** the flash geometry and material are fine. **All 76 flash textures
+across all 17 guns that have one fail to decode** — 100% — because PD's second texture codec
+is unported (`pd_tex.py` raises
 `UnsupportedTexture("non-zlib codec (tex_inflate_non_zlib) is not ported")`). Undecodable
-textures fall back to the flat per-part debug palette, which is exactly the opaque white
-square being described. There is no flame texture on screen because the flame texture never
-decoded.
+textures fall back to the flat per-part debug palette, and *that* is the opaque white square.
+There was never a flame on screen because the flame never decoded.
 
-This is not cosmetic polish, it is a hard blocker, and it is **the same gap** behind the
-remaining flat patches elsewhere: honouring part visibility already took undecodable
-*visible* textures from 117 down to 37, and what is left is all this codec. Worst affected:
-MagSec 4 (6), K7 Avenger (7), Rocket Launcher (4), Laser (4).
+**Take them from the editor dump (item 0) — it covers all 76.** Porting the codec is now
+optional: `tex_inflate_non_zlib` is 193 lines at `game/texdecompress.c:699` (called from
+`:2263`) and would make the pipeline self-sufficient from the ROM alone, which is worth
+something, but it is no longer on the critical path for anything visible.
 
-**The work:** `tex_inflate_non_zlib` is **193 lines** at `game/texdecompress.c:699`, called
-from `:2263`. Port it into `tools/pd-assets/pd_tex.py` beside the existing zlib path. Then
-re-export. Expect 37 → 0 and the flash to become a real flame.
-
-**Then finish the flash properly** — three things beyond the codec:
+**Then finish the flash properly** — three things beyond the texture:
 
 * **There are three flashes, not one.** `MODELPART_GUN_MUZZLEFLASH1/2/3` (`0x5a/0x5b/0x5c`,
   `constants.h:2421`) are each annotated `// toggle`, and the Reaper hides all three. PD
@@ -129,7 +178,7 @@ What is **not** ported, in rough order of how much it would change the look:
 
 | thing | where | what it does |
 |---|---|---|
-| `PD_VIEW_SCALE` | `combat/arsenal.rs` | **0.0007, inherited from the character pipeline and never measured for guns.** The most likely reason a gun reads too big or too small. |
+| `PD_VIEW_SCALE` | `combat/arsenal.rs` | **0.0007, inherited from the character pipeline and never measured for guns.** The most likely reason a gun reads too big or too small. The editor dump's OBJ vertices are a second, independent measure of true gun size — worth comparing against. |
 | `weapondef.muzzlez` | `types.h:3033` | Per-weapon muzzle depth; transcribed, unused. |
 | `weapondef.sway` | `types.h:3037` | Per-weapon sway amount; transcribed, unused. |
 | `invaimsettings.guntransup/down/side` | `types.h:2877` | The gun translates as you aim up/down/sideways (default 3 / 8 / 15). This is a large part of why PD's gun feels attached to the view. |
@@ -232,6 +281,9 @@ answer gets reintroduced.
 * **1 PD damage unit = 25.0 HP**, derived from shots-to-kill agreeing on both sides.
 * **Names collide across families** (7 of them). Resolve by **display** name — resolving by
   source name made GoldenEye's Shotgun pick up PD's −X barrel and aim 83° off.
+* **The editor dump's `GunNNNN` is the `WEAPON_*` enum in hex**, and 31 folders cover 33 guns
+  because the Falcon variants share a model file. Both verified across the whole dump;
+  `editor_dump_index()` already encodes it.
 
 ## Traps that keep firing on this track
 
