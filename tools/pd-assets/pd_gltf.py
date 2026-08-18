@@ -82,6 +82,7 @@ import argparse
 import json
 import math
 import os
+import re
 import struct
 import sys
 import zlib
@@ -386,6 +387,153 @@ def decode_texture(m: ModelDef, cfg: TexConfig) -> tuple[int, int, bytes]:
             )
         return t.width, t.height, t.rgba
     return cfg.width, cfg.height, decode_inline_texture(m, cfg)
+
+
+#: The Perfect Gold / GoldenEye Setup Editor export of the arsenal, checked into
+#: the repo. See [`editor_textures`].
+EDITOR_DUMP = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "..", "pd dump", "weapons"
+)
+
+#: Built once by [`editor_textures`].
+_EDITOR_TEXTURES: dict[int, dict] | None = None
+
+
+def editor_textures() -> dict[int, dict]:
+    """`texture number -> {"bmp": path, "hints": str}` over the WHOLE editor dump.
+
+    PD's second texture codec (`tex_inflate_non_zlib`, `texdecompress.c:699`) is
+    not ported, so [`decode_texture`] raises on the textures that use it — and
+    those are not a rounding error: **every one of the 76 muzzle-flash textures**
+    is on that codec, plus 36 visible surfaces. An undecodable texture falls back
+    to the per-part debug palette, which is why the flash read as an opaque white
+    square and why the MagSec 4 (89.6% of its triangles) read as flat colour.
+
+    The user's Perfect Gold export supplies them: 355 BMPs across 31 gun folders,
+    32-bit with real alpha. This index is **global rather than per-gun** on
+    purpose — `tempImgEdNNNN.bmp` is NNNN = the *global pool* texture number, the
+    same number `modeldef.texconfigs` carries, so a BMP exported under the Falcon
+    covers the same texture wherever else it appears (which is what extends the
+    coverage to third-person `chr*` models the dump never exported). Verified
+    across the dump: 214 distinct numbers, and where two folders both export one,
+    the files are byte-identical — so there is no ambiguity to resolve.
+
+    `hints` is the render intent, which the editor writes into the **material
+    name** (`m4CullBothEnvMappingTexScaleS0.03125…`) in the exact convention our
+    engine already parses — `textured_model.rs` looks for `*EnvMapping*`,
+    `load_flash` filters on `CullBoth` — because our GoldenEye weapon GLBs came
+    out of this same tool. It is a per-*material* property being folded onto a
+    per-*texture* key (our exports batch by texture, as PD draws them), so where a
+    texture is used both ways the **modal** hint wins; 57 of 214 are like that,
+    and the counts are lopsided enough for a majority to be meaningful (0x386 is
+    EnvMapping on 80 materials and plain on 24).
+    """
+    global _EDITOR_TEXTURES
+    if _EDITOR_TEXTURES is not None:
+        return _EDITOR_TEXTURES
+    out: dict[int, dict] = {}
+    votes: dict[int, dict[str, int]] = {}
+    if os.path.isdir(EDITOR_DUMP):
+        for folder in sorted(os.listdir(EDITOR_DUMP)):
+            path = os.path.join(EDITOR_DUMP, folder)
+            if not os.path.isdir(path):
+                continue
+            for f in sorted(os.listdir(path)):
+                if f.startswith("tempImgEd") and f.lower().endswith(".bmp"):
+                    try:
+                        num = int(f[len("tempImgEd") : -4], 16)
+                    except ValueError:
+                        continue
+                    out.setdefault(num, {"bmp": os.path.join(path, f), "hints": ""})
+                elif f.lower().endswith(".mtl"):
+                    cur = ""
+                    for line in open(os.path.join(path, f), encoding="utf-8", errors="replace"):
+                        line = line.strip()
+                        if line.startswith("newmtl "):
+                            # `m<N><hints>` — the leading index is the editor's own
+                            # material counter and carries no intent.
+                            cur = re.sub(r"^m\d+", "", line[len("newmtl ") :])
+                        elif line.startswith("map_Kd ") and cur is not None:
+                            tex = line[len("map_Kd ") :].strip()
+                            if not tex.startswith("tempImgEd"):
+                                continue
+                            try:
+                                num = int(tex[len("tempImgEd") : -4], 16)
+                            except ValueError:
+                                continue
+                            votes.setdefault(num, {})[cur] = votes.setdefault(num, {}).get(cur, 0) + 1
+    for num, tally in votes.items():
+        if num in out:
+            out[num]["hints"] = max(tally.items(), key=lambda kv: kv[1])[0]
+    _EDITOR_TEXTURES = out
+    return out
+
+
+def read_bmp(path: str) -> tuple[int, int, bytes]:
+    """A Windows BMP as `(width, height, RGBA8)`, top-down.
+
+    Only what the editor writes: an uncompressed `BITMAPINFOHEADER` at 32 bpp
+    (BGRA, and the alpha is real — the flame frames ramp 0..255 across their soft
+    edge) or 24 bpp.
+
+    **Rows are taken in file order, not bottom-up.** A positive `height` means
+    bottom-up per the BMP spec, and these files all declare one — but the editor
+    writes the rows already flipped, so honouring the spec turns every texture
+    upside down. That is measured, not assumed: 427 of these textures are ones our
+    own decoder can also produce, and **423 of them agree with PD's decode only
+    when the rows are read in file order** (the other 4 are vertically symmetric,
+    so they agree either way). A wrong choice here is invisible as an error — it
+    just makes every gun skin subtly wrong — which is why the two pipelines are
+    cross-checked against each other rather than either being trusted.
+    """
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if data[:2] != b"BM":
+        raise ValueError(f"{path}: not a BMP")
+    pixoff = struct.unpack_from("<I", data, 10)[0]
+    hdr_size, width, height, _planes, bpp, compression = struct.unpack_from("<IiiHHI", data, 14)
+    if hdr_size < 40 or compression != 0 or bpp not in (24, 32):
+        raise ValueError(f"{path}: unsupported BMP ({bpp}bpp, compression {compression})")
+    height = abs(height)
+    stride = ((width * bpp // 8) + 3) & ~3
+    out = bytearray(width * height * 4)
+    for y in range(height):
+        src = pixoff + y * stride
+        for x in range(width):
+            o = src + x * (bpp // 8)
+            d = (y * width + x) * 4
+            out[d] = data[o + 2]
+            out[d + 1] = data[o + 1]
+            out[d + 2] = data[o]
+            out[d + 3] = data[o + 3] if bpp == 32 else 255
+    return width, height, bytes(out)
+
+
+def resolve_texture(m: ModelDef, cfg: TexConfig, texnum: int) -> tuple[int, int, bytes, str]:
+    """Level 0 of a texture, from PD's own data or — when our codec cannot — from
+    the editor dump. Returns `(width, height, RGBA8, source)`.
+
+    Raises [`pd_tex.UnsupportedTexture`] only when BOTH fail, which is what the
+    caller turns into the debug palette.
+    """
+    try:
+        w, h, rgba = decode_texture(m, cfg)
+        return w, h, rgba, "pd"
+    except pd_tex.UnsupportedTexture:
+        entry = editor_textures().get(texnum)
+        if entry is None:
+            raise
+        w, h, rgba = read_bmp(entry["bmp"])
+        if (w, h) != (cfg.width, cfg.height):
+            # Callers normalise UVs by the returned size for exactly this case
+            # (0x606 is 4x16 in the texconfig and 8x16 here), but it is worth
+            # saying out loud — a silent rescale is invisible until it is on screen.
+            print(
+                f"  NOTE: editor BMP for texture {texnum:#x} is {w}x{h} but "
+                f"{m.name}'s texconfig says {cfg.width}x{cfg.height}",
+                file=sys.stderr,
+            )
+        return w, h, rgba, "editor"
 
 
 def decode_inline_texture(m: ModelDef, cfg: TexConfig) -> bytes:
@@ -1289,21 +1437,36 @@ def export_gun(
     # which is how PD draws it and what the renderer wants.
     batches: dict[object, list] = {}
     untextured = 0
+    flat_tris = 0
     undecodable: set[int] = set()
+    # Decoded once per texture, from PD's own data or the editor dump
+    # ([`resolve_texture`]): `texnum -> (w, h, rgba, source)`.
+    images: dict[int, tuple[int, int, bytes, str]] = {}
     for gi, g in enumerate(groups):
         for a, b, c, tex in g.tris:
             cfg = cfgs.get(tex)
-            if cfg is not None and tex not in undecodable:
+            if cfg is not None and tex not in undecodable and tex not in images:
                 try:
-                    decode_texture(model, cfg)
+                    images[tex] = resolve_texture(model, cfg, tex)
                 except pd_tex.UnsupportedTexture as e:
-                    print(f"  NOTE: {model.name} texture {cfg.index}: {e}", file=sys.stderr)
+                    print(f"  NOTE: {model.name} texture {tex:#x}: {e}", file=sys.stderr)
                     undecodable.add(tex)
             if cfg is not None and tex in undecodable:
                 cfg = None
-            if cfg is None:
+            # Three states, not two. A triangle whose texture our codec cannot decode
+            # keeps the loud debug palette — that is data we are MISSING. But PD also
+            # authors triangles with **no texture at all** (`tex == -1`, the display
+            # list simply never binds one; the Mauler has six), and those are shaded
+            # by the vertex colour alone on the N64. Painting them from the palette
+            # put a garish stripe on an otherwise finished gun and read as "the
+            # Mauler looks very off" — so they get a white texel and their own
+            # authored shading, which is what PD draws.
+            flat = cfg is None and tex not in cfgs
+            if cfg is None and not flat:
                 untextured += 1
-            key = tex if cfg is not None else None
+            elif flat:
+                flat_tris += 1
+            key = tex if cfg is not None else ("flat" if flat else None)
             batch = batches.get(key)
             if batch is None:
                 batch = batches[key] = [cfg, gi, {}, [], [], [], [], []]
@@ -1323,7 +1486,17 @@ def export_gun(
                         )
                     )
                     if cfg is not None:
-                        uv.extend((v.s / 32.0 / cfg.width, v.t / 32.0 / cfg.height))
+                        # PD texcoords are S10.5 fixed point in TEXELS, so they
+                        # normalise by the size of the image actually being shipped
+                        # — which is not always the texconfig's. Texture 0x606 is
+                        # 4x16 there and 8x16 in the editor's export (the texconfig
+                        # width is what the gun *uses*, not what the pool holds), and
+                        # dividing those texel counts by 4 would stretch the used
+                        # half across the whole image.
+                        iw, ih, *_ = images[tex]
+                        uv.extend((v.s / 32.0 / iw, v.t / 32.0 / ih))
+                    elif flat:
+                        uv.extend((0.5, 0.5))  # the single white texel
                     else:
                         uv.extend(palette_uv(gi, len(groups)))
                     # The authored per-vertex datum. `Vtx.colour` is a byte offset,
@@ -1360,8 +1533,14 @@ def export_gun(
                 idx.append(out_i)
     if untextured:
         print(
-            f"  WARNING: {model.name}: {untextured} triangles had no texture — "
-            "they fall back to the per-part debug palette",
+            f"  WARNING: {model.name}: {untextured} triangles reference a texture we "
+            "cannot decode — they fall back to the per-part debug palette",
+            file=sys.stderr,
+        )
+    if flat_tris:
+        print(
+            f"  note: {model.name}: {flat_tris} triangles are authored untextured — "
+            "drawn from their vertex colour",
             file=sys.stderr,
         )
 
@@ -1407,11 +1586,29 @@ def export_gun(
     primitives = []
     nverts = 0
     ntris = 0
-    for cfg, gi, _remap, pos, uv, idx, nrm, col in batches.values():
-        if cfg is not None:
-            tw, th, rgba = decode_texture(model, cfg)
+    white_image = None
+    from_editor = 0
+    for texnum, (cfg, gi, _remap, pos, uv, idx, nrm, col) in batches.items():
+        hints = ""
+        if texnum == "flat":
+            # Authored untextured (see the batching above): one white texel, so the
+            # shader's `texel x vertex colour` is the vertex colour.
+            if white_image is None:
+                white_image = glb.image_png(png_bytes(1, 1, bytes((255, 255, 255, 255))))
+            image = white_image
+            mat_name = f"part{gi:02d}_vertexcolour"
+        elif cfg is not None:
+            tw, th, rgba, src = images[texnum]
+            from_editor += src == "editor"
             image = glb.image_png(png_bytes(tw, th, rgba))
-            mat_name = f"tex{cfg.index:02d}_{tw}x{th}"
+            # The editor's render intent, carried on the material NAME because that
+            # is the convention our engine reads: `textured_model::load` binds the
+            # `*EnvMapping*` material's texture as the reflection map, and
+            # `combat::load_flash` keeps the `CullBoth` geometry. Naming the texture
+            # by its POOL number (not the texconfig slot) keeps a material traceable
+            # to `pd dump/weapons/*/tempImgEd<NNNN>.bmp`.
+            hints = editor_textures().get(texnum, {}).get("hints", "")
+            mat_name = f"tex{texnum:04x}_{tw}x{th}" + (f"_{hints}" if hints else "")
         else:
             if palette_image is None:
                 palette_image = glb.image_png(palette_png(len(groups)))
@@ -1424,10 +1621,29 @@ def export_gun(
                 "name": mat_name,
                 "pbrMetallicRoughness": {
                     "baseColorTexture": {"index": texture},
+                    # An `EnvMapping` face is painted by the REFLECTION ALONE, so its
+                    # flat base contributes nothing. On the N64 those faces generate
+                    # their texcoords from the vertex normal (`G_TEXTURE_GEN`), which
+                    # means the s/t stored in the vertex is leftover data and sampling
+                    # the map with it — as we did — paints a tiled blue-grey smear
+                    # flat across the gun. That is exactly the "dull metal" symptom.
+                    # The engine's matcap (`shader_viewmodel.wgsl`) is the *correct*
+                    # lookup for these faces, so the base is zeroed and the reflection
+                    # left to do the whole job, rather than the two being added.
+                    "baseColorFactor": [0.0, 0.0, 0.0, 1.0]
+                    if "EnvMapping" in hints
+                    else [1.0, 1.0, 1.0, 1.0],
                     "metallicFactor": 0.0,
                     "roughnessFactor": 1.0,
                 },
-                "alphaMode": "MASK",
+                # RGBA5551's single alpha bit is all-or-nothing, which is what MASK
+                # means — but the editor's BMPs carry a real 8-bit ramp (the muzzle
+                # flames fade out over ~8 texels), and cutting that at 0.5 would
+                # give back the hard-edged square this pass exists to remove. Our
+                # own renderer reads neither: the gun pass is opaque and the flash
+                # pass is additive on `SrcAlpha`. This is for external viewers and
+                # `pd_preview.py`.
+                "alphaMode": "BLEND" if "Transparent" in hints else "MASK",
                 "alphaCutoff": 0.5,
                 "doubleSided": True,
             },
@@ -1481,6 +1697,10 @@ def export_gun(
         "tris": ntris,
         "parts": len(groups),
         "textures": sum(1 for cfg, *_ in batches.values() if cfg is not None),
+        #: How many of those came from the editor dump rather than PD's own data —
+        #: i.e. how much of this gun our texture codec cannot reach on its own.
+        "editor_textures": from_editor,
+        "palette_tris": untextured,
         **meta,
     }
     muzzle = (
@@ -1490,7 +1710,9 @@ def export_gun(
     )
     print(
         f"{model.name} -> {out}: {stats['verts']} verts, {stats['tris']} tris, "
-        f"{stats['textures']} textures, {muzzle}"
+        f"{stats['textures']} textures"
+        + (f" ({from_editor} from the editor dump)" if from_editor else "")
+        + f", {muzzle}"
     )
     return stats
 
@@ -1517,10 +1739,21 @@ def export_guns(manifest_path: str, outdir: str, scale: float) -> int:
         if w.get("equipment_only"):
             continue
         entry: dict = {"name": w["name_text"], "mp_index": w["mp_index"]}
-        # The parts this weapon variant hides (`modelpartvisibility`).
-        hide = [
-            r["part"] for r in (w.get("part_visibility") or []) if not r.get("visible", True)
-        ]
+        # The parts this weapon variant hides. PD has TWO tables and a static export
+        # has to honour both: `modelpartvisibility` (per variant) and the
+        # unconditional rows of `gunviscmds` (see `pd_weapons.py`'s `expand_gunvis`).
+        # The second adds exactly two groups across the arsenal — the silenced
+        # Falcon 2's 002F and the CMP150's open cartridge flap — but an open flap on
+        # a holstered-looking gun is precisely the kind of "looks off" that is
+        # invisible until someone names it.
+        hide = sorted(
+            {r["part"] for r in (w.get("part_visibility") or []) if not r.get("visible", True)}
+            | {
+                r["part"]
+                for r in (w.get("gun_vis") or [])
+                if r.get("op") == "hidden" and r.get("condition") == "always" and r.get("part")
+            }
+        )
         for role, key in (("fp", "fp_model"), ("tp", "tp_model")):
             rel = w["assets"].get(key)
             if not rel:

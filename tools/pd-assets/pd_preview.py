@@ -47,6 +47,11 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from pd_gltf import png_bytes  # noqa: E402
 
+#: How hard `--viewmodel` adds the matcap reflection, kept equal to the `1.6` in
+#: `shader_viewmodel.wgsl`. If that constant is ever tuned, this follows it — the
+#: whole point of the mode is that the preview is not a second opinion.
+ENV_GAIN = 1.6
+
 CT_SIZE = {5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4}
 CT_FMT = {5120: "b", 5121: "B", 5122: "h", 5123: "H", 5125: "I", 5126: "f"}
 NCOMP = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
@@ -207,10 +212,13 @@ class Model:
         self.verts: list[tuple] = []
         self.uvs: list[tuple] = []
         self.cols: list[tuple] = []
+        self.nrms: list[tuple] = []
         self.jnts: list[tuple] = []
         self.wgts: list[tuple] = []
         self.tris: list[tuple[int, int, int, int]] = []  # (a, b, c, primitive)
         self.images: list[tuple[int, int, bytes] | None] = []
+        self.factors: list[list[float]] = []
+        self.env_prim: list[bool] = []
         for mesh in g.doc.get("meshes", []):
             for prim in mesh["primitives"]:
                 attrs = prim["attributes"]
@@ -229,6 +237,11 @@ class Model:
                     if "COLOR_0" in attrs
                     else [(1.0, 1.0, 1.0, 1.0)] * len(p)
                 )
+                # `NORMAL` matters for `--viewmodel`: the engine's matcap reflection
+                # samples the environment map by the raw (untransformed) normal.
+                self.nrms += (
+                    g.accessor(attrs["NORMAL"]) if "NORMAL" in attrs else [(0.0, 1.0, 0.0)] * len(p)
+                )
                 self.jnts += (
                     g.accessor(attrs["JOINTS_0"]) if "JOINTS_0" in attrs else [(0, 0, 0, 0)] * len(p)
                 )
@@ -244,8 +257,58 @@ class Model:
                 )
                 pi = len(self.images)
                 self.images.append(self._prim_image(prim))
+                self.factors.append(self._prim_factor(prim))
+                self.env_prim.append(self._prim_is_env(prim))
                 for k in range(0, len(idx) - 2, 3):
                     self.tris.append((base + idx[k], base + idx[k + 1], base + idx[k + 2], pi))
+
+    def env_image(self):
+        """The model's environment/reflection map, or `None`.
+
+        Exactly the rule `engine/src/assets/textured_model.rs` applies: the base
+        texture of the FIRST material whose name contains `EnvMapping` — the
+        editor's own render-intent tag. Reproducing the rule here (rather than
+        approximating it) is the point: `--viewmodel` is for judging what the
+        engine will draw, and half the PD arsenal carries such a material.
+        """
+        for i, mat in enumerate(self.g.doc.get("materials", [])):
+            if "EnvMapping" not in (mat.get("name") or ""):
+                continue
+            for mesh in self.g.doc.get("meshes", []):
+                for prim in mesh["primitives"]:
+                    if prim.get("material") == i:
+                        return self._prim_image(prim)
+        return None
+
+    def env_per_material(self) -> bool:
+        """Whether the reflection covers only the `EnvMapping` primitives.
+
+        The game's `combat::viewmodel::env_scope` makes this call by asset family
+        (PD's exports live under `assets/weapons/pd/`); a preview is handed a bare
+        path, so it reads the same fact off the file — `extras.pd_gun` is written
+        by `pd_gltf.py`'s gun export and by nothing else. Same rule, same answer,
+        from the only evidence available here.
+        """
+        return "pd_gun" in (self.g.doc.get("extras") or {})
+
+    def _prim_is_env(self, prim) -> bool:
+        try:
+            return "EnvMapping" in (self.g.doc["materials"][prim["material"]].get("name") or "")
+        except (KeyError, IndexError):
+            return False
+
+    def _prim_factor(self, prim):
+        """`baseColorFactor`, which the engine folds into the vertex colour.
+
+        Matters for the PD guns: an `EnvMapping` material carries a BLACK factor,
+        because those faces are painted by the reflection alone (see `pd_gltf.py`).
+        Ignoring it here would preview a gun the engine never draws.
+        """
+        try:
+            mat = self.g.doc["materials"][prim["material"]]
+            return mat["pbrMetallicRoughness"].get("baseColorFactor", [1.0, 1.0, 1.0, 1.0])
+        except (KeyError, IndexError):
+            return [1.0, 1.0, 1.0, 1.0]
 
     def _prim_image(self, prim):
         try:
@@ -433,13 +496,15 @@ def decode_png(data: bytes):
     return (w, h, bytes(out))
 
 
-def sample_image(img, u, v):
+def sample_image(img, u, v, with_alpha=False):
     if img is None:
-        return (200, 200, 200)
+        return (200, 200, 200, 255) if with_alpha else (200, 200, 200)
     w, h, px = img
     x = min(w - 1, max(0, int(u * w)))
     y = min(h - 1, max(0, int(v * h)))
     o = (y * w + x) * 4
+    if with_alpha:
+        return (px[o], px[o + 1], px[o + 2], px[o + 3])
     return (px[o], px[o + 1], px[o + 2])
 
 
@@ -458,6 +523,7 @@ def render(
     highlight: set[int] | None = None,
     bg=(24, 26, 30),
     frame_radius: float | None = None,
+    viewmodel: bool = False,
 ):
     """Z-buffered flat-shaded render, framed on the posed model's own bounds.
 
@@ -466,6 +532,15 @@ def render(
     what is being judged rather than the framing. Pass `frame_radius` (in the
     model's own units) to pin the camera instead — that is what makes two
     different assets comparable in size rather than each filling its own frame.
+
+    `viewmodel=True` swaps the flat two-sided lambert for a transliteration of
+    `engine/src/render/shaders/shader_viewmodel.wgsl`: **unlit** `texel x vertex
+    colour`, plus the matcap environment reflection sampled by the vertex normal
+    and added at [`ENV_GAIN`]. That is what a first-person gun actually looks like
+    in the game, and it is the only way to see the reflection decision (half the
+    PD arsenal has an `EnvMapping` material) without launching anything. The
+    default shading stays as it was — it reads shape better, which is what the
+    character checks want.
     """
     lo = [min(p[i] for p in positions) for i in range(3)]
     hi = [max(p[i] for p in positions) for i in range(3)]
@@ -527,6 +602,11 @@ def render(
         fb += bytes((bg[0], bg[1], bg[2], 255))
     zb = [float("inf")] * (width * height)
 
+    env = model.env_image() if viewmodel else None
+    # Whole-model (GoldenEye) vs only the EnvMapping primitives (PD) — see
+    # `Model.env_per_material`, which mirrors the game's `env_scope`.
+    env_only_tagged = model.env_per_material()
+
     for a, b, c, prim in model.tris:
         pa, pb, pc = positions[a], positions[b], positions[c]
         sa, sb, sc = project(pa), project(pb), project(pc)
@@ -543,9 +623,11 @@ def render(
         ldir = [-right[i] * 0.4 + up[i] * 0.5 - fwd[i] for i in range(3)]
         ln = math.sqrt(sum(v * v for v in ldir)) or 1.0
         lam = abs((nx * ldir[0] + ny * ldir[1] + nz * ldir[2]) / (nl * ln))
-        shade = 0.35 + 0.65 * lam
+        shade = 1.0 if viewmodel else 0.35 + 0.65 * lam
 
         img = model.images[prim]
+        fac = model.factors[prim]
+        prim_env = env if (not env_only_tagged or model.env_prim[prim]) else None
         forced = (255, 60, 60) if (highlight and model.jnts[a][0] in highlight) else None
         # Perspective-correct texturing: interpolate u/z, v/z and 1/z, then divide.
         # Affine interpolation is visibly wrong on the big torso triangles at this
@@ -553,6 +635,7 @@ def render(
         iza, izb, izc = 1.0 / sa[2], 1.0 / sb[2], 1.0 / sc[2]
         uva, uvb, uvc = model.uvs[a], model.uvs[b], model.uvs[c]
         ca, cb, cc = model.cols[a], model.cols[b], model.cols[c]
+        na, nb, nc = model.nrms[a], model.nrms[b], model.nrms[c]
 
         minx = max(0, int(min(sa[0], sb[0], sc[0])))
         maxx = min(width - 1, int(max(sa[0], sb[0], sc[0])) + 1)
@@ -581,16 +664,39 @@ def render(
                         continue
                     u = (wa * uva[0] * iza + w1 * uvb[0] * izb + w0 * uvc[0] * izc) / iz
                     v = (wa * uva[1] * iza + w1 * uvb[1] * izb + w0 * uvc[1] * izc) / iz
-                    r, g, bl = sample_image(img, u, v)
+                    if viewmodel:
+                        # `shader_viewmodel.wgsl` discards fully transparent texels —
+                        # a cut-out is a hole, not a black pixel. Same rule here or the
+                        # preview shows patches the game does not.
+                        r, g, bl, al = sample_image(img, u, v, with_alpha=True)
+                        if al == 0:
+                            continue
+                    else:
+                        r, g, bl = sample_image(img, u, v)
                     # texel x vertex colour, matching `shader_viewmodel.wgsl`.
                     vc = (
                         wa * ca[0] * iza + w1 * cb[0] * izb + w0 * cc[0] * izc,
                         wa * ca[1] * iza + w1 * cb[1] * izb + w0 * cc[1] * izc,
                         wa * ca[2] * iza + w1 * cb[2] * izb + w0 * cc[2] * izc,
                     )
-                    r *= vc[0] / iz
-                    g *= vc[1] / iz
-                    bl *= vc[2] / iz
+                    r *= vc[0] / iz * fac[0]
+                    g *= vc[1] / iz * fac[1]
+                    bl *= vc[2] / iz * fac[2]
+                    if prim_env is not None:
+                        # `shader_viewmodel.wgsl`: matcap the normal's XY into the
+                        # reflection map and ADD it. The normal is used untransformed
+                        # there too, so this is the same lookup, not an analogue.
+                        vn = [
+                            (wa * na[k] * iza + w1 * nb[k] * izb + w0 * nc[k] * izc) / iz
+                            for k in range(3)
+                        ]
+                        vl = math.sqrt(sum(t * t for t in vn)) or 1.0
+                        er, eg, eb = sample_image(
+                            prim_env, vn[0] / vl * 0.5 + 0.5, vn[1] / vl * 0.5 + 0.5
+                        )
+                        r += er * ENV_GAIN
+                        g += eg * ENV_GAIN
+                        bl += eb * ENV_GAIN
                 zb[o] = z
                 fb[o * 4 : o * 4 + 3] = bytes(
                     (
@@ -638,6 +744,12 @@ def main() -> int:
         "so two assets can be compared at true relative size",
     )
     ap.add_argument(
+        "--viewmodel",
+        action="store_true",
+        help="shade like the ENGINE's first-person gun pass (unlit texel x vertex "
+        "colour + the EnvMapping matcap) instead of the shape-reading lambert",
+    )
+    ap.add_argument(
         "--positions",
         default=None,
         help="raw f32 [frames x verts x xyz] from `cargo run --example pd_pose_dump` — "
@@ -669,7 +781,7 @@ def main() -> int:
         for f in range(count):
             vals = struct.unpack_from(f"<{n * 3}f", raw, f * stride)
             pos = [tuple(vals[i * 3 : i * 3 + 3]) for i in range(n)]
-            frames.append(render(model, pos, w, h, args.yaw, args.pitch, highlight, frame_radius=args.frame_radius))
+            frames.append(render(model, pos, w, h, args.yaw, args.pitch, highlight, frame_radius=args.frame_radius, viewmodel=args.viewmodel))
     elif args.clip:
         clip = Clip(args.clip, model)
         bound = len({c[0] for c in clip.channels})
@@ -683,10 +795,10 @@ def main() -> int:
             ts = [clip.duration * i / max(args.frames, 1) for i in range(args.frames)]
         for t in ts:
             joints = model.joint_matrices(clip.locals(model, t))
-            frames.append(render(model, model.skin_positions(joints), w, h, args.yaw, args.pitch, highlight, frame_radius=args.frame_radius))
+            frames.append(render(model, model.skin_positions(joints), w, h, args.yaw, args.pitch, highlight, frame_radius=args.frame_radius, viewmodel=args.viewmodel))
     else:
         joints = model.joint_matrices()
-        frames.append(render(model, model.skin_positions(joints), w, h, args.yaw, args.pitch, highlight, frame_radius=args.frame_radius))
+        frames.append(render(model, model.skin_positions(joints), w, h, args.yaw, args.pitch, highlight, frame_radius=args.frame_radius, viewmodel=args.viewmodel))
 
     px, tw, th = tile(frames, w, h, min(args.cols, len(frames)))
     with open(args.out, "wb") as fh:

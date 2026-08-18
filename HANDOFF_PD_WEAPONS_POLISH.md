@@ -1,20 +1,14 @@
 # Handoff — Perfect Dark weapons, second pass (fidelity + polish)
 
-State: branch `feat/pd-hunters-ship` @ `170dcd5`, **384 tests green**, release built.
+State: branch `feat/pd-hunters-ship`, **389 tests green**, release built, assets re-exported.
 
 The PD arsenal **works**: 33 guns, two firing functions each, playable by the player and
-the hunters, with both models per gun and PD's explosion model. See
-`HANDOFF_PD_WEAPONS.md` for what that track landed and why.
+the hunters. `HANDOFF_PD_WEAPONS.md` covers what that first track landed.
 
-This handoff is the **fidelity pass** that playtest asked for. Five items, all reported from
-a real session on `ARSENAL=pd`. The recon below is done — every root cause named here was
-traced to a decomp line or measured off the assets, so **start from the findings, not from
-the symptoms.**
-
-**Read item 0 first.** The user has since exported the arsenal from the Perfect Gold editor
-into `pd dump/weapons/`, and it changes the plan: it supplies 100% of the textures our decoder
-cannot handle (including every muzzle flash), plus the material render intent our engine
-already knows how to read.
+This pass was the **fidelity** work playtest asked for. Items 1 and 2 are **done**, and
+finishing them corrected three things the previous handoff had wrong — read
+"What the measurements corrected" before picking up items 3–5, because two of them are
+smaller than they looked and one of them is already answered.
 
 ```powershell
 $env:ARSENAL = "pd"; $env:OWN_ALL = "1"
@@ -22,291 +16,192 @@ $env:ARSENAL = "pd"; $env:OWN_ALL = "1"
 ```
 
 ```
-cargo test --release      # 384 green today
-python tools/pd-assets/pd_weapons.py rust native/crates/game/src/combat/pd_weapons.rs
+cargo test --release
+python tools/pd-assets/pd_weapons.py json tools/pd-assets/pd_weapons.json
 python tools/pd-assets/pd_gltf.py guns tools/pd-assets/pd_weapons.json native/assets/weapons/pd
+python tools/pd-assets/pd_preview.py <gun.glb> out.png --viewmodel   # see it without launching
 ```
 
 **Two standing rules.** Always go back to the decomp (`reference/pd-decomp`, gitignored —
-`reference/README.md` says how to re-clone); this track has produced eight cases where the
-obvious answer was wrong and the decomp had the real one. And **never launch and drive the
-game yourself** — hand the user a specific brief instead.
+`reference/README.md` says how to re-clone). And **never launch and drive the game
+yourself** — hand the user a specific brief instead.
 
 ---
 
-## Do these in this order
+## DONE this pass
 
-The order matters: item 1 unblocks item 2, and item 3 is the one that needs the user's eye
-rather than more code.
+### The textures our codec cannot decode now come from the editor dump
 
-### 0. START HERE: the editor dump already solves most of items 1 and 2
+PD's second texture codec (`tex_inflate_non_zlib`) is unported, and an undecodable texture
+fell back to a flat debug palette. That was **1,063 triangles across the arsenal** — 89.6%
+of the MagSec 4, 62% of the Laser, 25.6% of the K7 Avenger, and **100% of all 76 muzzle-flash
+textures**. `pd_gltf.py` now falls back to the user's Perfect Gold export (`pd dump/weapons/`,
+355 BMPs) keyed by **global pool texture number**, which is why one first-person export also
+covers third-person models it never contained.
 
-**The user exported the arsenal from Perfect Gold** (the OBJ header says "SubDrag and the
-GoldenEye Setup Editor V4.4") into **`pd dump/weapons/`** — 31 folders, OBJ + MTL + 355 BMPs,
-5.8 MB. It is already wired into the pipeline: `pd_weapons.json` now carries an `editor`
-block per weapon (`folder`, `obj`, `mtl`, `textures`), resolved by
-`editor_dump_index()` in `pd_weapons.py`. **33/33 MP guns resolve.**
+**61 triangles remain on debug palette, all on five `chr*` third-person models**
+(MagSec 4, Shotgun, DY357 ×2 — pool textures `0x934`/`0x96a`–`0x97d` the dump never carried).
+Porting `tex_inflate_non_zlib` (193 lines, `game/texdecompress.c:699`) would close them, and
+nothing else needs it.
 
-The naming, verified across all 31 folders rather than assumed: `GunNNNN.obj` where NNNN is
-the **`WEAPON_*` enum value in hex** (`Gun0002` = WEAPON_FALCON2, `Gun000C` = WEAPON_CALLISTO),
-and `tempImgEdNNNN.bmp` where NNNN is the model's own texconfig texture number. 31 folders
-cover 33 guns because the Falcon 2 silencer and scope **share the plain Falcon's model file**
-and differ only by `modelpartvisibility` — the resolver falls back on shared `fp_model`.
+Two traps found by cross-checking, not by reasoning:
 
-Three things it gives us, measured:
+* **The editor writes BMP rows top-down while declaring a positive height** (which per spec
+  means bottom-up). Measured against the 427 textures both pipelines can produce: 423 agree
+  only when read in file order, 4 are symmetric. A wrong choice here is invisible — it just
+  makes every skin subtly wrong.
+* **Texture `0x606` is 4×16 in the texconfig and 8×16 in the dump.** UVs normalise by the
+  shipped image's size now, not the texconfig's, or the used half stretches over the whole.
 
-1. **100% of the textures our decoder cannot do.** All **36** undecodable visible textures
-   and all **76** muzzle-flash textures are covered, as 32-bit BMPs with real alpha. The
-   Falcon's `0x325`–`0x328` are four soft-edged yellow-white flame frames. **So the muzzle
-   flash no longer needs the codec port** — see item 1.
-2. **Material render intent, in the convention our engine already parses.** The hints are in
-   the material *name*: `m0TransparentCullBothClampSClampT` for the flash,
-   `m4CullBothEnvMappingTexScaleS0.03125TexScaleT0.03125` for the gun body. That is not a
-   coincidence — our GoldenEye weapon GLBs came from this same tool, which is why
-   `engine::assets::textured_model` already looks for `*EnvMapping*` and
-   `combat::viewmodel::load_flash` already filters on `CullBoth`.
-3. **`0x323` is an ENVIRONMENT/REFLECTION map, not a surface texture.** It is a blue-grey
-   swirl, referenced by ~200 `EnvMapping` materials on the Falcon alone. **We have been
-   painting it on flat as base colour, which is exactly why the guns read as dull blue-grey
-   metal.** Sampled as a matcap by the surface normal — which `shader_viewmodel.wgsl` already
-   does for `*EnvMapping*` materials, and which now has real normals to work with — it
-   becomes polished metal. This is the user's "is there a metallic material that isn't being
-   applied", and the answer is yes.
+### The muzzle flash is a flame
 
-It also independently corroborates two of our findings, from a different direction: the
-Falcon exports 1479 normals and the Callisto **zero**, matching the per-node
-normals-or-colours split; and the Falcon's 565 faces match our extraction exactly.
+Same root cause; nothing was wrong with the geometry or the blend. And **the four textures
+are not four frames — they are a 2×2 tiling of one flame**, drawn on two mirrored planes.
+Rasterised from the shipped GLB it is a soft yellow-white star (`tools/pd-assets/preview/`).
+The additive `SrcAlpha` muzzle pipeline was always right; the alpha was the debug palette's,
+which is opaque, which is the white square that was reported.
 
-**What it does NOT give**, so the decomp pipeline stays authoritative for structure:
-`MODELPART` ids (the OBJ groups are the editor's generic `RoomNN`), the `CHRGUNFIRE` muzzle,
-the `POSITIONHELD` grip, and the **third-person `chr*` models hunters hold** (first-person
-only). So the shape of the work is a **hybrid: decomp for structure, editor dump for textures
-and material intent.**
+Regression test: `the_muzzle_flash_is_a_soft_flame_not_a_square` asserts partial alpha in
+the flash textures, which is the entire difference between the two pictures.
 
-The pragmatic build order: teach `export_gun` to prefer the dump's BMP for a texture the
-codec cannot decode, carry the MTL's material-name hints onto the glTF material name (so the
-engine's existing `EnvMapping` / `CullBoth` paths light up), and bind `0x323` as the env
-texture rather than a base colour.
+### Environment mapping — the guns read as metal now
 
-### 1. The muzzle flash — no longer blocked on the codec
+`0x323` and 26 other textures are **reflection maps**, not surfaces: those faces generate
+texcoords from the normal on the N64 (`G_TEXTURE_GEN`), so the stored s/t is leftover data
+and sampling with it smears a tiled blue-grey flat across the gun. Exporter zeroes the base
+factor on an `EnvMapping` material and lets the engine's matcap paint it.
 
-**Symptom:** "the muzzle flash is just the entire white square muzzle mesh appearing for a
-second, it's not a texture with a transparency that looks like a flame."
+The scope of that reflection had to change with it: `EnvScope::PerMaterial` for PD.
+GoldenEye tags **one** material and means the whole (black-based) gun; PD mixes env-mapped
+metal with real skins on one model, and the whole-model rule washed the Shotgun out to
+near-white. Seen in `pd_preview.py --viewmodel`, which is a transliteration of
+`shader_viewmodel.wgsl` (same matcap, same `1.6`, same base-factor fold) added this pass
+specifically so this decision could be made without launching anything.
 
-**Root cause, measured:** the flash geometry and material are fine. **All 76 flash textures
-across all 17 guns that have one fail to decode** — 100% — because PD's second texture codec
-is unported (`pd_tex.py` raises
-`UnsupportedTexture("non-zlib codec (tex_inflate_non_zlib) is not ported")`). Undecodable
-textures fall back to the flat per-part debug palette, and *that* is the opaque white square.
-There was never a flame on screen because the flame never decoded.
+### Two smaller fixes that came out of the same work
 
-**Take them from the editor dump (item 0) — it covers all 76.** Porting the codec is now
-optional: `tex_inflate_non_zlib` is 193 lines at `game/texdecompress.c:699` (called from
-`:2263`) and would make the pipeline self-sufficient from the ROM alone, which is worth
-something, but it is no longer on the critical path for anything visible.
+* **Authored-untextured triangles** (`tex == -1`) now draw white × vertex colour, which is
+  what PD does with them. Six of them put a garish palette stripe on the **Mauler** — the
+  gun the user singled out as "very off".
+* **`gunviscmds` is ported** (unconditional rows only; the `upgradewant`/which-hand rows are
+  runtime state). Across the whole arsenal it hides exactly two more geometry groups: the
+  silenced Falcon 2's `002F` and the **CMP150's open cartridge flap**.
+* **Fully transparent texels are discarded** in the viewmodel shader. The gun pass is opaque
+  and depth-writing, so a cut-out drew as a black patch that also occluded — visible on the
+  K7 Avenger, whose detail decals are ~75% transparent. This also touches the GoldenEye guns
+  (11–15% of some of their texels), and is the one change here that alters an asset family
+  nobody complained about — worth a glance during playtest.
+* **`every_shader_compiles`** (new, engine): naga parses and validates every `.wgsl`. Shaders
+  were the one part of the renderer no test touched — a typo was a panic on launch.
 
-**Then finish the flash properly** — three things beyond the texture:
+## What the measurements corrected
 
-* **There are three flashes, not one.** `MODELPART_GUN_MUZZLEFLASH1/2/3` (`0x5a/0x5b/0x5c`,
-  `constants.h:2421`) are each annotated `// toggle`, and the Reaper hides all three. PD
-  alternates them per shot; we export only `0x5a`. Exporting all three and picking one per
-  shot is what stops a repeated flash reading as a stuck decal.
-* **The material must not be `MASK`.** `export_gun` writes `alphaMode: "MASK"` with
-  `alphaCutoff: 0.5`, which is right for hard-edged N64 gun skins and wrong for a flame. A
-  flash wants blending (ideally additive — the viewmodel shader already *adds* its matcap
-  term, so there is precedent).
-* **`load_flash` filters for `CullBoth`** (`combat/viewmodel.rs:40`) and falls back to
-  "keep everything" — which is what our PD flash GLBs hit. Worth naming the flash material
-  so the intended path is taken rather than the fallback.
+Three claims in the previous handoff were wrong, and each cost less to check than to act on.
 
-**Verify:** `pd_preview.py` renders a GLB on the CPU and now applies `COLOR_0`, so a decoded
-flame is visible without launching anything.
+1. **"14 weapons render a disembodied hand" — no. No gun model has a hand at all.**
+   `MODELPART_HAND_LEFT` appears in 14 `gunviscmds` tables, but checked across all 33
+   first-person and all 33 third-person models, **not one carries part `0x35` or `0x36`**.
+   PD's first-person hands live in their own model, so those rows address geometry we never
+   load. This was expected to "fix most of looks-off in one change"; it fixes nothing, and
+   the actual cause of the Mauler was the six untextured triangles above.
+2. **"There are three flashes, not one" — only for the Reaper.** `MUZZLEFLASH2/3` exist on
+   exactly one model of the 33, and their geometry sits at the **same centroid** as
+   `MUZZLEFLASH1`, so they are alternate frames of one flash rather than three barrels.
+   Alternating them needs a runtime that can hold more than one flash mesh per weapon
+   (`WeaponStats.muzzle_path` is a single `&str`) — for one gun. Deliberately not done.
+3. **`PD_VIEW_SCALE` is not the problem.** At 0.0007 the guns come out physically right and
+   agree with the GoldenEye set: Falcon 2 0.19 m, MagSec 0.31 m, AR34 **0.778 m** against
+   GoldenEye's AR33 **0.776 m**, sniper rifle 0.93 m. If placement still reads wrong it is
+   the offsets, not the size.
 
-### 2. Hide the hand — `gunviscmds` is not ported, and it is why the Mauler looks wrong
+---
 
-**Symptom:** "guns like the mauler look very off to me, we might have to take some of these
-case by case."
+## Remaining, in the order they are worth doing
 
-**Root cause:** it is not case-by-case. `weapondef` carries **two** visibility tables and we
-only ported one:
+### 3. Viewmodel placement — a question for the user, not a task
 
-```c
-/*0x3c*/ struct gunviscmd *gunviscmds;            // NOT ported
-/*0x40*/ struct modelpartvisibility *partvisibility;  // ported
-```
-
-`gunviscmds_mauler` (`invitems.c:1146`) is:
-
-```c
-gunviscmd_sethidden(MODELPART_HAND_LEFT)
-gunviscmd_sethidden(MODELPART_MAULER_MAGAZINE2)
-gunviscmd_end
-```
-
-**PD's first-person gun models contain a HAND** (`MODELPART_HAND_LEFT` = `0x35`,
-`constants.h:2426`), and `gunviscmds` is what hides it. **14 weapons hide the left hand this
-way**, out of 29 `gunviscmd` tables. So those guns are currently rendering with a
-disembodied hand attached — which is precisely the `enemy-weapon-hand-artifact` problem from
-the GoldenEye set, except PD *tells us which part is the hand by name*, so no material
-heuristic is needed this time.
-
-**The work:** transcribe `gunviscmds` in `pd_weapons.py` (the parser already handles
-`partvisibility`; this is the same shape) and fold the unconditional `sethidden` entries into
-the export's hide list. `struct gunviscmd` is at `types.h:2889` with the condition/op
-semantics commented — `type` 0 terminates, 5/6 are hand-specific, `op` 0/1/3 set
-visible/hidden/conditional. **Only the unconditional ones are safe to bake**; the
-`upgradewant`-conditional entries are runtime state and should be left alone rather than
-guessed at.
-
-Expect this to fix most of "looks off" in one change. Re-review the sheet afterwards and only
-then treat what remains as per-weapon.
-
-### 3. Viewmodel placement — ask the user, do not keep guessing
-
-**Symptom:** "the gun placement on the screen. Before I placed the guns manually but is
-there anything in the pd decomp that tells us where the gun should be placed correctly?"
-
-**Answer: yes, and it is already in use — but only the static third of it.** What is ported
-is `weapondef.posx/posy/posz`, and that much is confirmed correct:
-`gset_get_xpos` (`gset.c:155`) returns `weapon->posx` for the right hand and `-posx` for the
-left, and `bgun_update_hand_pos` (`bondgun.c:7411-7419`) assigns those straight into the view
-offset. **Do not re-derive the sign** — it was already got wrong once (negating `posz` put
-every gun behind the camera and drew nothing) and the fix is documented in
-`combat/arsenal.rs`'s `view_offset`.
-
-What is **not** ported, in rough order of how much it would change the look:
+`weapondef.posx/posy/posz` is ported and correct (`gset_get_xpos`, `bgun_update_hand_pos`);
+**do not re-derive the sign**, it was got wrong once and put every gun behind the camera.
+With the scale question retired (above), what remains unported is **behaviour**, not size:
 
 | thing | where | what it does |
 |---|---|---|
-| `PD_VIEW_SCALE` | `combat/arsenal.rs` | **0.0007, inherited from the character pipeline and never measured for guns.** The most likely reason a gun reads too big or too small. The editor dump's OBJ vertices are a second, independent measure of true gun size — worth comparing against. |
-| `weapondef.muzzlez` | `types.h:3033` | Per-weapon muzzle depth; transcribed, unused. |
-| `weapondef.sway` | `types.h:3037` | Per-weapon sway amount; transcribed, unused. |
-| `invaimsettings.guntransup/down/side` | `types.h:2877` | The gun translates as you aim up/down/sideways (default 3 / 8 / 15). This is a large part of why PD's gun feels attached to the view. |
-| `hand->damppos` / `adjustpos` | `bondgun.c:7411+` | Per-frame damping and sway. |
-| `player->guncloseroffset` | `bondgun.c:7424` | The "hold gun closer" option. |
+| `invaimsettings.guntransup/down/side` | `types.h:2877` | the gun translates as you aim (3 / 8 / 15). A large part of why PD's gun feels attached to the view. |
+| `hand->damppos` / `adjustpos` | `bondgun.c:7411+` | per-frame damping and sway |
+| `weapondef.sway` | `types.h:3037` | per-weapon sway amount; transcribed, unused |
+| `weapondef.muzzlez` | `types.h:3033` | per-weapon muzzle depth; transcribed, unused |
+| `player->guncloseroffset` | `bondgun.c:7424` | the "hold gun closer" option |
 
-**The judgement call, and it is the user's:** they hand-placed the GoldenEye guns and were
-happy with them. PD's authored numbers are *different*, not obviously better, and they have
-never been eyeballed. So do not spend a session tuning 33 offsets before asking. Put the
-question to them with the arsenal on screen: keep PD's authored placement and fix the scale,
-or treat PD's numbers as a starting point and hand-tune like the GoldenEye set. Porting
+**The judgement call is the user's:** they hand-placed the GoldenEye guns and were happy.
+Keep PD's authored placement, or hand-tune 33 offsets like the GoldenEye set? Porting
 `invaimsettings` is worth doing either way — it is behaviour, not placement.
 
 ### 4. Reload animations — the `guncmd` bytecode
 
-**Symptom:** "PD has more advanced reloading animations for guns, we should look into this."
+Unchanged from the previous handoff, and still gated the same way. PD's reload is a real
+keyframed animation with sound and part visibility driven off it
+(`invanim_falcon2_reload_singlewield`, `invitems.c:~395`); ours is a timer plus a viewmodel
+dip. The bytecode is 12 opcodes (`include/gunscript.h`) and small enough to port properly,
+but **it needs an articulated viewmodel first** — the parts have nowhere to land while the
+gun is one static mesh. The exports were built for that: part offsets are baked into the
+geometry rather than dropped, so articulation is a **re-export, not a re-rip**
+(`export_gun` already takes `only_parts`).
 
-**What PD has.** Our reload is a timer plus a viewmodel dip (`RELOAD_DIP` 0.6 in
-`combat/viewmodel.rs`). PD's is a real keyframed animation with sound and part visibility
-driven off it. `invanim_falcon2_reload_singlewield` (`invitems.c:~395`):
+Sequence: articulated export → `guncmd` interpreter → reloads, sounds and
+`allowfeature(ATTACKAGAIN)` all fall out of the same system.
 
-```c
-gunscript_playanimation(ANIM_GUN_FALCON2_RELOAD, 0, 10000)
-gunscript_showpart(1, MODELPART_HAND_LEFT)        // the hand comes IN for the reload
-gunscript_showpart(1, MODELPART_FALCON2_MAGAZINE2)
-gunscript_playsound(10, SFXNUM_01D8_RELOAD_REMOVE)
-gunscript_hidepart(19, MODELPART_FALCON2_MAGAZINE1)
-gunscript_allowfeature(24, GUNFEATURE_RELOAD)
-gunscript_playsound(24, SFXMAP_80F6)
-gunscript_hidepart(24, MODELPART_FALCON2_MAGAZINE2)
-gunscript_playsound(53, SFXNUM_01DB_RELOAD_RACK)
-gunscript_allowfeature(53, GUNFEATURE_ATTACKAGAIN)
-gunscript_end
-```
+Note this is also where **the hand and the spare magazines come from** — the reload script
+shows them. Which is the other half of finding 1 above: PD only ever draws that hand during
+a reload, from a model we do not load.
 
-Note how much this settles at once: **that is where the hand and the spare magazines come
-from** (item 2 hides them at rest; the reload shows them), it is where the three reload
-sounds and their exact timings come from, and `allowfeature(53, ATTACKAGAIN)` is the authored
-answer to "when can the player fire again" — which we currently approximate with
-`reload_time`.
+### 5. PD weapon sounds — self-contained, blocked on a VADPCM decoder
 
-`invanim_falcon2_reload` dispatches to **separate single-wield and dual-wield** scripts via
-`gunscript_include`, and the scope variant has its own.
+Every PD gun still borrows the closest GoldenEye sound by role (`fire_sound_for`). The real
+`funcdef_shoot.shootsound` ids **are transcribed and unused** in `combat/pd_weapons.rs`.
+The samples are `sfx.ctl` + `sfx.tbl` (`reference/pd-decomp/src/assets/ntsc-final/`) in
+**VADPCM**, which needs a decoder written; then map `SFXMAP_*` → bank index → sample → WAV.
+Precedent for the second half: the repo already converted 375 GoldenEye AIFFs for kira
+(`goldeneye-soundpack`). Touches nothing else.
 
-**The work, and the honest sequencing:** the bytecode is 12 opcodes
-(`include/gunscript.h`, `GUNCMD_*` in `constants.h`) and small enough to port properly. But
-**it needs a keyframed viewmodel first** — the parts have nowhere to land while the gun is
-one static mesh with a dip. The exports were deliberately built for this: part offsets are
-baked into the geometry rather than dropped, so **adding articulation is a re-export, not a
-re-rip** (`export_gun` already takes `only_parts`, which is how the flash was split out).
+### 6. Optional cleanup
 
-So: articulated export → then the `guncmd` interpreter → then reloads, sounds and
-`ATTACKAGAIN` all fall out of the same system. Do not try to special-case reload animations
-without it.
-
-### 5. PD weapon sounds
-
-**Symptom:** "it seems like we're still using goldeneye sounds, let's see if we can find and
-use the pd gun sounds."
-
-**Correct — every PD gun currently borrows the closest GoldenEye sound by role**
-(`fire_sound_for` in `combat/arsenal.rs`). That was always a stopgap: the real
-`funcdef_shoot.shootsound` ids **are transcribed** and sitting unused in
-`combat/pd_weapons.rs` (e.g. the Falcon 2's `SFXMAP_804D`, the silenced variant's
-`SFXMAP_8054`), and the reload scripts above name theirs too.
-
-**What is needed:** PD's audio is `sfx.ctl` (195 KB of N64 ALBank instrument metadata) and
-`sfx.tbl` (4.99 MB of samples) under
-`reference/pd-decomp/src/assets/ntsc-final/`, extracted by `tools/extract` (see its
-`sfxctl`/`sfxtbl` offsets). The samples are **VADPCM**, Nintendo's ADPCM codec — a
-well-documented format, but it needs a decoder written. Then map `SFXMAP_*` → bank index →
-sample, and convert to WAV.
-
-**Precedent for the wiring half:** the repo already converted 375 GoldenEye AIFFs to
-`pcm_s16le` WAV for kira (see the `goldeneye-soundpack` memory) — so once decoded, the path
-into the engine is known. This is a self-contained sub-project; it touches nothing else and
-could be done in isolation.
+* Port `tex_inflate_non_zlib` and the pipeline is self-sufficient from the ROM alone (closes
+  the last 61 palette triangles).
+* The Reaper's alternating flash (finding 2) if the runtime ever holds more than one flash.
 
 ---
 
-## What NOT to redo
+## Playtest brief
 
-Each of these was measured this session and is settled. Re-deriving them is how the wrong
-answer gets reintroduced.
+`ARSENAL=pd OWN_ALL=1`, then cycle the arsenal and look for:
 
-* **`posz` is used directly, not negated.** PD's z runs the same way ours does.
-* **The barrel axis is authored** (`CHRGUNFIRE`, −X on all 27 models that have one). Where it
-  is absent (17 of 33) PD's own `chr_get_gun_pos` fires **from the grip** — that is the
-  answer, not a gap to fill.
-* **`Vtx.colour` is a byte offset into a table that is *either* colours *or* normals**,
-  per node — 120 colour nodes, 54 normal nodes across the 33 guns. Both are exported now;
-  normal nodes are pre-lit into `COLOR_0` because the viewmodel shader is unlit by design.
-* **PD's null table slot `(0,0,0,0)` means "unspecified", not black.** Treating it as a
-  colour rendered the Remote Mine as a pure black silhouette.
-* **Not every gun is shaded.** The Dragon's visible nodes reference only the null slot and
-  `(254,254,254)` — authored flat, leaning on its texture. A test asserting all 33 vary was
-  asserting something untrue about the source.
-* **`WEAPONFLAG_AICANUSE` is not a gun filter** (it is on all 64 real weapons); the AI data is
-  `g_BotWeaponConfigs`.
-* **1 PD damage unit = 25.0 HP**, derived from shots-to-kill agreeing on both sides.
-* **Names collide across families** (7 of them). Resolve by **display** name — resolving by
-  source name made GoldenEye's Shotgun pick up PD's −X barrel and aim 83° off.
-* **The editor dump's `GunNNNN` is the `WEAPON_*` enum in hex**, and 31 folders cover 33 guns
-  because the Falcon variants share a model file. Both verified across the whole dump;
-  `editor_dump_index()` already encodes it.
+1. **Fire something.** The flash should be a soft yellow-white flame, not a white square.
+2. **MagSec 4, Laser, K7 Avenger, Rocket Launcher, Mauler** — these were the worst hit by the
+   missing textures. The Mauler in particular should have lost its odd stripe.
+3. **Falcon 2, DY357 Magnum, Laptop Gun** — metal now, from the reflection map. Too shiny?
+   The knob is the `1.6` in `shader_viewmodel.wgsl` (and `ENV_GAIN` in `pd_preview.py`).
+4. **CMP150** — its cartridge flap should be closed.
+5. **GoldenEye guns (`ARSENAL=ge`)** — unchanged except for the transparent-texel discard.
+   Anything showing a new hole is that change.
+6. **Placement** — the question in item 3. Sizes are confirmed right; judge position only.
 
 ## Traps that keep firing on this track
 
-1. **CPU-side green does not mean it works.** Every defect in this handoff passed the whole
-   suite. Hand off a playtest brief.
-2. **A test can fail because of the fix, or pass because of the bug.** Four fired this
-   session, including one that silently changed meaning when a default moved.
-3. **Assert token counts when transcribing.** Four parser defects surfaced only because the
-   generator refuses a column-count mismatch — one of which mis-resolved every weapon past
-   `0x4f` into a *plausible* wrong answer.
-4. **Measure the invariant you actually have.** The barrel-axis test asserts "dominant
-   component is −X" because that is what was measured; an invented angular tolerance failed
-   on the Reaper, which is a minigun with the barrel slung under the grip.
-5. **An absence renders as a plausible-looking bug.** A missing `COLOR_0` reads as "no
-   textures"; an undecodable texture reads as "the flash is a white square". Check whether
-   the data arrived before theorising about the renderer.
+1. **CPU-side green does not mean it works.** Every defect in the previous handoff passed the
+   whole suite. Hand off a playtest brief.
+2. **A test can fail because of the fix.** `every_gun_mesh_carries_per_vertex_shading` failed
+   on a deliberately black env material, and the right answer was to teach it the new fact,
+   not to revert.
+3. **Check the data arrived before theorising about the renderer.** Three separate symptoms
+   this pass ("white square flash", "dull blue-grey metal", "the Mauler looks off") were all
+   missing or misused *data*, and none was a renderer bug.
+4. **Verify a claim against the assets before building on it.** All three corrections above
+   took one measurement each and would each have cost a session of work.
 
 ## Context worth reading
 
-* `HANDOFF_PD_WEAPONS.md` — what the first pass shipped, and its own remaining list.
-* `DESIGN_PD_WEAPON_MECHANICS.md` — §2 (no attach offset to tune), §3 (two models per gun),
-  §8 (`guncmd`).
-* `combat/arsenal.rs` — the bridge, and the documented reasoning for every conversion.
-* `tools/pd-assets/pd_gltf.py` — `dl_vertex_table` and `gun_metadata` carry the findings
-  above in full.
-* Memory: `pd-arsenal-decisions`, `pd-weapon-mechanics`, `goldeneye-soundpack`.
+* `HANDOFF_PD_WEAPONS.md` — what the first pass shipped.
+* `DESIGN_PD_WEAPON_MECHANICS.md` — §2, §3, §8 (`guncmd`).
+* `tools/pd-assets/pd_gltf.py` — `editor_textures`, `read_bmp`, `resolve_texture`, `export_gun`.
+* `combat/arsenal.rs` — the bridge, with the reasoning for every conversion.
+* Memory: `pd-arsenal-decisions`, `pd-weapon-mechanics`, `pd-editor-dump-textures`.

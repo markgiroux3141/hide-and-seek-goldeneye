@@ -769,6 +769,42 @@ def build() -> dict:
                 out.append({"part": part, "visible": visible})
         return out
 
+    def expand_gunvis(sym: object) -> list[dict]:
+        """`gunviscmds_*` -> the SECOND visibility table on a weapondef.
+
+        `weapondef` carries two (`types.h:3023`): `partvisibility`, which
+        [`expand_partvis`] reads, and this one, run by
+        `bgun_execute_gun_vis_commands`. Only the unconditional rows can be baked
+        into a static export — `type` 0 terminates, 4 tests `hand->upgradewant`,
+        5/6 test which hand the gun is in, and those are runtime state. The macros
+        (`gunscript.h:37-49`) are transcribed rather than the expanded structs
+        because that is the form the source is written in.
+
+        What this actually buys, measured across the whole MP set rather than
+        assumed: **two** geometry groups that `partvisibility` leaves showing — the
+        silenced Falcon 2's `MODELPART_FALCON2_002F` and the CMP150's
+        `MODELPART_GUN_CARTFLAPOPEN` (its cartridge flap, hanging open at rest).
+
+        The 14 `MODELPART_HAND_LEFT` rows — which looked like the big prize, since
+        a first-person gun rendering a disembodied hand is a defect we have had
+        before — hide **nothing of ours**: no first-person or third-person gun
+        model in the MP set has a hand part at all (checked on all 33 of each).
+        PD's first-person hands live in their own model, so `gunviscmds` is
+        addressing geometry we never load.
+        """
+        if not isinstance(sym, str) or sym not in inv:
+            return []
+        out: list[dict] = []
+        body = inv[sym]["body"]
+        for call, args in re.findall(r"gunviscmd_(\w+)\(([^)]*)\)", body):
+            vals = [resolve_expr(a.strip(), consts) for a in args.split(",") if a.strip()]
+            if call == "sethidden" and vals and isinstance(vals[0], int):
+                out.append({"part": vals[0], "op": "hidden", "condition": "always"})
+            elif call in ("checkupgrade", "checkinlefthand", "checkinrighthand"):
+                part = next((v for v in reversed(vals) if isinstance(v, int)), None)
+                out.append({"part": part, "op": "conditional", "condition": call})
+        return out
+
     def expand_ammo(sym: object) -> dict | None:
         if not isinstance(sym, str) or sym not in inv:
             return None
@@ -941,6 +977,7 @@ def build() -> dict:
                     "source": f"mplayer.c:{mp_init['g_MpWeapons']['line'] + mp_index}",
                 },
                 "part_visibility": part_vis,
+                "gun_vis": expand_gunvis(wdef.get("gunviscmds")),
                 "editor": None,  # filled in below, once fp_model is known
                 "export": export_info(
                     w_slug(mp_index, name_text),

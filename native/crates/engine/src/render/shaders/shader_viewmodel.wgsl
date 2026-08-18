@@ -46,6 +46,16 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // palette entry tinted by the vertex color gives the real (e.g. dark metal)
     // surface color. Region meshes carry white vertex colors → no-op.
     let base = textureSample(tex, samp, in.uv) * in.color;
+    // Fully transparent texels are HOLES, not black pixels. Both source games
+    // alpha-test their weapon skins (N64 RGBA5551 carries a single alpha bit), and
+    // the gun pass is opaque and depth-writing, so without this a cut-out — a
+    // scope's glass, the K7 Avenger's detail decals, 15% of the KF7's texels —
+    // draws as a black patch that also occludes what is behind it. Only exact
+    // zero: the muzzle flash shares this shader and its soft edge lives in the
+    // partial alphas, which the additive blend already weights to nothing.
+    if (base.a < 0.004) {
+        discard;
+    }
     // Matcap environment reflection: map the surface normal's XY to [0,1] and look
     // up the reflection map. For metallic guns this paints uniform gold/silver over
     // the (black) metal; for everything else `env_tex` is 1×1 black → adds nothing.

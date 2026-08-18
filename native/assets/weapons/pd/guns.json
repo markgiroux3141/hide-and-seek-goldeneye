@@ -73,8 +73,8 @@
           64.38874281369722
         ],
         "star_flash": false,
-        "verts": 548,
-        "tris": 383
+        "verts": 497,
+        "tris": 343
       },
       "tp": {
         "glb": "02-falcon-2-silencer-tp.glb",
@@ -359,8 +359,8 @@
           293.5178463275616
         ],
         "star_flash": false,
-        "verts": 361,
-        "tris": 247
+        "verts": 355,
+        "tris": 243
       },
       "tp": {
         "glb": "09-cmp150-tp.glb",

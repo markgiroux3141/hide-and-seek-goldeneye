@@ -630,6 +630,43 @@
           "visible": false
         }
       ],
+      "gun_vis": [
+        {
+          "part": 42,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 43,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 44,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 45,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 46,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 47,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 53,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "falcon",
         "obj": "Gun0002.obj",
@@ -823,6 +860,38 @@
         {
           "part": 46,
           "visible": false
+        }
+      ],
+      "gun_vis": [
+        {
+          "part": 42,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 43,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 44,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 46,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 47,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 53,
+          "op": "hidden",
+          "condition": "always"
         }
       ],
       "editor": {
@@ -1021,6 +1090,38 @@
           "visible": false
         }
       ],
+      "gun_vis": [
+        {
+          "part": 42,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 43,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 45,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 46,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 47,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 53,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "falcon",
         "obj": "Gun0002.obj",
@@ -1208,6 +1309,23 @@
           "visible": false
         }
       ],
+      "gun_vis": [
+        {
+          "part": 53,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 42,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 41,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "magsec",
         "obj": "Gun0005.obj",
@@ -1391,6 +1509,18 @@
           "visible": false
         }
       ],
+      "gun_vis": [
+        {
+          "part": 53,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 43,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "mauler",
         "obj": "Gun0006.obj",
@@ -1571,6 +1701,18 @@
         {
           "part": 40,
           "visible": false
+        }
+      ],
+      "gun_vis": [
+        {
+          "part": 40,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 53,
+          "op": "hidden",
+          "condition": "always"
         }
       ],
       "editor": {
@@ -1767,6 +1909,43 @@
         {
           "part": 45,
           "visible": false
+        }
+      ],
+      "gun_vis": [
+        {
+          "part": 40,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 41,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 42,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 43,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 44,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 45,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 53,
+          "op": "hidden",
+          "condition": "always"
         }
       ],
       "editor": {
@@ -1974,6 +2153,43 @@
           "visible": false
         }
       ],
+      "gun_vis": [
+        {
+          "part": 40,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 41,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 42,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 43,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 44,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 45,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 53,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "gold dy357",
         "obj": "Gun0009.obj",
@@ -2157,6 +2373,23 @@
         {
           "part": 43,
           "visible": false
+        }
+      ],
+      "gun_vis": [
+        {
+          "part": 53,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 43,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 71,
+          "op": "hidden",
+          "condition": "always"
         }
       ],
       "editor": {
@@ -2350,6 +2583,18 @@
           "visible": false
         }
       ],
+      "gun_vis": [
+        {
+          "part": 53,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 40,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "cyclone",
         "obj": "Gun000B.obj",
@@ -2538,6 +2783,13 @@
           "visible": false
         }
       ],
+      "gun_vis": [
+        {
+          "part": 40,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "callisto",
         "obj": "Gun000C.obj",
@@ -2719,6 +2971,13 @@
         {
           "part": 41,
           "visible": false
+        }
+      ],
+      "gun_vis": [
+        {
+          "part": 41,
+          "op": "hidden",
+          "condition": "always"
         }
       ],
       "editor": {
@@ -2908,6 +3167,18 @@
           "visible": false
         }
       ],
+      "gun_vis": [
+        {
+          "part": 42,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 41,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "laptop gun",
         "obj": "Gun000E.obj",
@@ -3092,6 +3363,13 @@
           "visible": false
         }
       ],
+      "gun_vis": [
+        {
+          "part": 40,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "dragon",
         "obj": "Gun000F.obj",
@@ -3269,6 +3547,13 @@
         {
           "part": 90,
           "visible": false
+        }
+      ],
+      "gun_vis": [
+        {
+          "part": 42,
+          "op": "hidden",
+          "condition": "always"
         }
       ],
       "editor": {
@@ -3473,6 +3758,13 @@
           "visible": false
         }
       ],
+      "gun_vis": [
+        {
+          "part": 42,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "ar34",
         "obj": "Gun0011.obj",
@@ -3668,6 +3960,18 @@
         {
           "part": 90,
           "visible": false
+        }
+      ],
+      "gun_vis": [
+        {
+          "part": 40,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 41,
+          "op": "hidden",
+          "condition": "always"
         }
       ],
       "editor": {
@@ -3879,6 +4183,13 @@
           "visible": false
         }
       ],
+      "gun_vis": [
+        {
+          "part": 43,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "shotgun",
         "obj": "Gun0013.obj",
@@ -4079,6 +4390,13 @@
           "visible": false
         }
       ],
+      "gun_vis": [
+        {
+          "part": 43,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "reaper",
         "obj": "Gun0014.obj",
@@ -4264,6 +4582,13 @@
           "visible": false
         }
       ],
+      "gun_vis": [
+        {
+          "part": 41,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "sniper rifle",
         "obj": "Gun0015.obj",
@@ -4426,6 +4751,13 @@
         {
           "part": 40,
           "visible": false
+        }
+      ],
+      "gun_vis": [
+        {
+          "part": 40,
+          "op": "hidden",
+          "condition": "always"
         }
       ],
       "editor": {
@@ -4601,6 +4933,7 @@
           "visible": false
         }
       ],
+      "gun_vis": [],
       "editor": {
         "folder": "devastator",
         "obj": "Gun0017.obj",
@@ -4801,6 +5134,13 @@
           "visible": false
         }
       ],
+      "gun_vis": [
+        {
+          "part": 40,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "rocket launcher",
         "obj": "Gun0018.obj",
@@ -4992,6 +5332,7 @@
         "source": "mplayer.c:79"
       },
       "part_visibility": [],
+      "gun_vis": [],
       "editor": {
         "folder": "skedar rocket launcher",
         "obj": "Gun0019.obj",
@@ -5188,6 +5529,13 @@
         "source": "mplayer.c:80"
       },
       "part_visibility": [],
+      "gun_vis": [
+        {
+          "part": 53,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "knife",
         "obj": "Gun001A.obj",
@@ -5351,6 +5699,18 @@
         {
           "part": 42,
           "visible": false
+        }
+      ],
+      "gun_vis": [
+        {
+          "part": 53,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 41,
+          "op": "hidden",
+          "condition": "always"
         }
       ],
       "editor": {
@@ -5557,6 +5917,18 @@
           "visible": false
         }
       ],
+      "gun_vis": [
+        {
+          "part": 40,
+          "op": "hidden",
+          "condition": "always"
+        },
+        {
+          "part": 53,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "psychosis gun",
         "obj": "Gun001C.obj",
@@ -5727,6 +6099,13 @@
         "source": "mplayer.c:83"
       },
       "part_visibility": [],
+      "gun_vis": [
+        {
+          "part": 53,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "grenade",
         "obj": "Gun001E.obj",
@@ -5880,6 +6259,13 @@
         "source": "mplayer.c:84"
       },
       "part_visibility": [],
+      "gun_vis": [
+        {
+          "part": 53,
+          "op": "hidden",
+          "condition": "always"
+        }
+      ],
       "editor": {
         "folder": "n bomb",
         "obj": "Gun001F.obj",
@@ -6030,6 +6416,7 @@
         "source": "mplayer.c:85"
       },
       "part_visibility": [],
+      "gun_vis": [],
       "editor": {
         "folder": "timed mine",
         "obj": "Gun0020.obj",
@@ -6170,6 +6557,7 @@
         "source": "mplayer.c:86"
       },
       "part_visibility": [],
+      "gun_vis": [],
       "editor": {
         "folder": "proximity mine",
         "obj": "Gun0021.obj",
@@ -6313,6 +6701,28 @@
         {
           "part": 41,
           "visible": false
+        }
+      ],
+      "gun_vis": [
+        {
+          "part": 53,
+          "op": "conditional",
+          "condition": "checkinlefthand"
+        },
+        {
+          "part": 41,
+          "op": "conditional",
+          "condition": "checkinlefthand"
+        },
+        {
+          "part": 54,
+          "op": "conditional",
+          "condition": "checkinrighthand"
+        },
+        {
+          "part": 40,
+          "op": "conditional",
+          "condition": "checkinrighthand"
         }
       ],
       "editor": {
@@ -6468,6 +6878,7 @@
         "source": "mplayer.c:88"
       },
       "part_visibility": [],
+      "gun_vis": [],
       "editor": {
         "folder": "laser",
         "obj": "Gun001D.obj",
@@ -6628,6 +7039,7 @@
         "source": "mplayer.c:89"
       },
       "part_visibility": [],
+      "gun_vis": [],
       "editor": null,
       "export": {
         "fp_glb": "pd/22-x-ray-scanner-fp.glb",
@@ -6723,6 +7135,7 @@
         "source": "mplayer.c:90"
       },
       "part_visibility": [],
+      "gun_vis": [],
       "editor": null,
       "export": {
         "fp_glb": "pd/23-cloaking-device-fp.glb",
@@ -6829,6 +7242,7 @@
         "source": "mplayer.c:91"
       },
       "part_visibility": [],
+      "gun_vis": [],
       "editor": null,
       "export": {
         "fp_glb": "pd/24-combat-boost-fp.glb",
@@ -6956,6 +7370,7 @@
         "source": "mplayer.c:92"
       },
       "part_visibility": [],
+      "gun_vis": [],
       "editor": null,
       "export": {
         "fp_glb": "pd/25--fp.glb",

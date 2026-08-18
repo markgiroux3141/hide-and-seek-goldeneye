@@ -646,8 +646,25 @@ mod tests {
         for w in Arsenal::PerfectDark.weapons() {
             let model = crate::combat::load_gun(&asset(w.gun_path)).unwrap();
             assert!(!model.vertices.is_empty(), "{} has no vertices", w.name);
-            let lo = model.vertices.iter().map(|v| lum(&v.color)).fold(f32::MAX, f32::min);
-            let hi = model.vertices.iter().map(|v| lum(&v.color)).fold(f32::MIN, f32::max);
+            // Only the primitives drawn from their BASE colour. An env-mapped one is
+            // black on purpose — those faces generate their texcoords from the normal
+            // on the N64, so the flat sample is meaningless and the exporter zeroes
+            // the base factor, leaving the matcap reflection to paint them
+            // (`pd_gltf.py`, `EnvScope::PerMaterial`). Including them would make this
+            // test demand the very smear it exists to keep off the gun.
+            let mut lo = f32::MAX;
+            let mut hi = f32::MIN;
+            for p in model.primitives.iter().filter(|p| p.emissive.is_none()) {
+                let range = p.index_start as usize..(p.index_start + p.index_count) as usize;
+                for &i in &model.indices[range] {
+                    let l = lum(&model.vertices[i as usize].color);
+                    lo = lo.min(l);
+                    hi = hi.max(l);
+                }
+            }
+            if lo == f32::MAX {
+                continue; // every face is reflection-painted (nothing to judge)
+            }
 
             // The real failure is a mesh multiplied toward BLACK. PD's null table
             // slot is (0,0,0,0) meaning "unspecified", and passing it through as a
@@ -722,6 +739,96 @@ mod tests {
             assert!(!model.vertices.is_empty(), "{}'s flash is empty", w.name);
         }
         assert!(with_flash >= 15, "most guns author a flash, got {with_flash}");
+    }
+
+    /// The muzzle flash is a soft flame, not an opaque square.
+    ///
+    /// Regression for the playtest report "the muzzle flash is just the entire white
+    /// square muzzle mesh appearing for a second". The geometry and the additive
+    /// blend were always right; **the texture never decoded**. All 76 flash textures
+    /// across the arsenal use PD's second codec (`tex_inflate_non_zlib`, unported),
+    /// and an undecodable texture falls back to the flat per-part debug palette —
+    /// which is opaque, so `SrcAlpha` additive blending painted a solid square.
+    /// They come from the editor dump now.
+    ///
+    /// The invariant is therefore about the ALPHA: a flame fades out at its edges,
+    /// so a flash texture must carry partial alpha, not just 0 and 255. That is the
+    /// difference between the two pictures and nothing else is.
+    #[test]
+    fn the_muzzle_flash_is_a_soft_flame_not_a_square() {
+        let asset =
+            |rel: &str| format!("{}/../../assets/weapons/{}", env!("CARGO_MANIFEST_DIR"), rel);
+        if !std::path::Path::new(&asset("pd")).is_dir() {
+            eprintln!("note: PD weapon assets absent");
+            return;
+        }
+        let mut checked = 0;
+        for w in Arsenal::PerfectDark.weapons() {
+            let pd = pd_weapon_for(w.name).unwrap();
+            if pd.flash_glb.is_empty() {
+                continue;
+            }
+            let model = crate::combat::load_flash(&asset(pd.flash_glb)).unwrap();
+            let mut partial = 0;
+            let mut opaque = 0;
+            for img in &model.images {
+                for a in img.rgba.chunks_exact(4).map(|p| p[3]) {
+                    if a == 255 {
+                        opaque += 1;
+                    } else if a > 0 {
+                        partial += 1;
+                    }
+                }
+            }
+            let texels = model.images.iter().map(|i| i.rgba.len() / 4).sum::<usize>();
+            assert!(texels > 0, "{}'s flash has no texture at all", w.name);
+            assert!(
+                partial * 20 > texels,
+                "{}'s flash is hard-edged ({partial} of {texels} texels have partial \
+                 alpha, {opaque} fully opaque) — the debug palette looks exactly like this",
+                w.name
+            );
+            checked += 1;
+        }
+        assert!(checked >= 15, "expected most guns to carry a flash, got {checked}");
+    }
+
+    /// No first-person gun renders any of its faces in the debug palette.
+    ///
+    /// The palette is the exporter's fallback for a texture it cannot decode, and it
+    /// is a *plausible-looking* failure: flat authored-ish colours that read as "PD
+    /// art" rather than as missing data. It was 89.6% of the MagSec 4's triangles and
+    /// 62% of the Laser's. Naming a material `partNN_untextured` is how the exporter
+    /// admits it, so the check is simply that no gun ships one — read back through
+    /// the same glTF crate the loader uses.
+    ///
+    /// Third-person `chr*` models are exempt: five of them use pool textures the
+    /// editor dump never exported (it was a first-person export), leaving 61 palette
+    /// triangles on guns seen at a distance in a hunter's hands.
+    #[test]
+    fn no_first_person_gun_falls_back_to_the_debug_palette() {
+        let asset =
+            |rel: &str| format!("{}/../../assets/weapons/{}", env!("CARGO_MANIFEST_DIR"), rel);
+        if !std::path::Path::new(&asset("pd")).is_dir() {
+            eprintln!("note: PD weapon assets absent");
+            return;
+        }
+        for w in Arsenal::PerfectDark.weapons() {
+            let pd = pd_weapon_for(w.name).unwrap();
+            for rel in [pd.fp_glb, pd.flash_glb].iter().filter(|r| !r.is_empty()) {
+                let (doc, _, _) = gltf::import(asset(rel)).unwrap();
+                let fallback: Vec<_> = doc
+                    .materials()
+                    .filter_map(|m| m.name().map(str::to_owned))
+                    .filter(|n| n.contains("untextured"))
+                    .collect();
+                assert!(
+                    fallback.is_empty(),
+                    "{} ({rel}) still has undecodable textures: {fallback:?}",
+                    w.name
+                );
+            }
+        }
     }
 
     /// A weapon whose firing function sets `FUNCFLAG_NOMUZZLEFLASH` shows no flash,

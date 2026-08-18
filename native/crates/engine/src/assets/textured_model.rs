@@ -64,12 +64,44 @@ impl TexturedModel {
     }
 }
 
+/// Which primitives an `*EnvMapping*` material's reflection map is bound to.
+///
+/// The two asset families genuinely differ, and picking one rule for both makes
+/// half of them wrong:
+///
+/// * a GoldenEye metallic gun tags **one** material `EnvMapping` while the whole
+///   weapon is meant to be shiny — its other materials are near-black metal
+///   waiting for a reflection, so the map goes on [`EnvScope::WholeModel`];
+/// * a Perfect Dark gun mixes env-mapped metal with ordinary painted skins on the
+///   same model (the Shotgun has one env texture and twenty-six real ones), so
+///   the same rule adds a bright sheen over its wood and its decals and washes
+///   the gun out — measured on screen, not feared in the abstract.
+///   [`EnvScope::PerMaterial`] binds it only where the author asked for it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EnvScope {
+    /// Every primitive reflects (GoldenEye's shiny guns).
+    WholeModel,
+    /// Only primitives whose own material is `*EnvMapping*` (Perfect Dark's).
+    PerMaterial,
+}
+
 /// Load a GLB into a [`TexturedModel`], keeping only primitives whose glTF
 /// material name passes `keep` (a nameless material is offered as `""`). Pass
 /// `|_| true` to keep everything. Node transforms are baked into positions
 /// (these models are multi-node). Errors if nothing drawable survives the
 /// filter.
+///
+/// Environment mapping follows [`EnvScope::WholeModel`]; see [`load_with`].
 pub fn load(path: &str, keep: impl Fn(&str) -> bool + Copy) -> Result<TexturedModel, String> {
+    load_with(path, keep, EnvScope::WholeModel)
+}
+
+/// [`load`], with an explicit [`EnvScope`].
+pub fn load_with(
+    path: &str,
+    keep: impl Fn(&str) -> bool + Copy,
+    env_scope: EnvScope,
+) -> Result<TexturedModel, String> {
     let (doc, buffers, images) =
         gltf::import(path).map_err(|e| format!("gltf import {path}: {e}"))?;
 
@@ -84,8 +116,11 @@ pub fn load(path: &str, keep: impl Fn(&str) -> bool + Copy) -> Result<TexturedMo
         primitives: Vec::new(),
         images: Vec::new(),
     };
+    // Per-primitive "its own material is `*EnvMapping*`", parallel to
+    // `model.primitives` — only [`EnvScope::PerMaterial`] reads it.
+    let mut env_material: Vec<bool> = Vec::new();
     for node in scene.nodes() {
-        visit_node(node, Mat4::IDENTITY, &buffers, &mut model, keep);
+        visit_node(node, Mat4::IDENTITY, &buffers, &mut model, keep, &mut env_material);
     }
     if model.vertices.is_empty() {
         return Err(format!("{path}: no drawable geometry found (after material filter)"));
@@ -110,8 +145,10 @@ pub fn load(path: &str, keep: impl Fn(&str) -> bool + Copy) -> Result<TexturedMo
                 .map(|info| info.texture().source().index())
         });
     if let Some(env) = env_image {
-        for p in &mut model.primitives {
-            p.emissive = Some(env);
+        for (i, p) in model.primitives.iter_mut().enumerate() {
+            if env_scope == EnvScope::WholeModel || env_material.get(i).copied().unwrap_or(false) {
+                p.emissive = Some(env);
+            }
         }
     }
 
@@ -125,6 +162,7 @@ fn visit_node(
     buffers: &[gltf::buffer::Data],
     out: &mut TexturedModel,
     keep: impl Fn(&str) -> bool + Copy,
+    env_material: &mut Vec<bool>,
 ) {
     let local = Mat4::from_cols_array_2d(&node.transform().matrix());
     let world = parent * local;
@@ -206,11 +244,12 @@ fn visit_node(
                 // Filled in the metallic post-pass below (env reflection map).
                 emissive: None,
             });
+            env_material.push(mat_name.contains("EnvMapping"));
         }
     }
 
     for child in node.children() {
-        visit_node(child, world, buffers, out, keep);
+        visit_node(child, world, buffers, out, keep, env_material);
     }
 }
 

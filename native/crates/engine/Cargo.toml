@@ -26,3 +26,9 @@ gilrs = { workspace = true }
 # the egui Context + winit event translation; the engine just paints its output.
 egui = { workspace = true }
 egui-wgpu = { workspace = true }
+
+[dev-dependencies]
+# WGSL front-end (same major as our wgpu, so it is the very validator wgpu runs at
+# `create_shader_module`). Used by the shader test: a typo in a .wgsl otherwise
+# surfaces as a panic on launch, which no CPU-side test would catch.
+naga = { version = "24", features = ["wgsl-in"] }

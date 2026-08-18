@@ -22,7 +22,24 @@ use crate::combat::config::WeaponStats;
 /// (no skin/anim): the GoldenEye weapon GLBs carry `POSITION / NORMAL /
 /// TEXCOORD_0` with embedded textures.
 pub fn load_gun(path: &str) -> Result<TexturedModel, String> {
-    textured_model::load(path, |_| true)
+    textured_model::load_with(path, |_| true, env_scope(path))
+}
+
+/// Which primitives an `*EnvMapping*` reflection map covers, per asset family.
+///
+/// PD knowledge belongs here rather than in the engine loader, which is
+/// deliberately domain-free. A PD gun mixes env-mapped metal with ordinary
+/// painted skins — the Shotgun has one env texture and twenty-six real ones — so
+/// GoldenEye's whole-model rule adds a sheen over its wood and washes it out
+/// (seen in `pd_preview.py --viewmodel`, which reproduces the shader). GoldenEye's
+/// metallic guns need the opposite: they tag ONE material and mean the whole gun.
+/// The exports live under `assets/weapons/pd/`, which is the whole distinction.
+fn env_scope(path: &str) -> textured_model::EnvScope {
+    if path.replace('\\', "/").contains("/pd/") {
+        textured_model::EnvScope::PerMaterial
+    } else {
+        textured_model::EnvScope::WholeModel
+    }
 }
 
 /// Load the muzzle-flash billboards from a `muzzle.glb`. These GoldenEye "muzzle"
@@ -37,8 +54,9 @@ pub fn load_gun(path: &str) -> Result<TexturedModel, String> {
 /// flash, no hand), fall back to loading the whole GLB when nothing is tagged
 /// `CullBoth`. Returns an error only if the GLB has no drawable geometry at all.
 pub fn load_flash(path: &str) -> Result<TexturedModel, String> {
-    textured_model::load(path, |mat| mat.contains("CullBoth"))
-        .or_else(|_| textured_model::load(path, |_| true))
+    let scope = env_scope(path);
+    textured_model::load_with(path, |mat| mat.contains("CullBoth"), scope)
+        .or_else(|_| textured_model::load_with(path, |_| true, scope))
 }
 
 /// Vertical field of view for the viewmodel projection (radians). Matches the
