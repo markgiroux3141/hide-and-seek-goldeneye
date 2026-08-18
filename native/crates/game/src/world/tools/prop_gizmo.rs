@@ -165,7 +165,7 @@ impl World {
     /// sit around the object rather than at the floor. `None` without bounds. A
     /// light has no mesh bounds: its gizmo sits at the light position itself.
     fn prop_gizmo_origin(&self, e: hecs::Entity) -> Option<Vec3> {
-        if self.entity_is_light(e) {
+        if self.entity_is_light(e) || self.entity_is_spawn_point(e) {
             return self.prop_transform(e).map(|t| t.pos);
         }
         let t = self.prop_transform(e)?;
@@ -176,19 +176,30 @@ impl World {
     }
 
     /// The click-pick AABB for a selectable authored entity: a prop's world bounds,
-    /// or a small synthetic box around a light (which has no mesh). `None` if the
-    /// entity is neither (or a prop without registered bounds).
+    /// or a small synthetic box around something with no mesh (a light, a spawn pad).
+    /// `None` if the entity is none of those (or a prop without registered bounds).
     fn select_aabb(&self, e: hecs::Entity) -> Option<(Vec3, Vec3)> {
         if self.entity_is_light(e) {
             let p = self.prop_transform(e)?.pos;
             let h = Vec3::splat(super::light::LIGHT_MARKER_HALF * 1.7);
             return Some((p - h, p + h));
         }
+        if self.entity_is_spawn_point(e) {
+            // A pad's pick box is its floor square, given enough height to be clickable
+            // from a shallow fly-cam angle (the marker itself is nearly flat).
+            let p = self.prop_transform(e)?.pos;
+            let h = super::spawn_point::PAD_MARKER_HALF;
+            return Some((
+                Vec3::new(p.x - h, p.y - 0.05, p.z - h),
+                Vec3::new(p.x + h, p.y + 0.6, p.z + h),
+            ));
+        }
         self.prop_world_aabb(e)
     }
 
     /// The gizmo mode to actually drive for `e`: lights are translate-only (no
-    /// rotate/scale), so they ignore the cycled `prop_gizmo_mode`.
+    /// rotate/scale), so they ignore the cycled `prop_gizmo_mode`. A spawn pad keeps
+    /// **both** — its yaw is its authored spawn facing, so rotate is meaningful.
     fn effective_gizmo_mode(&self, e: hecs::Entity) -> PropGizmoMode {
         if self.entity_is_light(e) {
             PropGizmoMode::Translate

@@ -870,31 +870,85 @@ impl World {
         out
     }
 
-    /// Prepare the enemy spawn at G→HUNT from the **fixed** [`SPAWN_MARKER_POS`] (a
-    /// consistent world point the level is built around — **not** derived from where
-    /// the player is standing): snap it to a standable cell for [`Self::spawn_point`],
-    /// and build the fan-out search-point pool ([`Self::search_points`], spread
-    /// standable cells handed to searching hunters). No door is built — the ingress is
-    /// just the marked floor point (see [`World::spawn_marker_mesh`]).
+    /// Build the spawn pool at G→HUNT: resolve every **authored** spawn pad
+    /// (`world::tools::spawn_point`) to a standable nav cell, and build the fan-out
+    /// search-point pool ([`Self::search_points`], spread standable cells handed to
+    /// searching hunters). No door is built — a pad is just a marked floor point.
+    ///
+    /// Resolving to a standable cell here is Perfect Dark's `chr_adjust_pos_for_spawn`
+    /// (`player.c:403`), moved to pool-build time: PD validates fit per candidate inside
+    /// the chooser, but every pad in this pool is checked once at G instead, so
+    /// [`spawn::choose_spawn`] only ever sees pads a body fits on.
+    ///
+    /// **Empty pool → one synthetic pad at [`SPAWN_MARKER_POS`].** A level with no pads
+    /// authored (an older save, the AI lab's arenas, the levelgen harness) keeps
+    /// flooding its wave in at the old fixed marker rather than going quiet. Perfect
+    /// Dark guards identically — `if (g_NumSpawnPoints > 0)` (`playerreset.c:398`).
     ///
     /// (Breakable-door breach/blocking stays disabled — user call 2026-07-16 — so
     /// `self.doors` stays empty; the `Door` / `breach_tick` machinery is left intact
     /// for a re-enable.)
     pub(crate) fn prepare_spawn(&mut self, nav: &NavWorld) {
         self.doors.clear();
-        // Snap the fixed marker to a standable cell (in case it sits a hair off the
-        // floor, or the builder walled it into a tight spot).
-        let m = SPAWN_MARKER_POS;
-        self.spawn_point = nav.nearest_standable(m.x, m.y + 0.1, m.z, 16).unwrap_or(m);
+        // Snap each pad to a standable cell (in case it sits a hair off the floor, or
+        // the builder walled it into a tight spot).
+        let snap = |p: spawn::SpawnPad| spawn::SpawnPad {
+            pos: nav
+                .nearest_standable(p.pos.x, p.pos.y + 0.1, p.pos.z, 16)
+                .unwrap_or(p.pos),
+            yaw: p.yaw,
+        };
+        let authored = self.authored_spawn_pads();
+        self.spawn_pads = if authored.is_empty() {
+            vec![snap(spawn::SpawnPad { pos: SPAWN_MARKER_POS, yaw: 0.0 })]
+        } else {
+            authored.into_iter().map(snap).collect()
+        };
+        // The wave's reference point (search-pool seed + search fallback).
+        self.spawn_point = self.spawn_pads[0].pos;
         // Fan-out search pool: spread standable cells across the whole level, seeded
-        // from the spawn point (reuses the farthest-point sampler).
+        // from that point (reuses the farthest-point sampler).
         self.search_points = super::pick_spread_spawns(nav, self.spawn_point, SEARCH_POINT_COUNT);
         log::info!(
-            "wave spawns at {:?} (marker {:?}); {} search points",
-            self.spawn_point,
-            m,
+            "spawn pool: {} pad(s){}; {} search points",
+            self.spawn_pads.len(),
+            if self.spawn_pad_count() == 0 {
+                " (none authored — falling back to the fixed marker)"
+            } else {
+                ""
+            },
             self.search_points.len()
         );
+    }
+
+    /// Pick a pad for a body entering the level, applying Perfect Dark's rule (see
+    /// [`spawn::choose_spawn`]). Returns `(pool index, pad)`; the index lets the caller
+    /// notice when several bodies draw the *same* pad and ring them apart.
+    ///
+    /// Everyone else currently alive is passed as an occupant — the player and every
+    /// live hunter but `spawning` itself — which is both PD's teamless-deathmatch case
+    /// and what stops a wave stacking on one pad.
+    pub(crate) fn choose_spawn_pad(&mut self, spawning: Spawning) -> Option<(usize, spawn::SpawnPad)> {
+        // The pool is `Copy` data; clone it so `physics` + `char_rng` can be borrowed
+        // mutably for the line-of-sight test and the roll.
+        let pads = self.spawn_pads.clone();
+        if pads.is_empty() {
+            return None;
+        }
+        let mut occupants: Vec<Vec3> = Vec::new();
+        if spawning != Spawning::Player && !self.player_dead {
+            if let Some(p) = self.player_pos() {
+                occupants.push(p);
+            }
+        }
+        for (j, e) in self.enemies.iter().enumerate() {
+            if spawning == Spawning::Hunter(j) || e.enemy.is_dead() {
+                continue;
+            }
+            occupants.push(e.enemy.pos);
+        }
+        let i = spawn::choose_spawn(&pads, &occupants, &mut self.physics, &mut self.spawn_rng)?;
+        Some((i, pads[i]))
     }
 
     /// Drain a breaching door's hp; on break, remove its panel collider and flip

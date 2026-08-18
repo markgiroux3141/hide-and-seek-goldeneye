@@ -163,8 +163,16 @@ impl World {
         match self.mode {
             Mode::Build => self.camera.apply_move(dt, input),
             Mode::Hunt => {
-                // On player death everything freezes behind the YOU DIED screen.
+                // Round over → the sim is frozen behind the result screen until `R`.
+                if self.round_over.is_some() {
+                    return;
+                }
+                // Player dead → the world freezes for the death beat, but the respawn
+                // clocks keep running so the player (and any dead hunter) still comes
+                // back. This *is* the beat the auto-respawn was chosen for: it lasts
+                // exactly [`RESPAWN_DELAY`], not until a keypress.
                 if self.player_dead {
+                    self.respawn_step(dt);
                     return;
                 }
                 let Some(c) = self.character.as_mut() else { return };
@@ -559,6 +567,9 @@ impl World {
                 // none live), then age each corpse toward its settle → fade → despawn.
                 self.physics.step_dynamics(dt);
                 self.advance_ragdolls(dt);
+                // Bring back whoever is due. After `advance_ragdolls`, so a corpse's
+                // bodies are torn down on the same step its slot is reused.
+                self.respawn_step(dt);
                 if any_caught && !self.caught {
                     self.caught = true;
                     log::info!("CAUGHT by a hunter!");
@@ -599,26 +610,23 @@ impl World {
         self.player_health = PLAYER_MAX_HEALTH;
         self.player_armor = 0.0;
         self.player_dead = false;
+        self.player_respawn = 0.0;
         self.damage_flash = 0.0;
         self.hud_show_timer = 0.0;
         match self.mode {
             Mode::Build => {
-                let Some(feet) = self.floor_under(self.camera.pos) else {
+                // The fly-cam floor probe: still the player's entry when the level has
+                // authored no pads, and the guard that a hunt is possible at all.
+                let Some(cam_feet) = self.floor_under(self.camera.pos) else {
                     log::warn!("HUNT: no floor beneath the camera to spawn on — staying in BUILD");
                     return;
                 };
-                self.character = Some(CharacterController::new(
-                    feet,
-                    self.camera.yaw,
-                    self.camera.pitch,
-                ));
-                // Remember the duel start so a difficulty-change reset returns here.
-                self.hunt_spawn = Some((feet, self.camera.yaw, self.camera.pitch));
                 self.selected = None; // clear any authoring selection
                 self.caught = false;
+                self.reset_scores();
 
-                // Bake the nav grid from the frozen geometry (once), seal the spawn
-                // door, and flood the hunter wave in through it.
+                // Bake the nav grid from the frozen geometry (once), build the spawn
+                // pool from it, then enter the player and flood the wave in.
                 let t0 = Instant::now();
                 let mut structure_solids = self.structure_solid_boxes();
                 // Placed props are solid to grid-navving enemies too: block their
@@ -632,20 +640,30 @@ impl World {
                             "nav baked in {bake_ms:.2} ms ({} cells)",
                             nav.cell_count()
                         );
-                        // Resolve the fixed enemy spawn point (marker → standable
-                        // cell) and the fan-out search-point pool.
+                        // Resolve the authored pads → the shared spawn pool, and build
+                        // the fan-out search-point pool.
                         self.prepare_spawn(&nav);
                         // Decimate the walkable floor for the radar backdrop (once —
                         // it's static for the hunt).
                         self.bake_radar_cells(&nav);
-                        // Flood in the wave: ENEMY_COUNT hunters clustered at the fixed
-                        // spawn point, each in Search, fanning out to hunt the player.
+                        // ── The player enters from the pool, not from the fly-cam. ──
+                        // Perfect Dark's own guard: only override the default entry when
+                        // pads exist (`if (g_NumSpawnPoints > 0)`, `playerreset.c:398`).
+                        // With none authored we keep dropping the capsule under the
+                        // camera, which is what every headless caller relies on.
+                        self.enter_player(cam_feet);
+                        // Flood in the wave: each hunter draws its own pad from the same
+                        // pool, in Search, fanning out to hunt the player.
                         if self.spawn_enemies {
                             self.spawn_wave(&nav);
                         }
                         self.nav = Some(nav);
                     }
-                    None => log::warn!("nav bake produced no grid"),
+                    None => {
+                        log::warn!("nav bake produced no grid");
+                        // No nav → no pool; the player still has to get in somewhere.
+                        self.enter_player(cam_feet);
+                    }
                 }
 
                 // Make destructible props solid + shootable for the hunt (colliders
@@ -653,7 +671,7 @@ impl World {
                 self.spawn_prop_colliders();
 
                 self.mode = Mode::Hunt;
-                log::info!("→ HUNT (spawned at {feet:?})");
+                log::info!("→ HUNT (player at {:?})", self.player_pos());
             }
             Mode::Hunt => {
                 if let Some(c) = self.character.take() {
@@ -664,6 +682,7 @@ impl World {
                 self.nav = None;
                 self.enemies.clear();
                 self.hunt_spawn = None;
+                self.spawn_pads.clear();
                 self.search_points.clear();
                 self.radar_cells.clear();
                 self.caught = false;
@@ -687,6 +706,31 @@ impl World {
         }
     }
 
+    /// Seat the player for a hunt: at a pad drawn from the shared pool, or — when the
+    /// level has authored no pads — under the fly-cam at `cam_feet`, which is what this
+    /// game always did and what every headless caller (the AI lab's arenas, the levelgen
+    /// harness) depends on. Perfect Dark makes the same distinction with the same guard:
+    /// `if (g_NumSpawnPoints > 0)` before `scenario_choose_spawn_location`
+    /// (`playerreset.c:398`).
+    ///
+    /// Also records `hunt_spawn`, the pose a difficulty-change reset returns to.
+    fn enter_player(&mut self, cam_feet: Vec3) {
+        let (feet, yaw, pitch) = match (self.spawn_pad_count() > 0)
+            .then(|| self.choose_spawn_pad(Spawning::Player))
+            .flatten()
+        {
+            // A pad's authored yaw *is* the spawn facing (PD hands back the pad's look
+            // angle from `player_choose_spawn_location`); pitch is level.
+            Some((i, pad)) => {
+                log::info!("player enters at pad {i} {:?}", pad.pos);
+                (pad.pos, pad.yaw, 0.0)
+            }
+            None => (cam_feet, self.camera.yaw, self.camera.pitch),
+        };
+        self.character = Some(CharacterController::new(feet, yaw, pitch));
+        self.hunt_spawn = Some((feet, yaw, pitch));
+    }
+
     /// Restart the current duel WITHOUT leaving HUNT (bound to the difficulty keys):
     /// heal the player and drop them back at the hunt-start pose, clear combat VFX,
     /// then despawn + respawn the wave so it comes back fresh at the CURRENT difficulty
@@ -701,9 +745,14 @@ impl World {
         self.player_health = PLAYER_MAX_HEALTH;
         self.player_armor = 0.0;
         self.player_dead = false;
+        self.player_respawn = 0.0;
         self.damage_flash = 0.0;
         self.hud_show_timer = 0.0;
         self.caught = false;
+        // A difficulty-change reset is a fresh encounter, so the board goes back to 0–0
+        // as well — `spawn_wave` re-sizes the hunter tallies, but the player's would
+        // otherwise carry over from the previous difficulty and read as one long round.
+        self.reset_scores();
         if let Some((feet, yaw, pitch)) = self.hunt_spawn {
             self.character = Some(CharacterController::new(feet, yaw, pitch));
         }
@@ -728,13 +777,41 @@ impl World {
         }
     }
 
-    /// Flood the wave in at the fixed spawn point: [`ENEMY_COUNT`] hunters clustered
-    /// in a small ring around [`Self::spawn_point`] (so they don't all stack on one
-    /// cell), each watching toward the player so their perception cones face where the
-    /// action is, and each drawing a weapon from [`ENEMY_ROSTER`] (cycling if the count
-    /// exceeds the roster). Every hunter starts in `Search` and gets a fan-out point on
-    /// its first step. Skips entirely if the animation template failed to load (no
-    /// clips → nothing to animate).
+    /// Where hunter `i` enters the level: a pad drawn from the shared pool by Perfect
+    /// Dark's rule ([`spawn::choose_spawn`]), ringed off the pad when other bodies in
+    /// this wave already took it.
+    ///
+    /// `per_pad` counts how many bodies have taken each pool slot so far. The offsets
+    /// are a phyllotaxis spiral (golden angle, radius ∝ √n), so any number of bodies on
+    /// one pad spread evenly instead of pairing up — and with a single-pad pool (the
+    /// no-pads-authored fallback) this reproduces the old fixed-marker cluster.
+    fn hunter_entry(&mut self, i: usize, per_pad: &mut [usize], nav: &NavWorld) -> Vec3 {
+        let (pi, pad) = match self.choose_spawn_pad(Spawning::Hunter(i)) {
+            Some(v) => v,
+            // No pool at all (nav bake failed) — fall back to the reference point.
+            None => return self.spawn_point,
+        };
+        let n = per_pad.get(pi).copied().unwrap_or(0);
+        if let Some(c) = per_pad.get_mut(pi) {
+            *c += 1;
+        }
+        if n == 0 {
+            return pad.pos; // the first body on a pad stands on the authored point
+        }
+        let ang = n as f32 * 2.399_963; // golden angle
+        let r = SPAWN_CLUSTER_RADIUS * (n as f32).sqrt();
+        let raw = pad.pos + Vec3::new(ang.cos(), 0.0, ang.sin()) * r;
+        nav.nearest_standable(raw.x, raw.y.max(0.1), raw.z, 6).unwrap_or(pad.pos)
+    }
+
+    /// Flood the wave in: `wave_size` hunters, **each drawing its own pad from the
+    /// shared spawn pool** (see [`Self::hunter_entry`]) — so a level with pads scattered
+    /// through it gets a wave that arrives from all of them, and a level with none keeps
+    /// the old single-marker cluster. Each hunter watches toward the player so its
+    /// perception cone faces where the action is, and draws a weapon from
+    /// [`ENEMY_ROSTER`] (cycling if the count exceeds the roster). Every hunter starts in
+    /// `Search` and gets a fan-out point on its first step. Skips entirely if the
+    /// animation template failed to load (no clips → nothing to animate).
     fn spawn_wave(&mut self, nav: &NavWorld) {
         // **The wave draws from every loaded body, both families**, and each hunter is
         // driven by the clip template built for its own rig — Perfect Dark's set on both
@@ -794,6 +871,11 @@ impl World {
         // check the aim/hold transfers from the one-handed pistol case) so behaviour
         // can be observed in isolation.
         let count = if self.anim_debug { 1 } else { self.wave_size };
+        // Per-pad occupancy across this wave, so bodies drawing the same pad ring apart.
+        let mut per_pad = vec![0usize; self.spawn_pads.len().max(1)];
+        // Fresh scoreboard for the round: one slot per hunter, held on the World (not on
+        // the instance) so an in-place respawn can't clobber a hunter's tally.
+        self.hunter_scores = vec![Score::default(); count];
         // Drawn from the LIVE arsenal: the GoldenEye roster's weapons do not exist
         // under `ARSENAL=pd`, and a name that does not resolve means a hunter with
         // no gun mesh at all.
@@ -826,16 +908,13 @@ impl World {
             let pd_family = templates[ti].0 .1;
             // This hunter starts clean (all-white blood), sized to ITS body's mesh.
             let vert_count = self.char_models.get(body).map(|m| m.vertices.len()).unwrap_or(0);
+            // This hunter's own pad from the shared pool (ringed if shared). Resolved
+            // BEFORE `arm` below: `hunter_entry` needs `&mut self`, and `arm` holds a
+            // borrow of `self.enemy_arm` for the rest of the loop body.
+            let spawn = self.hunter_entry(i, &mut per_pad, nav);
             // This body's resolved gun-arm + upper-body mask; the hunter clones its own
             // aim/recoil stack (borrowed — `EnemyArm` owns a joint-mask `Vec`, not `Copy`).
             let arm = self.enemy_arm.get(body).and_then(|a| a.as_ref());
-            // Ring the cluster around the spawn point.
-            let ang = i as f32 / count as f32 * std::f32::consts::TAU;
-            let raw = self.spawn_point
-                + Vec3::new(ang.cos(), 0.0, ang.sin()) * SPAWN_CLUSTER_RADIUS;
-            let spawn = nav
-                .nearest_standable(raw.x, raw.y.max(0.1), raw.z, 6)
-                .unwrap_or(self.spawn_point);
             let weapon = enemy_def_for(&wcfg);
             // Sized to THIS body — a Perfect Dark hunter is 1.73 m and needs a taller
             // capsule than a 1.50 m GoldenEye one, or its head is not there to shoot.
@@ -975,6 +1054,7 @@ impl World {
                 dual,
                 collider,
                 fade: None,
+                respawn_timer: None,
                 shot_timer: 0.0,
                 loaded: weapon.clip,
                 reload_timer: 0.0,

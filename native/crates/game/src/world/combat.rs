@@ -269,8 +269,15 @@ impl World {
         if self.mode != Mode::Hunt {
             return None;
         }
-        // Dead → the "YOU DIED / PRESS R" text (over the dark death overlay); else
-        // the ammo counter.
+        // Round over → the result screen; dead → the death beat; else the live HUD. The
+        // scoreboard rides the live HUD, so it is on screen while you are playing rather
+        // than only at the end.
+        if let Some(outcome) = self.round_over {
+            return Some(crate::hud::round_over_quads(
+                outcome == RoundOutcome::PlayerWins,
+                aspect,
+            ));
+        }
         if self.player_dead {
             Some(crate::hud::death_quads(aspect))
         } else {
@@ -283,6 +290,14 @@ impl World {
             q.extend(crate::hud::danger_quads(self.difficulty, DIFFICULTY_MAX, aspect));
             // Credit balance (top-left) — money earned from kills, spent in the shop.
             q.extend(crate::hud::credits_quads(self.economy.credits(), aspect));
+            // Deathmatch scoreboard (top-right): kills−deaths per side, and the target.
+            let sims = self.hunter_side_score();
+            q.extend(crate::hud::score_quads(
+                (self.player_score.kills, self.player_score.deaths),
+                (sims.kills, sims.deaths),
+                self.score_limit,
+                aspect,
+            ));
             Some(q)
         }
     }
@@ -1267,7 +1282,9 @@ impl World {
             // little so it's flung, not scraped). `start_death` handles ragdoll vs clip.
             let dir = (at - blast_center).normalize_or_zero();
             let knock = (dir + Vec3::Y * 0.3).normalize_or_zero() * RAGDOLL_BLAST_IMPULSE;
-            self.start_death(idx, collider, at, knock);
+            // A splash kill carries no attacker: neither `Projectile` nor `Mine` records
+            // an owner, so there is nobody to credit. The victim still takes the death.
+            self.start_death(idx, collider, at, knock, Killer::Unattributed);
             log::info!("HUNTER DOWN (blast, {dmg:.0} dmg)");
         } else if self.ragdoll {
             // Phase 3 default: a brief physics-ragdoll stagger (radial from the blast) +
@@ -1330,11 +1347,22 @@ impl World {
         Some(rows[self.rand_below(rows.len())])
     }
 
-    fn start_death(&mut self, idx: usize, collider: ColliderHandle, impact: Vec3, impulse: Vec3) {
+    fn start_death(
+        &mut self,
+        idx: usize,
+        collider: ColliderHandle,
+        impact: Vec3,
+        impulse: Vec3,
+        killer: Killer,
+    ) {
         // A hunter just went down — pay the kill bounty. Every enemy death funnels
         // through here (bullet + blast paths both call it), so this is the one place
         // combat income is granted.
         self.award_kill();
+        // …which makes it also the one place the scoreboard is credited and the respawn
+        // clock is armed. Both belong here for exactly that reason.
+        self.record_hunter_death(idx, killer);
+        self.arm_hunter_respawn(idx);
         // The corpse can't be shot: the capsule goes now, either way.
         self.physics.remove_enemy_collider(collider);
         // **Authored first for a Perfect Dark hunter.** It has a real death table for
@@ -1437,14 +1465,21 @@ impl World {
     /// `onHit`). The death fade begins later, once the death animation finishes.
     pub(crate) fn hit_enemy(&mut self, idx: usize, hit_point: Vec3) {
         let base = self.weapon().active_damage();
-        self.hit_enemy_with(idx, hit_point, base);
+        self.hit_enemy_with(idx, hit_point, base, Killer::Player);
     }
 
-    /// [`Self::hit_enemy`] with the damage supplied rather than read off the player's
-    /// weapon — the entry point for a shot that did not come from the player, i.e. one
-    /// hunter hitting another (see `emit_pd_shot`). Everything downstream is shared,
-    /// so a hunter shot by a packmate bleeds, flinches and dies identically.
-    pub(crate) fn hit_enemy_with(&mut self, idx: usize, hit_point: Vec3, base: f32) {
+    /// [`Self::hit_enemy`] with the damage + attacker supplied rather than assumed to be
+    /// the player — the entry point for a shot that did not come from the player, i.e. one
+    /// hunter hitting another (see `emit_pd_shot`). Everything downstream is shared, so a
+    /// hunter shot by a packmate bleeds, flinches and dies identically; `killer` only
+    /// decides who the scoreboard credits.
+    pub(crate) fn hit_enemy_with(
+        &mut self,
+        idx: usize,
+        hit_point: Vec3,
+        base: f32,
+        killer: Killer,
+    ) {
         // Paint blood at the impact (before damage, so it shows even on the kill
         // shot). Needs this hunter's body model (immut) + its pose/blood (mut) —
         // disjoint fields, split-borrowed. Body id + its feet offset read out first.
@@ -1505,7 +1540,7 @@ impl World {
                 .map(|e| (hit_point - e).normalize_or_zero())
                 .unwrap_or(Vec3::Y);
             let knock = (dir + Vec3::Y * 0.25).normalize_or_zero() * RAGDOLL_BULLET_IMPULSE;
-            self.start_death(idx, collider, hit_point, knock);
+            self.start_death(idx, collider, hit_point, knock, killer);
             log::info!("HUNTER DOWN ({zone:?}, {dmg:.0} dmg)");
         } else if let Some(r) = self.pd_reaction(idx, false) {
             // Perfect Dark's injury table for the part that was hit — usually the
@@ -2064,7 +2099,7 @@ impl World {
         // Perfect Dark. If the lab turns out to need a ceiling for playability,
         // it belongs on the *weapon*, not on a global damage throttle.
         match victim {
-            None => self.take_player_damage(weapon.damage),
+            None => self.take_player_damage_from(weapon.damage, Killer::Hunter(idx)),
             Some(j) => {
                 // Hunter-on-hunter. It runs through the same `hit_enemy` the player's
                 // shots do, so the victim gets a hit part, blood, a pain vocal and an
@@ -2076,7 +2111,12 @@ impl World {
                     .get(j)
                     .map(|e| self.body_height(e.body) * 0.55)
                     .unwrap_or(0.8);
-                self.hit_enemy_with(j, victim_pos + Vec3::Y * chest, weapon.damage);
+                self.hit_enemy_with(
+                    j,
+                    victim_pos + Vec3::Y * chest,
+                    weapon.damage,
+                    Killer::Hunter(idx),
+                );
             }
         }
     }
@@ -2085,6 +2125,14 @@ impl World {
     /// with the damage feedback — red flash (peak α = min(0.5, dmg/40)), the
     /// breathe SFX, and the health-HUD pop. Death (→ YOU DIED) at 0 health.
     pub(crate) fn take_player_damage(&mut self, dmg: f32) {
+        // No attacker named — splash damage, or a test poking health directly. The death
+        // still counts against the player; no kill is credited.
+        self.take_player_damage_from(dmg, Killer::Unattributed);
+    }
+
+    /// [`Self::take_player_damage`] with the attacker named, so a kill can be credited on
+    /// the scoreboard. Death arms the player's respawn clock rather than ending the hunt.
+    pub(crate) fn take_player_damage_from(&mut self, dmg: f32, killer: Killer) {
         if self.player_dead || self.player_invulnerable {
             return;
         }
@@ -2098,8 +2146,8 @@ impl World {
             audio.play(PLAYER_HIT_SOUND, PLAYER_HIT_VOL);
         }
         if self.player_health <= 0.0 {
-            self.player_dead = true;
-            log::info!("YOU DIED — press R to restart");
+            // Death is no longer terminal: it scores, then starts the respawn clock.
+            self.kill_player(killer);
         }
     }
 
@@ -2176,19 +2224,25 @@ impl World {
         }
     }
 
-    /// Restart after death (the `R` key on the YOU DIED screen): reset player
-    /// health/armor and return to BUILD (which also clears the hunter + colliders).
+    /// The `R` key while dead: **skip the rest of the death beat and respawn now.**
+    ///
+    /// Death used to end the hunt — `R` reset health and dropped back to BUILD. With the
+    /// deathmatch loop it no longer can: the player is coming back from the spawn pool in
+    /// [`RESPAWN_DELAY`] whether or not a key is pressed, so all `R` does is cut the wait
+    /// short. Leaving HUNT is `G`, and starting a fresh round is [`Self::restart_round`].
     pub fn restart_after_death(&mut self) {
         if !self.player_dead {
             return;
         }
-        self.player_health = PLAYER_MAX_HEALTH;
-        self.player_armor = 0.0;
-        self.player_dead = false;
-        self.damage_flash = 0.0;
-        self.hud_show_timer = 0.0;
         if self.mode == Mode::Hunt {
-            self.toggle_mode();
+            self.respawn_player();
+        } else {
+            // Not in a hunt (nothing to respawn into) — just clear the death state.
+            self.player_health = PLAYER_MAX_HEALTH;
+            self.player_armor = 0.0;
+            self.player_dead = false;
+            self.damage_flash = 0.0;
+            self.hud_show_timer = 0.0;
         }
     }
 

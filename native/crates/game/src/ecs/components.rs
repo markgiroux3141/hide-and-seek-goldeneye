@@ -137,6 +137,26 @@ impl Default for PointLight {
     }
 }
 
+/// An authored spawn pad: somewhere a player or a simulant can enter the level.
+///
+/// Perfect Dark's equivalent is a *pad* listed in the stage setup's `INTROCMD_SPAWN`
+/// commands (`playerreset.c:171`), and both sides draw from that one list —
+/// `bot_spawn` (`bot.c:288`) and `player_start_new_life` (`player.c:528`) both call
+/// `scenario_choose_spawn_location`. So this is one shared pool, not a
+/// player-pool/simulant-pool pair.
+///
+/// Like [`PointLight`], a pad entity is just [`Transform`] + `SpawnPoint` with **no**
+/// [`Renderable`] — it has no mesh, so it rides the level file's `entities` collection
+/// with no schema change and is naturally skipped by every prop path (draw list,
+/// colliders, nav) that queries `Renderable`.
+///
+/// **Facing lives in the [`Transform`]'s rotation**, not in a field here: PD's pads
+/// carry a `look` vector and `player_choose_spawn_location` returns
+/// `atan2f(pad.look.x, pad.look.z)` as the spawn angle (`player.c:355`). Storing it as
+/// the transform yaw means the existing rotate gizmo authors the facing for free.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpawnPoint;
+
 /// Level-wide ambient fill. **Not a component** — a single global carried on the
 /// level (and its file), since ambient light has no position. `level` scales
 /// `color` into a flat term added to every lit surface so shadowed areas aren't

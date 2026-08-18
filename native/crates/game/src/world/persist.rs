@@ -32,6 +32,12 @@ use super::*;
 /// `entities` collection (a light entity is `Transform` + `PointLight`, no schema
 /// change), plus a new `#[serde(default)] ambient` global. Both defaults keep v1/v2
 /// files loading unchanged (no lights, default ambient).
+///
+/// **Still v3 (2026-08-18)** with the arrival of authorable spawn pads: a pad entity is
+/// `Transform` + `SpawnPoint` and rides the same `entities` collection, exactly as a
+/// point light does, so nothing about the file schema moved. The legacy scalar
+/// [`LevelFile::spawn_point`] below is now vestigial — kept written so a level saved by
+/// this build still opens in an older one at its old fixed ingress.
 const LEVEL_FORMAT_VERSION: u32 = 3;
 
 /// One CSG region's authored data (the shell is derived, so it isn't stored —
@@ -286,6 +292,8 @@ impl World {
         self.prop_gizmo_drag = None;
         self.light_tool = false;
         self.light_preview_pos = None;
+        self.spawn_tool = false;
+        self.spawn_preview = None;
         self.platform_phase = None;
         self.selected_platform = None;
         self.selected_run = None;

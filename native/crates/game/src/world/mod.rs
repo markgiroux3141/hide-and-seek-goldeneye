@@ -56,6 +56,12 @@ pub mod pd_lab;
 mod persist;
 mod pick;
 mod regions;
+mod respawn;
+mod scoreboard;
+pub use scoreboard::{RoundOutcome, Score};
+pub(crate) use scoreboard::Killer;
+mod spawn;
+pub(crate) use spawn::Spawning;
 mod spike_preview;
 mod tools;
 #[cfg(test)]
@@ -832,20 +838,37 @@ pub(crate) const PD_TEMPLATE_CLIPS: &[&str] = &[
     "50-fire-dual-right-007E.glb",
 ];
 
-// ─── Enemy spawn point (a FIXED world marker) ────────────────────────────────
-/// The hunters always flood in at this fixed world-space point (metres) — a
-/// consistent location the builder authors around, **not** derived from where the
-/// player happens to be at G. Marked on the floor by a colored square
-/// ([`World::spawn_marker_mesh`]) visible in both BUILD and HUNT. Defaults to the
-/// centre of the starting room; a placement tool can make it authorable later.
+// ─── Spawn points ────────────────────────────────────────────────────────────
+/// The **fallback** ingress point (metres), used only when a level has authored no
+/// spawn pads at all: the pack floods in here and the player still enters under the
+/// fly-cam, which is what this game did before pads existed.
+///
+/// Perfect Dark guards its spawn selection exactly this way —
+/// `if (g_NumSpawnPoints > 0) { ...choose... }` (`playerreset.c:398`) — so an empty
+/// pool falling back to a default entry is the ported behaviour, not a workaround. It
+/// also keeps every headless caller that predates pads (the AI lab's arenas, the
+/// levelgen harness) spawning exactly as before: they author brushes only, so their
+/// pool is empty and they take this path.
+///
+/// Authored pads are the normal case; see `world::tools::spawn_point`.
 pub(crate) const SPAWN_MARKER_POS: Vec3 = Vec3::new(3.0, 0.0, 3.0);
-/// Half-extent (m) of the floor marker square, and its flat colour (a bright
-/// red so it clearly reads as the enemy ingress).
-const SPAWN_MARKER_HALF: f32 = 0.6;
-const SPAWN_MARKER_COLOR: [f32; 3] = [0.95, 0.12, 0.12];
-/// Radius (m) of the ring the wave clusters into around the spawn point, so the
-/// hunters don't all stack on one cell.
+/// Radius (m) of the ring bodies cluster into when several draw the **same** pad, so
+/// they don't all stack on one cell. (With one pad in the pool this reproduces the old
+/// fixed-marker ring exactly.)
 const SPAWN_CLUSTER_RADIUS: f32 = 0.7;
+
+/// Seconds between a death and the respawn that follows it, both sides.
+///
+/// Perfect Dark's bots respawn immediately and fade in over `TICKS(120)` — 2 seconds
+/// (`aibot->fadeintimer60`, `bot.c:258`) — and in normal multiplayer the player
+/// respawns automatically once the death fade completes rather than on a keypress
+/// (`dostartnewlife`, `player.c:4596`). 2 s auto for both is that behaviour.
+pub(crate) const RESPAWN_DELAY: f32 = 2.0;
+
+/// Kills needed to win a round. First side to this many ends it (see
+/// [`World::round_outcome`]); `R` starts the next round. Overridable at launch with
+/// `SCORE_LIMIT=n` (`0` = endless, for open-ended playtesting).
+pub const SCORE_LIMIT: u32 = 10;
 
 /// Enemies keep this much personal space (m): pairs closer than this are nudged
 /// apart each step so they don't merge into one body / march in unison. ~3× the
@@ -1526,6 +1549,14 @@ pub(crate) struct EnemyInstance {
     /// Death fade: seconds since the death animation finished, or `None` while alive
     /// / mid death-animation. Drives opacity 1→0 over [`FADE_DURATION`].
     pub fade: Option<f32>,
+    /// Counts down from [`RESPAWN_DELAY`] once this hunter is killed; at 0 it respawns
+    /// **into this same slot** (see [`World::respawn_hunter`]). `None` while alive.
+    ///
+    /// The slot has to be reused rather than a fresh instance pushed: the roster index is
+    /// load-bearing well past the roster — `pd_lab::PdTarget::Hunter(i)`,
+    /// [`Self::pd_target`], the ORCA agent tags, squad alert, and every AI-lab metric key
+    /// off it — so renumbering mid-fight would silently repoint all of them.
+    pub respawn_timer: Option<f32>,
     /// Enemy-fire cadence: seconds until the next shot may leave during the fire
     /// window (spaced by `1/weapon.fire_rate`, or by the PD burst cadence).
     pub shot_timer: f32,
@@ -1840,6 +1871,15 @@ pub struct World {
     pd_anim_template_ge: Option<AnimPlayer>,
     /// xorshift state for the hit/death/pain random picks (no `rand` dep).
     char_rng: u64,
+    /// A **separate** xorshift state for spawn-pad selection (`world::spawn`).
+    ///
+    /// Deliberately not `char_rng`: spawn choice is a roll, and sharing the combat
+    /// stream would mean every spawn shifted every subsequent hit/pain/reaction draw.
+    /// That is not a hypothetical — folding the spawn roll into `char_rng` moved the
+    /// PD half-clip-reload lab scenario off its boundary and failed it, without any
+    /// change to the behaviour it measures. Two streams keep combat outcomes
+    /// reproducible independently of how many bodies have entered the level.
+    spawn_rng: u64,
     /// Difficulty dial, `0..=DIFFICULTY_MAX` (0 = original baseline). Cranked live with
     /// the `=` / `-` keys; drives [`DiffParams`] for enemy lethality/health/evasion.
     difficulty: u32,
@@ -2102,9 +2142,32 @@ pub struct World {
     audio: Option<AudioManager>,
 
     caught: bool,
-    /// Where the hunters materialise at G→HUNT — the fixed [`SPAWN_MARKER_POS`]
-    /// snapped to a standable cell. Set by [`World::prepare_spawn`]; the wave clusters
-    /// around it. HUNT only.
+    /// The player's kill/death tally for the current round. See `world::scoreboard`.
+    player_score: Score,
+    /// Per-roster-slot hunter tallies, sized to the wave at spawn. Held here rather than
+    /// on the `EnemyInstance` precisely because a respawn rebuilds the instance in place
+    /// — a score on the instance would be wiped by every death.
+    hunter_scores: Vec<Score>,
+    /// Kills needed to win the round; 0 = endless. Defaults to [`SCORE_LIMIT`], and the
+    /// launcher honours a `SCORE_LIMIT=n` env override.
+    score_limit: u32,
+    /// Latched once a side reaches [`Self::score_limit`]; `None` while the round is live.
+    /// Freezes the sim behind the round-over screen (`R` starts the next round).
+    round_over: Option<RoundOutcome>,
+    /// Counts down from [`RESPAWN_DELAY`] while the player is dead; at 0 the player
+    /// respawns from the pool. The death beat, not a game-over.
+    player_respawn: f32,
+    /// The live spawn pool for this hunt: every authored pad resolved to a standable
+    /// nav cell (PD's `chr_adjust_pos_for_spawn` step, done once at pool-build time).
+    /// **One shared pool** — the player and the simulants both draw from it, as in
+    /// Perfect Dark. Never empty during HUNT: with no pads authored it holds one
+    /// synthetic pad at [`SPAWN_MARKER_POS`], which reproduces the old fixed-ingress
+    /// behaviour exactly. Built by [`World::prepare_spawn`], cleared on return to BUILD.
+    spawn_pads: Vec<spawn::SpawnPad>,
+    /// The wave's reference point: the first resolved pad (or the fallback marker).
+    /// Only two things still read it — the fan-out search-pool seed and
+    /// [`World::pick_search_point`]'s empty-pool fallback — since *where a body enters*
+    /// is now per-body ([`World::spawn_pads`]). HUNT only.
     spawn_point: Vec3,
     /// The fan-out search-point pool for the hunt (spread standable cells). The
     /// `World` hands these out to searching hunters so the pack sweeps the base
@@ -2174,6 +2237,14 @@ pub struct World {
     /// The metric point the light-placement ghost currently previews (floor pick +
     /// fixed height); what a confirm places the light at.
     light_preview_pos: Option<Vec3>,
+    /// Spawn-pad placement tool armed (the SPAWNS panel's Place Spawn Point), BUILD
+    /// only. While set, a floor marker ghost tracks the cursor and a left-click authors
+    /// a pad entity facing the fly-cam. Mutually exclusive with the other placeables.
+    /// See `world::tools::spawn_point`.
+    spawn_tool: bool,
+    /// The metric floor point the pad-placement ghost currently previews; what a
+    /// confirm places the pad at.
+    spawn_preview: Option<Vec3>,
     /// This frame's mouse world ray `(origin, dir)`, pushed by the app from the free
     /// cursor's unprojection; the prop gizmo pick/hover/drag read it.
     mouse_ray: Option<(Vec3, Vec3)>,
@@ -2559,6 +2630,7 @@ impl World {
             pd_anim_template,
             pd_anim_template_ge,
             char_rng: 0x9E37_79B9_7F4A_7C15,
+            spawn_rng: 0x5DEE_CE66_D5C4_1B3B,
             difficulty: 0,
             wave_size: ENEMY_COUNT,
             pd: pd_lab::PdHunters::default(),
@@ -2617,6 +2689,12 @@ impl World {
             aiming: false,
             audio: None,
             caught: false,
+            player_score: Score::default(),
+            hunter_scores: Vec::new(),
+            score_limit: SCORE_LIMIT,
+            round_over: None,
+            player_respawn: 0.0,
+            spawn_pads: Vec::new(),
             spawn_point: SPAWN_MARKER_POS,
             search_points: Vec::new(),
             regions: vec![region],
@@ -2639,6 +2717,8 @@ impl World {
             prop_gizmo_mode: PropGizmoMode::Translate,
             light_tool: false,
             light_preview_pos: None,
+            spawn_tool: false,
+            spawn_preview: None,
             prop_gizmo_drag: None,
             mouse_ray: None,
             gizmo_snap: false,
@@ -3168,17 +3248,4 @@ impl World {
         self.caught
     }
 
-    /// The enemy spawn-point marker: a flat colored square laid on the floor at the
-    /// fixed [`SPAWN_MARKER_POS`], drawn in **both** BUILD and HUNT so the level can
-    /// be authored around a consistent, visible enemy-ingress point. A thin raised
-    /// tile (via [`push_colored_box`]) through the depth-tested spark pipeline.
-    pub fn spawn_marker_mesh(&self) -> Option<ColoredMesh> {
-        let c = SPAWN_MARKER_POS;
-        let min = Vec3::new(c.x - SPAWN_MARKER_HALF, c.y + 0.01, c.z - SPAWN_MARKER_HALF);
-        let max = Vec3::new(c.x + SPAWN_MARKER_HALF, c.y + 0.05, c.z + SPAWN_MARKER_HALF);
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-        push_colored_box(&mut vertices, &mut indices, min, max, SPAWN_MARKER_COLOR);
-        Some(ColoredMesh { vertices, indices })
-    }
 }

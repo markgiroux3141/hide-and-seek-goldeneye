@@ -36,6 +36,9 @@ pub enum ComponentData {
     Door { opening_type: OpeningType },
     Renderable { mesh: MeshId },
     PointLight { color: [f32; 3], intensity: f32, range: f32 },
+    /// A spawn pad. No payload — its position *and facing* are the entity's
+    /// [`Transform`] (see [`SpawnPoint`]), so the marker component is a bare tag.
+    SpawnPoint,
 }
 
 /// Spawn one authored entity into `world` from its data, returning the live handle.
@@ -74,6 +77,9 @@ fn fold_one(b: &mut EntityBuilder, c: &ComponentData) {
         }
         ComponentData::PointLight { color, intensity, range } => {
             b.add(PointLight { color: Vec3::from(*color), intensity: *intensity, range: *range });
+        }
+        ComponentData::SpawnPoint => {
+            b.add(SpawnPoint);
         }
     }
 }
@@ -123,6 +129,9 @@ pub(crate) fn extract(eref: &EntityRef<'_>) -> Vec<ComponentData> {
             intensity: l.intensity,
             range: l.range,
         });
+    }
+    if eref.has::<SpawnPoint>() {
+        cs.push(ComponentData::SpawnPoint);
     }
     if let Some(i) = eref.get::<&Interactable>() {
         cs.push(ComponentData::Interactable { radius: i.radius });

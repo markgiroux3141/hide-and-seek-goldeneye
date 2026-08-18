@@ -27,7 +27,7 @@ mod tests;
 
 pub use components::{
     AmbientSettings, Destroyed, Door, DoorState, Health, Interactable, MeshId, OpeningType,
-    PointLight, Renderable, Transform,
+    PointLight, Renderable, SpawnPoint, Transform,
 };
 pub use persist::{ComponentData, EntityData};
 pub use systems::{Command, SystemCtx};

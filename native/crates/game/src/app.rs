@@ -48,17 +48,19 @@ enum ShopAction {
 enum PanelTab {
     Objects,
     Lighting,
+    Spawns,
 }
 
 impl PanelTab {
     /// Every tab, in display order (also the cycle order).
-    const ALL: [PanelTab; 2] = [PanelTab::Objects, PanelTab::Lighting];
+    const ALL: [PanelTab; 3] = [PanelTab::Objects, PanelTab::Lighting, PanelTab::Spawns];
 
     /// The header title for this tab.
     fn title(self) -> &'static str {
         match self {
             PanelTab::Objects => "OBJECTS",
             PanelTab::Lighting => "LIGHTING",
+            PanelTab::Spawns => "SPAWNS",
         }
     }
 
@@ -482,6 +484,14 @@ impl App {
             selected_light.unwrap_or(([1.0, 1.0, 1.0], 1.0, 8.0));
         let mut light_edited = false;
         let mut toggle_light_place = false;
+        // Spawn-pad snapshot + edit buffer (same read-up-front / apply-after discipline).
+        let placing_spawn = self
+            .world
+            .as_ref()
+            .map(|w| w.is_placing_spawn_point())
+            .unwrap_or(false);
+        let spawn_pad_count = self.world.as_ref().map(|w| w.spawn_pad_count()).unwrap_or(0);
+        let mut toggle_spawn_place = false;
         let mut real_lighting_ui = self.build_real_lighting;
         let mut set_real_lighting: Option<bool> = None;
         let panel_tab = self.panel_tab;
@@ -762,8 +772,8 @@ impl App {
 
                         // Leave placement / clear selection so clicks select existing
                         // objects (also the Q / Esc key).
-                        if placing_prop || placing_light || prop_selected {
-                            let label = if placing_prop || placing_light {
+                        if placing_prop || placing_light || placing_spawn || prop_selected {
+                            let label = if placing_prop || placing_light || placing_spawn {
                                 "Stop placing (Q)"
                             } else {
                                 "Deselect (Q)"
@@ -817,6 +827,48 @@ impl App {
                                 {
                                     ambient_edited = true;
                                 }
+                            }
+                            PanelTab::Spawns => {
+                                if ui
+                                    .selectable_label(placing_spawn, "+ Place Spawn Point")
+                                    .clicked()
+                                {
+                                    toggle_spawn_place = true;
+                                }
+                                ui.label(
+                                    egui::RichText::new(
+                                        "click the floor to drop a pad — it faces the way \
+                                         the camera is looking",
+                                    )
+                                    .small()
+                                    .color(SHOP_DIM),
+                                );
+                                ui.add_space(6.0);
+                                ui.label(
+                                    egui::RichText::new(format!("{spawn_pad_count} PAD(S) AUTHORED"))
+                                        .small()
+                                        .strong()
+                                        .color(SHOP_GOLD_DIM),
+                                );
+                                ui.label(
+                                    egui::RichText::new(
+                                        "At G everyone — you and the simulants — enters from \
+                                         this one shared pool. Click a pad to select it: the \
+                                         Move gizmo repositions it, T switches to Rotate to \
+                                         re-aim its facing, Del removes it.",
+                                    )
+                                    .small()
+                                    .color(SHOP_DIM),
+                                );
+                                ui.add_space(4.0);
+                                ui.label(
+                                    egui::RichText::new(
+                                        "With no pads authored the level falls back to the \
+                                         old fixed red marker and you enter under the camera.",
+                                    )
+                                    .small()
+                                    .color(SHOP_DIM),
+                                );
                             }
                             PanelTab::Objects => {
                                 // A 3D turntable of the highlighted catalog prop, above
@@ -936,7 +988,13 @@ impl App {
             if let Some(world) = self.world.as_mut() {
                 world.cancel_prop_placement();
                 world.cancel_light_placement();
+                world.cancel_spawn_point_placement();
                 world.deselect_prop();
+            }
+        }
+        if toggle_spawn_place {
+            if let Some(world) = self.world.as_mut() {
+                world.arm_spawn_point_placement();
             }
         }
         // Lighting edits (arm/disarm light placement, flat/real preference, ambient,
@@ -1407,6 +1465,20 @@ impl ApplicationHandler for App {
         // duel-mode tests are unaffected) — the coordinated AI (flanking, squad
         // suppression, cover) only reads with more than one hunter on the field.
         world.set_wave_size(crate::world::PLAYTEST_WAVE_SIZE);
+        // `SCORE_LIMIT=n` — kills to win the round; `0` = endless, for an open-ended
+        // observation run where you don't want the result screen interrupting.
+        if let Ok(v) = std::env::var("SCORE_LIMIT") {
+            match v.trim().parse::<u32>() {
+                Ok(n) => {
+                    world.set_score_limit(n);
+                    log::info!(
+                        "SCORE_LIMIT={n}{}",
+                        if n == 0 { " (endless round)" } else { " kills to win" }
+                    );
+                }
+                Err(_) => log::warn!("SCORE_LIMIT={v:?} is not a number — keeping the default"),
+            }
+        }
         for rm in world.initial_meshes() {
             renderer.set_region_textured(rm.id, &rm.mesh);
         }
@@ -1638,6 +1710,16 @@ impl ApplicationHandler for App {
                         if let Some(world) = self.world.as_mut() {
                             world.update_prop_preview(o, d);
                             world.confirm_prop_placement();
+                        }
+                    }
+                    return;
+                }
+                // Spawn-pad placement: same free-cursor click-to-drop as props.
+                if self.world.as_ref().map(|w| w.is_placing_spawn_point()).unwrap_or(false) {
+                    if let Some((o, d)) = self.mouse_world_ray() {
+                        if let Some(world) = self.world.as_mut() {
+                            world.update_spawn_point_preview(o, d);
+                            world.confirm_spawn_point_placement();
                         }
                     }
                     return;
@@ -1902,7 +1984,21 @@ impl ApplicationHandler for App {
                     .as_ref()
                     .map(|w| w.is_build() && w.is_placing_light())
                     .unwrap_or(false);
-                if prop_placing {
+                let spawn_placing = self
+                    .world
+                    .as_ref()
+                    .map(|w| w.is_build() && w.is_placing_spawn_point())
+                    .unwrap_or(false);
+                if spawn_placing {
+                    // Spawn-pad ghost: the marker square at the cursor's floor pick.
+                    let ray = self.mouse_world_ray();
+                    let mesh = ray.and_then(|(o, d)| {
+                        self.world.as_mut().and_then(|w| w.update_spawn_point_preview(o, d))
+                    });
+                    if let Some(r) = self.renderer.as_mut() {
+                        r.set_highlight(mesh.as_ref());
+                    }
+                } else if prop_placing {
                     let ray = self.mouse_world_ray();
                     let mesh = ray
                         .and_then(|(o, d)| self.world.as_mut().and_then(|w| w.update_prop_preview(o, d)));
@@ -2032,7 +2128,11 @@ impl ApplicationHandler for App {
                     } else {
                         renderer.set_health_hud(Some(world.hud_alpha()));
                         renderer.set_damage_flash(world.damage_flash());
-                        renderer.set_death_screen(world.is_player_dead());
+                        // The dark overlay backs both end-screens: the death beat and the
+                        // round result (whose text `hud_mesh` supplies).
+                        renderer.set_death_screen(
+                            world.is_player_dead() || world.round_outcome().is_some(),
+                        );
                     }
                     renderer.set_door_mesh(world.door_mesh().as_ref());
                     // Pending-stair ghost — `None` (auto-clears) unless a stair op
@@ -2179,6 +2279,7 @@ impl App {
                 if let Some(w) = self.world.as_mut() {
                     w.cancel_prop_placement();
                     w.cancel_light_placement();
+                    w.cancel_spawn_point_placement();
                     w.deselect_prop();
                 }
                 return;
@@ -2392,13 +2493,16 @@ impl App {
             }
             return;
         }
-        // R in HUNT: restart from the YOU DIED screen if dead, else reload the
-        // weapon (in BUILD it's the brace tool, below).
+        // R in HUNT, in priority order: start the next round from the result screen,
+        // skip the rest of the death beat if dead, else reload the weapon. (In BUILD it's
+        // the brace tool, below.)
         if code == KeyCode::KeyR
             && self.world.as_ref().map(|w| !w.is_build()).unwrap_or(false)
         {
             if let Some(world) = self.world.as_mut() {
-                if world.is_player_dead() {
+                if world.round_outcome().is_some() {
+                    world.restart_round();
+                } else if world.is_player_dead() {
                     world.restart_after_death();
                 } else {
                     world.reload_weapon();

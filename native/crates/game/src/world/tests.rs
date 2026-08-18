@@ -2658,12 +2658,15 @@ use super::editing::find_room_brushes;
         world.take_player_damage(1000.0); // lethal
         assert_eq!(world.player_health(), 0.0, "health floors at 0");
         assert!(world.is_player_dead(), "0 health → dead");
+        assert_eq!(world.player_score().deaths, 1, "the death is scored");
 
-        // Restart resets health + returns to BUILD.
+        // `R` skips the rest of the death beat and respawns **in place**. Death used to
+        // end the hunt (restart → BUILD); under the deathmatch loop it is a respawn, so
+        // the property this guards deliberately changed: full health, alive, still HUNT.
         world.restart_after_death();
         assert!(!world.is_player_dead());
         assert_eq!(world.player_health(), PLAYER_MAX_HEALTH);
-        assert!(world.is_build(), "restart drops back to BUILD");
+        assert!(!world.is_build(), "respawn keeps the hunt running — G leaves it");
     }
 
     /// A3: in HUNT the hunters carry weapons — each gun's world clip transform

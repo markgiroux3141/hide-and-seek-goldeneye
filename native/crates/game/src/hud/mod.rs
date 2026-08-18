@@ -151,22 +151,60 @@ pub fn credits_quads(credits: u32, aspect: f32) -> Vec<HudVertex> {
     out
 }
 
+/// The deathmatch scoreboard quads: `YOU n - n  SIMS n - n` (kills − deaths per side),
+/// with `/ limit` appended when the round has a score limit. Laid out along the top edge,
+/// right-aligned so it sits clear of the credits readout (top-left) and the difficulty
+/// dial (top-centre). `aspect` = framebuffer w/h.
+pub fn score_quads(
+    you: (u32, u32),
+    sims: (u32, u32),
+    limit: u32,
+    aspect: f32,
+) -> Vec<HudVertex> {
+    let text = if limit > 0 {
+        format!("YOU {}-{} SIMS {}-{} / {limit}", you.0, you.1, sims.0, sims.1)
+    } else {
+        format!("YOU {}-{} SIMS {}-{}", you.0, you.1, sims.0, sims.1)
+    };
+    let gh = 0.05;
+    let gw = gh / aspect.max(1e-6) * (GLYPH_W as f32 / GLYPH_H as f32);
+    let gap = gw * 0.4;
+    let x_start = 0.94 - text_width(&text, gw, gap); // top-right
+    let y_top = 0.96;
+    let mut out = Vec::with_capacity(text.chars().count() * 6);
+    layout_text(&text, x_start, y_top, gw, gh, gap, &mut out);
+    out
+}
+
 /// The "YOU DIED" death-screen text quads (P5): a centered title + a smaller
-/// "PRESS R" prompt. Drawn white over the dark death overlay. `aspect` = w/h.
+/// prompt. Drawn white over the dark death overlay. `aspect` = w/h.
+///
+/// The prompt is no longer "PRESS R": with respawning, the player is coming back from the
+/// spawn pool on its own after [`crate::world::RESPAWN_DELAY`] and `R` only cuts the wait
+/// short — so the screen says what is about to happen rather than demanding an input.
 pub fn death_quads(aspect: f32) -> Vec<HudVertex> {
+    centered_message("YOU DIED", "RESPAWNING", aspect)
+}
+
+/// The round-over screen: which side took the score limit, and the prompt to start
+/// another. Same layout as [`death_quads`], different words.
+pub fn round_over_quads(player_won: bool, aspect: f32) -> Vec<HudVertex> {
+    let title = if player_won { "YOU WIN" } else { "SIMS WIN" };
+    centered_message(title, "PRESS R", aspect)
+}
+
+/// A centered big-title + small-prompt overlay pair, shared by the death and round-over
+/// screens so they sit at identical positions.
+fn centered_message(title: &str, prompt: &str, aspect: f32) -> Vec<HudVertex> {
     let mut out = Vec::new();
-    // Title.
     let gh = 0.13;
     let gw = gh / aspect.max(1e-6) * (GLYPH_W as f32 / GLYPH_H as f32);
     let gap = gw * 0.5;
-    let title = "YOU DIED";
     layout_text(title, -text_width(title, gw, gap) / 2.0, 0.16, gw, gh, gap, &mut out);
-    // Prompt.
     let gh2 = 0.055;
     let gw2 = gh2 / aspect.max(1e-6) * (GLYPH_W as f32 / GLYPH_H as f32);
     let gap2 = gw2 * 0.5;
-    let sub = "PRESS R";
-    layout_text(sub, -text_width(sub, gw2, gap2) / 2.0, -0.08, gw2, gh2, gap2, &mut out);
+    layout_text(prompt, -text_width(prompt, gw2, gap2) / 2.0, -0.08, gw2, gh2, gap2, &mut out);
     out
 }
 
@@ -206,5 +244,74 @@ mod tests {
         assert!(short_left > long_left, "the shorter count starts further right");
         // 6 verts per drawn glyph; "7 / 70" has 4 non-space glyphs (7 / 7 0).
         assert_eq!(short.len(), 4 * 6);
+    }
+
+    /// The scoreboard lays out, stays right-aligned inside the NDC viewport, and drops
+    /// the `/ limit` suffix in endless mode (so an endless round doesn't show `/ 0`).
+    #[test]
+    fn score_readout_right_aligns_and_hides_an_endless_limit() {
+        let limited = score_quads((3, 1), (2, 4), 10, 1.6);
+        let endless = score_quads((3, 1), (2, 4), 0, 1.6);
+        assert!(!limited.is_empty() && !endless.is_empty());
+        assert!(
+            endless.len() < limited.len(),
+            "endless mode omits the `/ limit` suffix"
+        );
+        // Right-aligned within the viewport: nothing runs off the right edge.
+        let right = limited.iter().map(|v| v.pos[0]).fold(f32::NEG_INFINITY, f32::max);
+        assert!(right <= 0.95, "the readout stays on screen (right edge {right})");
+        // Two-digit scores push the text further left, never further right.
+        let wide = score_quads((13, 11), (12, 14), 10, 1.6);
+        let wide_left = wide.iter().map(|v| v.pos[0]).fold(f32::INFINITY, f32::min);
+        let narrow_left = limited.iter().map(|v| v.pos[0]).fold(f32::INFINITY, f32::min);
+        assert!(wide_left < narrow_left, "a longer score grows leftward");
+    }
+
+    /// Both end-screens share one layout, and each names its own outcome.
+    #[test]
+    fn round_over_screens_differ_from_the_death_screen() {
+        let died = death_quads(1.6);
+        let won = round_over_quads(true, 1.6);
+        let lost = round_over_quads(false, 1.6);
+        assert!(!died.is_empty() && !won.is_empty() && !lost.is_empty());
+        // "YOU WIN" (6 drawn glyphs) and "SIMS WIN" (7) are different lengths, so the two
+        // outcomes are genuinely distinct text rather than one shared string.
+        assert_ne!(won.len(), lost.len(), "the two outcomes read differently");
+    }
+
+    /// **Every character the HUD prints must be in the [`CHARSET`].**
+    ///
+    /// A char without an atlas cell is silently *dropped* by [`layout_text`] — not drawn
+    /// as a placeholder box — so a new HUD string containing an unatlased letter loses it
+    /// on screen with nothing failing. That is not hypothetical: the scoreboard and the
+    /// win screen needed `M`, `W` and `-`, none of which were in the charset, and without
+    /// this test `SIMS WIN` would have shipped rendering as `SIS IN`.
+    ///
+    /// Each case below asserts the quad count equals 6 × (non-space chars), which only
+    /// holds if every glyph in the string actually made it into the atlas.
+    #[test]
+    fn every_string_the_hud_prints_is_fully_atlased() {
+        let drawn = |s: &str| s.chars().filter(|c| *c != ' ').count() * 6;
+
+        assert_eq!(ammo_quads(7, 70, 1.6).len(), drawn("7 / 70"), "ammo counter");
+        assert_eq!(danger_quads(4, 10, 1.6).len(), drawn("DANGER 4 / 10"), "danger dial");
+        assert_eq!(credits_quads(250, 1.6).len(), drawn("$250"), "credit balance");
+        assert_eq!(
+            score_quads((3, 1), (2, 4), 10, 1.6).len(),
+            drawn("YOU 3-1 SIMS 2-4 / 10"),
+            "scoreboard"
+        );
+        assert_eq!(
+            score_quads((3, 1), (2, 4), 0, 1.6).len(),
+            drawn("YOU 3-1 SIMS 2-4"),
+            "scoreboard (endless)"
+        );
+        assert_eq!(death_quads(1.6).len(), drawn("YOU DIEDRESPAWNING"), "death screen");
+        assert_eq!(round_over_quads(true, 1.6).len(), drawn("YOU WINPRESS R"), "win screen");
+        assert_eq!(
+            round_over_quads(false, 1.6).len(),
+            drawn("SIMS WINPRESS R"),
+            "loss screen"
+        );
     }
 }
