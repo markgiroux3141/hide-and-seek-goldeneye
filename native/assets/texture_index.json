@@ -1,0 +1,9938 @@
+{
+ "blue_brick_wall": {
+  "aliases": [
+   "tempImgEd00B5"
+  ],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "blue_stairs": {
+  "aliases": [
+   "tempImgEd0393"
+  ],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "06 - Silo",
+   "07 - Frigate",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "brown_wall": {
+  "aliases": [
+   "tempImgEd02D1"
+  ],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "chainlink": {
+  "aliases": [
+   "tempImgEd0105"
+  ],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "03 - Runway",
+   "04 - Surface1",
+   "08 - Surface2"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "dark_ceiling": {
+  "aliases": [
+   "tempImgEd0102"
+  ],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "06 - Silo",
+   "11 - Archives",
+   "15 - Jungle",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "floor_doorframe": {
+  "aliases": [
+   "tempImgEd00F0"
+  ],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "02 - Facility",
+   "03 - Runway",
+   "04 - Surface1",
+   "08 - Surface2",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "foam_ceiling": {
+  "aliases": [
+   "tempImgEd0101"
+  ],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "grey_line_wall": {
+  "aliases": [
+   "tempImgEd011B"
+  ],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "grey_tile_floor": {
+  "aliases": [
+   "tempImgEd02B7"
+  ],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "railing": {
+  "aliases": [
+   "tempImgEd02BE"
+  ],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "snow": {
+  "aliases": [
+   "tempImgEd04F0"
+  ],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "snow_path": {
+  "aliases": [
+   "tempImgEd04F1"
+  ],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "snow_path_branch": {
+  "aliases": [
+   "tempImgEd04F3"
+  ],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "snow_path_intersection": {
+  "aliases": [
+   "tempImgEd04EF"
+  ],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "stair_gradient": {
+  "aliases": [
+   "tempImgEd02C2"
+  ],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0005": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0006": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0007": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "06 - Silo",
+   "07 - Frigate",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "13 - Depot",
+   "15 - Jungle",
+   "16 - Control",
+   "17 - Caverns",
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0008": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "02 - Facility",
+   "03 - Runway",
+   "05 - Bunker1",
+   "06 - Silo",
+   "07 - Frigate",
+   "09 - Bunker2",
+   "13 - Depot",
+   "14 - Train",
+   "16 - Control",
+   "17 - Caverns",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0009": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd000A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0012": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0013": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0014": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0016": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "03 - Runway",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0019": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd002D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd002E": {
+  "aliases": [],
+  "h": 128,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 16
+ },
+ "tempImgEd0032": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0038": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0039": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd003B": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd003C": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate",
+   "13 - Depot",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0040": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0041": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0042": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0044": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0045": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0047": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0053": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0055": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0056": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0058": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0059": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd005A": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd005B": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd005C": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd005D": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd005E": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd005F": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0060": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0061": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0062": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0063": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0064": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0065": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0066": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0067": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0068": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0069": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd006A": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd006B": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd006C": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd006D": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd006E": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd006F": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0070": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0071": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0072": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0073": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0074": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0075": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0076": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0077": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0078": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0079": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd007A": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd007B": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd007C": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd007D": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd007E": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd007F": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0080": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0081": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0082": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0083": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0084": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0085": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0086": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0087": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0088": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0089": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd008A": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd008B": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd008C": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd008D": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd008E": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd008F": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0090": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0091": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0092": {
+  "aliases": [],
+  "h": 47,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0093": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0094": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0095": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2",
+   "11 - Archives",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0097": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0098": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "06 - Silo",
+   "07 - Frigate",
+   "13 - Depot",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0099": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "11 - Archives",
+   "13 - Depot",
+   "18 - Cradle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd009A": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "03 - Runway",
+   "05 - Bunker1",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd009B": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd009C": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd009D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00A0": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00A1": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "19 - Aztec",
+   "21 - Complex"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd00A2": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "19 - Aztec",
+   "21 - Complex"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd00A3": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "19 - Aztec",
+   "21 - Complex"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd00A4": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "19 - Aztec",
+   "21 - Complex"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd00A5": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "19 - Aztec",
+   "21 - Complex"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd00A6": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "19 - Aztec",
+   "21 - Complex"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd00A7": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "19 - Aztec"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd00A8": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00AD": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "09 - Bunker2",
+   "16 - Control",
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00AE": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "16 - Control",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00AF": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot",
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00B0": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd00B1": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00B2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00B3": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00B5": {
+  "aliases": [
+   "blue_brick_wall"
+  ],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00B7": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00BA": {
+  "aliases": [
+   "tempImgEd09E7"
+  ],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "09 - Bunker2",
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00BB": {
+  "aliases": [
+   "tempImgEd046D"
+  ],
+  "h": 32,
+  "levels": [
+   "15 - Jungle",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00C2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00C3": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00C4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00C5": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "14 - Train",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00C6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00C7": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00C8": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00C9": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00CA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "06 - Silo",
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00CB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "06 - Silo",
+   "07 - Frigate",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00CC": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00CD": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "06 - Silo",
+   "07 - Frigate",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00CE": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "09 - Bunker2",
+   "11 - Archives"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd00D3": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate",
+   "10 - Statue",
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00D4": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate",
+   "13 - Depot",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 16
+ },
+ "tempImgEd00D5": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00D6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00E2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "13 - Depot",
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00E3": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot",
+   "14 - Train",
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00E4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00E5": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "03 - Runway",
+   "13 - Depot",
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00EB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "11 - Archives",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00EC": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd00ED": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00EE": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd00EF": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "04 - Surface1",
+   "06 - Silo",
+   "08 - Surface2"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd00F0": {
+  "aliases": [
+   "floor_doorframe"
+  ],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "02 - Facility",
+   "03 - Runway",
+   "04 - Surface1",
+   "08 - Surface2",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00F1": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd00F2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00F3": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00F4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00FB": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd00FC": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00FD": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00FE": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "06 - Silo",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "15 - Jungle",
+   "16 - Control",
+   "17 - Caverns",
+   "19 - Aztec"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd00FF": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0100": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0101": {
+  "aliases": [
+   "foam_ceiling"
+  ],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0102": {
+  "aliases": [
+   "dark_ceiling"
+  ],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "06 - Silo",
+   "11 - Archives",
+   "15 - Jungle",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0103": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0106": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 16
+ },
+ "tempImgEd0109": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot",
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd010A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd010E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0110": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0111": {
+  "aliases": [],
+  "h": 48,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0112": {
+  "aliases": [],
+  "h": 48,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0113": {
+  "aliases": [],
+  "h": 48,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0114": {
+  "aliases": [],
+  "h": 48,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0115": {
+  "aliases": [],
+  "h": 48,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0116": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0117": {
+  "aliases": [
+   "tempImgEd0471"
+  ],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "09 - Bunker2",
+   "11 - Archives",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0118": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0119": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd011A": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd011B": {
+  "aliases": [
+   "grey_line_wall"
+  ],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd011C": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo",
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd011D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd011E": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd011F": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0120": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0121": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0122": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "03 - Runway",
+   "04 - Surface1",
+   "08 - Surface2"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0123": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "02 - Facility",
+   "03 - Runway",
+   "04 - Surface1",
+   "08 - Surface2"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0124": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0125": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "02 - Facility",
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0126": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "03 - Runway",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "13 - Depot",
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0127": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "11 - Archives"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0128": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "02 - Facility",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "06 - Silo",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "11 - Archives",
+   "13 - Depot",
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0129": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd012A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "09 - Bunker2",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd012B": {
+  "aliases": [
+   "tempImgEd012C"
+  ],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "06 - Silo",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "11 - Archives",
+   "13 - Depot",
+   "14 - Train",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd012D": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd012E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "04 - Surface1",
+   "06 - Silo",
+   "08 - Surface2"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd012F": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0130": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0131": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0132": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0133": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0134": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "03 - Runway",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "11 - Archives",
+   "13 - Depot",
+   "16 - Control",
+   "18 - Cradle",
+   "19 - Aztec"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0135": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot",
+   "19 - Aztec"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0136": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0137": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "05 - Bunker1"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0138": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0139": {
+  "aliases": [
+   "tempImgEd013A"
+  ],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd013B": {
+  "aliases": [
+   "tempImgEd013C"
+  ],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd013C": {
+  "aliases": [
+   "tempImgEd013B"
+  ],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd013D": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 16
+ },
+ "tempImgEd013E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd013F": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0140": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0141": {
+  "aliases": [],
+  "h": 9,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 128
+ },
+ "tempImgEd0142": {
+  "aliases": [],
+  "h": 9,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 128
+ },
+ "tempImgEd0143": {
+  "aliases": [],
+  "h": 9,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 128
+ },
+ "tempImgEd0144": {
+  "aliases": [],
+  "h": 9,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0145": {
+  "aliases": [],
+  "h": 9,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0146": {
+  "aliases": [],
+  "h": 9,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0147": {
+  "aliases": [],
+  "h": 9,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0148": {
+  "aliases": [],
+  "h": 9,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0171": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0172": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0173": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0174": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0175": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0176": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0177": {
+  "aliases": [
+   "tempImgEd0178"
+  ],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0179": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd017A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd017B": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd017C": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd017D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd017E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0180": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0181": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd018A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd018F": {
+  "aliases": [
+   "tempImgEd09A9"
+  ],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "07 - Frigate",
+   "09 - Bunker2",
+   "11 - Archives",
+   "16 - Control",
+   "21 - Complex"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0190": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo",
+   "11 - Archives",
+   "13 - Depot",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0191": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0192": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "20 - Egyptian"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0193": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "20 - Egyptian"
+  ],
+  "tiles": false,
+  "w": 16
+ },
+ "tempImgEd0194": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "20 - Egyptian"
+  ],
+  "tiles": true,
+  "w": 16
+ },
+ "tempImgEd0195": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "20 - Egyptian"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0196": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "20 - Egyptian"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0197": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "15 - Jungle",
+   "20 - Egyptian"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0198": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0199": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "20 - Egyptian"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd019A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "20 - Egyptian"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd019B": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "06 - Silo",
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd019C": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd019D": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd019E": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "06 - Silo",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd019F": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "09 - Bunker2",
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd01A0": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd01A1": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd01A3": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01A6": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd01A7": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "01 - Dam",
+   "06 - Silo"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01A8": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "01 - Dam",
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd01AA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01AB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01AC": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd01AD": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01AE": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd01AF": {
+  "aliases": [],
+  "h": 8,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd01B1": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd01B2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd01B3": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd01B4": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01B5": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd01B6": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01B7": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "01 - Dam",
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd01B8": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd01B9": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd01BA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd01BF": {
+  "aliases": [],
+  "h": 65,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01C0": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01C1": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd01C2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "10 - Statue",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd01C3": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "10 - Statue",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01C4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "10 - Statue",
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd01C7": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo",
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd01C8": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo",
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd01C9": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd01CA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd01CB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "10 - Statue",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd01D6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01D7": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd01D8": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd01D9": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01DA": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01DB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd01DC": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01DD": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01DE": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01E0": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd01E1": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01E2": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01E3": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01E4": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01E5": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01E6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd01E7": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01E8": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01E9": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd01EA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01EB": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01EC": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd01ED": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd01EE": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "03 - Runway",
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01EF": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "01 - Dam",
+   "07 - Frigate",
+   "19 - Aztec"
+  ],
+  "tiles": true,
+  "w": 128
+ },
+ "tempImgEd01F0": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01F1": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate",
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01F2": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "07 - Frigate",
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01F3": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd01F5": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01F7": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01F9": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "06 - Silo",
+   "07 - Frigate",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "11 - Archives",
+   "13 - Depot",
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd01FA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd01FB": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0201": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0202": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0203": {
+  "aliases": [],
+  "h": 128,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0204": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0205": {
+  "aliases": [],
+  "h": 128,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 8
+ },
+ "tempImgEd0206": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0207": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0208": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0209": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd020A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd020B": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd020C": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd020D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd020E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd020F": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0210": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0211": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate",
+   "18 - Cradle"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0212": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0213": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0214": {
+  "aliases": [],
+  "h": 1,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0215": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0216": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0217": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0218": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0219": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd021A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0224": {
+  "aliases": [],
+  "h": 22,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0225": {
+  "aliases": [],
+  "h": 22,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0226": {
+  "aliases": [],
+  "h": 22,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0240": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0243": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot",
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0249": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd024A": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd024B": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd024C": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd024D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd024E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd024F": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0250": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0251": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0252": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0253": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0254": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "09 - Bunker2",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0255": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "09 - Bunker2",
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0256": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0257": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0258": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0259": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd025A": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd025B": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd025C": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd025D": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd025E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd025F": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "09 - Bunker2",
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0260": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0261": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0262": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0263": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0267": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0269": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd026A": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "06 - Silo",
+   "15 - Jungle",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd026B": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "16 - Control",
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd026F": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0276": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "18 - Cradle",
+   "21 - Complex"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0277": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0278": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0281": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0282": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0286": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0287": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd028A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd028B": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd028F": {
+  "aliases": [],
+  "h": 54,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 56
+ },
+ "tempImgEd0290": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot",
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0291": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo",
+   "19 - Aztec"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0296": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0299": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd029F": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd02A0": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd02A1": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd02A2": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd02A3": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02A4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd02A5": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd02A6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd02A7": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd02A8": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd02A9": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd02AA": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd02AB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd02AC": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd02AD": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02AE": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02AF": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02B0": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02B1": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd02B2": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "01 - Dam",
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 128
+ },
+ "tempImgEd02B3": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd02B4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02B6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd02B7": {
+  "aliases": [
+   "grey_tile_floor"
+  ],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02B8": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02B9": {
+  "aliases": [
+   "yellow_floor"
+  ],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd02BA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02BB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02BD": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd02C0": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02C1": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd02C4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd02C5": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02C6": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd02C7": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02C9": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02CE": {
+  "aliases": [
+   "white_tile"
+  ],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd02CF": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd02D1": {
+  "aliases": [
+   "brown_wall"
+  ],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd02D2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd02D4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02D5": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02D6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02D7": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02D8": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02D9": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02DA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02DB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02DC": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd02DD": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd02DE": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02DF": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02E0": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02E1": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02E2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02E3": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02E6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02E7": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02E8": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02E9": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02EA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02EB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02EC": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02ED": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02EE": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02EF": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02F0": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02F1": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02F2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02F3": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02F4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02F5": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02F6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd02F7": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd02F8": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot",
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd02F9": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd02FA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd02FD": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0301": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0302": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0304": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0305": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "07 - Frigate",
+   "09 - Bunker2",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0309": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0313": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate",
+   "10 - Statue",
+   "14 - Train",
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0315": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "03 - Runway",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0316": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "03 - Runway",
+   "18 - Cradle"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0317": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "03 - Runway",
+   "18 - Cradle"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0318": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "03 - Runway",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0319": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd031A": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd031B": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0325": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0326": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0329": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd032A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0330": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0338": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0339": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd033A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd033B": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd033C": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd033D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd033E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd033F": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0340": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0341": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0346": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0347": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0348": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot",
+   "19 - Aztec"
+  ],
+  "tiles": true,
+  "w": 40
+ },
+ "tempImgEd0349": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot",
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd034C": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "04 - Surface1",
+   "06 - Silo",
+   "08 - Surface2",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd034E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0350": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0359": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "06 - Silo",
+   "09 - Bunker2",
+   "13 - Depot",
+   "15 - Jungle",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd035A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo",
+   "15 - Jungle",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd035D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd035E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd035F": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0360": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0361": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0362": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0363": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0365": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0378": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd037F": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0380": {
+  "aliases": [],
+  "h": 48,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0381": {
+  "aliases": [],
+  "h": 48,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0382": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0383": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0384": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 16
+ },
+ "tempImgEd0385": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0386": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo",
+   "16 - Control",
+   "17 - Caverns",
+   "19 - Aztec"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0390": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0391": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0394": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0398": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0399": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd039A": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd039B": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd039E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd03A2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd03A5": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd03A6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd03AB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd03B4": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03B5": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03BF": {
+  "aliases": [
+   "tempImgEd03C0"
+  ],
+  "h": 64,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03C0": {
+  "aliases": [
+   "tempImgEd03BF"
+  ],
+  "h": 64,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03C1": {
+  "aliases": [],
+  "h": 9,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd03C2": {
+  "aliases": [],
+  "h": 9,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd03C3": {
+  "aliases": [],
+  "h": 9,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd03C4": {
+  "aliases": [],
+  "h": 9,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd03C5": {
+  "aliases": [],
+  "h": 9,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd03C6": {
+  "aliases": [],
+  "h": 9,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd03C7": {
+  "aliases": [],
+  "h": 9,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd03C8": {
+  "aliases": [],
+  "h": 9,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd03C9": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd03CA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd03CB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd03CC": {
+  "aliases": [
+   "tempImgEd03CE",
+   "tempImgEd03CF",
+   "tempImgEd03D1"
+  ],
+  "h": 32,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03CD": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03CF": {
+  "aliases": [
+   "tempImgEd03CC",
+   "tempImgEd03CE",
+   "tempImgEd03D1"
+  ],
+  "h": 32,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03D0": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03D1": {
+  "aliases": [
+   "tempImgEd03CC",
+   "tempImgEd03CE",
+   "tempImgEd03CF"
+  ],
+  "h": 32,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03D2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03D3": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd03D4": {
+  "aliases": [
+   "tempImgEd03D5"
+  ],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd03D6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "06 - Silo",
+   "09 - Bunker2",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd03D7": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd03D8": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd03DD": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "02 - Facility",
+   "13 - Depot",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03DE": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "02 - Facility",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03DF": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "13 - Depot",
+   "19 - Aztec"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd03E0": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "02 - Facility",
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd03E1": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03E2": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "13 - Depot",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03E3": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03E4": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "13 - Depot",
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd03E5": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03E6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd03F1": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd03F3": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate",
+   "12 - Streets"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd03F4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd03F5": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd03F9": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "09 - Bunker2",
+   "11 - Archives"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd03FB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd03FE": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0400": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0402": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0403": {
+  "aliases": [
+   "tempImgEd0405"
+  ],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0408": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0409": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd040A": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd040B": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd040C": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd040D": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd040E": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd040F": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0410": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0411": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0412": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0413": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0414": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0416": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 16
+ },
+ "tempImgEd0417": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0418": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd041A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 48
+ },
+ "tempImgEd041B": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 48
+ },
+ "tempImgEd041C": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 48
+ },
+ "tempImgEd041D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd041E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 48
+ },
+ "tempImgEd041F": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "11 - Archives",
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0420": {
+  "aliases": [],
+  "h": 48,
+  "levels": [
+   "02 - Facility",
+   "11 - Archives"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0421": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "11 - Archives",
+   "16 - Control",
+   "18 - Cradle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0422": {
+  "aliases": [],
+  "h": 48,
+  "levels": [
+   "02 - Facility",
+   "11 - Archives",
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0423": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "16 - Control",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0424": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd042A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd042B": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0433": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0434": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0436": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0438": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot",
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0439": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd043A": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "13 - Depot",
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd043D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd043E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd043F": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0443": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0448": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0449": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd044A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd044B": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd044C": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd044D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd044E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd044F": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0450": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0451": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0452": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0453": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0464": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0465": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0466": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0467": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd046A": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd046C": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd046D": {
+  "aliases": [
+   "tempImgEd00BB"
+  ],
+  "h": 32,
+  "levels": [
+   "15 - Jungle",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd046E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd046F": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0470": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0471": {
+  "aliases": [
+   "tempImgEd0117"
+  ],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "09 - Bunker2",
+   "11 - Archives",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0472": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo",
+   "07 - Frigate",
+   "15 - Jungle",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0473": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0474": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0478": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0479": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd047A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd047B": {
+  "aliases": [],
+  "h": 128,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 16
+ },
+ "tempImgEd047C": {
+  "aliases": [],
+  "h": 128,
+  "levels": [
+   "03 - Runway",
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 16
+ },
+ "tempImgEd047D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd047E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd047F": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0480": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0481": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0482": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0483": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0484": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0485": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0486": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2",
+   "11 - Archives",
+   "12 - Streets",
+   "13 - Depot",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0487": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "04 - Surface1",
+   "08 - Surface2",
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0488": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0489": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd048A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd048B": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2",
+   "13 - Depot",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd048C": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd048D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd048E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "06 - Silo",
+   "08 - Surface2",
+   "12 - Streets",
+   "13 - Depot",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd048F": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "04 - Surface1",
+   "08 - Surface2",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0490": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "13 - Depot",
+   "16 - Control",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0491": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0492": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0493": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "10 - Statue",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0495": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "20 - Egyptian"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0496": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "20 - Egyptian"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0497": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "20 - Egyptian"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd04A9": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd04AA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd04AB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd04AC": {
+  "aliases": [],
+  "h": 54,
+  "levels": [
+   "05 - Bunker1",
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 56
+ },
+ "tempImgEd04AE": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd04AF": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd04B0": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd04B1": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd04B2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd04B3": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "04 - Surface1",
+   "08 - Surface2"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd04B4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2",
+   "10 - Statue",
+   "13 - Depot",
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd04BE": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd04C2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd04C4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd04C7": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue",
+   "13 - Depot",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd04C8": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue",
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 48
+ },
+ "tempImgEd04C9": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd04CA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue",
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd04CB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd04CC": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd04CD": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd04CE": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd04CF": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd04D0": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd04D1": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd04D2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd04D3": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd04D4": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd04D5": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd04D6": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd04D7": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd04D8": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd04D9": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd04DA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "06 - Silo",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd04DB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd04DC": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd04DD": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "06 - Silo",
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 72
+ },
+ "tempImgEd04DE": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "06 - Silo",
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 72
+ },
+ "tempImgEd04DF": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo",
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd04E0": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd04E1": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd04E2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd04E3": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd04E4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo",
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd04E5": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd04E6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd04E7": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd04E8": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets",
+   "13 - Depot",
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd04EA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "06 - Silo",
+   "09 - Bunker2",
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd04EC": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd04ED": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd04EF": {
+  "aliases": [
+   "snow_path_intersection"
+  ],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd04F0": {
+  "aliases": [
+   "snow"
+  ],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd04F2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd04F3": {
+  "aliases": [
+   "snow_path_branch"
+  ],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd04F4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd04F5": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd04FC": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd04FD": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "07 - Frigate",
+   "09 - Bunker2",
+   "11 - Archives",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd04FE": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd04FF": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0500": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "11 - Archives",
+   "13 - Depot",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0501": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0502": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0503": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0505": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0506": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0507": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0508": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0509": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd050A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd050B": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd050C": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd050D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd050E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd050F": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0510": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0511": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0512": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0513": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0514": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0515": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0516": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0517": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0518": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0519": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd051A": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd051B": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd051C": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd051D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd051E": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd051F": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0520": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0521": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0522": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0523": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0524": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0525": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0526": {
+  "aliases": [
+   "tempImgEd0528"
+  ],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0527": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0528": {
+  "aliases": [
+   "tempImgEd0526"
+  ],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0529": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd052A": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 16
+ },
+ "tempImgEd052B": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 16
+ },
+ "tempImgEd052C": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd052D": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd052E": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd052F": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0530": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0531": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0532": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0533": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0534": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0535": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0536": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0537": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0538": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0539": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd053A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd053B": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd053C": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd053D": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd053E": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd053F": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0540": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0541": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0542": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0543": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0544": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0545": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0546": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0547": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0548": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0549": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd054A": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd054B": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd054D": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd054E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd054F": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0550": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0551": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0552": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0553": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0554": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0555": {
+  "aliases": [],
+  "h": 128,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0556": {
+  "aliases": [],
+  "h": 128,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": true,
+  "w": 16
+ },
+ "tempImgEd0558": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "10 - Statue",
+   "11 - Archives",
+   "12 - Streets",
+   "13 - Depot",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0559": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam",
+   "05 - Bunker1",
+   "11 - Archives",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 16
+ },
+ "tempImgEd055A": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "15 - Jungle",
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd055B": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "15 - Jungle",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd055C": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd055D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "06 - Silo",
+   "08 - Surface2",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd055E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd055F": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "13 - Depot",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0560": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "13 - Depot",
+   "18 - Cradle"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0564": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0565": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0566": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo",
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0567": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "06 - Silo",
+   "07 - Frigate",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "16 - Control",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0568": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate",
+   "14 - Train",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd056A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo",
+   "17 - Caverns"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd058A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd058B": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0590": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0591": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0592": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot",
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0593": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0594": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0595": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0596": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0597": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0598": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0599": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot",
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd059A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd059B": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd059C": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd059D": {
+  "aliases": [
+   "tempImgEd059E"
+  ],
+  "h": 32,
+  "levels": [
+   "13 - Depot",
+   "14 - Train",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd059E": {
+  "aliases": [
+   "tempImgEd059D"
+  ],
+  "h": 32,
+  "levels": [
+   "13 - Depot",
+   "14 - Train",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05A7": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd05B4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05B5": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "09 - Bunker2",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05B7": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "06 - Silo",
+   "07 - Frigate",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd05B8": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "19 - Aztec",
+   "21 - Complex"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd05B9": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd05BC": {
+  "aliases": [
+   "tempImgEd05BD"
+  ],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd05BD": {
+  "aliases": [
+   "tempImgEd05BC"
+  ],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd05BE": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05BF": {
+  "aliases": [],
+  "h": 128,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": true,
+  "w": 8
+ },
+ "tempImgEd05C0": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 16
+ },
+ "tempImgEd05C1": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "03 - Runway",
+   "11 - Archives",
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05C2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd05C3": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05C4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05C5": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05C6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd05C7": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd05C8": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd05C9": {
+  "aliases": [],
+  "h": 1,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd05CA": {
+  "aliases": [],
+  "h": 1,
+  "levels": [
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd05CB": {
+  "aliases": [],
+  "h": 1,
+  "levels": [
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd05CC": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05CD": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd05CE": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd05CF": {
+  "aliases": [],
+  "h": 38,
+  "levels": [
+   "02 - Facility",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd05D0": {
+  "aliases": [],
+  "h": 38,
+  "levels": [
+   "02 - Facility",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd05D1": {
+  "aliases": [],
+  "h": 38,
+  "levels": [
+   "02 - Facility",
+   "06 - Silo"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd05D2": {
+  "aliases": [],
+  "h": 38,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd05D3": {
+  "aliases": [],
+  "h": 38,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd05D4": {
+  "aliases": [],
+  "h": 38,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd05D5": {
+  "aliases": [],
+  "h": 38,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd05D6": {
+  "aliases": [],
+  "h": 38,
+  "levels": [
+   "02 - Facility",
+   "03 - Runway"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd05D7": {
+  "aliases": [],
+  "h": 38,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd05D8": {
+  "aliases": [],
+  "h": 38,
+  "levels": [
+   "02 - Facility",
+   "18 - Cradle"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd05D9": {
+  "aliases": [],
+  "h": 38,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd05DA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "06 - Silo"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd05DB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05DC": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05E4": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "17 - Caverns"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd05E5": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "02 - Facility",
+   "04 - Surface1",
+   "05 - Bunker1",
+   "08 - Surface2",
+   "09 - Bunker2",
+   "14 - Train",
+   "20 - Egyptian"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd05E6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "09 - Bunker2"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd05E7": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "21 - Complex"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd05EB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets",
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05EC": {
+  "aliases": [],
+  "h": 48,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05EE": {
+  "aliases": [],
+  "h": 48,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05EF": {
+  "aliases": [],
+  "h": 48,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05F1": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05F2": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "05 - Bunker1"
+  ],
+  "tiles": false,
+  "w": 16
+ },
+ "tempImgEd05F3": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue",
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd05F4": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd05F5": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05F6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05F7": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd05F9": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05FA": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd05FC": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets",
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd05FD": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd05FE": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "04 - Surface1",
+   "08 - Surface2"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd05FF": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "04 - Surface1",
+   "08 - Surface2",
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0600": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "01 - Dam",
+   "04 - Surface1",
+   "08 - Surface2",
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0601": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0602": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0603": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "14 - Train"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0604": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "13 - Depot",
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd0605": {
+  "aliases": [],
+  "h": 24,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0608": {
+  "aliases": [],
+  "h": 23,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd0609": {
+  "aliases": [],
+  "h": 23,
+  "levels": [
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd060B": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd060C": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd064B": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd064C": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd064F": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0652": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0655": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd087D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd08BF": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd08C0": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd08D8": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle",
+   "16 - Control"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd08D9": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd08DA": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "15 - Jungle",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd08DB": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "15 - Jungle",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd08DC": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "15 - Jungle",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd08DD": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "15 - Jungle",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd08DE": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "15 - Jungle",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd08DF": {
+  "aliases": [],
+  "h": 17,
+  "levels": [
+   "15 - Jungle",
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0929": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd093A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0941": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0942": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0943": {
+  "aliases": [],
+  "h": 48,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0944": {
+  "aliases": [],
+  "h": 48,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0945": {
+  "aliases": [],
+  "h": 48,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0946": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0947": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0948": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd094A": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd094C": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd094D": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "11 - Archives",
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd094E": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd094F": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0950": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0951": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0952": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0953": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0962": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0963": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0965": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0967": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "12 - Streets",
+   "15 - Jungle"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0968": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0969": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd096A": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": true,
+  "w": 40
+ },
+ "tempImgEd096D": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0975": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": true,
+  "w": 40
+ },
+ "tempImgEd0976": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0977": {
+  "aliases": [],
+  "h": 33,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 40
+ },
+ "tempImgEd0978": {
+  "aliases": [],
+  "h": 48,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd099F": {
+  "aliases": [],
+  "h": 16,
+  "levels": [
+   "13 - Depot"
+  ],
+  "tiles": false,
+  "w": 128
+ },
+ "tempImgEd09A7": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "21 - Complex"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd09A8": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "21 - Complex"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd09A9": {
+  "aliases": [
+   "tempImgEd018F"
+  ],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "07 - Frigate",
+   "09 - Bunker2",
+   "11 - Archives",
+   "16 - Control",
+   "21 - Complex"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd09AA": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "01 - Dam"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd09AB": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle",
+   "19 - Aztec"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd09AC": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "03 - Runway"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd09AD": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd09AE": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd09AF": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd09B0": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd09B1": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd09B2": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd09B3": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "07 - Frigate"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd09B6": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd09CD": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd09E6": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd09E7": {
+  "aliases": [
+   "tempImgEd00BA"
+  ],
+  "h": 32,
+  "levels": [
+   "05 - Bunker1",
+   "09 - Bunker2",
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 32
+ },
+ "tempImgEd09E8": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "15 - Jungle"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "tempImgEd0A76": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "16 - Control"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "tempImgEd0A77": {
+  "aliases": [],
+  "h": 64,
+  "levels": [
+   "19 - Aztec",
+   "21 - Complex"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0A79": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "12 - Streets"
+  ],
+  "tiles": false,
+  "w": 16
+ },
+ "tempImgEd0A88": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "tempImgEd0A89": {
+  "aliases": [],
+  "h": 32,
+  "levels": [
+   "10 - Statue"
+  ],
+  "tiles": false,
+  "w": 32
+ },
+ "toilet_seat": {
+  "aliases": [
+   "tempImgEd058C"
+  ],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "white_brace": {
+  "aliases": [
+   "tempImgEd02D3"
+  ],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 64
+ },
+ "white_tile": {
+  "aliases": [
+   "tempImgEd02CE"
+  ],
+  "h": 64,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": false,
+  "w": 64
+ },
+ "yellow_floor": {
+  "aliases": [
+   "tempImgEd02B9"
+  ],
+  "h": 32,
+  "levels": [
+   "02 - Facility"
+  ],
+  "tiles": true,
+  "w": 32
+ }
+}
