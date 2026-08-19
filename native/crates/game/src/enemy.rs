@@ -426,6 +426,21 @@ const EVADE_INTERVAL_HI: f32 = 0.45;
 /// Within this XZ distance (m) of a search / investigate target, the hunter counts
 /// as "arrived" (and Search asks for the next point).
 const ARRIVE_DIST: f32 = 0.6;
+
+/// Extra standoff beyond a door's own swing clearance, in metres — roughly a hunter's
+/// capsule radius, so the panel misses its shoulders rather than grazing them.
+///
+/// The hold distance is `nav.door_clearance(i) + this` rather than a flat constant,
+/// because a door that swings **toward** the hunter sweeps a quarter circle out from
+/// its hinge as wide as the opening itself. Hunters navigate the grid and ignore the
+/// panel's collider entirely, so nothing else stops the door passing through them —
+/// they have to stand back far enough of their own accord.
+const DOOR_WAIT_MARGIN: f32 = 0.45;
+/// Longest a hunter will wait on a door before walking on regardless — a safety valve,
+/// not a behaviour. A door it may open swings in well under a second, and one it may
+/// not is already solid to its pathing, so this should never fire in practice; it
+/// exists so no bug can leave a hunter frozen at a doorway for a whole round.
+const DOOR_WAIT_MAX: f32 = 2.5;
 /// How long (s) a hunter scans a spot in `Investigate` before giving up to `Search`.
 const INVESTIGATE_SCAN_DURATION: f32 = 2.5;
 /// How fast (rad/s) the hunter's facing sweeps while scanning in `Investigate`, so
@@ -452,6 +467,15 @@ pub struct Enemy {
     path: Vec<Vec3>,
     path_idx: usize,
     repath_timer: f32,
+    /// The nav-overlay index of a shut door standing in this hunter's way, if any —
+    /// drained into [`EnemyStep::open_door`] so the `World` (which owns the door
+    /// entities and the audio) can work it. Cleared each step it isn't needed.
+    pending_door: Option<usize>,
+    /// How long this hunter has been held up at a shut door. A safety valve only: a
+    /// door it may open swings in well under a second, so this fires solely if
+    /// something has gone wrong, and it lets the hunter carry on rather than stand
+    /// there forever.
+    door_wait: f32,
     /// Horizontal facing (unit vector): the direction the model faces + the
     /// perception cone axis. Set to the travel direction while chasing and toward
     /// the player while alert/attack/cooldown (JS `faceTarget`).
@@ -624,6 +648,8 @@ impl Enemy {
             path: Vec::new(),
             path_idx: 0,
             repath_timer: 0.0,
+            pending_door: None,
+            door_wait: 0.0,
             heading,
             moving: false,
             move_speed: 0.0,
@@ -780,6 +806,20 @@ impl Enemy {
     /// spawn so the pack splits left/right. Sign only; magnitude is ignored.
     pub fn set_flank_side(&mut self, dir: f32) {
         self.flank_dir = if dir < 0.0 { -1.0 } else { 1.0 };
+    }
+
+    /// The shut door standing in this hunter's way, if any (nav-overlay index) — the
+    /// `World` works it, since doors are ECS entities with audio that the hunter can't
+    /// reach from here.
+    ///
+    /// Read **straight off the hunter** rather than returned in [`EnemyStep`]. `update`
+    /// has three separate return points (Perfect Dark's ladder, the utility scorer, the
+    /// legacy FSM) and only one of them is live at a time, so a field on the step struct
+    /// is only ever populated by whichever branch remembered to set it — which is
+    /// exactly how the first version of this shipped broken, dropping every request
+    /// because the default-on utility layer returns early.
+    pub fn pending_door(&self) -> Option<usize> {
+        self.pending_door
     }
 
     /// Report this hunter's ACTUAL net horizontal travel (`actual_m`) over the step
@@ -2233,6 +2273,41 @@ impl Enemy {
         }
     }
 
+
+    /// Gate a step that would carry this hunter through a **shut** door.
+    ///
+    /// Returns `true` if the hunter should hold this step: it has reached the doorway
+    /// and is waiting for the panel to swing. Records the door as a request either way,
+    /// so the `World` can start opening it while the hunter is still walking up.
+    ///
+    /// Both movement branches call this. The A\* branch alone would not be enough — the
+    /// straight-line beeline shortcut is gated on `los_clear`, and a door is *not* solid
+    /// in the nav grid (it rides the overlay), so a hunter would happily beeline through
+    /// a shut door without this.
+    fn door_gate(&mut self, nav: &NavWorld, next: Vec3, dt: f32) -> bool {
+        let up = Vec3::new(0.0, 0.5, 0.0);
+        let Some(di) = nav.door_blocking(self.pos + up, next + up) else {
+            self.pending_door = None;
+            self.door_wait = 0.0;
+            return false;
+        };
+        self.pending_door = Some(di);
+        self.door_wait += dt;
+        if self.door_wait > DOOR_WAIT_MAX {
+            return false; // safety valve — never stand at a door forever
+        }
+        let Some(c) = nav.door_center(di) else { return false };
+        // Stand clear of the panel's swing, not merely near the doorway: a door opening
+        // toward the hunter sweeps out as far as the opening is wide.
+        let hold = nav.door_clearance(di).unwrap_or(1.0) + DOOR_WAIT_MARGIN;
+        if Vec3::new(c.x - self.pos.x, 0.0, c.z - self.pos.z).length() > hold {
+            return false;
+        }
+        self.moving = false;
+        self.move_speed = 0.0;
+        true
+    }
+
     fn move_toward(&mut self, dt: f32, target: Vec3, nav: &NavWorld, speed: f32) -> bool {
         // Anti-grind hold: if we were stuck (crowd/separation fight) give it a beat —
         // stand put (legs idle) so the pack settles instead of walk-cycling in place.
@@ -2262,6 +2337,9 @@ impl Enemy {
             && nav.los_clear(self.pos + up, target + up)
             && nav.ground_path_clear(self.pos, target)
         {
+            if self.door_gate(nav, target, dt) {
+                return false;
+            }
             self.path.clear();
             self.repath_timer = 0.0; // force a fresh A* path the instant LOS breaks
             let dist = flat.length();
@@ -2303,6 +2381,9 @@ impl Enemy {
                 self.path_idx += 1;
             }
             let waypoint = self.path[self.path_idx];
+            if self.door_gate(nav, waypoint, dt) {
+                return false;
+            }
             // Aim in the XZ plane toward the waypoint; the tread height is handled by
             // the integrator's floor-snap (A* waypoints are quantized to cell floors,
             // so following them in XZ + snapping never floats the hunter over a step).
@@ -3188,5 +3269,172 @@ mod tests {
         }
         assert!(cooled, "with no cover it uses the open burst-and-reposition");
         assert!(!took_cover, "it never enters the cover states when there's nowhere to hide");
+    }
+
+    /// A hunter walking into a **shut** door pulls up at the threshold and asks for it
+    /// to be opened, rather than ghosting through it.
+    ///
+    /// This is checked on the *beeline*, which is the case that would otherwise slip
+    /// through: the straight-line shortcut is gated on `los_clear`, and a door is not a
+    /// solid cell (it rides the nav overlay), so without the gate a hunter would walk
+    /// straight through a closed door in plain sight.
+    #[test]
+    fn a_hunter_holds_at_a_shut_door_and_asks_for_it() {
+        use engine::geometry::csg_runtime::{Brush, Op, Region};
+        use engine::sim::nav;
+
+        // One room (a subtract carves the cavity) with a door slab across the middle.
+        let mut regions = {
+            let mut r = Region::new(0);
+            r.brushes.push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 24.0, 16.0, 24.0));
+            vec![r]
+        };
+        let mut navw = nav::bake(&mut regions, &[]).expect("bake");
+        let mut door = Brush::new(1, Op::Subtract, 12.0, 0.0, 0.0, 1.0, 7.0, 24.0);
+        door.door = true;
+        navw.set_doors(&[door]);
+
+        // Start a couple of metres short of the door, heading across it.
+        let start = Vec3::new(10.0 * WT, 0.1, 12.0 * WT);
+        let target = Vec3::new(16.0 * WT, 0.1, 12.0 * WT);
+        let mut e = Enemy::new(start, Vec3::X);
+
+        // Walk until it either reaches the door or gives up.
+        let dt = 1.0 / 120.0;
+        let mut held = false;
+        for _ in 0..600 {
+            e.desired_vel = Vec3::ZERO;
+            e.move_toward(dt, target, &navw, 2.0);
+            if e.pending_door.is_some() && !e.moving {
+                held = true;
+                break;
+            }
+            let v = e.desired_vel;
+            e.integrate_move(v, dt, &navw);
+        }
+        assert!(held, "the hunter stopped at the shut door and requested it");
+        assert_eq!(e.pending_door, Some(0), "and named the door in its way");
+        assert!(
+            e.pos.x < 12.0 * WT,
+            "it never crossed the panel: stopped at x={}",
+            e.pos.x / WT
+        );
+
+        // Open the door — the hold clears and it walks on through.
+        navw.set_door_open(0, true);
+        for _ in 0..600 {
+            e.desired_vel = Vec3::ZERO;
+            e.move_toward(dt, target, &navw, 2.0);
+            let v = e.desired_vel;
+            e.integrate_move(v, dt, &navw);
+        }
+        assert_eq!(e.pending_door, None, "nothing blocking once it is open");
+        assert!(e.pos.x > 12.0 * WT, "and the hunter is through the doorway");
+    }
+
+    /// The door request must survive the **real** `update` path, whichever AI branch is
+    /// live. `update` returns from three places (Perfect Dark's ladder, the default-on
+    /// utility scorer, the legacy FSM), and the first version of this feature reported
+    /// the door through a field on `EnemyStep` that only the last of those set — so in
+    /// the actual game every request was dropped and hunters just clipped through doors
+    /// once the wait valve expired. Reading it off the hunter can't rot that way.
+    #[test]
+    fn a_door_request_survives_every_ai_branch() {
+        use engine::geometry::csg_runtime::{Brush, Op, Region};
+        use engine::sim::nav;
+
+        // Both of the *pathing* branches. Perfect Dark's ladder is deliberately not
+        // driven here: a PD hunter that can see its target stops at its distance band
+        // and shoots rather than walking anywhere, so the scenario would be testing the
+        // AI's mood rather than this wiring. It shares the same `move_toward`, and
+        // `pending_door` now lives on the hunter rather than on whichever branch's
+        // return value, which is what makes the branch irrelevant.
+        let mode = AiMode::Ours;
+        {
+            for utility in [true, false] {
+                let mut regions = {
+                    let mut r = Region::new(0);
+                    r.brushes
+                        .push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 24.0, 16.0, 24.0));
+                    vec![r]
+                };
+                let nav = {
+                    let mut n = nav::bake(&mut regions, &[]).expect("bake");
+                    let mut door = Brush::new(1, Op::Subtract, 12.0, 0.0, 0.0, 1.0, 7.0, 24.0);
+                    door.door = true;
+                    n.set_doors(&[door]);
+                    n
+                };
+                let mut physics = PhysicsWorld::new();
+                let start = Vec3::new(9.0 * WT, 0.1, 12.0 * WT);
+                let player = Vec3::new(18.0 * WT, 0.1, 12.0 * WT);
+                let collider = physics.add_enemy_collider(start, 0.24, 0.48);
+                let mut e = Enemy::new(start, Vec3::X);
+                e.utility = utility;
+                e.omniscient = true; // head straight for the player, through the door
+                let tuning = AiTuning { mode, ..AiTuning::default() };
+
+                let dt = 1.0 / 120.0;
+                let mut saw_request = false;
+                for _ in 0..900 {
+                    drive(&mut e, dt, player, 1.0, tuning, false, &nav, &mut physics, false, collider);
+                    if e.pending_door().is_some() {
+                        saw_request = true;
+                        break;
+                    }
+                }
+                assert!(
+                    saw_request,
+                    "mode={mode:?} utility={utility}: the hunter reported the shut door"
+                );
+            }
+        }
+    }
+
+    /// A hunter waits far enough back to clear the panel's swing — a door opening
+    /// *toward* it sweeps out as wide as the opening, and nothing physical stops it
+    /// (hunters navigate the grid and ignore the panel collider).
+    #[test]
+    fn a_hunter_stands_clear_of_a_doors_swing() {
+        use engine::geometry::csg_runtime::{Brush, Op, Region};
+        use engine::sim::nav;
+
+        // A wide (6 WT = 1.5 m) double opening: its leaves sweep correspondingly far.
+        let mut regions = {
+            let mut r = Region::new(0);
+            r.brushes.push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 24.0, 16.0, 24.0));
+            vec![r]
+        };
+        let mut navw = nav::bake(&mut regions, &[]).expect("bake");
+        let mut door = Brush::new(1, Op::Subtract, 12.0, 0.0, 9.0, 1.0, 7.0, 6.0);
+        door.door = true;
+        navw.set_doors(&[door]);
+        let clearance = navw.door_clearance(0).expect("clearance");
+        assert!((clearance - 6.0 * WT).abs() < 1e-4, "clearance is the opening span");
+
+        // Start well outside the hold radius so the walk-in is actually exercised —
+        // beginning inside it would "pass" without the hunter ever stopping itself.
+        let start = Vec3::new(2.0 * WT, 0.1, 12.0 * WT);
+        let target = Vec3::new(18.0 * WT, 0.1, 12.0 * WT);
+        let mut e = Enemy::new(start, Vec3::X);
+        assert!(
+            (12.5 * WT - start.x).abs() > clearance,
+            "precondition: the hunter starts clear of the swing and must walk in"
+        );
+        let dt = 1.0 / 120.0;
+        for _ in 0..900 {
+            e.desired_vel = Vec3::ZERO;
+            e.move_toward(dt, target, &navw, 2.0);
+            if e.pending_door.is_some() && !e.moving {
+                break;
+            }
+            let v = e.desired_vel;
+            e.integrate_move(v, dt, &navw);
+        }
+        let gap = (12.5 * WT - e.pos.x).abs();
+        assert!(
+            gap >= clearance,
+            "held {gap:.2} m from the doorway, needs at least the {clearance:.2} m swing"
+        );
     }
 }

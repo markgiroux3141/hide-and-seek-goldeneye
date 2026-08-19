@@ -33,12 +33,77 @@ pub enum ComponentData {
     Transform { pos: [f32; 3], rot: [f32; 4], scale: [f32; 3] },
     Health { hp: f32, max: f32 },
     Interactable { radius: f32 },
-    Door { opening_type: OpeningType },
+    /// A door's *authored* settings. Every field past `opening_type` carries a
+    /// `#[serde(default)]`, so a level written before doors gained their authoring
+    /// options still loads — each missing field falls back to the same catalog default
+    /// a freshly-placed door gets. That is why this needed no level-format bump.
+    Door {
+        opening_type: OpeningType,
+        #[serde(default = "default_hinge")]
+        hinge: HingeSide,
+        #[serde(default)]
+        flip: bool,
+        #[serde(default)]
+        mirrored: bool,
+        #[serde(default = "default_open_angle")]
+        open_angle: f32,
+        #[serde(default)]
+        slide_distance: f32,
+        #[serde(default = "default_speed")]
+        speed: f32,
+        #[serde(default = "default_auto_close")]
+        auto_close: f32,
+        #[serde(default = "default_use_radius")]
+        use_radius: f32,
+        #[serde(default = "default_access")]
+        access: DoorAccess,
+    },
     Renderable { mesh: MeshId },
     PointLight { color: [f32; 3], intensity: f32, range: f32 },
     /// A spawn pad. No payload — its position *and facing* are the entity's
     /// [`Transform`] (see [`SpawnPoint`]), so the marker component is a bare tag.
     SpawnPoint,
+}
+
+impl ComponentData {
+    /// A default-configured door of `opening_type` — the data form of [`Door::new`].
+    /// Handy for levelgen and tests, which care about the motion and nothing else.
+    pub fn door(opening_type: OpeningType) -> Self {
+        let d = Door::new(opening_type);
+        ComponentData::Door {
+            opening_type,
+            hinge: d.hinge,
+            flip: d.flip,
+            mirrored: d.mirrored,
+            open_angle: d.open_angle,
+            slide_distance: d.slide_distance,
+            speed: d.speed,
+            auto_close: d.auto_close,
+            use_radius: d.use_radius,
+            access: d.access,
+        }
+    }
+}
+
+// Serde fallbacks for the door options, so a pre-doors level file loads with exactly
+// the defaults a freshly-placed door would get. They mirror `Door::new`.
+fn default_hinge() -> HingeSide {
+    HingeSide::Left
+}
+fn default_open_angle() -> f32 {
+    DOOR_OPEN_ANGLE
+}
+fn default_speed() -> f32 {
+    1.0
+}
+fn default_auto_close() -> f32 {
+    DOOR_AUTO_CLOSE
+}
+fn default_use_radius() -> f32 {
+    DOOR_USE_RADIUS
+}
+fn default_access() -> DoorAccess {
+    DoorAccess::Both
 }
 
 /// Spawn one authored entity into `world` from its data, returning the live handle.
@@ -69,8 +134,30 @@ fn fold_one(b: &mut EntityBuilder, c: &ComponentData) {
         ComponentData::Interactable { radius } => {
             b.add(Interactable { radius: *radius });
         }
-        ComponentData::Door { opening_type } => {
-            b.add(Door::new(*opening_type));
+        ComponentData::Door {
+            opening_type,
+            hinge,
+            flip,
+            mirrored,
+            open_angle,
+            slide_distance,
+            speed,
+            auto_close,
+            use_radius,
+            access,
+        } => {
+            b.add(Door {
+                hinge: *hinge,
+                flip: *flip,
+                mirrored: *mirrored,
+                open_angle: *open_angle,
+                slide_distance: *slide_distance,
+                speed: *speed,
+                auto_close: *auto_close,
+                use_radius: *use_radius,
+                access: *access,
+                ..Door::new(*opening_type)
+            });
         }
         ComponentData::Renderable { mesh } => {
             b.add(Renderable { mesh: *mesh });
@@ -118,7 +205,20 @@ pub(crate) fn extract(eref: &EntityRef<'_>) -> Vec<ComponentData> {
         });
     }
     if let Some(d) = eref.get::<&Door>() {
-        cs.push(ComponentData::Door { opening_type: d.opening_type });
+        // Authored settings only — `state`/`open_frac`/`timer` are HUNT-transient, so a
+        // door blown open mid-round is saved shut, like every other combat state.
+        cs.push(ComponentData::Door {
+            opening_type: d.opening_type,
+            hinge: d.hinge,
+            flip: d.flip,
+            mirrored: d.mirrored,
+            open_angle: d.open_angle,
+            slide_distance: d.slide_distance,
+            speed: d.speed,
+            auto_close: d.auto_close,
+            use_radius: d.use_radius,
+            access: d.access,
+        });
     }
     if let Some(r) = eref.get::<&Renderable>() {
         cs.push(ComponentData::Renderable { mesh: r.mesh });

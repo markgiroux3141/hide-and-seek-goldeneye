@@ -215,13 +215,38 @@ impl Default for Interactable {
     }
 }
 
-/// How a door animates open.
+/// How a door animates open. Mirrors [`crate::props::DoorMotion`], which is what the
+/// catalog fixes per model; this is the *persisted* copy on the placed entity, so a
+/// level file records the motion it was authored with even if a catalog row changes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OpeningType {
-    /// Hinged swing about one edge.
+    /// Hinged swing about one vertical edge.
     Swing,
     /// Slides sideways into a wall pocket.
     Slide,
+    /// Rises vertically — a shutter / vehicle blast door.
+    Shutter,
+}
+
+/// Which vertical edge of the panel a swing door pivots about. Resolved against the
+/// panel's own width axis (the wider of local X/Z — measured to differ per model), so
+/// it means the same thing whichever way the door was rotated when placed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum HingeSide {
+    Left,
+    Right,
+}
+
+/// Who is allowed to open a door. Not a lock in the key-and-keyhole sense — an
+/// authoring lever specific to this game: a door only the player can open is a hiding
+/// advantage, one only hunters can open is a trap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DoorAccess {
+    Both,
+    PlayerOnly,
+    HuntersOnly,
+    /// Sealed — opens for nobody. Rattles when used.
+    Locked,
 }
 
 /// Runtime open/close state of a door. Not persisted — an authored door always
@@ -234,22 +259,133 @@ pub enum DoorState {
     Closing,
 }
 
-/// The exemplar prop: a door that opens. **Inert this pass** — defined as data and
-/// persisted so the scaffold has a real multi-component consumer, but nothing
-/// drives `state`/`open_frac` yet. The door task adds the system that animates it
-/// and makes the act of opening slow a passing enemy (via the nav `DOOR_COST`
-/// overlay in [`engine::sim::nav`]).
+/// A door that opens. Placed as an ordinary prop (so it inherits the whole object
+/// pipeline — palette, ghost, gizmos, snap, duplicate, undo, persistence) and given
+/// this component at bake from [`crate::props::door_def`].
+///
+/// The fields split three ways: **authored** (persisted, edited in the object panel),
+/// **catalog-derived** (`opening_type`, copied at bake), and **runtime**
+/// (`state`/`open_frac`/`timer`, never persisted — an authored door always loads shut).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Door {
+    // ── runtime ──
     pub state: DoorState,
-    pub opening_type: OpeningType,
-    /// Open fraction, 0 (shut) → 1 (fully open); driven by the future door system.
+    /// Open fraction, 0 (shut) → 1 (fully open). Drives both the draw matrix and the
+    /// collider pose.
     pub open_frac: f32,
+    /// Counts down the auto-close dwell while [`DoorState::Open`].
+    pub timer: f32,
+    // ── catalog-derived ──
+    pub opening_type: OpeningType,
+    // ── authored ──
+    pub hinge: HingeSide,
+    /// Reverse the motion: swings the other way / slides to the other side. Together
+    /// with `hinge` this covers all four swing configurations.
+    pub flip: bool,
+    /// Mirror the panel's artwork across its width. The mesh is reflected about the
+    /// panel's own centre, so the hinge and collider are untouched — only which side
+    /// the handle and any decals appear on changes. This is what makes the two leaves
+    /// of a double door read as a matched pair meeting in the middle, rather than two
+    /// copies of the same door.
+    pub mirrored: bool,
+    /// How far a swing door opens, in radians.
+    pub open_angle: f32,
+    /// How far a sliding door travels, in metres. `0.0` = auto (the panel's own width
+    /// for a slide, its height for a shutter), which is what a door in a wall pocket
+    /// wants and what every catalog default uses.
+    pub slide_distance: f32,
+    /// Animation rate multiplier.
+    pub speed: f32,
+    /// Seconds to dwell fully open before closing itself. `0.0` = stays open.
+    pub auto_close: f32,
+    /// How close an actor must be to work the door, in metres.
+    pub use_radius: f32,
+    pub access: DoorAccess,
 }
 
+/// A door's resolved panel geometry plus its live collider handle — everything the
+/// door system needs to animate it, baked once at BUILD→HUNT so the per-step tick
+/// touches nothing outside the ECS.
+///
+/// **Transient, never persisted.** It is derived from the prop's model-space AABB
+/// (registered from the GLB at startup), the authored [`Transform`], and the [`Door`]
+/// settings, so it is always reconstructable and would only go stale in a save file.
+///
+/// The derivation is the part the *assets* cannot supply: every door GLB is a single
+/// unnamed mesh with no frame and no authored pivot, and — measured — the panel's thin
+/// axis is **X** on some models (`metal_door`, `grey_door`, `wooden_door`) and **Z** on
+/// the rest, with four models not even centred on their width axis. So the width axis
+/// is chosen per model and the hinge is taken from the AABB edge, never the origin.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DoorGeom {
+    /// Model-space pivot: on the hinge edge of the width axis, at the panel's base.
+    pub hinge: Vec3,
+    /// Model-space unit vector along the panel's width (either `X` or `Z`).
+    pub width_axis: Vec3,
+    /// Panel width in world metres (after the prop's scale).
+    pub width: f32,
+    /// Panel height in world metres.
+    pub height: f32,
+    /// Model-space centre of the panel — the collider's anchor point.
+    pub center: Vec3,
+    /// The prop placement anchor (horizontal centre + vertical base) this mesh draws
+    /// about. Cached here so the per-step tick can rebuild the world matrix without
+    /// reaching back into the world's mesh-bounds table.
+    pub anchor: Vec3,
+    /// World half-extents of the panel box, in its own frame.
+    pub half: Vec3,
+    /// The moving collider, if one was baked (absent headless, where no GLB bounds are
+    /// registered and so no panel geometry exists).
+    pub collider: Option<rapier3d::prelude::ColliderHandle>,
+    /// This door's index in the nav door overlay, if it was registered there. The door
+    /// system flips the overlay's open flag through it, which is what lets a hunter's
+    /// A\* reroute the instant a door swings — with no nav re-bake.
+    pub nav_index: Option<usize>,
+}
+
+/// Default swing arc — a quarter turn, as in the reference implementation.
+pub const DOOR_OPEN_ANGLE: f32 = std::f32::consts::FRAC_PI_2;
+/// Default dwell before a door shuts itself, in seconds.
+pub const DOOR_AUTO_CLOSE: f32 = 4.0;
+/// Default reach to work a door, in metres. Generous enough that you don't have to be
+/// touching the panel, tight enough that you can't open one through a wall.
+pub const DOOR_USE_RADIUS: f32 = 2.0;
+
 impl Door {
-    /// A closed door of the given opening style.
+    /// A closed door of the given motion, with catalog defaults for everything the
+    /// author hasn't touched.
     pub fn new(opening_type: OpeningType) -> Self {
-        Door { state: DoorState::Closed, opening_type, open_frac: 0.0 }
+        Door {
+            state: DoorState::Closed,
+            open_frac: 0.0,
+            timer: 0.0,
+            opening_type,
+            hinge: HingeSide::Left,
+            flip: false,
+            mirrored: false,
+            open_angle: DOOR_OPEN_ANGLE,
+            slide_distance: 0.0,
+            speed: 1.0,
+            auto_close: DOOR_AUTO_CLOSE,
+            use_radius: DOOR_USE_RADIUS,
+            access: DoorAccess::Both,
+        }
+    }
+
+    /// Whether the panel is currently shut enough to block a doorway — the test both
+    /// the LOS collider and the nav overlay key off. A door reads as blocking until it
+    /// is meaningfully ajar, so cracking one open doesn't instantly expose you.
+    pub fn is_blocking(&self) -> bool {
+        self.open_frac < 0.5
+    }
+
+    /// Whether `is_hunter` may work this door.
+    pub fn opens_for(&self, is_hunter: bool) -> bool {
+        match self.access {
+            DoorAccess::Both => true,
+            DoorAccess::PlayerOnly => !is_hunter,
+            DoorAccess::HuntersOnly => is_hunter,
+            DoorAccess::Locked => false,
+        }
     }
 }

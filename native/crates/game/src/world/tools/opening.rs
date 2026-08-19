@@ -81,6 +81,15 @@ impl World {
     /// `dv` heightens (V), in ±1 WT steps, clamped to ≥1. The upper clamp to the
     /// face happens in [`resolve_opening_placement`](Self::resolve_opening_placement).
     pub fn adjust_opening_size(&mut self, du: f32, dv: f32) {
+        // While the *door* tool is armed the same scroll toggles single ↔ double width,
+        // rather than free-sizing: a doorway only has two useful widths, and a double is
+        // exactly two single leaves (see `DOOR_WIDTH_DOUBLE`).
+        if self.opening_tool == Some(OpeningKind::Door) {
+            if du != 0.0 {
+                self.door_double = du > 0.0;
+            }
+            return;
+        }
         if self.opening_tool != Some(OpeningKind::Hole) {
             return;
         }
@@ -118,7 +127,10 @@ impl World {
         let (face_w, face_h) = (u_max - u_min, v_max - v_min);
 
         let (w, h) = match kind {
-            OpeningKind::Door => (DOOR_WIDTH, DOOR_HEIGHT),
+            OpeningKind::Door => (
+                if self.door_double { DOOR_WIDTH_DOUBLE } else { DOOR_WIDTH },
+                DOOR_HEIGHT,
+            ),
             OpeningKind::Hole => (self.hole_w.min(face_w), self.hole_h.min(face_h)),
         };
         if face_w < w || face_h < h || w < 1.0 || h < 1.0 {

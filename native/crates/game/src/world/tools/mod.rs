@@ -2,6 +2,9 @@
 //! `impl World` methods (arm / query / preview / scroll / confirm / cancel).
 
 mod draw;
+/// `pub(crate)` so the ECS door system can reach the shared panel-transform helpers —
+/// the draw list, the collider pose and the tick all go through the same matrix.
+pub(crate) mod door;
 mod gizmo;
 mod light;
 mod opening;

@@ -63,7 +63,7 @@ pub(crate) use scoreboard::Killer;
 mod spawn;
 pub(crate) use spawn::Spawning;
 mod spike_preview;
-mod tools;
+pub(crate) mod tools;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -1127,8 +1127,22 @@ pub(crate) const PLAYER_HIT_SOUND: &str = "sounds/player/breathe.wav";
 pub(crate) const PLAYER_HIT_VOL: f32 = 0.7;
 
 /// Door opening size in WT (JS `DOOR_WIDTH` / `DOOR_HEIGHT`): 3 × 7 = 0.75 × 1.75 m.
+///
+/// **Kept at 3 WT deliberately.** Measured against the thirteen door GLBs, a 3×7 carve
+/// has aspect ratio 0.429 and the person-sized door models span 0.346–0.528 with a
+/// median of **0.440** — so the existing opening is already the best single-leaf match
+/// available. Widening it by one wall (4 WT → 0.571) would make it wider than *every*
+/// door model, so every door would leave a gap. What the eye reads as "the door is too
+/// wide for the hole" is the widest model (`wooden_door`, 0.528) not being fitted to
+/// the carve, which `door_fit_scale` now does.
 const DOOR_WIDTH: f32 = 3.0;
 const DOOR_HEIGHT: f32 = 7.0;
+
+/// Double-door opening width in WT — exactly twice [`DOOR_WIDTH`], so each of the two
+/// leaves fills a 3×7 half and keeps the same 0.429 ratio a single door has. (The
+/// `glass_door` asset is itself ratio 0.195, about half the others: it is a double-door
+/// leaf, which is independent evidence that this is the right pairing.)
+const DOOR_WIDTH_DOUBLE: f32 = DOOR_WIDTH * 2.0;
 
 /// Default hole size in WT (JS `HOLE_WIDTH` / `HOLE_HEIGHT`), scroll-adjustable.
 const HOLE_WIDTH: f32 = 3.0;
@@ -2299,6 +2313,16 @@ pub struct World {
     /// handles routes damage to the mapped entity. An entry is removed as its prop is
     /// destroyed, and the whole map is cleared on return to BUILD. HUNT-only.
     prop_colliders: std::collections::HashMap<ColliderHandle, hecs::Entity>,
+    /// Live openable-door panel colliders → their door entity. Baked at BUILD→HUNT
+    /// alongside `prop_colliders` and cleared on return to BUILD; unlike a prop
+    /// collider, a door's is re-posed every step as the panel swings.
+    door_entities: std::collections::HashMap<ColliderHandle, hecs::Entity>,
+    /// Whether the door tool cuts a **double**-width opening (scroll toggles it while
+    /// the tool is armed). Authoring state, not persisted.
+    door_double: bool,
+    /// Whether hunters spawn at all (dev toggle, `J`). Off lets you author and test the
+    /// level — doors especially — without being hunted while you do it.
+    hunters_enabled: bool,
     /// Which prop gizmo is active (Translate / Rotate); cycled with Tab.
     prop_gizmo_mode: PropGizmoMode,
     /// The in-progress prop gizmo drag, if any.
@@ -2820,6 +2844,9 @@ impl World {
             prop_bounds: std::collections::HashMap::new(),
             selected_prop: None,
             prop_colliders: std::collections::HashMap::new(),
+            door_entities: std::collections::HashMap::new(),
+            door_double: false,
+            hunters_enabled: true,
             prop_gizmo_mode: PropGizmoMode::Translate,
             light_tool: false,
             light_preview_pos: None,

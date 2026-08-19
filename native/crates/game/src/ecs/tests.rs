@@ -37,7 +37,7 @@ fn authored_round_trips_multi_component_entity() {
                 rot: Quat::IDENTITY.to_array(),
                 scale: [1.0, 1.0, 1.0],
             },
-            ComponentData::Door { opening_type: OpeningType::Swing },
+            ComponentData::door(OpeningType::Swing),
             ComponentData::Interactable { radius: 1.5 },
             ComponentData::Health { hp: 100.0, max: 100.0 },
         ],
@@ -82,7 +82,7 @@ fn load_authored_replaces_not_appends() {
     let fresh = AuthoredId(42);
     ecs.load_authored(&[EntityData {
         id: fresh,
-        components: vec![ComponentData::Door { opening_type: OpeningType::Slide }],
+        components: vec![ComponentData::door(OpeningType::Slide)],
     }]);
 
     assert_eq!(ecs.len(), 1);
@@ -103,6 +103,7 @@ fn empty_system_tick_is_a_noop() {
         nav: None,
         physics: &mut physics,
         commands: Vec::new(),
+        sounds: Vec::new(),
     };
     ecs.run_systems(&mut ctx);
     assert!(ecs.is_empty());

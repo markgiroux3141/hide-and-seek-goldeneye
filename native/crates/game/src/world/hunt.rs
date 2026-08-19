@@ -983,7 +983,8 @@ impl World {
         if let Some(panel) = broke {
             self.physics.remove_door_collider(panel);
             if let Some(nav) = self.nav.as_mut() {
-                nav.break_door(di);
+                // A breached panel is gone for good — permanently open to pathing.
+                nav.set_door_open(di, true);
             }
             log::info!(
                 "DOOR {di} BREACHED — panel collider removed + nav flag flipped, no re-bake"

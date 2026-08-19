@@ -343,6 +343,29 @@ impl App {
         }
     }
 
+    /// The **use** button, in HUNT: GoldenEye's context-sensitive B. Opens or shuts a
+    /// door if one is in reach, otherwise reloads — and skips the death beat first if
+    /// the player is down.
+    ///
+    /// Shared by the keyboard `B` and the N64 pad's B tap so the two can't drift: the
+    /// pad previously went straight to `reload_weapon`, which meant doors worked on the
+    /// keyboard and not on the controller.
+    fn use_or_reload(&mut self) {
+        let Some(world) = self.world.as_mut() else { return };
+        if world.is_build() {
+            return;
+        }
+        if world.is_player_dead() {
+            world.restart_after_death();
+            return;
+        }
+        // Door takes priority over reloading — a door in reach is what you meant.
+        if world.use_door() {
+            return;
+        }
+        world.reload_weapon();
+    }
+
     /// Toggle the left object-placement panel (BUILD). Opening frees the cursor (so
     /// its list is clickable and you can aim the floor crosshair); closing restores
     /// the prior lock, disarms any armed prop, and clears the selection.
@@ -473,6 +496,10 @@ impl App {
         let mut ground_prop = false;
         let mut delete_prop = false;
         let mut go_neutral = false;
+        // The selected prop's door settings, if it is a door — edited by value in the
+        // panel and written back after, matching the light editor's borrow discipline.
+        let mut door_edit = self.world.as_ref().and_then(|w| w.selected_door());
+        let mut door_changed = false;
 
         // Lighting panel snapshot + edit buffers. The selected light's params (if the
         // selection is a light), the level ambient, and the placement/toggle states
@@ -771,6 +798,108 @@ impl App {
                                     delete_prop = true;
                                 }
                             });
+
+                            // ── Door settings, when the selected prop is a door ──
+                            if let Some(d) = door_edit.as_mut() {
+                                ui.separator();
+                                ui.label(
+                                    egui::RichText::new("DOOR")
+                                        .small()
+                                        .strong()
+                                        .color(SHOP_GOLD_DIM),
+                                );
+                                let swings = d.opening_type == crate::ecs::OpeningType::Swing;
+                                if swings {
+                                    ui.horizontal(|ui| {
+                                        ui.label("Hinge");
+                                        for (label, side) in [
+                                            ("Left", crate::ecs::HingeSide::Left),
+                                            ("Right", crate::ecs::HingeSide::Right),
+                                        ] {
+                                            if ui
+                                                .selectable_label(d.hinge == side, label)
+                                                .clicked()
+                                                && d.hinge != side
+                                            {
+                                                d.hinge = side;
+                                                door_changed = true;
+                                            }
+                                        }
+                                    });
+                                }
+                                ui.horizontal(|ui| {
+                                    let verb = if swings { "Swing out" } else { "Reverse" };
+                                    if ui.checkbox(&mut d.flip, verb).changed() {
+                                        door_changed = true;
+                                    }
+                                    if ui.checkbox(&mut d.mirrored, "Mirror").changed() {
+                                        door_changed = true;
+                                    }
+                                });
+                                if swings {
+                                    let mut deg = d.open_angle.to_degrees();
+                                    if ui
+                                        .add(egui::Slider::new(&mut deg, 30.0..=170.0).text("open °"))
+                                        .changed()
+                                    {
+                                        d.open_angle = deg.to_radians();
+                                        door_changed = true;
+                                    }
+                                }
+                                if ui
+                                    .add(egui::Slider::new(&mut d.speed, 0.2..=3.0).text("speed"))
+                                    .changed()
+                                {
+                                    door_changed = true;
+                                }
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut d.auto_close, 0.0..=20.0)
+                                            .text("shuts after s"),
+                                    )
+                                    .changed()
+                                {
+                                    door_changed = true;
+                                }
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut d.use_radius, 0.5..=5.0)
+                                            .text("reach m"),
+                                    )
+                                    .changed()
+                                {
+                                    door_changed = true;
+                                }
+                                egui::ComboBox::from_label("opens for")
+                                    .selected_text(match d.access {
+                                        crate::ecs::DoorAccess::Both => "Everyone",
+                                        crate::ecs::DoorAccess::PlayerOnly => "Player only",
+                                        crate::ecs::DoorAccess::HuntersOnly => "Hunters only",
+                                        crate::ecs::DoorAccess::Locked => "Locked",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        for (label, a) in [
+                                            ("Everyone", crate::ecs::DoorAccess::Both),
+                                            ("Player only", crate::ecs::DoorAccess::PlayerOnly),
+                                            ("Hunters only", crate::ecs::DoorAccess::HuntersOnly),
+                                            ("Locked", crate::ecs::DoorAccess::Locked),
+                                        ] {
+                                            if ui
+                                                .selectable_value(&mut d.access, a, label)
+                                                .clicked()
+                                            {
+                                                door_changed = true;
+                                            }
+                                        }
+                                    });
+                                ui.label(
+                                    egui::RichText::new(
+                                        "0 s = stays open · Mirror flips the handle side (double doors)",
+                                    )
+                                    .small()
+                                    .color(SHOP_DIM),
+                                );
+                            }
                             ui.separator();
                         }
 
@@ -998,6 +1127,12 @@ impl App {
                 (self.world.as_mut(), crate::props::CATALOG.get(sel))
             {
                 world.arm_prop_placement(def.mesh);
+            }
+        }
+        // Door inspector edits, written back once per frame (the panel edited a copy).
+        if door_changed {
+            if let (Some(world), Some(d)) = (self.world.as_mut(), door_edit) {
+                world.set_selected_door(d);
             }
         }
         if ground_prop {
@@ -1670,7 +1805,7 @@ impl ApplicationHandler for App {
             world.attach_audio(audio);
         }
         log::info!(
-            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  F1-F8=load level slot  Ctrl+F1-F8=save level slot  Y=proc-anim preview(Z=fire)  I=invincible  N=invisible  G=HUNT  M=shop menu (N64 Start)  [HUNT: click=fire  RMB=aim  R=reload  Q=weapon  F=detonate mines]"
+            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door(scroll=single/double)  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  F1-F8=load level slot  Ctrl+F1-F8=save level slot  Y=proc-anim preview(Z=fire)  I=invincible  N=invisible  J=hunters on/off  G=HUNT  M=shop menu (N64 Start)  [HUNT: click=fire  RMB=aim  B=use/open door  R=reload  Q=weapon  F=detonate mines]"
         );
 
         window.request_redraw();
@@ -1885,8 +2020,9 @@ impl ApplicationHandler for App {
                 if let Some(world) = self.world.as_mut() {
                     // Scroll routes to whichever tool is armed: the connect-slide
                     // (attach point along the edge), else platform footprint, else
-                    // placement (pillar/brace) sizing, else hole sizing, else the
-                    // sub-face selection.
+                    // placement (pillar/brace) sizing, else opening sizing (hole =
+                    // free size, door = single/double width), else the sub-face
+                    // selection.
                     if world.is_draw_sizing() {
                         world.adjust_draw_depth(step);
                     } else if world.is_draw_choosing_face() {
@@ -1899,7 +2035,9 @@ impl ApplicationHandler for App {
                         world.adjust_platform_size(du, dv);
                     } else if world.is_placing() {
                         world.adjust_place_size(du, dv);
-                    } else if world.is_hole_arming() {
+                    } else if world.is_opening_arming() {
+                        // Both opening tools, not just the hole: the door tool uses the
+                        // same scroll to pick single vs double width.
                         world.adjust_opening_size(du, dv);
                     } else {
                         world.adjust_selection_size(du, dv);
@@ -1957,16 +2095,10 @@ impl ApplicationHandler for App {
                 if pad_actions.menu {
                     self.toggle_shop();
                 }
+                // A B tap on the pad is GoldenEye's use button, exactly as on the
+                // keyboard: door first, reload if there's no door in reach.
                 if pad_actions.reload {
-                    if let Some(world) = self.world.as_mut() {
-                        if !world.is_build() {
-                            if world.is_player_dead() {
-                                world.restart_after_death();
-                            } else {
-                                world.reload_weapon();
-                            }
-                        }
-                    }
+                    self.use_or_reload();
                 }
                 // B held past PD's 25-tick threshold → switch firing function. The
                 // keyboard counterpart is `E`; inert on a single-function weapon.
@@ -2449,6 +2581,16 @@ impl App {
             }
             return;
         }
+        // J toggles hunters entirely (dev): no pack spawns, and flipping it off during a
+        // hunt clears the live one. The third of the dev observe toggles beside I
+        // (invincible) and N (invisible) — this one is for authoring and testing the
+        // level itself, where standing still at a door to work it is the whole point.
+        if code == KeyCode::KeyJ {
+            if let Some(world) = self.world.as_mut() {
+                world.toggle_hunters();
+            }
+            return;
+        }
         // N toggles player invisibility (dev/observe): no hunter can perceive you, so
         // the pack drops to searching — walk around and watch them scan for you.
         if code == KeyCode::KeyN {
@@ -2533,6 +2675,19 @@ impl App {
             if self.world.as_ref().map(|w| !w.is_draw_tool()).unwrap_or(true) {
                 self.refresh_highlight();
             }
+            return;
+        }
+        // B in HUNT: the **use** button. GoldenEye and Perfect Dark open a door by
+        // pressing B when you're at it — they do not swing open as you walk up — and
+        // that button is context-sensitive, so this tries the door first and falls
+        // through to reload when there's none in reach. Placed above the BUILD B/H
+        // opening-tool handler below, which returns early and would otherwise swallow
+        // the key; the two meanings line up nicely anyway (B cuts a doorway in BUILD,
+        // B works the door in HUNT).
+        if code == KeyCode::KeyB
+            && self.world.as_ref().map(|w| !w.is_build()).unwrap_or(false)
+        {
+            self.use_or_reload();
             return;
         }
         // B / H toggle the opening tools (door / hole): arm a ghost preview that

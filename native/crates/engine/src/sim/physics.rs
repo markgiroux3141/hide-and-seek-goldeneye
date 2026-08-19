@@ -40,6 +40,10 @@ pub struct PhysicsWorld {
     /// door colliders), so the player's hitscan + move query see them for free.
     /// Excluded from perception line-of-sight (below) so adding cover never shifts
     /// the hunter-perception baseline. Emptied on return to BUILD.
+    /// Colliders for **openable** door panels (the ECS door props). Separate from
+    /// `door_colliders` above, which is the older fixed breach-panel path: these carry
+    /// a rotation and are re-posed every step as the panel swings or slides.
+    door_panels: HashSet<ColliderHandle>,
     prop_colliders: HashSet<ColliderHandle>,
     /// The hunters' capsule colliders (Track A) — bare colliders repositioned each
     /// fixed step so hitscan can hit an enemy. One per live hunter, keyed by handle;
@@ -132,6 +136,7 @@ impl PhysicsWorld {
             query_pipeline: QueryPipeline::new(),
             region_colliders: HashMap::new(),
             door_colliders: Vec::new(),
+            door_panels: HashSet::new(),
             prop_colliders: HashSet::new(),
             enemy_colliders: HashSet::new(),
             enemy_capsule_offset: 0.0,
@@ -190,6 +195,61 @@ impl PhysicsWorld {
                 self.colliders
                     .remove(handle, &mut IslandManager::new(), &mut self.bodies, false);
             }
+        }
+        self.dirty = true;
+    }
+
+    // ── Openable door panels ──────────────────────────────────────────────────
+    // (helper `door_iso` lives at the bottom of the file)
+
+    /// Insert the moving collider for an **openable door panel** and return its handle.
+    ///
+    /// Distinct from [`Self::add_door_collider`] above (the old fixed breach panel) in
+    /// the one way that matters: this box carries a **rotation**, because a swinging
+    /// panel is not axis-aligned once it starts to move. Half-extents are in the
+    /// panel's own frame; `center` and `rot` are world-space and get rewritten every
+    /// step by [`Self::set_door_panel_pose`] as the door animates.
+    ///
+    /// Default collision groups, so the panel is ordinary world geometry: the player's
+    /// move-and-slide stops at it, hitscan hits it, and — unlike a destructible prop —
+    /// it **blocks line of sight**. That last point is deliberate and is what makes
+    /// hiding behind a shut door mean anything. No special-casing is needed for the
+    /// open state: the collider physically swings out of the doorway with the panel, so
+    /// a ray through the cleared opening simply misses it.
+    pub fn add_door_panel(&mut self, center: Vec3, half: Vec3, rot: Quat) -> ColliderHandle {
+        let collider = ColliderBuilder::cuboid(half.x.max(1e-3), half.y.max(1e-3), half.z.max(1e-3))
+            .position(door_iso(center, rot))
+            .build();
+        let handle = self.colliders.insert(collider);
+        self.door_panels.insert(handle);
+        self.dirty = true;
+        handle
+    }
+
+    /// Move an open/closing door panel's collider to match the drawn panel. Called
+    /// each fixed step for every door that is mid-animation; a no-op for a handle that
+    /// isn't a live panel.
+    pub fn set_door_panel_pose(&mut self, handle: ColliderHandle, center: Vec3, rot: Quat) {
+        if !self.door_panels.contains(&handle) {
+            return;
+        }
+        if let Some(c) = self.colliders.get_mut(handle) {
+            c.set_position(door_iso(center, rot));
+            self.dirty = true;
+        }
+    }
+
+    /// Whether `handle` is a live openable door panel (so a shot can be routed to the
+    /// door rather than sparking off it as anonymous world geometry).
+    pub fn is_door_panel(&self, handle: ColliderHandle) -> bool {
+        self.door_panels.contains(&handle)
+    }
+
+    /// Remove every openable door panel (on return to BUILD).
+    pub fn clear_door_panels(&mut self) {
+        for handle in self.door_panels.drain().collect::<Vec<_>>() {
+            self.colliders
+                .remove(handle, &mut IslandManager::new(), &mut self.bodies, false);
         }
         self.dirty = true;
     }
@@ -703,6 +763,18 @@ pub fn smoke_test() -> f32 {
     }
 
     bodies[ball_handle].translation().y
+}
+
+/// glam pose → rapier isometry, for the door-panel collider. Rapier takes rotation as
+/// a scaled-axis vector, so this matches the axis-angle conversion the ragdoll bodies
+/// already use rather than inventing a second convention.
+fn door_iso(center: Vec3, rot: Quat) -> Isometry<f32> {
+    let (axis, angle) = rot.to_axis_angle();
+    let axisangle = axis * angle;
+    Isometry::new(
+        vector![center.x, center.y, center.z],
+        vector![axisangle.x, axisangle.y, axisangle.z],
+    )
 }
 
 #[cfg(test)]

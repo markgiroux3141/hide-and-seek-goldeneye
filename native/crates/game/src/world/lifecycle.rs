@@ -187,8 +187,8 @@ impl World {
                 // Runs before the hunter FSM so any nav-overlay a system sets this
                 // step (e.g. a door's live pathing cost) is visible when hunters
                 // path below. Built from disjoint borrows of `nav`/`physics`, so it
-                // coexists with the enemy loop's borrows of those fields. Inert this
-                // pass (empty system list); the door/prop systems land on this seam.
+                // coexists with the enemy loop's borrows of those fields. Carries the
+                // door open/close tick.
                 {
                     let mut ctx = crate::ecs::SystemCtx {
                         dt,
@@ -196,8 +196,27 @@ impl World {
                         nav: self.nav.as_mut(),
                         physics: &mut self.physics,
                         commands: Vec::new(),
+                        sounds: Vec::new(),
                     };
                     self.ecs.run_systems(&mut ctx);
+                    // Systems raise world-positioned cues (a door latching, a door
+                    // starting to slide) rather than playing them, since they don't
+                    // hold the audio device. Attenuate each by the player's distance,
+                    // like every other door sound.
+                    let cues = std::mem::take(&mut ctx.sounds);
+                    if let Some(audio) = self.audio.as_mut() {
+                        for (name, at) in cues {
+                            let vol = crate::world::tools::door::falloff_volume(
+                                crate::world::tools::door::DOOR_VOL,
+                                at,
+                                feet,
+                                crate::world::tools::door::DOOR_AUDIBLE_RANGE,
+                            );
+                            if vol > 0.0 {
+                                audio.play(name, vol);
+                            }
+                        }
+                    }
                 }
                 // Advance each hunter's perception FSM. Take the roster out so it
                 // isn't borrowed while each FSM needs `&self.nav` + `&mut self.physics`
@@ -256,6 +275,10 @@ impl World {
                 };
                 let mut fire_requests: Vec<usize> = Vec::new();
                 let mut needs_target: Vec<usize> = Vec::new();
+                // Doors hunters want opened this step (nav-overlay indices). Collected
+                // like fire requests because opening one needs `&mut self` (the door
+                // entities + the audio), which is borrowed by the roster loop.
+                let mut door_requests: Vec<usize> = Vec::new();
                 let mut any_caught = false;
                 for (i, inst) in enemies.iter_mut().enumerate() {
                     // Apply the player-visibility toggle so an invisible player can't be
@@ -457,6 +480,9 @@ impl World {
                     if step.needs_search_target {
                         needs_target.push(i);
                     }
+                    if let Some(di) = inst.enemy.pending_door() {
+                        door_requests.push(di);
+                    }
                     if step.caught {
                         any_caught = true;
                     }
@@ -563,6 +589,14 @@ impl World {
                         inst.enemy.assign_search_target(target);
                     }
                 }
+                // Work the doors hunters pulled up at. Deduplicated, since a whole pack
+                // funnelling through one doorway would otherwise re-trigger the open
+                // sound once per hunter per step.
+                door_requests.sort_unstable();
+                door_requests.dedup();
+                for di in door_requests {
+                    self.hunter_opens_door(di);
+                }
                 // Advance any death ragdolls: step the rigid-body solver (a no-op with
                 // none live), then age each corpse toward its settle → fade → despawn.
                 self.physics.step_dynamics(dt);
@@ -603,9 +637,7 @@ impl World {
         self.aiming = false;
         // A mode switch always ends any hunt: drop every hunter + its capsule, and
         // revive the BUILD demo model.
-        self.clear_ragdolls();
-        self.physics.clear_enemy_colliders();
-        self.enemies.clear();
+        self.despawn_wave();
         // Fresh player-combat state each mode switch (full health, no flash/HUD).
         self.player_health = PLAYER_MAX_HEALTH;
         self.player_armor = 0.0;
@@ -669,6 +701,14 @@ impl World {
                 // Make destructible props solid + shootable for the hunt (colliders
                 // + transient Health baked from the authored entities).
                 self.spawn_prop_colliders();
+                // Bring the placed doors to life: resolve each panel's pivot from its
+                // mesh bounds and give it a moving collider. After the nav bake, since
+                // doors are excluded from it by design.
+                self.spawn_doors();
+                // Attach the doors to the nav overlay. After the grid bake on purpose:
+                // the overlay rides the *frozen* grid and is read live, which is what
+                // lets a door open mid-hunt and reroute hunters with no re-bake.
+                self.register_doors_with_nav();
 
                 self.mode = Mode::Hunt;
                 log::info!("→ HUNT (player at {:?})", self.player_pos());
@@ -700,6 +740,9 @@ impl World {
                 // Drop prop colliders + strip the transient prop combat state, so a
                 // crate blown up this hunt returns intact to the authored level.
                 self.clear_prop_colliders();
+                // Drop the door panels + reset every door to shut, so a door left open
+                // this hunt is closed again in the authored level.
+                self.clear_doors();
                 self.mode = Mode::Build;
                 log::info!("→ BUILD");
             }
@@ -766,9 +809,7 @@ impl World {
         self.camp_timer = 0.0;
         self.grenade_cooldown = 0.0;
         // Despawn the current wave and re-flood it in at the current difficulty.
-        self.clear_ragdolls();
-        self.physics.clear_enemy_colliders();
-        self.enemies.clear();
+        self.despawn_wave();
         if self.spawn_enemies {
             if let Some(nav) = self.nav.take() {
                 self.spawn_wave(&nav);
@@ -812,7 +853,67 @@ impl World {
     /// [`ENEMY_ROSTER`] (cycling if the count exceeds the roster). Every hunter starts in
     /// `Search` and gets a fan-out point on its first step. Skips entirely if the
     /// animation template failed to load (no clips → nothing to animate).
+    /// Tear down the live wave: every hunter, its capsule, and its ragdoll bodies.
+    ///
+    /// **The order is load-bearing.** [`Self::clear_ragdolls`] finds the rigid bodies by
+    /// walking `self.enemies` — each instance owns its `ragdoll`/`reaction` handles — so
+    /// emptying the roster first orphans those bodies in the solver with no handle left
+    /// to remove them, permanently. [`engine::sim::physics::PhysicsWorld::step_dynamics`]
+    /// early-returns only while no ragdoll bodies exist, so even one leaked corpse turns
+    /// a free call into a full rapier solve every step for the rest of the session.
+    ///
+    /// One function rather than the three hand-copied call sites this replaces: the copy
+    /// in `toggle_hunters` was missing the `clear_ragdolls` line, which is exactly the
+    /// leak above — pressing `J` while any hunter was dead or mid hit-reaction dropped
+    /// the game to a couple of frames a second.
+    pub(crate) fn despawn_wave(&mut self) {
+        self.clear_ragdolls();
+        self.physics.clear_enemy_colliders();
+        self.enemies.clear();
+        // With the roster empty, nothing can ever reach a surviving ragdoll body again —
+        // so any left here are leaked for the session and `step_dynamics` will solve
+        // them every step forever. Cheap to check (a length), and it names the fault in
+        // the log instead of leaving it to be discovered as an unexplained frame-rate
+        // collapse, which is how the `toggle_hunters` leak actually surfaced.
+        let orphans = self.physics.ragdoll_body_count();
+        if orphans > 0 {
+            log::warn!(
+                "despawn_wave: {orphans} ragdoll bodies survived the teardown and are \
+                 now unreachable — they will be solved every step for the rest of the \
+                 session (expect a severe frame-rate drop)"
+            );
+        }
+    }
+
+    /// Toggle whether hunters exist (dev, `J`). Turning them off mid-HUNT clears the
+    /// live pack immediately so you can author and test in peace — doors especially,
+    /// which you have to stand still at to use; turning them back on re-floods the wave
+    /// without leaving HUNT.
+    pub fn toggle_hunters(&mut self) {
+        self.hunters_enabled = !self.hunters_enabled;
+        log::info!("hunters: {}", if self.hunters_enabled { "ON" } else { "OFF" });
+        if self.mode != Mode::Hunt {
+            return;
+        }
+        if !self.hunters_enabled {
+            self.despawn_wave();
+        } else if let Some(nav) = self.nav.take() {
+            self.spawn_wave(&nav);
+            self.nav = Some(nav);
+        }
+    }
+
+    /// Whether hunters are currently enabled (HUD / tests).
+    pub fn hunters_enabled(&self) -> bool {
+        self.hunters_enabled
+    }
+
     fn spawn_wave(&mut self, nav: &NavWorld) {
+        // The `J` dev toggle: no hunters at all, so the level can be authored and
+        // walked without being chased.
+        if !self.hunters_enabled {
+            return;
+        }
         // **The wave draws from every loaded body, both families**, and each hunter is
         // driven by the clip template built for its own rig — Perfect Dark's set on both
         // (see `World::body_clips`). Before the roster widened, one family was chosen for

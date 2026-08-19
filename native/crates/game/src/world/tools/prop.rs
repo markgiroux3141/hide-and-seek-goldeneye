@@ -71,7 +71,7 @@ impl World {
 
     /// World model matrix for a placed prop: put its anchor at `pos`, then apply the
     /// authored rotation + scale. Shared by the in-world draw and (future) pick.
-    fn prop_model_matrix(&self, mesh: MeshId, pos: Vec3, rot: Quat, scale: Vec3) -> Mat4 {
+    pub(crate) fn prop_model_matrix(&self, mesh: MeshId, pos: Vec3, rot: Quat, scale: Vec3) -> Mat4 {
         let anchor = self.prop_anchor(mesh);
         Mat4::from_translation(pos)
             * Mat4::from_quat(rot)
@@ -95,6 +95,20 @@ impl World {
         // Grounded metric contact point (WT → metres).
         let pos = hit_wt * WORLD_SCALE;
         self.prop_preview_pos = Some(pos);
+        let s = WORLD_SCALE;
+
+        // A door aimed near a doorway snaps into it, fitted to the hole. The ghost
+        // shows the fit — one box per leaf — so a double opening visibly previews as
+        // two panels before you commit.
+        if let Some(way) = self.door_snap_for(mesh, pos) {
+            let boxes: Vec<[f32; 6]> = (0..way.leaves)
+                .filter_map(|leaf| self.door_leaf_box_wt(mesh, &way, leaf))
+                .collect();
+            if !boxes.is_empty() {
+                return Some(boxes_mesh(&boxes));
+            }
+        }
+
         // Ghost footprint = the prop's world AABB at this placement, in WT for
         // `boxes_mesh`, base at the floor and centred on the cursor.
         let (min, max) = self.prop_bounds.get(&mesh).copied()?;
@@ -104,7 +118,6 @@ impl World {
             (max.y - min.y) * scale,
             (max.z - min.z) * scale,
         );
-        let s = WORLD_SCALE;
         let box_wt = [
             (pos.x - w * 0.5) / s,
             pos.y / s,
@@ -124,6 +137,67 @@ impl World {
         let (Some(mesh), Some(pos)) = (self.prop_tool, self.prop_preview_pos) else {
             return false;
         };
+
+        // A door dropped at a doorway fits itself into the hole — and a double-width
+        // opening authors **both leaves** in one click, mirrored so they meet in the
+        // middle. Two ordinary door entities rather than one two-panel entity: each
+        // leaf then swings on its own hinge and is separately selectable, editable and
+        // deletable, with no new component or draw path.
+        if let Some(way) = self.door_snap_for(mesh, pos) {
+            self.record_undo();
+            // A doorway holds exactly one door. Clear whatever is already in it first,
+            // so a second click (the tool stays armed, so this is easy to do by
+            // accident) **replaces** rather than stacking a second panel in the same
+            // hole — and so swapping a door for a different model is just placing it.
+            for e in self.doorway_occupants(&way) {
+                self.ecs.despawn_authored(e);
+                if self.selected_prop == Some(e) {
+                    self.selected_prop = None;
+                }
+            }
+            let mut placed = 0;
+            for leaf in 0..way.leaves {
+                let Some((lpos, lrot, lscale)) = self.door_fit_transform(mesh, &way, leaf) else {
+                    continue;
+                };
+                let mut door = crate::ecs::Door::new(super::door::door_opening_type(mesh));
+                // Leaves mirror: the left one hinges left and the right one hinges
+                // right (with a reversed swing) so a double opens outward as a pair.
+                if way.leaves == 2 && leaf == 1 {
+                    door.hinge = crate::ecs::HingeSide::Right;
+                    door.flip = true;
+                    // Mirror the artwork too, so the pair reads as matched leaves
+                    // meeting in the middle rather than two copies of one door.
+                    door.mirrored = true;
+                }
+                let id = self.ecs.alloc_id();
+                self.ecs.spawn_authored(&EntityData {
+                    id,
+                    components: vec![
+                        ComponentData::Transform {
+                            pos: lpos.to_array(),
+                            rot: lrot.to_array(),
+                            scale: lscale.to_array(),
+                        },
+                        ComponentData::Renderable { mesh },
+                        ComponentData::door(door.opening_type),
+                    ],
+                });
+                if let Some(e) = self.ecs.resolve(id) {
+                    let _ = self.ecs.world_mut().insert_one(e, door);
+                }
+                placed += 1;
+            }
+            if placed > 0 {
+                log::info!(
+                    "fitted {mesh:?} into a {}-leaf doorway at {:?}",
+                    way.leaves,
+                    way.center
+                );
+                return true;
+            }
+        }
+
         let scale = crate::props::def(mesh).map(|d| d.scale).unwrap_or(1.0);
         self.record_undo();
         let id = self.ecs.alloc_id();
@@ -153,16 +227,42 @@ impl World {
     /// for call-site symmetry with the other draw-list getters.
     pub fn prop_draws(&self, _aspect: f32) -> Vec<(&'static str, Mat4, [f32; 4])> {
         let mut out = Vec::new();
-        for (t, r, hp, destroyed) in self
+        for (t, r, hp, destroyed, door, baked) in self
             .ecs
             .world()
-            .query::<(&Transform, &Renderable, Option<&Health>, Option<&Destroyed>)>()
+            .query::<(
+                &Transform,
+                &Renderable,
+                Option<&Health>,
+                Option<&Destroyed>,
+                Option<&crate::ecs::Door>,
+                Option<&crate::ecs::DoorGeom>,
+            )>()
             .iter()
         {
             let Some(def) = crate::props::def(r.mesh) else {
                 continue;
             };
-            let model = self.prop_model_matrix(r.mesh, t.pos, t.rot, t.scale);
+            // A door draws through the door matrix — its placement matrix with the
+            // mirror and any swing/slide composed in; everything else is a plain prop.
+            //
+            // The panel geometry is normally baked at BUILD→HUNT, but a door being
+            // *authored* has none yet, so it is derived on the spot here. That is what
+            // makes hinge and mirror edits visible in the editor: without it the
+            // editor drew the plain prop matrix while HUNT drew the door matrix, so a
+            // mirrored door looked unchanged until you started the hunt.
+            let model = match door {
+                Some(d) => {
+                    let geom = baked
+                        .copied()
+                        .or_else(|| self.derive_door_geom(r.mesh, t.scale, d.hinge));
+                    match geom {
+                        Some(g) => super::door::door_world_matrix(t, &g, d),
+                        None => self.prop_model_matrix(r.mesh, t.pos, t.rot, t.scale),
+                    }
+                }
+                None => self.prop_model_matrix(r.mesh, t.pos, t.rot, t.scale),
+            };
             let tint = if destroyed.is_some() {
                 // Blown — the darkened husk stays in place.
                 [PROP_DESTROYED_SHADE, PROP_DESTROYED_SHADE, PROP_DESTROYED_SHADE, 1.0]
@@ -225,7 +325,14 @@ impl World {
             .world()
             .query::<(hecs::Entity, &Renderable)>()
             .iter()
-            .filter(|(_, r)| crate::props::def(r.mesh).is_some())
+            // Doors are deliberately excluded: this list is voxelized into the frozen
+            // nav grid and can never change afterwards, which is right for a crate and
+            // fatal for a door — one baked solid here could never be opened for a
+            // hunter. They go to the live `nav::set_doors` overlay instead (see
+            // `World::door_solid_boxes`).
+            .filter(|(_, r)| {
+                crate::props::def(r.mesh).is_some() && crate::props::door_def(r.mesh).is_none()
+            })
             .map(|(e, _)| e)
             .collect();
         let mut out = Vec::new();

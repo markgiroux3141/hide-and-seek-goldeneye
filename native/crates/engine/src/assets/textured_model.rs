@@ -119,12 +119,23 @@ pub fn load_with(
     // Per-primitive "its own material is `*EnvMapping*`", parallel to
     // `model.primitives` — only [`EnvScope::PerMaterial`] reads it.
     let mut env_material: Vec<bool> = Vec::new();
+    // Per-primitive `(vertex_start, vertex_end, is_decal)`, for `lift_decals`.
+    let mut decals: Vec<(usize, usize, bool)> = Vec::new();
     for node in scene.nodes() {
-        visit_node(node, Mat4::IDENTITY, &buffers, &mut model, keep, &mut env_material);
+        visit_node(
+            node,
+            Mat4::IDENTITY,
+            &buffers,
+            &mut model,
+            keep,
+            &mut env_material,
+            &mut decals,
+        );
     }
     if model.vertices.is_empty() {
         return Err(format!("{path}: no drawable geometry found (after material filter)"));
     }
+    lift_decals(&mut model, &decals);
 
     // Metallic guns (gold/silver/chrome) — environment mapping. GoldenEye tags the
     // reflective surface with an `*EnvMapping*` material whose texture is the metal
@@ -156,6 +167,76 @@ pub fn load_with(
     Ok(model)
 }
 
+/// How far a decal surface is lifted off the face it sits on, in model-space metres.
+///
+/// Big enough to clear depth-buffer precision at any view distance the game uses, small
+/// enough to be invisible: 2 mm on a 1.75 m door panel, and it survives the doorway fit
+/// (a door squashed to ~0.6 still clears by better than a millimetre).
+const DECAL_LIFT: f32 = 0.002;
+
+/// Lift every `TopFlag` (decal) primitive clear of the surface it is coplanar with.
+///
+/// **Why this exists.** GoldenEye's artists authored door handles, crate stencils and
+/// barrel labels as geometry sharing a plane *exactly* with the body underneath, and
+/// tagged the material `TopFlag`. On the N64 that was free: the RDP had a dedicated
+/// **decal z-mode** (`ZMODE_DEC`) which drew a coplanar surface on top of what was
+/// already in the depth buffer instead of fighting it. Modern depth testing has no such
+/// mode, so the two surfaces interleave per-pixel and shimmer.
+///
+/// The fix is geometric rather than a depth-bias pipeline, because a bias would have to
+/// be applied *per primitive* — the body and its decal are primitives of the same mesh
+/// drawn in one pass, so biasing the pipeline moves both equally and fixes nothing.
+/// Splitting the prop draw by primitive to switch pipelines would be a much larger
+/// change for the same result.
+///
+/// **Direction is derived from the model, not from vertex normals.** A decal's normals
+/// may be averaged, inward, or (on the flat quads) degenerate. Instead: find which face
+/// of the model's own bounding box the decal is flush against — the axis and side whose
+/// gap is smallest — and push it out that way. That is exactly what "sits on the
+/// surface" means, and it works for a flat quad and for a handle with thickness alike.
+fn lift_decals(model: &mut TexturedModel, decals: &[(usize, usize, bool)]) {
+    if !decals.iter().any(|(_, _, d)| *d) {
+        return; // no decal materials — the overwhelmingly common case
+    }
+    // Whole-model bounds: the box whose faces the decals are stuck to.
+    let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    for v in &model.vertices {
+        lo = lo.min(Vec3::from(v.pos));
+        hi = hi.max(Vec3::from(v.pos));
+    }
+
+    for &(start, end, is_decal) in decals {
+        if !is_decal || start >= end || end > model.vertices.len() {
+            continue;
+        }
+        let (mut dlo, mut dhi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for v in &model.vertices[start..end] {
+            dlo = dlo.min(Vec3::from(v.pos));
+            dhi = dhi.max(Vec3::from(v.pos));
+        }
+        // Smallest gap to a bounding-box face wins: that's the surface it lies on.
+        let mut best = (f32::MAX, Vec3::ZERO);
+        for axis in 0..3 {
+            let to_min = (dlo[axis] - lo[axis]).abs();
+            if to_min < best.0 {
+                let mut d = Vec3::ZERO;
+                d[axis] = -1.0;
+                best = (to_min, d);
+            }
+            let to_max = (hi[axis] - dhi[axis]).abs();
+            if to_max < best.0 {
+                let mut d = Vec3::ZERO;
+                d[axis] = 1.0;
+                best = (to_max, d);
+            }
+        }
+        let push = best.1 * DECAL_LIFT;
+        for v in &mut model.vertices[start..end] {
+            v.pos = (Vec3::from(v.pos) + push).to_array();
+        }
+    }
+}
+
 fn visit_node(
     node: gltf::Node,
     parent: Mat4,
@@ -163,6 +244,7 @@ fn visit_node(
     out: &mut TexturedModel,
     keep: impl Fn(&str) -> bool + Copy,
     env_material: &mut Vec<bool>,
+    decals: &mut Vec<(usize, usize, bool)>,
 ) {
     let local = Mat4::from_cols_array_2d(&node.transform().matrix());
     let world = parent * local;
@@ -245,11 +327,22 @@ fn visit_node(
                 emissive: None,
             });
             env_material.push(mat_name.contains("EnvMapping"));
+            // GoldenEye's `TopFlag` material flag = the N64 RDP's **decal** z-mode
+            // (`ZMODE_DEC`): a surface authored exactly coplanar with the one under it
+            // — a door handle, a crate stencil, a barrel label — which the hardware drew
+            // on top instead of z-fighting with. We have no such mode, so record the
+            // range now and nudge it off the surface in `lift_decals` once the whole
+            // model's bounds are known.
+            decals.push((
+                base as usize,
+                out.vertices.len(),
+                mat_name.contains("TopFlag"),
+            ));
         }
     }
 
     for child in node.children() {
-        visit_node(child, world, buffers, out, keep, env_material);
+        visit_node(child, world, buffers, out, keep, env_material, decals);
     }
 }
 
@@ -278,5 +371,53 @@ mod tests {
             pp7.primitives.iter().all(|p| p.emissive.is_none()),
             "pp7 is not metallic → no reflection map"
         );
+    }
+
+    /// GoldenEye's `TopFlag` decal surfaces (door handles, crate stencils) are authored
+    /// exactly coplanar with the body beneath them — free on the N64's decal z-mode,
+    /// z-fighting for us. The loader lifts them clear along the model-box face they sit
+    /// on, and must leave every other primitive untouched.
+    #[test]
+    fn topflag_decals_are_lifted_off_the_surface_they_sit_on() {
+        // `wooden_door` is the case from the playtest: two handle quads at x = ±0.075,
+        // exactly on the door's own faces.
+        let path = format!(
+            "{}/../../assets/props/wooden_door.glb",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let m = load_with(&path, |_| true, EnvScope::PerMaterial).expect("loads");
+        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for v in &m.vertices {
+            lo = lo.min(Vec3::from(v.pos));
+            hi = hi.max(Vec3::from(v.pos));
+        }
+        // The lift pushes the handles just outside what the body alone spans, so the
+        // model is now wider than the panel by about one lift on each face.
+        let thickness = hi.x - lo.x;
+        assert!(
+            thickness > 0.1506 && thickness < 0.1506 + 4.0 * DECAL_LIFT,
+            "handles lifted clear of the 0.1506 m panel without floating: {thickness}"
+        );
+    }
+
+    /// A prop with no `TopFlag` material is passed through byte-identically — the lift
+    /// must never perturb ordinary geometry.
+    #[test]
+    fn a_prop_without_decals_is_untouched() {
+        let path = format!(
+            "{}/../../assets/props/filing_cabinet.glb",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let m = load_with(&path, |_| true, EnvScope::PerMaterial).expect("loads");
+        // `lift_decals` early-returns when nothing is flagged; assert the geometry still
+        // has the tight, axis-aligned bounds a box prop should.
+        let mut n = 0;
+        for v in &m.vertices {
+            if v.pos.iter().any(|c| !c.is_finite()) {
+                n += 1;
+            }
+        }
+        assert_eq!(n, 0, "no vertex was disturbed into a bad value");
+        assert!(!m.vertices.is_empty());
     }
 }

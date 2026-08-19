@@ -23,18 +23,35 @@ const MAX_STEP: i32 = 1;
 /// [`NavWorld::wall_clearance_offset`].
 const WALL_PROBE_Y: f32 = 0.75;
 
-/// A* penalty for routing through an intact door — large enough to prefer an open
-/// detour, finite so a walled-in player is still reachable via breaching. JS
-/// `navWorld.DOOR_COST` is 25 on a base move cost of 1; here move costs are
-/// scaled ×2 (integer), so the penalty scales to 50 to preserve the ratio.
-/// This overlay is the whole thesis: a dynamic obstacle rides the static grid,
-/// and breaching = flipping [`NavDoor::broken`], read live by A* — **no re-bake**.
+/// A* penalty for routing through a **shut but openable** door — large enough to
+/// prefer an already-open detour, finite so a hunter will still work a door when that
+/// is the only way through. JS `navWorld.DOOR_COST` is 25 on a base move cost of 1;
+/// here move costs are scaled ×2 (integer), so the penalty scales to 50 to preserve
+/// the ratio. This overlay is the whole thesis: a dynamic obstacle rides the static
+/// grid, and opening a door = flipping [`NavDoor::open`], read live by A* — **no
+/// re-bake**.
 const DOOR_COST: i32 = 50;
 
-/// One door's live overlay state. `broken` is read live by [`NavWorld::find_path`]
-/// and [`NavWorld::door_blocking`], so breaching needs no re-voxelization.
+/// One door's live overlay state, read every query by [`NavWorld::find_path`] and
+/// [`NavWorld::door_blocking`] — so a door opening or shutting needs no re-voxelization.
+///
+/// `open` and `passable` are deliberately **two** flags, not one. `open` is the live
+/// state the door system drives; `passable` is authored and says whether a hunter could
+/// *ever* get through — false for a door only the player may open, or a locked one. A
+/// shut-but-passable door is merely expensive ([`DOOR_COST`]); a shut-and-impassable one
+/// is treated as solid, which is what makes "player-only" a real wall rather than a
+/// suggestion.
 struct NavDoor {
-    broken: bool,
+    open: bool,
+    passable: bool,
+    /// Centre of the doorway in metres, so a hunter can steer to the door it needs to
+    /// work without the caller having to map the index back to an entity.
+    center: Vec3,
+    /// The doorway's width in metres — an upper bound on how far a hinged panel sweeps
+    /// out from the wall when it opens. A hunter waiting for a door that swings *toward*
+    /// it has to stand back at least this far or the panel passes through it (hunters
+    /// move on the nav grid and ignore the panel's collider entirely).
+    clearance: f32,
 }
 
 #[inline]
@@ -57,7 +74,7 @@ pub struct NavWorld {
     ny: i32,
     nz: i32,
     solid: Vec<u8>, // 1 = solid
-    /// Door records; `doors[i].broken` is read live by A* and door_blocking.
+    /// Door records; `doors[i].open` is read live by A* and door_blocking.
     doors: Vec<NavDoor>,
     /// cellIdx → (doorIndex + 1); 0 = no door. Empty until `set_doors`.
     door_grid: Vec<u16>,
@@ -87,7 +104,21 @@ impl NavWorld {
     /// Doors start intact. Ordering matches the input slice, so caller-side door
     /// state (panel colliders, hp) stays index-aligned with the nav overlay.
     pub fn set_doors(&mut self, door_brushes: &[Brush]) {
-        self.doors = door_brushes.iter().map(|_| NavDoor { broken: false }).collect();
+        self.doors = door_brushes
+            .iter()
+            .map(|b| NavDoor {
+                open: false,
+                passable: true,
+                center: Vec3::new(
+                    wt_to_m(b.x + b.w * 0.5),
+                    wt_to_m(b.y + b.h * 0.5),
+                    wt_to_m(b.z + b.d * 0.5),
+                ),
+                // The wider horizontal extent is the opening's span; the thin one is
+                // the wall. A leaf can never sweep further than the span it fills.
+                clearance: wt_to_m(b.w.max(b.d)),
+            })
+            .collect();
         let mut grid = vec![0u16; self.solid.len()];
         for (i, b) in door_brushes.iter().enumerate() {
             let marker = (i + 1) as u16;
@@ -122,17 +153,37 @@ impl NavWorld {
         self.doors.len()
     }
 
-    /// Whether door `i` is broken (test/inspection helper).
-    pub fn door_broken(&self, i: usize) -> bool {
-        self.doors.get(i).map(|d| d.broken).unwrap_or(true)
+    /// Whether door `i` currently stands open. An out-of-range index reads as open,
+    /// so a stale index can never wall a hunter in.
+    pub fn door_is_open(&self, i: usize) -> bool {
+        self.doors.get(i).map(|d| d.open).unwrap_or(true)
     }
 
-    /// Flip a door to broken — the breach. A* and door_blocking read this live,
-    /// so the path reroutes with no re-bake (the thesis).
-    pub fn break_door(&mut self, i: usize) {
+    /// Set door `i`'s live open state. A* and `door_blocking` read it on the next
+    /// query, so a door swinging open reroutes paths with no re-bake — the thesis.
+    pub fn set_door_open(&mut self, i: usize, open: bool) {
         if let Some(d) = self.doors.get_mut(i) {
-            d.broken = true;
+            d.open = open;
         }
+    }
+
+    /// Whether a hunter could ever get through door `i` (authored, not live state).
+    /// Setting this false makes the shut door count as **solid** to pathing rather than
+    /// merely expensive — a door only the player can open really does wall hunters out.
+    pub fn set_door_passable(&mut self, i: usize, passable: bool) {
+        if let Some(d) = self.doors.get_mut(i) {
+            d.passable = passable;
+        }
+    }
+
+    /// Centre of door `i` in metres, for a hunter steering to the door it must work.
+    pub fn door_center(&self, i: usize) -> Option<Vec3> {
+        self.doors.get(i).map(|d| d.center)
+    }
+
+    /// How far back a hunter must stand to be clear of door `i`'s swing, in metres.
+    pub fn door_clearance(&self, i: usize) -> Option<f32> {
+        self.doors.get(i).map(|d| d.clearance)
     }
 
     /// Door index at a cell index, or `None` (JS `_doorAtCellIdx`).
@@ -174,7 +225,7 @@ impl NavWorld {
             let t = i as f32 / n as f32;
             if let Some(ci) = self.cell_index_meters(from + d * t) {
                 if let Some(di) = self.door_at_cell_idx(ci) {
-                    if !self.doors[di].broken {
+                    if !self.doors[di].open {
                         return Some(di);
                     }
                 }
@@ -480,8 +531,15 @@ impl NavWorld {
                     // Intact-door penalty (read live): prefer an open detour, but
                     // keep the door route finite so a walled-in target stays
                     // reachable by breaching.
+                    // A shut door is expensive if a hunter could work it, and simply
+                    // impassable if it isn't theirs to open (locked / player-only).
                     let door_penalty = match self.door_at_cell_idx(nk) {
-                        Some(di) if !self.doors[di].broken => DOOR_COST,
+                        Some(di) if !self.doors[di].open => {
+                            if !self.doors[di].passable {
+                                continue;
+                            }
+                            DOOR_COST
+                        }
                         _ => 0,
                     };
                     let tentative = cur_g + 2 + if dy != 0 { 1 } else { 0 } + door_penalty;
@@ -671,17 +729,46 @@ mod tests {
         let from = Vec3::new(11.5 * WORLD_SCALE, 0.1, 5.0 * WORLD_SCALE);
         let to = Vec3::new(13.5 * WORLD_SCALE, 0.1, 5.0 * WORLD_SCALE);
 
-        // Intact: the door blocks the segment and A* still finds the (only) route
-        // through it — the door slab spans the room, so breaching is the only way.
-        assert_eq!(nav.door_blocking(from, to), Some(0), "intact door blocks segment");
+        // Shut: the door blocks the segment and A* still finds the (only) route
+        // through it — the door slab spans the room, so working it is the only way.
+        assert_eq!(nav.door_blocking(from, to), Some(0), "shut door blocks segment");
         assert!(nav.find_path(from, to).is_some(), "path exists through the door");
-        assert!(!nav.door_broken(0));
+        assert!(!nav.door_is_open(0));
+        // Its centre is reported in metres, so a hunter can steer to it.
+        let c = nav.door_center(0).expect("door has a centre");
+        assert!((c.x - 12.5 * WORLD_SCALE).abs() < 1e-4, "centre of the slab in metres");
 
-        // Breach = flip the flag; the same overlay, no re-bake.
-        nav.break_door(0);
-        assert!(nav.door_broken(0));
-        assert_eq!(nav.door_blocking(from, to), None, "broken door no longer blocks");
-        assert!(nav.find_path(from, to).is_some(), "path still exists after breach");
+        // Opening = flip the flag; the same overlay, no re-bake.
+        nav.set_door_open(0, true);
+        assert!(nav.door_is_open(0));
+        assert_eq!(nav.door_blocking(from, to), None, "open door no longer blocks");
+        assert!(nav.find_path(from, to).is_some(), "path still exists once open");
+    }
+
+    /// A shut door a hunter may never open is **solid** to pathing, not merely
+    /// expensive — that is what makes an authored "player only" door a real wall
+    /// rather than a suggestion. Re-opening it restores the route.
+    #[test]
+    fn an_impassable_shut_door_walls_hunters_out() {
+        let mut regions = room();
+        let mut nav = bake(&mut regions, &[]).expect("bake");
+        let mut door = Brush::new(1, Op::Subtract, 12.0, 0.0, 0.0, 1.0, 7.0, 24.0);
+        door.door = true;
+        nav.set_doors(&[door]);
+
+        let from = Vec3::new(11.5 * WORLD_SCALE, 0.1, 5.0 * WORLD_SCALE);
+        let to = Vec3::new(13.5 * WORLD_SCALE, 0.1, 5.0 * WORLD_SCALE);
+        assert!(nav.find_path(from, to).is_some(), "passable while shut: costly route");
+
+        nav.set_door_passable(0, false);
+        assert!(
+            nav.find_path(from, to).is_none(),
+            "a door that is not theirs to open blocks the only route entirely"
+        );
+
+        // Live state still wins: if it is opened (by the player), the route returns.
+        nav.set_door_open(0, true);
+        assert!(nav.find_path(from, to).is_some(), "an open door is passable regardless");
     }
 
     #[test]
