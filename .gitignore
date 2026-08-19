@@ -33,3 +33,9 @@ reference/
 # Python bytecode from the asset tools.
 __pycache__/
 *.pyc
+
+# Regenerable output of tools/texture-themes (contact sheets, indexes, candidates)
+tools/texture-themes/out/
+
+# Backup written by tools/texture-themes/adopt.py --prune
+native/assets/themes.json.prebackup
