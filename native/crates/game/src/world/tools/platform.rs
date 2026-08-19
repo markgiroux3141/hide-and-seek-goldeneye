@@ -3,7 +3,7 @@
 //! rebuild + pick.
 
 use super::super::*;
-use engine::render::textures::{RAILING_ZONE, SIMPLE_SCHEME};
+use engine::render::textures::{simple_scheme, RAILING_ZONE};
 
 impl World {
     // ─── Free-standing platform + stair-run tool ────────────────────────
@@ -654,11 +654,11 @@ impl World {
         // verticals → wall); railings carry their own railing zone.
         let mut b = ZonedBuilder::new();
         for p in &self.platforms {
-            structures::append_platform_mesh(p, &brushes, &mut b, SIMPLE_SCHEME);
+            structures::append_platform_mesh(p, &brushes, &mut b, simple_scheme());
         }
         for r in &self.stair_runs {
             let (fp, tp) = self.run_platforms(r);
-            structures::append_stair_mesh(r, fp.as_ref(), tp.as_ref(), &brushes, &mut b, SIMPLE_SCHEME);
+            structures::append_stair_mesh(r, fp.as_ref(), tp.as_ref(), &brushes, &mut b, simple_scheme());
         }
         self.append_railings(&brushes, &mut b);
         RegionMesh {
@@ -680,7 +680,7 @@ impl World {
                     &self.platforms,
                     brushes,
                     b,
-                    SIMPLE_SCHEME,
+                    simple_scheme(),
                     RAILING_ZONE,
                 );
             }
@@ -694,7 +694,7 @@ impl World {
                     tp.as_ref(),
                     brushes,
                     b,
-                    SIMPLE_SCHEME,
+                    simple_scheme(),
                     RAILING_ZONE,
                 );
             }

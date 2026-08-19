@@ -103,7 +103,7 @@ impl World {
             .find(|r| r.id == sel.region_id)
             .and_then(|r| r.brushes.iter().find(|b| b.id == sel.brush_id))
             .map(|b| b.scheme)
-            .unwrap_or(DEFAULT_SCHEME);
+            .unwrap_or_else(default_scheme);
 
         self.pending_stair = Some(PendingStair {
             direction,

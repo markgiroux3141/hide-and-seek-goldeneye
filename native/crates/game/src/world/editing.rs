@@ -16,10 +16,65 @@ impl World {
     /// keeps its own scheme. Re-bakes and returns the region mesh, or `None` if the
     /// crosshair isn't on a retexturable room face.
     pub fn set_scheme_at_crosshair(&mut self, scheme: usize) -> Option<RegionMesh> {
+        self.set_scheme_along(None, scheme)
+    }
+
+    /// Resolve a number key to a theme, preferring **this level's** binding.
+    ///
+    /// Falls back to the manifest's own `key` when the level hasn't bound the digit,
+    /// so a fresh level still has the built-in quick picks. A binding naming a theme
+    /// this build doesn't have (pruned, or authored elsewhere) is ignored rather than
+    /// silently retexturing to something else.
+    pub fn scheme_for_key(&self, key: char) -> Option<usize> {
+        if let Some(name) = self.theme_hotkeys.get(&key) {
+            if let Some(i) = engine::render::textures::scheme_index(name) {
+                return Some(i);
+            }
+            log::warn!("hotkey {key} is bound to unknown theme {name:?}; ignoring");
+        }
+        engine::render::textures::scheme_for_key(key)
+    }
+
+    /// This level's hotkey bindings (digit → theme name).
+    pub fn theme_hotkeys(&self) -> &std::collections::BTreeMap<char, String> {
+        &self.theme_hotkeys
+    }
+
+    /// Bind a digit to a theme, or clear it with `None`. Digits outside `1..=9` are
+    /// rejected — those are the only keys the retexture handler reads.
+    pub fn set_theme_hotkey(&mut self, key: char, scheme: Option<usize>) {
+        if !key.is_ascii_digit() || key == '0' {
+            return;
+        }
+        match scheme {
+            Some(i) => {
+                let name = engine::render::textures::scheme_name(i).to_string();
+                self.theme_hotkeys.insert(key, name);
+            }
+            None => {
+                self.theme_hotkeys.remove(&key);
+            }
+        }
+    }
+
+    /// As [`set_scheme_at_crosshair`](Self::set_scheme_at_crosshair), but aimed by an
+    /// explicit `(origin, dir)` ray when one is given.
+    ///
+    /// The theme picker panel needs this: opening a side panel frees the mouse
+    /// cursor (so the list is clickable), which leaves the camera crosshair frozen
+    /// wherever it last pointed. Retexturing has to follow the *cursor* instead.
+    pub fn set_scheme_along(
+        &mut self,
+        ray: Option<(Vec3, Vec3)>,
+        scheme: usize,
+    ) -> Option<RegionMesh> {
         if self.mode != Mode::Build {
             return None;
         }
-        let (sel, _) = self.pick_face_hit()?;
+        let (sel, _) = match ray {
+            Some((o, d)) => self.pick_face_hit_from(o, d)?,
+            None => self.pick_face_hit()?,
+        };
         let region = self.regions.iter_mut().find(|r| r.id == sel.region_id)?;
         let start = region.brushes.iter().find(|b| b.id == sel.brush_id).copied()?;
         // A frame face isn't a room (JS returns) — don't let a doorway retexture.
@@ -41,7 +96,7 @@ impl World {
         log::info!(
             "room retexture: region {} -> {} ({} brush(es))",
             sel.region_id,
-            engine::render::textures::SCHEMES[scheme].name,
+            engine::render::textures::scheme_name(scheme),
             room_ids.len()
         );
         self.rebuild_affected_regions(&[sel.brush_id]).into_iter().next()

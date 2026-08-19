@@ -3443,7 +3443,7 @@ use super::editing::find_room_brushes;
     /// transparent railing texture) rather than being classified as walls.
     #[test]
     fn structures_wear_simple_scheme_with_railings_in_their_own_zone() {
-        use engine::render::textures::{RAILING_ZONE, SIMPLE_SCHEME};
+        use engine::render::textures::{simple_scheme, RAILING_ZONE};
         let mut world = room_with_platform_and_stair();
         world.platforms[0].railings = true;
         world.stair_runs[0].railings = true;
@@ -3454,7 +3454,7 @@ use super::editing::find_room_brushes;
             rm.mesh.groups.iter().map(|g| g.scheme).collect();
         assert_eq!(
             schemes,
-            std::iter::once(SIMPLE_SCHEME as u16).collect(),
+            std::iter::once(simple_scheme() as u16).collect(),
             "structures use only the simple scheme, got {schemes:?}"
         );
         // Slab/treads classify to floor/wall zones…

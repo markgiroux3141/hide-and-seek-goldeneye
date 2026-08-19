@@ -12,9 +12,13 @@ struct Camera {
 @group(1) @binding(1) var samp: sampler;
 
 struct Material {
-    // .x = tile-unit → texture-space scale (JS `texture.repeat`); UVs arrive in
-    // WT. Packed as a vec4 so the Rust-side uniform (16 bytes) matches the WGSL
-    // std140 layout exactly (a bare `f32 + vec3` pad would round up to 32).
+    // .x  = tile-unit → texture-space scale (JS `texture.repeat`); UVs arrive in WT.
+    // .yz = texture-space offset (JS `texture.offset`), applied AFTER the scale so
+    //       it slides the texture across the surface in whole-texture units — this
+    //       is what lets a theme align a band or a tile grid to a wall.
+    // .w  = unused.
+    // Packed as a vec4 so the Rust-side uniform (16 bytes) matches the WGSL std140
+    // layout exactly (a bare `f32 + vec3` pad would round up to 32).
     params: vec4<f32>,
 };
 @group(1) @binding(2) var<uniform> material: Material;
@@ -132,7 +136,7 @@ fn vs_main(in: VsIn) -> VsOut {
 
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let c = textureSample(tex, samp, in.uv * material.params.x);
+    let c = textureSample(tex, samp, in.uv * material.params.x + material.params.yz);
     // Alpha-test (JS `alphaTest: 0.5`): cut out the transparent texels of the
     // railing texture. Opaque zone textures decode to alpha 1, so they're
     // unaffected — and discard is order-independent, needing no blend/sort.

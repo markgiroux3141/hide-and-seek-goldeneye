@@ -49,11 +49,13 @@ enum PanelTab {
     Objects,
     Lighting,
     Spawns,
+    Textures,
 }
 
 impl PanelTab {
     /// Every tab, in display order (also the cycle order).
-    const ALL: [PanelTab; 3] = [PanelTab::Objects, PanelTab::Lighting, PanelTab::Spawns];
+    const ALL: [PanelTab; 4] =
+        [PanelTab::Objects, PanelTab::Lighting, PanelTab::Spawns, PanelTab::Textures];
 
     /// The header title for this tab.
     fn title(self) -> &'static str {
@@ -61,6 +63,7 @@ impl PanelTab {
             PanelTab::Objects => "OBJECTS",
             PanelTab::Lighting => "LIGHTING",
             PanelTab::Spawns => "SPAWNS",
+            PanelTab::Textures => "TEXTURES",
         }
     }
 
@@ -188,6 +191,35 @@ struct App {
     /// Which section of the left authoring panel is showing (Objects / Lighting),
     /// cycled by the `◄ ►` arrows in its header.
     panel_tab: PanelTab,
+
+    // ── TEXTURES tab: browse ~390 extracted themes, apply, keep/reject ──────
+    /// Theme index armed for application, if any. Clicking geometry applies it.
+    theme_armed: Option<usize>,
+    /// Case-insensitive substring filter over theme name/label/group.
+    theme_filter: String,
+    /// Which verdicts the list shows.
+    theme_review_filter: crate::theme_review::ReviewFilter,
+    /// Author keep/reject verdicts, persisted on every change.
+    theme_review: crate::theme_review::ThemeReview,
+    /// Lazily-built egui swatches, keyed by texture name.
+    ///
+    /// Built through `egui::Context::load_texture` rather than by retaining wgpu
+    /// texture views out of `build_materials` and registering them: egui owns the
+    /// upload, so this needs no renderer change at all. ~240 distinct 32x32 BMPs
+    /// back the whole library, so the memory is trivial.
+    theme_swatches: std::collections::HashMap<String, egui::TextureHandle>,
+    /// `false` = browse the theme library, `true` = build a custom one.
+    theme_edit_mode: bool,
+    /// The custom theme under construction, mirrored into the renderer's scratch slot.
+    theme_draft: crate::theme_editor::ThemeDraft,
+    /// Transient status line under the save button ("saved as …", "all slots full").
+    theme_status: String,
+    /// Labels for custom slots saved this session. The registry is a `OnceLock`, so a
+    /// slot's stored label only refreshes on restart — this makes a just-saved preset
+    /// show its real name immediately instead of "(empty 03)".
+    theme_slot_labels: std::collections::HashMap<usize, String>,
+    /// Whether the preview room geometry has been uploaded this session.
+    theme_preview_uploaded: bool,
 }
 
 impl App {
@@ -217,11 +249,159 @@ impl App {
             cursor_pos: (0.0, 0.0),
             build_real_lighting: true,
             panel_tab: PanelTab::Objects,
+            theme_armed: None,
+            theme_filter: String::new(),
+            theme_review_filter: crate::theme_review::ReviewFilter::All,
+            theme_review: crate::theme_review::ThemeReview::load(),
+            theme_swatches: std::collections::HashMap::new(),
+            theme_edit_mode: false,
+            theme_draft: crate::theme_editor::ThemeDraft::default(),
+            theme_status: String::new(),
+            theme_slot_labels: std::collections::HashMap::new(),
+            theme_preview_uploaded: false,
         }
     }
 }
 
 impl App {
+    /// An egui swatch for a level texture, decoded from disk on first use.
+    ///
+    /// Nearest-filtered and un-multiplied: these are 32x32 N64 textures, so any
+    /// smoothing turns a swatch into mush. Returns `None` if the BMP is missing —
+    /// the caller draws a placeholder rather than the magenta the 3D path uses,
+    /// since in a list a gap reads more clearly than a colour.
+    fn theme_swatch(&mut self, name: &str) -> Option<egui::TextureHandle> {
+        if let Some(h) = self.theme_swatches.get(name) {
+            return Some(h.clone());
+        }
+        let dec = engine::render::textures::try_decode(name)?;
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [dec.width as usize, dec.height as usize],
+            &dec.rgba,
+        );
+        let handle =
+            self.egui_ctx
+                .load_texture(format!("swatch:{name}"), image, egui::TextureOptions::NEAREST);
+        self.theme_swatches.insert(name.to_string(), handle.clone());
+        Some(handle)
+    }
+
+    /// Collect the swatches the TEXTURES tab needs this frame.
+    ///
+    /// Runs *before* the egui closure because that closure cannot hold `&mut self`
+    /// (see `build_egui_frame`), and loading a texture needs the context plus the
+    /// cache. Only themes passing the current filter are built, so the cost tracks
+    /// what is actually on screen.
+    fn collect_theme_swatches(&mut self, visible: &[usize]) -> Vec<[Option<egui::TextureHandle>; 4]> {
+        let names: Vec<[Option<String>; 4]> = visible
+            .iter()
+            .map(|&i| {
+                let s = &engine::render::textures::schemes()[i];
+                std::array::from_fn(|z| s.zones[z].and_then(|zd| zd.texture).map(String::from))
+            })
+            .collect();
+        names
+            .into_iter()
+            .map(|row| {
+                std::array::from_fn(|z| {
+                    row[z].as_deref().and_then(|n| self.theme_swatch(n))
+                })
+            })
+            .collect()
+    }
+
+    /// Push the whole draft into a scheme's live materials.
+    ///
+    /// Every zone is written even when only one changed: it is a handful of
+    /// `write_buffer`s plus at most a bind-group rebuild each, which is far cheaper
+    /// than tracking dirty zones, and it keeps "the GPU matches the draft" a single
+    /// unconditional statement rather than an invariant to maintain.
+    fn push_theme_to(&mut self, scheme: usize) {
+        let zones = self.theme_draft.zones;
+        let Some(r) = self.renderer.as_mut() else { return };
+        for (zi, z) in zones.iter().enumerate() {
+            let Some(z) = z else { continue };
+            r.set_material_texture(scheme, zi as u8, z.texture);
+            r.set_material_params(scheme, zi as u8, z.repeat, z.offset);
+        }
+    }
+
+    /// Mirror the draft into the scratch scheme so the world shows it immediately.
+    fn sync_theme_scratch(&mut self) {
+        let scratch = engine::render::textures::scratch_scheme();
+        self.push_theme_to(scratch);
+    }
+
+    /// Upload the preview room, tagged with the scratch scheme, once.
+    ///
+    /// Built lazily on first entry to the editor rather than at startup: it costs a
+    /// CSG fold and most sessions never open the editor. The mesh only depends on the
+    /// scheme *index* (zone groups carry it), and the scratch index is fixed, so one
+    /// upload serves the whole session — subsequent edits change materials, not
+    /// geometry.
+    fn ensure_theme_preview_room(&mut self) {
+        if self.theme_preview_uploaded {
+            return;
+        }
+        let scratch = engine::render::textures::scratch_scheme();
+        let mesh = crate::theme_editor::preview_room_mesh(scratch);
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_theme_preview_room(&mesh);
+            self.theme_preview_uploaded = true;
+        }
+    }
+
+    /// Display label for a theme, preferring a name saved this session.
+    ///
+    /// A preset saved now can't update the registry's label (`OnceLock`), so without
+    /// this a just-saved theme would list as "(empty 03)" until restart.
+    fn theme_label(&self, scheme: usize) -> String {
+        self.theme_slot_labels
+            .get(&scheme)
+            .cloned()
+            .unwrap_or_else(|| {
+                engine::render::textures::schemes()
+                    .get(scheme)
+                    .map(|s| s.label.to_string())
+                    .unwrap_or_default()
+            })
+    }
+
+    /// Theme indices passing the name/verdict filters, in manifest order.
+    fn visible_themes(&self) -> Vec<usize> {
+        let needle = self.theme_filter.trim().to_ascii_lowercase();
+        engine::render::textures::schemes()
+            .iter()
+            .enumerate()
+            .filter(|(i, s)| {
+                use engine::render::textures::SchemeKind;
+                match s.kind {
+                    // Reached through the editor, not the list — it has no stable
+                    // identity to review or bind a key to.
+                    SchemeKind::Scratch => return false,
+                    // An unoccupied slot is a placeholder. One saved *this session*
+                    // is real, but the registry still reports it unused (it's a
+                    // `OnceLock`), so the session's own record is the authority.
+                    SchemeKind::Custom { used: false } => {
+                        if !self.theme_slot_labels.contains_key(i) {
+                            return false;
+                        }
+                    }
+                    SchemeKind::Custom { used: true } | SchemeKind::Library => {}
+                }
+                if !self.theme_review_filter.accepts(self.theme_review.get(s.name)) {
+                    return false;
+                }
+                let label = self.theme_label(*i);
+                needle.is_empty()
+                    || s.name.to_ascii_lowercase().contains(&needle)
+                    || label.to_ascii_lowercase().contains(&needle)
+                    || s.group.to_ascii_lowercase().contains(&needle)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Upload a region's textured mesh + scheme to the renderer (after an edit or
     /// at startup).
     fn upload(&mut self, rm: &crate::world::RegionMesh) {
@@ -382,6 +562,9 @@ impl App {
                 w.deselect_prop();
             }
             self.props_selected = None;
+            // A theme armed for click-application only makes sense with the panel
+            // open and the cursor free; closing must not leave clicks retexturing.
+            self.theme_armed = None;
         }
     }
 
@@ -421,6 +604,96 @@ impl App {
     /// UI reads (credits, ownership, ammo, prices) is snapshotted up front for the
     /// same reason.
     fn build_egui_frame(&mut self) -> Option<EguiFrame> {
+        // ── TEXTURES tab prep, which MUST come first.
+        //
+        // Everything below this holds a shared borrow of `self`, but building a
+        // swatch needs `&mut self` (it fills a cache and touches the egui context).
+        // So the theme snapshot happens up front, while `self` is still free.
+        let theme_visible: Vec<usize> =
+            if self.props_open && self.panel_tab == PanelTab::Textures {
+                self.visible_themes()
+            } else {
+                Vec::new()
+            };
+        let theme_swatches = self.collect_theme_swatches(&theme_visible);
+        let theme_rows: Vec<ThemeRow> = theme_visible
+            .iter()
+            .map(|&idx| {
+                let s = &engine::render::textures::schemes()[idx];
+                ThemeRow {
+                    idx,
+                    name: s.name,
+                    label: self.theme_label(idx),
+                    group: s.group,
+                    key: s.key,
+                    verdict: self.theme_review.get(s.name),
+                    repeats: std::array::from_fn(|z| s.zones[z].map(|zd| zd.repeat)),
+                }
+            })
+            .collect();
+        let theme_armed = self.theme_armed;
+        let theme_armed_label = theme_armed.map(|i| self.theme_label(i)).unwrap_or_default();
+        // What each quick key resolves to right now, and whether that came from this
+        // level's own binding or fell through to the manifest.
+        let hotkey_rows: Vec<(char, String)> = if self.props_open
+            && self.panel_tab == PanelTab::Textures
+        {
+            "123456789"
+                .chars()
+                .map(|d| {
+                    let level_bound = self
+                        .world
+                        .as_ref()
+                        .and_then(|w| w.theme_hotkeys().get(&d).cloned());
+                    let label = match level_bound {
+                        Some(name) => match engine::render::textures::scheme_index(&name) {
+                            Some(i) => self.theme_label(i),
+                            None => format!("{name} (missing)"),
+                        },
+                        None => match engine::render::textures::scheme_for_key(d) {
+                            Some(i) => format!("{} (default)", self.theme_label(i)),
+                            None => "—".to_string(),
+                        },
+                    };
+                    (d, label)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut theme_filter_ui = self.theme_filter.clone();
+        let theme_review_filter = self.theme_review_filter;
+        let (kept_n, cut_n, new_n) = self.theme_review.tally();
+        let theme_total = engine::render::textures::schemes().len();
+
+        // ── Editor snapshot: the draft, plus swatches for the texture picker's
+        // currently-selected source level (not all 1016 — only what's on screen).
+        let theme_edit_mode = self.theme_edit_mode;
+        let mut draft_zone_sel = self.theme_draft.zone_sel;
+        let mut draft_save_name = self.theme_draft.save_name.clone();
+        let draft_zones = self.theme_draft.zones;
+        let draft_dirty = self.theme_draft.dirty;
+        let theme_status = self.theme_status.clone();
+        let mut draft_level_sel = self.theme_draft.level_sel.clone();
+        let level_groups: Vec<String> = engine::render::textures::catalog_by_level()
+            .iter()
+            .map(|(lv, _)| lv.clone())
+            .collect();
+        if draft_level_sel.is_empty() {
+            draft_level_sel = level_groups.first().cloned().unwrap_or_default();
+        }
+        let picker_textures: Vec<&'static str> = if theme_edit_mode {
+            engine::render::textures::catalog_by_level()
+                .iter()
+                .find(|(lv, _)| *lv == draft_level_sel)
+                .map(|(_, names)| names.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let picker_swatches: Vec<Option<egui::TextureHandle>> =
+            picker_textures.iter().map(|n| self.theme_swatch(n)).collect();
+
         let window = self.window.as_ref()?;
         let state = self.egui_state.as_mut()?;
         let raw_input = state.take_egui_input(window);
@@ -527,6 +800,25 @@ impl App {
         let mut set_real_lighting: Option<bool> = None;
         let panel_tab = self.panel_tab;
         let mut new_tab: Option<PanelTab> = None;
+        // TEXTURES tab deferred actions. `Some(None)` on `arm` means "disarm".
+        let mut new_theme_armed: Option<Option<usize>> = None;
+        let mut new_theme_verdict: Option<(&'static str, crate::theme_review::Verdict)> = None;
+        let mut new_theme_review_filter: Option<crate::theme_review::ReviewFilter> = None;
+        let mut theme_filter_changed = false;
+        // Editor deferred actions.
+        let mut toggle_edit_mode = false;
+        let mut draft_zone_changed = false;
+        let mut draft_level_changed = false;
+        let mut draft_name_changed = false;
+        let mut draft_pick_texture: Option<&'static str> = None;
+        let mut draft_new_repeat: Option<f32> = None;
+        let mut draft_new_offset: Option<[f32; 2]> = None;
+        let mut draft_clear_zone = false;
+        let mut draft_seed_from: Option<usize> = None;
+        let mut draft_save = false;
+        let mut draft_arm_scratch = false;
+        // `(digit, Some(scheme))` binds, `(digit, None)` clears.
+        let mut new_hotkey: Option<(char, Option<usize>)> = None;
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
             if shop_open {
@@ -1058,6 +1350,487 @@ impl App {
                                     }
                                 });
                             }
+                            PanelTab::Textures if theme_edit_mode => {
+                                ui.horizontal(|ui| {
+                                    if ui.selectable_label(false, "◄ Library").clicked() {
+                                        toggle_edit_mode = true;
+                                    }
+                                    ui.label(
+                                        egui::RichText::new("BUILD A THEME")
+                                            .small()
+                                            .strong()
+                                            .color(SHOP_GOLD),
+                                    );
+                                });
+                                ui.label(
+                                    egui::RichText::new(
+                                        "edits show instantly — the preview room above \
+                                         and any room wearing the scratch theme",
+                                    )
+                                    .small()
+                                    .color(SHOP_DIM),
+                                );
+                                ui.add_space(4.0);
+
+                                // ── Which zone are we editing?
+                                ui.label(
+                                    egui::RichText::new("ZONE")
+                                        .small()
+                                        .strong()
+                                        .color(SHOP_GOLD_DIM),
+                                );
+                                egui::ComboBox::from_id_salt("draft-zone")
+                                    .width(196.0)
+                                    .selected_text(
+                                        crate::theme_editor::EDITABLE_ZONES
+                                            .iter()
+                                            .find(|(z, _)| *z == draft_zone_sel)
+                                            .map(|(_, n)| *n)
+                                            .unwrap_or("?"),
+                                    )
+                                    .show_ui(ui, |ui| {
+                                        for (z, name) in crate::theme_editor::EDITABLE_ZONES {
+                                            if ui
+                                                .selectable_value(&mut draft_zone_sel, z, name)
+                                                .clicked()
+                                            {
+                                                draft_zone_changed = true;
+                                            }
+                                        }
+                                    });
+
+                                let cur = draft_zones
+                                    .get(draft_zone_sel as usize)
+                                    .copied()
+                                    .flatten();
+                                match cur {
+                                    Some(z) => {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                z.texture.replace("tempImgEd", "~"),
+                                            )
+                                            .color(SHOP_GOLD)
+                                            .strong(),
+                                        );
+                                        let mut rep = z.repeat;
+                                        if ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    &mut rep,
+                                                    crate::theme_editor::REPEAT_RANGE,
+                                                )
+                                                .logarithmic(true)
+                                                .text("scale"),
+                                            )
+                                            .changed()
+                                        {
+                                            draft_new_repeat = Some(rep);
+                                        }
+                                        let mut off = z.offset;
+                                        let mut off_changed = false;
+                                        off_changed |= ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    &mut off[0],
+                                                    crate::theme_editor::OFFSET_RANGE,
+                                                )
+                                                .text("shift U"),
+                                            )
+                                            .changed();
+                                        off_changed |= ui
+                                            .add(
+                                                egui::Slider::new(
+                                                    &mut off[1],
+                                                    crate::theme_editor::OFFSET_RANGE,
+                                                )
+                                                .text("shift V"),
+                                            )
+                                            .changed();
+                                        if off_changed {
+                                            draft_new_offset = Some(off);
+                                        }
+                                        if ui
+                                            .button("Clear zone")
+                                            .on_hover_text(
+                                                "an undefined zone renders INVISIBLE, \
+                                                 not untextured",
+                                            )
+                                            .clicked()
+                                        {
+                                            draft_clear_zone = true;
+                                        }
+                                    }
+                                    None => {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "zone undefined — invisible until you \
+                                                 pick a texture",
+                                            )
+                                            .small()
+                                            .color(SHOP_DIM),
+                                        );
+                                    }
+                                }
+                                ui.separator();
+
+                                // ── Texture picker, grouped by the GoldenEye level the
+                                // texture came from. A flat 1016-row list is unusable;
+                                // "which level was this from" is how you actually think.
+                                ui.label(
+                                    egui::RichText::new("TEXTURE — from level")
+                                        .small()
+                                        .strong()
+                                        .color(SHOP_GOLD_DIM),
+                                );
+                                egui::ComboBox::from_id_salt("draft-level")
+                                    .width(196.0)
+                                    .selected_text(draft_level_sel.clone())
+                                    .show_ui(ui, |ui| {
+                                        for lv in &level_groups {
+                                            if ui
+                                                .selectable_value(
+                                                    &mut draft_level_sel,
+                                                    lv.clone(),
+                                                    lv,
+                                                )
+                                                .clicked()
+                                            {
+                                                draft_level_changed = true;
+                                            }
+                                        }
+                                    });
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} textures",
+                                        picker_textures.len()
+                                    ))
+                                    .small()
+                                    .color(SHOP_DIM),
+                                );
+                                egui::ScrollArea::vertical()
+                                    .max_height(210.0)
+                                    .id_salt("draft-tex-grid")
+                                    .show(ui, |ui| {
+                                        ui.set_width(206.0);
+                                        let sel_tex = cur.map(|z| z.texture);
+                                        // 5 across at 36px — enough to scan a level's
+                                        // palette without endless scrolling.
+                                        egui::Grid::new("tex-grid").spacing([2.0, 2.0]).show(
+                                            ui,
+                                            |ui| {
+                                                for (n, (name, sw)) in picker_textures
+                                                    .iter()
+                                                    .zip(picker_swatches.iter())
+                                                    .enumerate()
+                                                {
+                                                    let selected = sel_tex == Some(*name);
+                                                    let resp = match sw {
+                                                        Some(h) => ui.add(
+                                                            egui::ImageButton::new(
+                                                                egui::load::SizedTexture::new(
+                                                                    h.id(),
+                                                                    egui::vec2(36.0, 36.0),
+                                                                ),
+                                                            )
+                                                            .selected(selected),
+                                                        ),
+                                                        None => ui.add_sized(
+                                                            egui::vec2(36.0, 36.0),
+                                                            egui::Button::new("?"),
+                                                        ),
+                                                    };
+                                                    if resp
+                                                        .on_hover_text(
+                                                            name.replace("tempImgEd", "~"),
+                                                        )
+                                                        .clicked()
+                                                    {
+                                                        draft_pick_texture = Some(name);
+                                                    }
+                                                    if n % 5 == 4 {
+                                                        ui.end_row();
+                                                    }
+                                                }
+                                            },
+                                        );
+                                    });
+                                ui.separator();
+
+                                // ── Try it, then keep it.
+                                if ui
+                                    .selectable_label(
+                                        theme_armed
+                                            == Some(engine::render::textures::scratch_scheme()),
+                                        "Apply scratch to a room (click)",
+                                    )
+                                    .on_hover_text(
+                                        "the scratch theme is shared — editing again \
+                                         changes every room wearing it",
+                                    )
+                                    .clicked()
+                                {
+                                    draft_arm_scratch = true;
+                                }
+                                ui.add_space(4.0);
+                                if ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut draft_save_name)
+                                            .hint_text("preset name")
+                                            .desired_width(196.0),
+                                    )
+                                    .changed()
+                                {
+                                    draft_name_changed = true;
+                                }
+                                let free = engine::render::textures::first_free_custom_slot();
+                                if ui
+                                    .add_enabled(
+                                        free.is_some(),
+                                        egui::Button::new(if draft_dirty {
+                                            "Save as preset *"
+                                        } else {
+                                            "Save as preset"
+                                        }),
+                                    )
+                                    .on_hover_text(match free {
+                                        Some(_) => "writes user_themes.json",
+                                        None => "all custom slots are full",
+                                    })
+                                    .clicked()
+                                {
+                                    draft_save = true;
+                                }
+                                if !theme_status.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(&theme_status)
+                                            .small()
+                                            .color(SHOP_GOLD_DIM),
+                                    );
+                                }
+                            }
+                            PanelTab::Textures => {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("APPLY THEME")
+                                            .small()
+                                            .strong()
+                                            .color(SHOP_GOLD_DIM),
+                                    );
+                                    if ui.selectable_label(false, "Build one ►").clicked() {
+                                        toggle_edit_mode = true;
+                                    }
+                                });
+                                ui.label(
+                                    egui::RichText::new(
+                                        "the whole room retextures (doors bound it)",
+                                    )
+                                    .small()
+                                    .color(SHOP_DIM),
+                                );
+                                ui.add_space(4.0);
+
+                                // Review tally + verdict filter. Most of this library
+                                // exists to be pruned, so progress is front and centre.
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{theme_total} themes · {kept_n} kept · {cut_n} cut · \
+                                         {new_n} unreviewed"
+                                    ))
+                                    .small()
+                                    .color(SHOP_TEXT),
+                                );
+                                ui.horizontal(|ui| {
+                                    for f in crate::theme_review::ReviewFilter::ALL {
+                                        if ui
+                                            .selectable_label(theme_review_filter == f, f.label())
+                                            .clicked()
+                                        {
+                                            new_theme_review_filter = Some(f);
+                                        }
+                                    }
+                                });
+                                if ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut theme_filter_ui)
+                                            .hint_text("filter by name or level")
+                                            .desired_width(196.0),
+                                    )
+                                    .changed()
+                                {
+                                    theme_filter_changed = true;
+                                }
+                                ui.add_space(2.0);
+                                if theme_armed.is_some() {
+                                    if ui
+                                        .button(format!(
+                                            "Armed: {theme_armed_label} — disarm (Q)"
+                                        ))
+                                        .clicked()
+                                    {
+                                        new_theme_armed = Some(None);
+                                    }
+                                }
+
+                                // ── This level's quick keys. Collapsed by default: it's
+                                // settings you visit occasionally, not part of the
+                                // browse-and-judge loop.
+                                egui::CollapsingHeader::new("QUICK KEYS (this level)")
+                                    .id_salt("theme-hotkeys")
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            egui::RichText::new(
+                                                "arm a theme above, then Set — saved with \
+                                                 the level",
+                                            )
+                                            .small()
+                                            .color(SHOP_DIM),
+                                        );
+                                        for (digit, bound) in &hotkey_rows {
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(format!("{digit}"))
+                                                        .strong()
+                                                        .color(SHOP_GOLD),
+                                                );
+                                                ui.label(
+                                                    egui::RichText::new(bound)
+                                                        .small()
+                                                        .color(SHOP_TEXT),
+                                                );
+                                                if ui
+                                                    .add_enabled(
+                                                        theme_armed.is_some(),
+                                                        egui::Button::new("Set").small(),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    new_hotkey = Some((*digit, theme_armed));
+                                                }
+                                                if ui.small_button("✕").clicked() {
+                                                    new_hotkey = Some((*digit, None));
+                                                }
+                                            });
+                                        }
+                                    });
+                                ui.separator();
+
+                                egui::ScrollArea::vertical().show(ui, |ui| {
+                                    ui.set_width(206.0);
+                                    let mut last_group = "";
+                                    for (row, swatches) in
+                                        theme_rows.iter().zip(theme_swatches.iter())
+                                    {
+                                        if row.group != last_group {
+                                            last_group = row.group;
+                                            ui.add_space(5.0);
+                                            ui.label(
+                                                egui::RichText::new(row.group)
+                                                    .small()
+                                                    .strong()
+                                                    .color(SHOP_GOLD_DIM),
+                                            );
+                                        }
+                                        // Four zone swatches: floor, ceiling, lower, upper.
+                                        ui.horizontal(|ui| {
+                                            for sw in swatches.iter() {
+                                                match sw {
+                                                    Some(h) => {
+                                                        ui.add(egui::Image::new(
+                                                            egui::load::SizedTexture::new(
+                                                                h.id(),
+                                                                egui::vec2(30.0, 30.0),
+                                                            ),
+                                                        ));
+                                                    }
+                                                    None => {
+                                                        let (rect, _) = ui.allocate_exact_size(
+                                                            egui::vec2(30.0, 30.0),
+                                                            egui::Sense::hover(),
+                                                        );
+                                                        ui.painter().rect_stroke(
+                                                            rect,
+                                                            0.0,
+                                                            egui::Stroke::new(1.0, SHOP_DIM),
+                                                            egui::StrokeKind::Inside,
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            // Keep / cut, showing the current verdict.
+                                            let kept = row.verdict
+                                                == Some(crate::theme_review::Verdict::Keep);
+                                            let cut = row.verdict
+                                                == Some(crate::theme_review::Verdict::Reject);
+                                            if ui
+                                                .selectable_label(kept, "✔")
+                                                .on_hover_text("keep")
+                                                .clicked()
+                                            {
+                                                new_theme_verdict = Some((
+                                                    row.name,
+                                                    crate::theme_review::Verdict::Keep,
+                                                ));
+                                            }
+                                            if ui
+                                                .selectable_label(cut, "✕")
+                                                .on_hover_text("cut")
+                                                .clicked()
+                                            {
+                                                new_theme_verdict = Some((
+                                                    row.name,
+                                                    crate::theme_review::Verdict::Reject,
+                                                ));
+                                            }
+                                            // Start a custom theme from this one — the
+                                            // usual way in is "nearly right, but…".
+                                            if ui
+                                                .selectable_label(false, "✎")
+                                                .on_hover_text("edit a copy")
+                                                .clicked()
+                                            {
+                                                draft_seed_from = Some(row.idx);
+                                            }
+                                        });
+                                        let key = row
+                                            .key
+                                            .map(|k| format!("[{k}] "))
+                                            .unwrap_or_default();
+                                        let mark = match row.verdict {
+                                            Some(crate::theme_review::Verdict::Keep) => "✔ ",
+                                            Some(crate::theme_review::Verdict::Reject) => "✕ ",
+                                            None => "",
+                                        };
+                                        if ui
+                                            .selectable_label(
+                                                theme_armed == Some(row.idx),
+                                                format!("{mark}{key}{}", row.label),
+                                            )
+                                            .on_hover_text(format!(
+                                                "{}\nrepeats: {}",
+                                                row.name,
+                                                row.repeats
+                                                    .iter()
+                                                    .map(|r| r
+                                                        .map(|v| format!("{v:.3}"))
+                                                        .unwrap_or_else(|| "-".into()))
+                                                    .collect::<Vec<_>>()
+                                                    .join(" / ")
+                                            ))
+                                            .clicked()
+                                        {
+                                            new_theme_armed = Some(Some(row.idx));
+                                        }
+                                    }
+                                    if theme_rows.is_empty() {
+                                        ui.add_space(6.0);
+                                        ui.label(
+                                            egui::RichText::new("no themes match")
+                                                .small()
+                                                .color(SHOP_DIM),
+                                        );
+                                    }
+                                });
+                            }
                         }
                     });
             }
@@ -1118,6 +1891,114 @@ impl App {
         }
         if close {
             self.toggle_shop();
+        }
+        // TEXTURES tab: apply the deferred picks. Arming a theme cancels any prop /
+        // light / spawn placement, since a click can only mean one thing.
+        if let Some(armed) = new_theme_armed {
+            self.theme_armed = armed;
+            if armed.is_some() {
+                if let Some(world) = self.world.as_mut() {
+                    world.cancel_prop_placement();
+                    world.cancel_light_placement();
+                }
+                self.props_selected = None;
+            }
+        }
+        if let Some((name, verdict)) = new_theme_verdict {
+            self.theme_review.toggle(name, verdict);
+        }
+        if let Some(f) = new_theme_review_filter {
+            self.theme_review_filter = f;
+        }
+        if theme_filter_changed {
+            self.theme_filter = theme_filter_ui;
+        }
+        // ── Theme editor. Every change that alters the draft ends with a push into
+        // the scratch scheme's live materials, which is what makes the world (and the
+        // preview room) follow a slider drag with no re-bake.
+        if toggle_edit_mode {
+            self.theme_edit_mode = !self.theme_edit_mode;
+            self.theme_status.clear();
+            if self.theme_edit_mode {
+                self.ensure_theme_preview_room();
+                self.sync_theme_scratch();
+            } else {
+                self.theme_armed = None;
+            }
+        }
+        if draft_zone_changed {
+            self.theme_draft.zone_sel = draft_zone_sel;
+        }
+        if draft_level_changed {
+            self.theme_draft.level_sel = draft_level_sel;
+        }
+        if draft_name_changed {
+            self.theme_draft.save_name = draft_save_name;
+        }
+        if let Some(seed) = draft_seed_from {
+            self.theme_draft.seed_from(seed);
+            self.theme_edit_mode = true;
+            self.theme_status = format!("copied {}", self.theme_label(seed));
+            self.sync_theme_scratch();
+        }
+        {
+            let mut changed = false;
+            if let Some(t) = draft_pick_texture {
+                self.theme_draft.set_texture(t);
+                changed = true;
+            }
+            if let Some(r) = draft_new_repeat {
+                self.theme_draft.set_repeat(r);
+                changed = true;
+            }
+            if let Some(o) = draft_new_offset {
+                self.theme_draft.set_offset(o);
+                changed = true;
+            }
+            if draft_clear_zone {
+                self.theme_draft.clear_zone();
+                changed = true;
+            }
+            if changed {
+                self.sync_theme_scratch();
+            }
+        }
+        if let Some((digit, scheme)) = new_hotkey {
+            if let Some(w) = self.world.as_mut() {
+                w.set_theme_hotkey(digit, scheme);
+            }
+            self.theme_status = match scheme {
+                Some(i) => format!("key {digit} -> {}", self.theme_label(i)),
+                None => format!("key {digit} cleared"),
+            };
+        }
+        if draft_arm_scratch {
+            let scratch = engine::render::textures::scratch_scheme();
+            self.theme_armed = Some(scratch);
+            self.sync_theme_scratch();
+        }
+        if draft_save {
+            match self.theme_draft.save_as_preset() {
+                Ok(slot) => {
+                    // Saving to disk cannot update the registry (a `OnceLock`), so the
+                    // slot's materials are pushed here and its label remembered for
+                    // this session. Both refresh from the file on the next run.
+                    self.push_theme_to(slot);
+                    let label = self.theme_draft.save_name.trim().to_string();
+                    let label = if label.is_empty() {
+                        engine::render::textures::schemes()[slot].label.to_string()
+                    } else {
+                        label
+                    };
+                    self.theme_slot_labels.insert(slot, label.clone());
+                    self.theme_status = format!("saved as \"{label}\" — usable now");
+                    log::info!("theme preset saved into custom slot {slot} as {label:?}");
+                }
+                Err(e) => {
+                    self.theme_status = e.clone();
+                    log::warn!("theme preset save failed: {e}");
+                }
+            }
         }
         // Object panel: apply the selection (arms placement of that prop on the
         // World) + the close, after the `state` borrow ends.
@@ -1557,6 +2438,22 @@ struct ShopRow {
     magazine_size: u32,
 }
 
+/// One row of the TEXTURES tab, snapshotted so the egui closure needs no borrow of
+/// the theme registry or the review state.
+struct ThemeRow {
+    /// Index into `engine::render::textures::schemes()`.
+    idx: usize,
+    name: &'static str,
+    /// Display label, which may be a name saved this session rather than the
+    /// registry's (see `App::theme_label`).
+    label: String,
+    group: &'static str,
+    key: Option<char>,
+    verdict: Option<crate::theme_review::Verdict>,
+    /// Per-zone `repeat` for zones 0..3, for the detail readout.
+    repeats: [Option<f32>; 4],
+}
+
 /// Map a number-row / numpad digit key to its '1'..'9' char (for scheme keys).
 fn digit_char(code: KeyCode) -> Option<char> {
     Some(match code {
@@ -1901,6 +2798,23 @@ impl ApplicationHandler for App {
                         if let Some(world) = self.world.as_mut() {
                             world.update_light_preview(o, d);
                             world.confirm_light_placement();
+                        }
+                    }
+                    return;
+                }
+                // TEXTURES tab: while a theme is armed, a left-click retextures the
+                // room under the *cursor*. Ray-aimed rather than crosshair-aimed
+                // because the panel frees the cursor, which leaves the camera
+                // crosshair frozen wherever it last pointed. Checked before prop
+                // selection so an armed theme owns the click.
+                if let Some(scheme) = self.theme_armed {
+                    if let Some((o, d)) = self.mouse_world_ray() {
+                        if let Some(rm) = self
+                            .world
+                            .as_mut()
+                            .and_then(|w| w.with_undo(|w| w.set_scheme_along(Some((o, d)), scheme)))
+                        {
+                            self.upload(&rm);
                         }
                     }
                     return;
@@ -2357,7 +3271,15 @@ impl ApplicationHandler for App {
                     }
                     // Object panel open → render the selected prop into the same
                     // offscreen preview texture (the panel samples it as an image).
-                    if self.props_open {
+                    //
+                    // The theme editor draws its preview *room* into that same target.
+                    // Only one can be on screen (they're different tabs), and the
+                    // editor wins when it's showing — it's the one that needs to track
+                    // a slider drag frame by frame.
+                    if self.props_open && self.theme_edit_mode && self.panel_tab == PanelTab::Textures
+                    {
+                        renderer.render_theme_preview(self.props_preview_angle);
+                    } else if self.props_open {
                         if let Some(def) =
                             self.props_selected.and_then(|i| crate::props::CATALOG.get(i))
                         {
@@ -2487,6 +3409,7 @@ impl App {
             // Q / Esc → neutral: stop placing AND deselect, so clicks select existing
             // props (no need to leave + re-enter object mode).
             if code == KeyCode::Escape || code == KeyCode::KeyQ {
+                self.theme_armed = None;
                 if let Some(w) = self.world.as_mut() {
                     w.cancel_prop_placement();
                     w.cancel_light_placement();
@@ -2623,7 +3546,9 @@ impl App {
         // Number keys 1-9 retexture the room under the crosshair (flood-fill,
         // bounded by door/hole frames).
         if let Some(key) = digit_char(code) {
-            if let Some(scheme) = engine::render::textures::scheme_for_key(key) {
+            // This level's own binding wins over the manifest's default key.
+            let scheme = self.world.as_ref().and_then(|w| w.scheme_for_key(key));
+            if let Some(scheme) = scheme {
                 if let Some(rm) = self
                     .world
                     .as_mut()

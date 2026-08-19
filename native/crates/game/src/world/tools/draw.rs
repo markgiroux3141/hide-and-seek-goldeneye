@@ -1146,7 +1146,7 @@ mod tests {
             v_min: 0,
             v_max: 24,
             rects: vec![[0, 24, 0, 24]],
-            scheme: DEFAULT_SCHEME,
+            scheme: default_scheme(),
         }
     }
 
@@ -1858,7 +1858,7 @@ mod tests {
             v_min: 0,
             v_max: 20,
             rects: vec![[0, 20, 0, 10], [0, 10, 0, 20]],
-            scheme: DEFAULT_SCHEME,
+            scheme: default_scheme(),
         };
         assert!(face.covers_cell(15, 5), "inside the bottom arm");
         assert!(face.covers_cell(5, 15), "inside the left arm");

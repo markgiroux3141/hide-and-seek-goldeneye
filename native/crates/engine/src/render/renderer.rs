@@ -365,12 +365,33 @@ pub struct Renderer {
     regions: HashMap<u32, TexturedRegion>,
 
     /// `materials[scheme][zone]` → the texture+sampler+repeat bind group for that
-    /// zone, or `None` when the scheme doesn't define the zone. Built once at init.
+    /// zone, or `None` when the scheme doesn't define the zone. Built at init and
+    /// mutable afterwards, so the theme editor can retexture a zone live
+    /// ([`set_material_texture`](Self::set_material_texture)).
     materials: Vec<[Option<wgpu::BindGroup>; 8]>,
-    /// Keeps the GPU textures + per-material uniform buffers alive for the bind
-    /// groups above (never read directly).
+    /// `material_params[scheme][zone]` → that zone's uniform buffer, addressable so
+    /// `repeat`/`offset` can be rewritten in place with a single `write_buffer` —
+    /// no bind group rebuild, no mesh re-bake. This is what makes dragging a scale
+    /// slider update the world at frame rate.
+    material_params: Vec<[Option<wgpu::Buffer>; 8]>,
+    /// Decoded texture views by name, retained so a zone can be pointed at a
+    /// different texture at runtime (building a bind group needs the view). The
+    /// original design dropped these after init; the custom-theme editor needs them.
+    material_views: HashMap<String, wgpu::TextureView>,
+    /// The shared sampler + layout the material bind groups are built from, kept so
+    /// new ones can be created after init.
+    material_layout: wgpu::BindGroupLayout,
+    material_sampler: wgpu::Sampler,
+    /// Keeps the GPU textures alive for the bind groups above (never read directly).
     _material_keepalive: Vec<wgpu::Texture>,
-    _material_buffers: Vec<wgpu::Buffer>,
+
+    /// A stock room mesh drawn into the offscreen preview target so the theme editor
+    /// can show a theme on real geometry without touching the level. Uploaded by the
+    /// game from the *actual* CSG fold, so its wall split, UV projection and zone
+    /// classification are the real ones rather than an approximation.
+    theme_preview_room: Option<TexturedRegion>,
+    theme_preview_camera_buf: wgpu::Buffer,
+    theme_preview_camera_bind: wgpu::BindGroup,
     /// `true` = checkerboard grid view; `false` = textured. Toggled by Backslash.
     grid_mode: bool,
 
@@ -900,8 +921,25 @@ impl Renderer {
             cache: None,
         });
 
-        let (materials, material_keepalive, material_buffers) =
-            build_materials(&device, &queue, &material_layout, &sampler);
+        let built_materials = build_materials(&device, &queue, &material_layout, &sampler);
+
+        // Its own camera uniform, so the preview pass can aim a different view
+        // without disturbing the main camera mid-frame.
+        let theme_preview_camera_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("theme-preview-camera"),
+            contents: bytemuck::cast_slice(&[CameraUniform {
+                view_proj: Mat4::IDENTITY.to_cols_array_2d(),
+            }]),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let theme_preview_camera_bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("theme-preview-camera-bg"),
+            layout: &camera_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: theme_preview_camera_buf.as_entire_binding(),
+            }],
+        });
 
         // ── Shadow pipeline: render region geometry from a light cube face, storing
         // linear light-distance into R32F with cutout discard. Reuses the material
@@ -2072,9 +2110,15 @@ impl Renderer {
             prop_draws: Vec::new(),
             prop_preview_slot,
             regions: HashMap::new(),
-            materials,
-            _material_keepalive: material_keepalive,
-            _material_buffers: material_buffers,
+            materials: built_materials.materials,
+            material_params: built_materials.params,
+            material_views: built_materials.views,
+            material_layout: material_layout.clone(),
+            material_sampler: sampler.clone(),
+            _material_keepalive: built_materials.keepalive,
+            theme_preview_room: None,
+            theme_preview_camera_buf,
+            theme_preview_camera_bind,
             grid_mode: false,
             highlight_pipeline,
             surface_tint_pipeline,
@@ -3017,6 +3061,194 @@ impl Renderer {
 
     /// Insert or replace a region's textured mesh. Called on every brush edit; an
     /// empty mesh removes the region.
+    /// Rewrite one zone's UV `repeat` + `offset` in place.
+    ///
+    /// A single `write_buffer` into the material's existing uniform: no bind group
+    /// rebuild, no mesh re-bake, no re-fold. That is what makes dragging a scale or
+    /// offset slider update the whole world at frame rate — the values were never
+    /// baked into the vertices (see the module note on `repeat` in `textures`).
+    ///
+    /// Silently ignores a `(scheme, zone)` the manifest doesn't define; the caller is
+    /// UI code driven by the same registry, so a miss means the zone is undrawn anyway.
+    pub fn set_material_params(&mut self, scheme: usize, zone: u8, repeat: f32, offset: [f32; 2]) {
+        let Some(zones) = self.material_params.get(scheme) else { return };
+        let Some(Some(buf)) = zones.get(zone as usize) else { return };
+        self.queue.write_buffer(
+            buf,
+            0,
+            bytemuck::cast_slice(&[MaterialUniform {
+                params: [repeat, offset[0], offset[1], 0.0],
+            }]),
+        );
+    }
+
+    /// Point one zone at a different texture, uploading it if not already resident.
+    ///
+    /// Unlike [`set_material_params`](Self::set_material_params) this must rebuild the
+    /// bind group — a texture view is baked into it — but it still avoids any mesh
+    /// work. Returns `false` if the texture can't be decoded or the zone is undefined,
+    /// so the caller can leave the UI showing the previous choice.
+    pub fn set_material_texture(&mut self, scheme: usize, zone: u8, name: &str) -> bool {
+        if self.materials.get(scheme).map(|z| z[zone as usize].is_none()).unwrap_or(true) {
+            return false;
+        }
+        if !self.material_views.contains_key(name) {
+            let Some(dec) = textures::try_decode(name) else {
+                log::warn!("set_material_texture: '{name}' failed to decode");
+                return false;
+            };
+            let size = wgpu::Extent3d {
+                width: dec.width,
+                height: dec.height,
+                depth_or_array_layers: 1,
+            };
+            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("material-texture"),
+                size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &dec.rgba,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * dec.width),
+                    rows_per_image: Some(dec.height),
+                },
+                size,
+            );
+            self.material_views
+                .insert(name.to_string(), tex.create_view(&wgpu::TextureViewDescriptor::default()));
+            self._material_keepalive.push(tex);
+        }
+        let Some(view) = self.material_views.get(name) else { return false };
+        let Some(Some(buf)) = self.material_params.get(scheme).map(|z| &z[zone as usize]) else {
+            return false;
+        };
+        let bg = material_bind_group(
+            &self.device,
+            &self.material_layout,
+            &self.material_sampler,
+            view,
+            buf,
+        );
+        self.materials[scheme][zone as usize] = Some(bg);
+        true
+    }
+
+    /// Upload the stock room the theme editor previews into.
+    ///
+    /// The game builds this by running the *real* CSG fold over one room brush, so
+    /// the preview shows the engine's actual wall split, UV projection and zone
+    /// classification rather than a hand-rolled box that could disagree with them.
+    /// Re-upload whenever the previewed scheme changes (the scheme is baked into the
+    /// mesh's zone groups).
+    pub fn set_theme_preview_room(&mut self, mesh: &TexturedMesh) {
+        if mesh.indices.is_empty() {
+            self.theme_preview_room = None;
+            return;
+        }
+        let vbytes: &[u8] = bytemuck::cast_slice(&mesh.vertices);
+        let ibytes: &[u8] = bytemuck::cast_slice(&mesh.indices);
+        let vertex_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("theme-preview-vertices"),
+            contents: vbytes,
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let index_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("theme-preview-indices"),
+            contents: ibytes,
+            usage: wgpu::BufferUsages::INDEX,
+        });
+        self.theme_preview_room = Some(TexturedRegion {
+            vertex_buf,
+            index_buf,
+            vertex_cap: vbytes.len() as u64,
+            index_cap: ibytes.len() as u64,
+            index_count: mesh.indices.len() as u32,
+            groups: mesh.groups.clone(),
+        });
+    }
+
+    /// Draw the preview room into the offscreen target, viewed from inside.
+    ///
+    /// Shares the target and lighting bind group with the prop turntable — only one
+    /// preview is ever on screen, since they live in different panel tabs. `yaw` lets
+    /// the caller spin the view; the camera sits inside the room looking slightly
+    /// down, which is the one framing that shows floor, two walls and ceiling at once
+    /// (and therefore the wall split, which is the thing most worth checking).
+    pub fn render_theme_preview(&mut self, yaw: f32) {
+        let Some(room) = self.theme_preview_room.as_ref() else { return };
+        // Room is the stock 24x16x24 WT carve => 6 x 4 x 6 m. Stand near the middle,
+        // a little above the floor, and look at the far lower corner.
+        let eye = Vec3::new(3.0, 1.6, 3.0) + Vec3::new(yaw.cos(), 0.0, yaw.sin()) * 1.1;
+        let target = Vec3::new(3.0, 1.1, 3.0) - Vec3::new(yaw.cos(), 0.0, yaw.sin()) * 2.0;
+        let view = Mat4::look_at_rh(eye, target, Vec3::Y);
+        let proj = Mat4::perspective_rh(70f32.to_radians(), 1.0, 0.05, 60.0);
+        self.queue.write_buffer(
+            &self.theme_preview_camera_buf,
+            0,
+            bytemuck::cast_slice(&[CameraUniform {
+                view_proj: (proj * view).to_cols_array_2d(),
+            }]),
+        );
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("theme-preview-encoder"),
+            });
+        {
+            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("theme-preview-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.preview_color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.05,
+                            g: 0.055,
+                            b: 0.065,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.preview_depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+            rp.set_pipeline(&self.textured_pipeline);
+            rp.set_bind_group(0, &self.theme_preview_camera_bind, &[]);
+            rp.set_bind_group(2, &self.preview_lighting_bind_group, &[]);
+            rp.set_vertex_buffer(0, room.vertex_buf.slice(..));
+            rp.set_index_buffer(room.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+            for g in &room.groups {
+                let Some(zones) = self.materials.get(g.scheme as usize) else { continue };
+                let Some(bg) = zones[g.zone as usize].as_ref() else { continue };
+                rp.set_bind_group(1, bg, &[]);
+                rp.draw_indexed(g.start..g.start + g.count, 0, 0..1);
+            }
+        }
+        self.queue.submit(std::iter::once(encoder.finish()));
+    }
+
     pub fn set_region_textured(&mut self, region_id: u32, mesh: &TexturedMesh) {
         if mesh.indices.is_empty() {
             self.regions.remove(&region_id);
@@ -3692,28 +3924,36 @@ fn pick_present_mode(available: &[wgpu::PresentMode]) -> wgpu::PresentMode {
 /// Decode every scheme's textures (deduped by name) into GPU textures and build
 /// the `materials[scheme][zone]` bind-group table. Returns the table plus the
 /// textures and uniform buffers that must be kept alive for the bind groups.
+/// Everything the material system needs at runtime, built once at init.
+struct BuiltMaterials {
+    materials: Vec<[Option<wgpu::BindGroup>; 8]>,
+    params: Vec<[Option<wgpu::Buffer>; 8]>,
+    views: HashMap<String, wgpu::TextureView>,
+    keepalive: Vec<wgpu::Texture>,
+}
+
 fn build_materials(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     layout: &wgpu::BindGroupLayout,
     sampler: &wgpu::Sampler,
-) -> (Vec<[Option<wgpu::BindGroup>; 8]>, Vec<wgpu::Texture>, Vec<wgpu::Buffer>) {
+) -> BuiltMaterials {
     let mut keepalive: Vec<wgpu::Texture> = Vec::new();
-    let mut buffers: Vec<wgpu::Buffer> = Vec::new();
-    let mut view_by_name: HashMap<&'static str, wgpu::TextureView> = HashMap::new();
+    let mut view_by_name: HashMap<String, wgpu::TextureView> = HashMap::new();
 
     let mut materials: Vec<[Option<wgpu::BindGroup>; 8]> = Vec::new();
-    for scheme in textures::SCHEMES {
+    let mut param_bufs: Vec<[Option<wgpu::Buffer>; 8]> = Vec::new();
+    for scheme in textures::schemes() {
         let mut zones: [Option<wgpu::BindGroup>; 8] = std::array::from_fn(|_| None);
+        let mut zone_bufs: [Option<wgpu::Buffer>; 8] = std::array::from_fn(|_| None);
         for (zi, zone) in scheme.zones.iter().enumerate() {
             let Some(zdef) = zone else { continue };
             let Some(name) = zdef.texture else { continue };
 
             if !view_by_name.contains_key(name) {
-                let Some(dec) = textures::decode(name) else {
-                    log::warn!("texture {name} failed to decode; zone left untextured");
-                    continue;
-                };
+                // Never fails: a missing BMP comes back magenta so the gap is
+                // visible on the surface rather than silently untextured.
+                let dec = textures::decode(name);
                 let size = wgpu::Extent3d {
                     width: dec.width,
                     height: dec.height,
@@ -3746,42 +3986,62 @@ fn build_materials(
                     },
                     size,
                 );
-                view_by_name.insert(name, tex.create_view(&wgpu::TextureViewDescriptor::default()));
+                view_by_name.insert(
+                    name.to_string(),
+                    tex.create_view(&wgpu::TextureViewDescriptor::default()),
+                );
                 keepalive.push(tex);
             }
 
             let Some(view) = view_by_name.get(name) else { continue };
+            // COPY_DST so the theme editor can rewrite repeat/offset in place.
             let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("material-uniform"),
                 contents: bytemuck::cast_slice(&[MaterialUniform {
-                    params: [zdef.repeat, 0.0, 0.0, 0.0],
+                    params: [zdef.repeat, zdef.offset[0], zdef.offset[1], 0.0],
                 }]),
-                usage: wgpu::BufferUsages::UNIFORM,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });
-            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("material-bg"),
-                layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: ubuf.as_entire_binding(),
-                    },
-                ],
-            });
-            buffers.push(ubuf);
-            zones[zi] = Some(bg);
+            zones[zi] = Some(material_bind_group(device, layout, sampler, view, &ubuf));
+            zone_bufs[zi] = Some(ubuf);
         }
         materials.push(zones);
+        param_bufs.push(zone_bufs);
     }
-    (materials, keepalive, buffers)
+    BuiltMaterials {
+        materials,
+        params: param_bufs,
+        views: view_by_name,
+        keepalive,
+    }
+}
+
+/// Build one `(texture, sampler, params)` material bind group.
+fn material_bind_group(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    view: &wgpu::TextureView,
+    ubuf: &wgpu::Buffer,
+) -> wgpu::BindGroup {
+    device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("material-bg"),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: ubuf.as_entire_binding(),
+            },
+        ],
+    })
 }
 
 /// Load the crosshair reticle PNG (`assets/hud/crosshairs.png`) as RGBA8 from the

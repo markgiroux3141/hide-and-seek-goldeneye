@@ -42,7 +42,7 @@ use engine::skeletal::layers::{
 };
 use engine::skeletal::gltf_skin::{self, SkinnedModel};
 use engine::geometry::structures::{self, Anchor, Edge, Platform, StairRun};
-use engine::render::textures::DEFAULT_SCHEME;
+use engine::render::textures::default_scheme;
 use engine::render::uv_zones::ZonedBuilder;
 
 // ─── Submodule tree (the `impl World` methods are spread across these) ──
@@ -1915,6 +1915,14 @@ pub struct World {
     /// ambient has no position. Persisted in the level file; edited in the OBJECTS
     /// panel's LEVEL LIGHTING section. See [`crate::ecs::AmbientSettings`].
     ambient: crate::ecs::AmbientSettings,
+    /// This level's number-key → theme-name bindings, for quick per-room retexturing.
+    ///
+    /// Per **level** rather than global because the useful nine differ completely
+    /// between a bunker and a jungle, and the library now runs to hundreds of themes.
+    /// Stored by theme *name* like everything else that references a theme (see
+    /// `Brush::scheme`), and consulted ahead of the manifest's own `key` — an unbound
+    /// digit falls through to whatever `themes.json` says.
+    theme_hotkeys: std::collections::BTreeMap<char, String>,
     /// The player capsule; `Some` only in HUNT mode.
     character: Option<CharacterController>,
     /// Baked nav grid; `Some` only in HUNT mode.
@@ -2751,6 +2759,7 @@ impl World {
             mode: Mode::Build,
             ecs: crate::ecs::Ecs::new(),
             ambient: crate::ecs::AmbientSettings::default(),
+            theme_hotkeys: std::collections::BTreeMap::new(),
             character: None,
             nav: None,
             enemies: Vec::new(),

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::geometry::geom;
 use crate::render::mesh::{CpuMesh, TexturedMesh};
-use crate::render::textures::DEFAULT_SCHEME;
+use crate::render::textures::{self, default_scheme};
 use crate::render::uv_zones::{self, BrushInfo, ZonedBuilder};
 
 /// Meters per world tile. Mirrors `src/core/constants.js` `WORLD_SCALE`.
@@ -149,9 +149,19 @@ pub struct Brush {
     /// down-stair no longer shifts the whole level's wall texture.
     #[serde(default)]
     pub floor_y: f32,
-    /// Texture scheme index (JS `BrushDef.schemeKey`), set per room by the
-    /// number-key flood-fill retexture. Defaults to [`crate::render::textures::DEFAULT_SCHEME`].
-    #[serde(default = "default_scheme")]
+    /// Texture theme, as an index into [`textures::schemes`] (JS
+    /// `BrushDef.schemeKey`), set per room by the number-key flood-fill retexture.
+    /// Defaults to [`textures::default_scheme`].
+    ///
+    /// The index is a **runtime** handle only — it is a position in whatever
+    /// `themes.json` currently lists. On disk this field is the theme's stable
+    /// *name* (see [`ser_scheme`] / [`de_scheme`]), so themes can be added,
+    /// reordered or removed without retexturing saved levels.
+    #[serde(
+        default = "default_scheme",
+        serialize_with = "ser_scheme",
+        deserialize_with = "de_scheme"
+    )]
     pub scheme: usize,
     /// Ties together the brushes that one authored shape decomposed into. The
     /// freeform draw tool emits an arbitrary 90°-snapped polygon as N rectangles
@@ -171,9 +181,49 @@ pub struct Brush {
     pub group: u32,
 }
 
-/// serde default for [`Brush::scheme`] on a file that predates the field.
-fn default_scheme() -> usize {
-    crate::render::textures::DEFAULT_SCHEME
+/// Serialize a theme index as its stable *name*.
+///
+/// Indices are positions in the runtime-loaded `themes.json`, so writing one to
+/// disk would silently retexture every saved level the moment a theme is inserted
+/// or removed. The name has no such coupling.
+fn ser_scheme<S: serde::Serializer>(index: &usize, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(textures::scheme_name(*index))
+}
+
+/// A theme reference as it may appear on disk: the current form (a name) or the
+/// legacy form (a bare index, written by level format v3 and earlier).
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SchemeRef {
+    Name(String),
+    Index(usize),
+}
+
+/// Resolve an on-disk theme reference to a runtime index.
+///
+/// Accepts both forms, which is what lets pre-v4 levels load with no migration
+/// pass: a legacy index is a position in the original hard-coded 10-scheme order,
+/// which `themes.json` preserves in its first ten entries for exactly this reason.
+/// An unknown name or an out-of-range index degrades to the default theme with a
+/// warning rather than failing the load — one mystery-textured room is a far
+/// better outcome than an unopenable level.
+fn de_scheme<'de, D: serde::Deserializer<'de>>(d: D) -> Result<usize, D::Error> {
+    let fallback = |what: String| {
+        log::warn!("level references unknown texture theme {what}; using the default");
+        default_scheme()
+    };
+    Ok(match SchemeRef::deserialize(d)? {
+        SchemeRef::Name(n) => {
+            textures::scheme_index(&n).unwrap_or_else(|| fallback(format!("'{n}'")))
+        }
+        SchemeRef::Index(i) => {
+            if i < textures::schemes().len() {
+                i
+            } else {
+                fallback(format!("index {i}"))
+            }
+        }
+    })
 }
 
 impl Brush {
@@ -183,7 +233,7 @@ impl Brush {
             door: false,
             frame: false,
             floor_y: y,
-            scheme: crate::render::textures::DEFAULT_SCHEME,
+            scheme: default_scheme(),
             group: 0,
         }
     }
@@ -327,8 +377,14 @@ pub struct StairDesc {
     /// Wall-texture floor anchor in WT (JS descriptor `floorY` = the pit/dest
     /// floor). Used to anchor the stair side-wall UVs so they don't shift.
     pub floor_y: f32,
-    /// Texture scheme index inherited from the wall the stair was cut into, and
-    /// updated when its room is retextured.
+    /// Texture theme inherited from the wall the stair was cut into, and updated
+    /// when its room is retextured. Persisted by name, exactly as
+    /// [`Brush::scheme`] is.
+    #[serde(
+        default = "default_scheme",
+        serialize_with = "ser_scheme",
+        deserialize_with = "de_scheme"
+    )]
     pub scheme: usize,
     /// The two void-brush ids this stair carved (JS `voidBrushIds`), so a room
     /// retexture flood-fill can find and re-scheme the matching tread mesh.
@@ -1096,7 +1152,7 @@ impl Region {
             .collect();
 
         let mut b = ZonedBuilder::new();
-        uv_zones::classify_soup(&mut b, &pos, &idx, &brush_infos, DEFAULT_SCHEME);
+        uv_zones::classify_soup(&mut b, &pos, &idx, &brush_infos, default_scheme());
         for s in &self.stairs {
             s.append_zoned(&mut b);
         }
@@ -1147,7 +1203,7 @@ impl Region {
             })
             .collect();
         let mut zb = ZonedBuilder::new();
-        uv_zones::classify_soup(&mut zb, &pos, &idx, &brush_infos, DEFAULT_SCHEME);
+        uv_zones::classify_soup(&mut zb, &pos, &idx, &brush_infos, default_scheme());
         for s in &self.stairs {
             s.append_zoned(&mut zb);
         }

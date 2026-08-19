@@ -38,7 +38,22 @@ use super::*;
 /// point light does, so nothing about the file schema moved. The legacy scalar
 /// [`LevelFile::spawn_point`] below is now vestigial — kept written so a level saved by
 /// this build still opens in an older one at its old fixed ingress.
-const LEVEL_FORMAT_VERSION: u32 = 3;
+///
+/// v4 (2026-08-19): texture themes are stored by **name** (`"scheme":
+/// "archives_1"`) instead of by index (`"scheme": 2`). Themes now load at runtime
+/// from `native/assets/themes.json`, so an index is only a position in whatever
+/// that file happens to list — inserting or removing a theme would silently
+/// retexture every saved level. No migration pass is needed in either direction
+/// of *reading*: `de_scheme` in `csg_runtime` accepts a name or a legacy index
+/// (see [`engine::geometry::csg_runtime::Brush::scheme`]), so v1–v3 files still
+/// open. Writing is one-way, though — a level saved by this build will not open
+/// in a pre-v4 build, hence the bump.
+///
+/// **Still v4 (2026-08-19)** with per-level theme hotkeys: `theme_hotkeys` is a new
+/// `#[serde(default)]` map, so v1-v4 files load with none bound (falling through to
+/// the manifest's own keys), and an older build silently ignores the extra field.
+/// By this file's own rule that is not a version-worthy change.
+const LEVEL_FORMAT_VERSION: u32 = 4;
 
 /// One CSG region's authored data (the shell is derived, so it isn't stored —
 /// `refresh_shell` recomputes it on load).
@@ -72,6 +87,10 @@ struct LevelFile {
     /// files loading with the neutral default. See [`crate::ecs::AmbientSettings`].
     #[serde(default)]
     ambient: crate::ecs::AmbientSettings,
+    /// This level's number-key → theme-name bindings. `#[serde(default)]`, so older
+    /// files load with none bound and fall through to the manifest's own keys.
+    #[serde(default)]
+    theme_hotkeys: std::collections::BTreeMap<char, String>,
     next_brush_id: u32,
     next_platform_id: u32,
     next_run_id: u32,
@@ -115,6 +134,7 @@ impl World {
             stair_runs: self.stair_runs.clone(),
             entities: self.ecs.save_authored(),
             ambient: self.ambient,
+            theme_hotkeys: self.theme_hotkeys.clone(),
             next_brush_id: self.next_brush_id,
             next_platform_id: self.next_platform_id,
             next_run_id: self.next_run_id,
@@ -194,6 +214,9 @@ impl World {
             stair_runs: built.stair_runs.clone(),
             entities: built.entities.clone(),
             ambient: crate::ecs::AmbientSettings::default(),
+            // A generated level starts with no quick keys bound; the digits fall
+            // through to the manifest's own defaults until an author binds them.
+            theme_hotkeys: std::collections::BTreeMap::new(),
             next_brush_id: built.next_brush_id,
             next_platform_id: built.next_platform_id,
             next_run_id: built.next_run_id,
@@ -233,6 +256,7 @@ impl World {
         self.stair_runs = file.stair_runs;
         self.spawn_point = Vec3::from(file.spawn_point);
         self.ambient = file.ambient;
+        self.theme_hotkeys = file.theme_hotkeys.clone();
 
         // Restore allocators, but never below one-past the max id actually
         // present — a hand-edited file with a stale counter can't then hand out
@@ -366,6 +390,217 @@ mod tests {
         assert_eq!(loaded.next_platform_id, 2, "platform allocator preserved");
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Themes are written as names, not indices — the whole point of v4. A level
+    /// saved by this build must be readable by a build whose `themes.json` lists
+    /// the same themes in a *different order*, which is only possible if the name
+    /// is what's on disk.
+    #[test]
+    fn scheme_is_persisted_by_name_not_index() {
+        use engine::render::textures;
+
+        // Pick a theme that is deliberately *not* index 0, so a stray index would
+        // be visible in the JSON as a bare number.
+        let scheme = textures::scheme_index("archives_1").expect("archives_1 exists");
+        assert_ne!(scheme, textures::default_scheme(), "need a non-default theme");
+
+        let mut world = World::new();
+        world.regions[0].brushes[0].scheme = scheme;
+
+        let path = std::env::temp_dir().join("bah_persist_scheme_name.json");
+        world.save_level(&path).expect("save");
+        let json = std::fs::read_to_string(&path).expect("read back");
+
+        assert!(
+            json.contains("\"scheme\": \"archives_1\""),
+            "theme must be written by name; got:\n{json}"
+        );
+        assert!(
+            !json.contains(&format!("\"scheme\": {scheme}")),
+            "no bare theme index may reach disk"
+        );
+
+        let mut loaded = World::new();
+        loaded.load_level(&path).expect("load");
+        assert_eq!(
+            loaded.regions[0].brushes[0].scheme, scheme,
+            "theme must round-trip through its name"
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Pre-v4 files stored a bare theme *index*. They must still open, mapping the
+    /// index through the manifest's (deliberately preserved) original order — and an
+    /// index past the end of a shrunken manifest must degrade to the default rather
+    /// than failing the whole load.
+    #[test]
+    fn legacy_integer_scheme_still_loads() {
+        use engine::render::textures;
+
+        let mut world = World::new();
+        let path = std::env::temp_dir().join("bah_persist_scheme_legacy.json");
+        world.save_level(&path).expect("save");
+
+        let json = std::fs::read_to_string(&path).expect("read");
+        let legacy_index = textures::scheme_index("facility_industrial_room").unwrap();
+
+        // Rewrite the file the way a v3 writer would have: version tag + bare index.
+        let v3 = json
+            .replace("\"version\": 4", "\"version\": 3")
+            .replace("\"scheme\": \"facility_white_tile\"", &format!("\"scheme\": {legacy_index}"));
+        assert!(v3.contains(&format!("\"scheme\": {legacy_index}")), "test rewrote the file");
+        std::fs::write(&path, &v3).expect("write v3");
+
+        let mut loaded = World::new();
+        loaded.load_level(&path).expect("a v3 file must still load");
+        assert_eq!(
+            loaded.regions[0].brushes[0].scheme, legacy_index,
+            "a legacy index maps through the manifest's original order"
+        );
+
+        // An index no manifest could satisfy degrades to the default, not an error.
+        let bogus = v3.replace(&format!("\"scheme\": {legacy_index}"), "\"scheme\": 9999");
+        std::fs::write(&path, bogus).expect("write bogus");
+        let mut loaded = World::new();
+        loaded.load_level(&path).expect("an out-of-range theme must not fail the load");
+        assert_eq!(loaded.regions[0].brushes[0].scheme, textures::default_scheme());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// An unknown theme *name* (a level authored against a manifest that has since
+    /// dropped that theme) must also degrade rather than make the level unopenable.
+    #[test]
+    fn unknown_scheme_name_falls_back_to_the_default() {
+        let mut world = World::new();
+        let path = std::env::temp_dir().join("bah_persist_scheme_unknown.json");
+        world.save_level(&path).expect("save");
+
+        let json = std::fs::read_to_string(&path)
+            .expect("read")
+            .replace("\"facility_white_tile\"", "\"a_theme_that_was_deleted\"");
+        std::fs::write(&path, json).expect("write");
+
+        let mut loaded = World::new();
+        loaded.load_level(&path).expect("an unknown theme must not fail the load");
+        assert_eq!(
+            loaded.regions[0].brushes[0].scheme,
+            engine::render::textures::default_scheme()
+        );
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Every committed slot file in `native/levels/` must still open. These are the
+    /// hand-authored test bases, they predate v4, and they are the real regression
+    /// surface for the index → name migration.
+    #[test]
+    fn every_committed_slot_file_still_loads() {
+        let dir = levels_dir();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return; // no catalog checked out — nothing to assert
+        };
+        let mut checked = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let mut world = World::new();
+            world
+                .load_level(&path)
+                .unwrap_or_else(|e| panic!("{} failed to load: {e}", path.display()));
+            // A loaded theme index must be resolvable, or the room renders untextured.
+            for region in &world.regions {
+                for b in &region.brushes {
+                    assert!(
+                        b.scheme < engine::render::textures::schemes().len(),
+                        "{}: brush {} has unresolvable theme {}",
+                        path.display(),
+                        b.id,
+                        b.scheme
+                    );
+                }
+            }
+            checked += 1;
+        }
+        assert!(checked > 0, "expected committed slot files under {}", dir.display());
+    }
+
+    /// Per-level quick keys round-trip, and a level binding beats the manifest's own
+    /// default for that digit — which is the whole point of making them per-level.
+    #[test]
+    fn theme_hotkeys_round_trip_and_override_the_manifest() {
+        use engine::render::textures;
+
+        let mut world = World::new();
+        // '1' has a manifest default (the default theme). Bind it to something else.
+        let manifest_default = textures::scheme_for_key('1');
+        let other = textures::scheme_index("bunker_1").expect("bunker_1 exists");
+        assert_ne!(manifest_default, Some(other), "need a distinguishable binding");
+
+        world.set_theme_hotkey('1', Some(other));
+        assert_eq!(world.scheme_for_key('1'), Some(other), "level binding wins");
+        // An unbound digit still falls through to the manifest.
+        assert_eq!(world.scheme_for_key('9'), textures::scheme_for_key('9'));
+
+        let path = std::env::temp_dir().join("bah_persist_hotkeys.json");
+        world.save_level(&path).expect("save");
+        let json = std::fs::read_to_string(&path).expect("read");
+        assert!(json.contains("\"bunker_1\""), "binding is stored by name:\n{json}");
+
+        let mut loaded = World::new();
+        loaded.load_level(&path).expect("load");
+        assert_eq!(loaded.scheme_for_key('1'), Some(other), "binding must survive a reload");
+
+        // Clearing restores the manifest default.
+        loaded.set_theme_hotkey('1', None);
+        assert_eq!(loaded.scheme_for_key('1'), manifest_default);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A binding naming a theme this build doesn't have must be ignored, not resolved
+    /// to something arbitrary — a pruned manifest must never silently remap a key.
+    #[test]
+    fn a_hotkey_naming_a_missing_theme_falls_back() {
+        let mut world = World::new();
+        let path = std::env::temp_dir().join("bah_persist_hotkeys_missing.json");
+        world.set_theme_hotkey('4', Some(engine::render::textures::default_scheme()));
+        world.save_level(&path).expect("save");
+
+        let json = std::fs::read_to_string(&path)
+            .expect("read")
+            .replace("\"facility_white_tile\"", "\"a_theme_that_was_pruned\"");
+        std::fs::write(&path, json).expect("write");
+
+        let mut loaded = World::new();
+        loaded.load_level(&path).expect("load");
+        assert_eq!(
+            loaded.scheme_for_key('4'),
+            engine::render::textures::scheme_for_key('4'),
+            "an unresolvable binding falls through to the manifest"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Only 1-9 are bindable: those are the digits the retexture handler reads, so
+    /// accepting anything else would store a key that can never fire.
+    #[test]
+    fn only_digits_one_to_nine_are_bindable() {
+        let mut world = World::new();
+        let scheme = engine::render::textures::default_scheme();
+        for bad in ['0', 'a', '-'] {
+            world.set_theme_hotkey(bad, Some(scheme));
+            assert!(
+                !world.theme_hotkeys().contains_key(&bad),
+                "{bad:?} should not be bindable"
+            );
+        }
+        world.set_theme_hotkey('5', Some(scheme));
+        assert!(world.theme_hotkeys().contains_key(&'5'));
     }
 
     /// A placed prop (an authored ECS entity: Transform + Renderable) survives the
