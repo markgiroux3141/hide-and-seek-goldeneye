@@ -115,6 +115,8 @@ impl World {
         }
 
         let flank = if idx % 2 == 0 { 1.0 } else { -1.0 };
+        // Read before the `&mut` borrow of the instance below.
+        let unarmed_hunters = self.hunters_start_unarmed();
         let inst = &mut self.enemies[idx];
         inst.enemy = {
             let mut e = Enemy::new(spawn, watch);
@@ -129,7 +131,20 @@ impl World {
         inst.ragdoll_time = 0.0;
         // Weapon state — a fresh magazine, no burst in flight (`aibot->loadedammo`,
         // `timeuntilreload60`, `burstsdone` all cleared by `bot_reset`).
+        //
+        // Under the deathmatch rule a hunter comes back **empty-handed**, exactly as
+        // the player does: dying costs it the gun it found. Which also means the gun
+        // it was carrying is not kept across the respawn — it goes back to looking.
+        if unarmed_hunters {
+            inst.weapon = crate::combat::enemy_def_for(&crate::combat::config::UNARMED);
+            inst.dual = false;
+        }
         inst.loaded = inst.weapon.clip;
+        inst.reserve = if inst.weapon.is_unarmed() {
+            0
+        } else {
+            inst.weapon.clip * crate::world::tools::pickup::HUNTER_SPAWN_MAGS
+        };
         inst.reload_timer = 0.0;
         inst.shot_timer = 0.0;
         inst.burst_shot = 0;
@@ -190,6 +205,10 @@ impl World {
         self.damage_flash = 0.0;
         self.hud_show_timer = 0.0;
         self.caught = false;
+        // Dying costs you what you were carrying — guns, magazines and reserves —
+        // and puts you back to empty hands. This is what makes the weapons on the
+        // floor worth crossing the level for (`DESIGN_PICKUPS.md`).
+        self.reset_loadout();
         let entry = (self.spawn_pad_count() > 0)
             .then(|| self.choose_spawn_pad(Spawning::Player))
             .flatten()
@@ -216,6 +235,11 @@ impl World {
         self.camp_anchor = None;
         self.camp_timer = 0.0;
         self.grenade_cooldown = 0.0;
+        // Restock the level. A new round is a clean slate, so the guns and ammo taken
+        // during the last one are back on the floor — without this the second round of
+        // a session would start stripped, since a pickup with no respawn time never
+        // comes back on its own.
+        self.spawn_pickups();
         // Every hunter back in, alive, wherever the pool puts it — including the ones
         // still standing (a new round is a clean slate, not a continuation).
         for i in 0..self.enemies.len() {

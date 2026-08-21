@@ -59,6 +59,10 @@ mod regions;
 mod respawn;
 mod scoreboard;
 pub use scoreboard::{RoundOutcome, Score};
+/// The model bounds for a gun lying on the ground — the app registers these for
+/// [`crate::ecs::MeshId::WeaponPickup`] at startup, since a weapon pickup has no
+/// catalog GLB to measure.
+pub use tools::pickup::weapon_pickup_bounds;
 pub(crate) use scoreboard::Killer;
 mod spawn;
 pub(crate) use spawn::Spawning;
@@ -1081,6 +1085,12 @@ fn load_anim_template(
 /// startup for the initial weapon and on every `Q`/`A` weapon switch.
 fn load_weapon_models(cfg: &crate::combat::config::WeaponStats) -> (Option<TexturedModel>, Option<TexturedModel>) {
     let asset = |rel: &str| format!("{}/../../assets/weapons/{}", env!("CARGO_MANIFEST_DIR"), rel);
+    // The unarmed slot has no mesh by design (`config::UNARMED`), so it takes the
+    // no-model path rather than the failed-load one — otherwise equipping empty hands
+    // (at startup, and on every death) would warn about an asset nobody authored.
+    if cfg.gun_path.is_empty() {
+        return (None, None);
+    }
     let gun = match crate::combat::load_gun(&asset(cfg.gun_path)) {
         Ok(m) => {
             log::info!(
@@ -1652,6 +1662,16 @@ pub(crate) struct EnemyInstance {
     /// `AI=ours` a hunter has never had a magazine and still does not, so it sits at the
     /// weapon's clip size and nothing consults it.
     pub loaded: u32,
+    /// **Spare rounds** this hunter can reload from — its equivalent of the player's
+    /// reserve.
+    ///
+    /// New with pickups, and the reason hunters care about ammo crates at all: a
+    /// hunter used to have unlimited magazines (like a Perfect Dark bot, whose
+    /// `botact_reload` just refills), so an ammo crate would have been worthless to it
+    /// and "prioritise picking up ammo" would have had nothing to prioritise. A hunter
+    /// with an empty magazine AND an empty reserve is **dry** — it stops fighting and
+    /// goes looking, exactly like an unarmed one.
+    pub reserve: u32,
     /// Seconds left of a scheduled reload (`aibot->timeuntilreload60`), or 0. While it
     /// runs the hunter holds fire, and it refills [`Self::loaded`] when it lapses.
     pub reload_timer: f32,
@@ -2316,6 +2336,28 @@ pub struct World {
     /// is drawn and drag-editable. A runtime handle — cleared on load/undo (the ECS
     /// respawns entities). See `world::tools::prop_gizmo`.
     selected_prop: Option<hecs::Entity>,
+    /// The settings the **next** placed pickup gets — the panel's draft (which
+    /// weapon, how many magazines, how long until it returns). Authoring state, not
+    /// persisted; each placed pickup carries its own copy. See
+    /// `world::tools::pickup`.
+    pickup_draft: crate::ecs::Pickup,
+    /// Shared hover/spin clock for the weapon pickups, advanced per render frame.
+    /// One clock rather than per-entity phase state: the phase is derived from each
+    /// pickup's position, so this stays a single float no matter how many are placed.
+    pickup_clock: f32,
+    /// What the player last collected + how long the HUD still shows it.
+    pickup_message: String,
+    pickup_message_timer: f32,
+    /// Whether `OWN_ALL=1` unlocked the whole arsenal. Remembered because it is also
+    /// the exemption from the on-death loadout reset (see `pickup::reset_loadout`).
+    own_all: bool,
+    /// Whether hunters spawn **empty-handed** and have to find a gun (the default,
+    /// and the deathmatch rule the player plays by). The kill-switch, off, restores
+    /// hunters that spawn holding their roster weapon with spare magazines — which is
+    /// what the AI-lab arenas and the combat tests are calibrated against, since a
+    /// hunter that has to go shopping first never reaches the behaviour they measure.
+    /// `ARMED_HUNTERS=1` turns it off for a playtest.
+    unarmed_hunters: bool,
     /// Live destructible-prop colliders → their prop entity (Milestone 3). Baked at
     /// BUILD→HUNT from every authored destructible prop; a hitscan hit on one of these
     /// handles routes damage to the mapped entity. An entry is removed as its prop is
@@ -2658,27 +2700,34 @@ impl World {
         let arsenal = crate::combat::Arsenal::from_env();
         log::info!("{}", arsenal.summary());
         let arsenal_weapons = arsenal.weapons();
-        let weapons: Vec<Weapon> = arsenal_weapons.iter().map(|&cfg| Weapon::new(cfg)).collect();
-        // Start on the PP7 (the default sidearm) — and, now that there's an economy,
-        // start *owning only* the PP7. The rest of the arsenal is bought from the
-        // BUILD-phase shop; cycling (Q / N64 A) reaches only what you own.
-        // The starting sidearm: the PP7 in a GoldenEye arsenal, the Falcon 2 in a
-        // Perfect Dark one (PD's own starting pistol, and `MPWEAPON_FALCON2` is
-        // index 1 of the MP set for the same reason). Falls back to index 0 so an
-        // arsenal that has neither still starts holding something.
-        let weapon_index = arsenal_weapons
-            .iter()
-            .position(|w| w.name == "PP7")
-            .or_else(|| arsenal_weapons.iter().position(|w| w.name == "Falcon 2"))
-            .unwrap_or(0);
-        // Normally you start owning only the sidearm and buy the rest from the shop.
-        // `OWN_ALL=1` grants the whole arsenal so the full cycle (`Q` / N64 `A`) is
-        // reachable immediately — for judging 33 guns in one session, buying each one
-        // first is pure friction.
+        // Every weapon starts **empty**: ammo is something you find now, so a gun you
+        // don't own must not be quietly holding ten magazines for the moment you pick
+        // it up. `OWN_ALL=1` hands the arsenal over stocked, since a dev judging 33
+        // guns wants to fire them, not forage for them.
         let own_all = matches!(
             std::env::var("OWN_ALL").unwrap_or_default().trim(),
             "1" | "on" | "yes" | "true"
         );
+        let weapons: Vec<Weapon> = arsenal_weapons
+            .iter()
+            .map(|&cfg| if own_all { Weapon::new(cfg) } else { Weapon::empty(cfg) })
+            .collect();
+        // You start **empty-handed** and find your guns on the floor
+        // (`DESIGN_PICKUPS.md`) — so the starting slot is `config::UNARMED`, which
+        // every arsenal leads with, and it is the only thing owned. The shop still
+        // works for the credits economy; a deathmatch level simply never opens it.
+        //
+        // Resolved by predicate rather than by index 0, for the same reason the old
+        // sidearm was resolved by name: nothing in this file should depend on where a
+        // weapon sits in a table.
+        let weapon_index = arsenal_weapons
+            .iter()
+            .position(|w| w.is_unarmed())
+            .unwrap_or(0);
+        // `OWN_ALL=1` grants the whole arsenal so the full cycle (`Q` / N64 `A`) is
+        // reachable immediately — for judging 33 guns in one session, hunting each one
+        // down first is pure friction. It is also the one exemption from the on-death
+        // loadout wipe, for the same reason (see `pickup::reset_loadout`).
         let mut owned = vec![own_all; weapons.len()];
         owned[weapon_index] = true;
         if own_all {
@@ -2710,6 +2759,12 @@ impl World {
         let asset = |rel: &str| format!("{}/../../assets/weapons/{}", env!("CARGO_MANIFEST_DIR"), rel);
         let mut enemy_weapon_lib: Vec<EnemyWeaponAsset> = Vec::new();
         for cfg in arsenal_weapons {
+            // The unarmed slot has no mesh by definition — skipped explicitly rather
+            // than left to fail the load, so booting doesn't warn about an asset that
+            // was never meant to exist.
+            if cfg.is_unarmed() {
+                continue;
+            }
             // Enemies wield the HANDLESS variant so Bond's ripped first-person hand
             // doesn't float on the hunter's gun (see `combat::gun_strip`). Only the
             // pistols + detonator ship a `gun_handless.glb`; everything else has no
@@ -2852,6 +2907,27 @@ impl World {
             prop_preview_pos: None,
             prop_bounds: std::collections::HashMap::new(),
             selected_prop: None,
+            // The draft starts on the first real gun of the live arsenal (index 0 is
+            // the unarmed slot, which cannot be picked up), so the pickup panel opens
+            // on something placeable rather than on "Unarmed".
+            pickup_draft: crate::ecs::Pickup::weapon(
+                arsenal_weapons
+                    .iter()
+                    .find(|w| !w.is_unarmed())
+                    .map(|w| w.name)
+                    .unwrap_or("PP7"),
+            ),
+            pickup_clock: 0.0,
+            pickup_message: String::new(),
+            pickup_message_timer: 0.0,
+            own_all,
+            // On by default — the player and the hunters play by the same rule. Read
+            // as a negative flag (`ARMED_HUNTERS=1` opts out) so the default needs no
+            // environment at all.
+            unarmed_hunters: !matches!(
+                std::env::var("ARMED_HUNTERS").unwrap_or_default().trim(),
+                "1" | "on" | "yes" | "true"
+            ),
             prop_colliders: std::collections::HashMap::new(),
             door_entities: std::collections::HashMap::new(),
             door_double: false,

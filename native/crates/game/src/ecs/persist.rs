@@ -63,6 +63,12 @@ pub enum ComponentData {
     /// A spawn pad. No payload — its position *and facing* are the entity's
     /// [`Transform`] (see [`SpawnPoint`]), so the marker component is a bare tag.
     SpawnPoint,
+    /// A weapon / ammo pickup. `weapon` is an owned `String` here (and a
+    /// `&'static str` on the live [`Pickup`]) because the file has to record what
+    /// the author chose even if that weapon isn't in the arsenal this session —
+    /// see [`crate::combat::arsenal::resolve_name`]. The runtime `cooldown` is
+    /// absent by design: an authored level opens with every pickup on the floor.
+    Pickup { kind: PickupKind, weapon: String, mags: u32, respawn: f32 },
 }
 
 impl ComponentData {
@@ -168,6 +174,28 @@ fn fold_one(b: &mut EntityBuilder, c: &ComponentData) {
         ComponentData::SpawnPoint => {
             b.add(SpawnPoint);
         }
+        ComponentData::Pickup { kind, weapon, mags, respawn } => {
+            // A name no weapon family knows means the file was written by a build
+            // with a weapon this one doesn't have. Keep the entity (it still draws
+            // and is still editable) but leave the `Pickup` off, so nothing tries to
+            // grant a weapon that cannot exist. Loud, because a silently inert
+            // pickup is the kind of thing a playtest blames on the grant radius.
+            match crate::combat::arsenal::resolve_name(weapon) {
+                Some(name) => {
+                    b.add(Pickup {
+                        kind: *kind,
+                        weapon: name,
+                        mags: *mags,
+                        respawn: *respawn,
+                        cooldown: 0.0,
+                    });
+                }
+                None => log::warn!(
+                    "level has a pickup for unknown weapon {weapon:?} — loading it as \
+                     scenery (no weapon by that name exists in either arsenal)"
+                ),
+            }
+        }
     }
 }
 
@@ -232,6 +260,16 @@ pub(crate) fn extract(eref: &EntityRef<'_>) -> Vec<ComponentData> {
     }
     if eref.has::<SpawnPoint>() {
         cs.push(ComponentData::SpawnPoint);
+    }
+    if let Some(p) = eref.get::<&Pickup>() {
+        // Authored settings only — `cooldown` is HUNT-transient, so a pickup taken
+        // mid-round is saved sitting on the floor.
+        cs.push(ComponentData::Pickup {
+            kind: p.kind,
+            weapon: p.weapon.to_string(),
+            mags: p.mags,
+            respawn: p.respawn,
+        });
     }
     if let Some(i) = eref.get::<&Interactable>() {
         cs.push(ComponentData::Interactable { radius: i.radius });

@@ -223,6 +223,10 @@ impl World {
                 // neither of by design (see `world::tools::turret`). Before the hunter
                 // FSM, so a hunter reacts this step to being shot at.
                 self.turret_step(dt);
+                // Hand the player anything they are standing on, and run the pickup
+                // respawn clocks. Before the hunter FSM so a gun collected this step
+                // is the gun the hunters are reacting to.
+                self.pickup_step(dt);
                 // Advance each hunter's perception FSM. Take the roster out so it
                 // isn't borrowed while each FSM needs `&self.nav` + `&mut self.physics`
                 // (the LOS raycast). Fire requests are collected + applied after the
@@ -288,15 +292,52 @@ impl World {
                 for (i, inst) in enemies.iter_mut().enumerate() {
                     // Apply the player-visibility toggle so an invisible player can't be
                     // perceived (all LOS/proximity checks in `update` fail).
-                    inst.enemy.set_detectable(player_visible);
+                    // ── Shopping beats fighting ──
+                    // A hunter with nothing to shoot walks to the nearest gun instead of
+                    // engaging, and is deaf and blind to the player on the way. Two
+                    // separate inputs say so, and both are needed:
+                    //
+                    // 1. **Suppression** (here) — it may not *act* on the player. Keyed
+                    //    off **wanting** something, not off having found it: a hunter that
+                    //    cannot shoot must not engage even when there is nothing on the
+                    //    floor to go and get. Keying it off the fetch target meant that the
+                    //    moment the level ran dry (the player can hoover up guns it already
+                    //    owns) every empty-handed hunter fell straight back into charging
+                    //    with its hands up. That was the first playtest defect. With no
+                    //    fetch target it keeps its ordinary fan-out search, which is the
+                    //    right thing to do while waiting for a gun to come back.
+                    //
+                    //    **Both** knowledge inputs have to be suppressed, and that is the
+                    //    part that is not obvious: omniscience is knowledge, not
+                    //    perception, so it bypasses `set_detectable` entirely
+                    //    (`Enemy::known_target_pos`). Suppressing only visibility left an
+                    //    omniscient hunter walking past the gun to fight bare-handed.
+                    //
+                    // 2. **A destination** (`set_fetch_target`) — where to go instead.
+                    //    Down its own channel, and that is the second playtest defect:
+                    //    suppression alone does not steer anything. Fetching used to be
+                    //    routed through `assign_search_target`, on the reasoning that a
+                    //    hunter which cannot shoot drops into the blind states and walks
+                    //    where it is told. It does not — `Search` scores zero the moment
+                    //    the hunter holds a `last_known`, and one heard gunshot is enough,
+                    //    so the utility scorer picked `Investigate`, whose executor walks
+                    //    to the player's last-known position. The hunter beelined at the
+                    //    player holding nothing while the fetch point steered nothing at
+                    //    all. It is [`crate::enemy::AiState::Fetch`] now, a scored
+                    //    behaviour in all three decision layers.
+                    let shopping = Self::hunter_want(inst).is_some();
+                    let fetch = self.hunter_fetch_target(inst);
+                    inst.enemy.set_detectable(player_visible && !shopping);
+                    inst.enemy.set_fetch_target(fetch);
                     // Arm the wall-clearance nudge for this step's movement commit.
                     inst.enemy.set_wall_clearance_radius(wall_clear_r);
                     // Select the decision layer (utility vs legacy FSM) for this step.
                     inst.enemy.set_utility(utility_on);
                     // Perfect Dark hunters always know where the player is (movement
                     // only — perception is untouched, see `Enemy::known_player_pos`).
-                    inst.enemy
-                        .set_omniscient(pd_mode || (omniscient_on && inst.pdsim.is_some()));
+                    inst.enemy.set_omniscient(
+                        !shopping && (pd_mode || (omniscient_on && inst.pdsim.is_some())),
+                    );
                     // Is THIS hunter mid fire burst? (the JS `enemyState === 'action'`
                     // proxy the attack→cooldown transition needs). Firing is a timer
                     // now, so the hunter can move + aim through it.
@@ -714,6 +755,14 @@ impl World {
                 // firing state. After the doors, so a turret's first shot can already
                 // be blocked by a panel that starts shut.
                 self.spawn_turrets();
+                // Stock the level: every authored pickup back on the floor, its
+                // runtime countdown cleared. Cheap, and it means a hunt never starts
+                // with a pickup that a previous hunt already took.
+                self.spawn_pickups();
+                // A level with no guns on the floor can't be played empty-handed, so
+                // the player gets the old starting sidearm instead. No-op on a level
+                // that authors pickups. See `grant_fallback_sidearm`.
+                self.grant_fallback_sidearm();
                 // Attach the doors to the nav overlay. After the grid bake on purpose:
                 // the overlay rides the *frozen* grid and is read live, which is what
                 // lets a door open mid-hunt and reroute hunters with no re-bake.
@@ -755,6 +804,9 @@ impl World {
                 // Disarm the turrets, so an authored sentry gun returns to the editor
                 // parked at rest rather than frozen mid-track.
                 self.clear_turrets();
+                // Put every collected pickup back, so the editor shows the level as
+                // authored rather than as the last hunt left it.
+                self.clear_pickups();
                 self.mode = Mode::Build;
                 log::info!("→ BUILD");
             }
@@ -993,6 +1045,9 @@ impl World {
         // under `ARSENAL=pd`, and a name that does not resolve means a hunter with
         // no gun mesh at all.
         let roster = crate::world::enemy_roster_for(self.arsenal);
+        // Empty-handed only where there is something to find — see
+        // `hunters_start_unarmed`. Resolved once for the wave rather than per hunter.
+        let unarmed_hunters = self.hunters_start_unarmed();
         for i in 0..count {
             let (wcfg, dual) = if self.anim_debug {
                 (crate::combat::config::AR33, false)
@@ -1028,7 +1083,18 @@ impl World {
             // This body's resolved gun-arm + upper-body mask; the hunter clones its own
             // aim/recoil stack (borrowed — `EnemyArm` owns a joint-mask `Vec`, not `Copy`).
             let arm = self.enemy_arm.get(body).and_then(|a| a.as_ref());
-            let weapon = enemy_def_for(&wcfg);
+            // Hunters spawn **empty-handed**, like the player, and go and find a gun
+            // (`DESIGN_PICKUPS.md`). The roster weapon above is still resolved — it
+            // decides this hunter's animation class and its arm rig, which are chosen
+            // once at spawn and are not cheap to redo — but what it *holds* starts as
+            // nothing. `unarmed_hunters` is the kill-switch: off, the roster weapon is
+            // equipped at spawn exactly as before, which is what every AI-lab arena
+            // and every combat test relies on.
+            let weapon = if unarmed_hunters {
+                enemy_def_for(&crate::combat::config::UNARMED)
+            } else {
+                enemy_def_for(&wcfg)
+            };
             // Sized to THIS body — a Perfect Dark hunter is 1.73 m and needs a taller
             // capsule than a 1.50 m GoldenEye one, or its head is not there to shoot.
             let (radius, half_height) = self.body_capsule(body);
@@ -1170,6 +1236,15 @@ impl World {
                 respawn_timer: None,
                 shot_timer: 0.0,
                 loaded: weapon.clip,
+                // Spare magazines. An empty-handed hunter has none (both come from the
+                // gun it has yet to find); an armed one carries the same
+                // `HUNTER_SPAWN_MAGS` a pickup would have given it, so turning the
+                // kill-switch off restores a hunter that can fight a whole round.
+                reserve: if weapon.is_unarmed() {
+                    0
+                } else {
+                    weapon.clip * crate::world::tools::pickup::HUNTER_SPAWN_MAGS
+                },
                 reload_timer: 0.0,
                 burst_shot: 0,
                 use_secondary: false,

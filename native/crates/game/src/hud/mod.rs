@@ -176,6 +176,25 @@ pub fn score_quads(
     out
 }
 
+/// The just-collected banner: `PICKED UP <thing>`, centred a little below the middle
+/// of the screen so it reads without covering the crosshair.
+///
+/// Deliberately a text line rather than a HUD widget — it is a momentary
+/// confirmation of something the player already did, and the pickup sound carries
+/// most of the feedback. `aspect` = framebuffer w/h.
+pub fn pickup_quads(what: &str, aspect: f32) -> Vec<HudVertex> {
+    let text = format!("PICKED UP {what}");
+    let gh = 0.055;
+    let gw = gh / aspect.max(1e-6) * (GLYPH_W as f32 / GLYPH_H as f32);
+    let gap = gw * 0.4;
+    let x_start = -text_width(&text, gw, gap) / 2.0;
+    // Below centre: clear of the crosshair, well above the ammo counter.
+    let y_top = -0.30;
+    let mut out = Vec::with_capacity(text.chars().count() * 6);
+    layout_text(&text, x_start, y_top, gw, gh, gap, &mut out);
+    out
+}
+
 /// The "YOU DIED" death-screen text quads (P5): a centered title + a smaller
 /// prompt. Drawn white over the dark death overlay. `aspect` = w/h.
 ///
@@ -313,5 +332,35 @@ mod tests {
             drawn("SIMS WINPRESS R"),
             "loss screen"
         );
+    }
+
+    /// **Every weapon name in every arsenal** survives the pickup banner.
+    ///
+    /// This is the one HUD string whose content is data rather than a literal, so it
+    /// is the one that can silently lose a letter as the arsenal grows — a missing
+    /// glyph is dropped, not boxed (`SIMS WIN` once printed as `SIS IN`). Checking the
+    /// tables directly means a newly-added weapon fails here rather than in a
+    /// playtest.
+    #[test]
+    fn every_weapon_name_survives_the_pickup_banner() {
+        let drawn = |s: &str| s.chars().filter(|c| *c != ' ').count() * 6;
+        for arsenal in [
+            crate::combat::Arsenal::GoldenEye,
+            crate::combat::Arsenal::PerfectDark,
+            crate::combat::Arsenal::Both,
+        ] {
+            for w in arsenal.weapons() {
+                for text in [w.name.to_ascii_uppercase(), format!("{} AMMO", w.name.to_ascii_uppercase())] {
+                    let banner = format!("PICKED UP {text}");
+                    assert_eq!(
+                        pickup_quads(&text, 1.6).len(),
+                        drawn(&banner),
+                        "{:?} loses glyphs in the pickup banner — add them to \
+                         `font::CHARSET` + `font::glyph`",
+                        w.name
+                    );
+                }
+            }
+        }
     }
 }

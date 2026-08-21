@@ -63,6 +63,7 @@ pub const GAS_CAN_DESTRUCTIBLE: DestructibleDef =
 /// Panel grouping for the object palette.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PropCategory {
+    Pickups,
     Destructible,
     Furniture,
     Electronics,
@@ -74,6 +75,7 @@ impl PropCategory {
     /// Display label for the panel header.
     pub fn label(self) -> &'static str {
         match self {
+            PropCategory::Pickups => "Pickups",
             PropCategory::Destructible => "Destructible",
             PropCategory::Furniture => "Furniture",
             PropCategory::Electronics => "Electronics",
@@ -82,8 +84,10 @@ impl PropCategory {
         }
     }
 
-    /// Every category, in panel order.
+    /// Every category, in panel order. Pickups lead: in a deathmatch they are what
+    /// you are actually placing.
     pub const ALL: &'static [PropCategory] = &[
+        PropCategory::Pickups,
         PropCategory::Destructible,
         PropCategory::Furniture,
         PropCategory::Electronics,
@@ -111,9 +115,44 @@ pub struct PropDef {
     pub destructible: Option<DestructibleDef>,
 }
 
+/// Authoring scale for the green ammo crate. The Setup-Editor export is 1.21 m
+/// across — a big floor crate in a world whose rooms are 2.0 m tall — so it is
+/// brought down to roughly the tan box's footprint, which is what makes the two read
+/// as two flavours of the same thing rather than two different objects.
+const GREEN_CRATE_FIT: f32 = 0.6;
+
 /// The full object palette. Panel iterates this grouped by [`PropCategory`]; the app
 /// loads each `glb` at startup and uploads it to the renderer under `key`.
+///
+/// **Weapon pickups are not in here.** A gun on the ground draws from the world-space
+/// weapon render library (keyed by weapon name, uploaded for the whole arsenal at
+/// startup) rather than the prop channel, so [`crate::ecs::MeshId::WeaponPickup`] has
+/// no catalog row — see [`crate::world::tools::pickup`]. Everything downstream that
+/// keys off `def()` therefore skips it correctly by construction: no collider, no nav
+/// footprint, nothing to walk into.
 pub const CATALOG: &[PropDef] = &[
+    // ── Pickups (collectable; no `destructible` — you walk through them) ──────
+    PropDef {
+        mesh: MeshId::AmmoPickupTan,
+        key: "ammo_pickup_tan",
+        name: "Ammo Crate (Tan)",
+        category: PropCategory::Pickups,
+        // Shares the destructible ammo crate's mesh: same GoldenEye box, placed as a
+        // collectable instead of as something to shoot. The catalog keys on `mesh`
+        // and `key`, not on the asset, so one GLB can serve both roles.
+        glb: "ammo_crate.glb",
+        scale: PROP_SCALE,
+        destructible: None,
+    },
+    PropDef {
+        mesh: MeshId::AmmoPickupGreen,
+        key: "ammo_pickup_green",
+        name: "Ammo Crate (Green)",
+        category: PropCategory::Pickups,
+        glb: "green_ammo_crate/green_ammo_crate.obj",
+        scale: GREEN_CRATE_FIT,
+        destructible: None,
+    },
     PropDef {
         mesh: MeshId::WoodenCrate,
         key: "wooden_crate",
@@ -652,6 +691,23 @@ pub fn secondary_glb(mesh: MeshId) -> Option<&'static str> {
     })
 }
 
+/// Whether placing this mesh authors a **pickup** — something the player collects
+/// rather than scenery. Drives the panel's pickup settings block and the
+/// [`crate::ecs::Pickup`] component attached at placement.
+///
+/// [`MeshId::WeaponPickup`] is included even though it has no [`CATALOG`] row: it is
+/// the one pickup mesh that is not a prop (see the `CATALOG` docs).
+///
+/// A side table rather than a [`PropDef`] field for the same reason as
+/// [`secondary_glb`]: the ~50 scenery rows shouldn't each carry a `pickup: None`.
+pub fn pickup_kind(mesh: MeshId) -> Option<crate::ecs::PickupKind> {
+    Some(match mesh {
+        MeshId::WeaponPickup => crate::ecs::PickupKind::Weapon,
+        MeshId::AmmoPickupTan | MeshId::AmmoPickupGreen => crate::ecs::PickupKind::Ammo,
+        _ => return None,
+    })
+}
+
 /// Whether a prop bolts to the **ceiling** rather than standing on the floor.
 ///
 /// A ceiling prop differs in both directions of the placement flow: it is picked
@@ -789,5 +845,7 @@ mod tests {
         }
     }
 }
+
+
 
 

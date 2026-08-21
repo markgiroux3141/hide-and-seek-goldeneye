@@ -103,17 +103,50 @@ impl Arsenal {
 /// A `static` array is not an option: the bridge needs float arithmetic and
 /// `Option` handling that const-eval will not do, and every string it needs is
 /// already `&'static` from the generated table.
+///
+/// Led by [`config::UNARMED`], like the GoldenEye table: you start a deathmatch
+/// empty-handed whichever arsenal is live, so the empty-handed slot belongs to
+/// *every* arsenal rather than to one of them.
 pub fn pd_arsenal() -> &'static [WeaponStats] {
     static CELL: std::sync::OnceLock<Vec<WeaponStats>> = std::sync::OnceLock::new();
-    CELL.get_or_init(|| pd_guns().map(weapon_stats_from_pd).collect())
+    CELL.get_or_init(|| {
+        std::iter::once(config::UNARMED)
+            .chain(pd_guns().map(weapon_stats_from_pd))
+            .collect()
+    })
 }
 
-/// GoldenEye's 23 followed by Perfect Dark's 33.
+/// The `&'static str` an authored weapon **name** refers to, or `None` if no weapon
+/// in either family goes by it.
+///
+/// Both families, deliberately, rather than the live arsenal: a pickup authored
+/// under `ARSENAL=pd` has to survive being loaded under `ARSENAL=ge`, and the level
+/// file records what the author chose. Resolving here keeps the authored link intact
+/// in the file even when the weapon isn't in play this session — the pickup simply
+/// cannot be granted, which the grant path reports once rather than silently
+/// dropping the component on load.
+///
+/// The point of handing back the `&'static str` (rather than a `bool`) is that the
+/// [`crate::ecs::Pickup`] component stays `Copy`: it holds the table's own string,
+/// not an owned `String` allocated per entity.
+pub fn resolve_name(name: &str) -> Option<&'static str> {
+    both_arsenal()
+        .iter()
+        .find(|w| w.name == name)
+        .map(|w| w.name)
+}
+
+/// GoldenEye's 23 followed by Perfect Dark's 33, behind the one shared unarmed slot.
+///
+/// PD's copy of [`config::UNARMED`] is dropped rather than appended: there is one
+/// way to hold nothing, and a duplicate would give the weapon cycle two identical
+/// dead slots and break the name-uniqueness the shop and enemy-def lookups rely on
+/// (see `the_two_families_share_no_names`).
 pub fn both_arsenal() -> &'static [WeaponStats] {
     static CELL: std::sync::OnceLock<Vec<WeaponStats>> = std::sync::OnceLock::new();
     CELL.get_or_init(|| {
         let mut all: Vec<WeaponStats> = config::WEAPONS.to_vec();
-        all.extend_from_slice(pd_arsenal());
+        all.extend(pd_arsenal().iter().filter(|w| !w.is_unarmed()).copied());
         all
     })
 }
@@ -551,18 +584,50 @@ pub fn ai_prefers_secondary_named(display_name: &str, dist_m: f32) -> bool {
 mod tests {
     use super::*;
 
+    /// Perfect Dark's **guns** — the arsenal minus the empty-handed slot every
+    /// arsenal now leads with (`config::UNARMED`). Every claim below is about a real
+    /// weapon: it has a mesh, a magazine and a shot, and the unarmed slot has none of
+    /// those by design, so it is filtered here once rather than special-cased in a
+    /// dozen loops.
+    fn pd_arsenal_guns() -> impl Iterator<Item = &'static WeaponStats> {
+        Arsenal::PerfectDark.weapons().iter().filter(|w| !w.is_unarmed())
+    }
+
     #[test]
     fn the_default_arsenal_is_goldeneye_and_unchanged() {
         assert_eq!(Arsenal::GoldenEye.weapons().len(), config::WEAPONS.len());
-        // The tuned table is handed back verbatim, not rebuilt.
-        assert_eq!(Arsenal::GoldenEye.weapons()[0].name, "PP7");
-        assert_eq!(Arsenal::GoldenEye.weapons()[0].damage, config::PP7.damage);
+        // The tuned table is handed back verbatim, not rebuilt. Index 0 is the
+        // empty-handed slot every arsenal now leads with; the PP7 follows it.
+        assert!(Arsenal::GoldenEye.weapons()[0].is_unarmed());
+        let pp7 = Arsenal::GoldenEye
+            .weapons()
+            .iter()
+            .find(|w| w.name == "PP7")
+            .expect("the PP7 is still in the GoldenEye arsenal");
+        assert_eq!(pp7.damage, config::PP7.damage);
+    }
+
+    /// Every arsenal leads with the empty-handed slot, and there is exactly one of
+    /// them — including under `ARSENAL=both`, where naively concatenating the two
+    /// tables would give the weapon cycle two identical dead slots.
+    #[test]
+    fn every_arsenal_leads_with_exactly_one_unarmed_slot() {
+        for arsenal in [Arsenal::GoldenEye, Arsenal::PerfectDark, Arsenal::Both] {
+            let ws = arsenal.weapons();
+            assert!(ws[0].is_unarmed(), "{arsenal:?} does not start empty-handed");
+            assert_eq!(
+                ws.iter().filter(|w| w.is_unarmed()).count(),
+                1,
+                "{arsenal:?} has more than one way to hold nothing"
+            );
+        }
     }
 
     #[test]
     fn the_pd_arsenal_is_the_33_guns() {
         let pd = Arsenal::PerfectDark.weapons();
-        assert_eq!(pd.len(), 33);
+        assert_eq!(pd_arsenal_guns().count(), 33, "33 guns behind the unarmed slot");
+        assert_eq!(pd.len(), 34, "the guns plus the empty-handed slot");
         assert!(pd.iter().any(|w| w.name == "Falcon 2"));
         assert!(pd.iter().any(|w| w.name == "FarSight XR-20"));
         // No equipment leaked in.
@@ -584,7 +649,7 @@ mod tests {
     /// loadable mesh, a positive cadence and magazine, and finite placement.
     #[test]
     fn every_bridged_weapon_is_well_formed() {
-        for w in Arsenal::PerfectDark.weapons() {
+        for w in pd_arsenal_guns() {
             assert!(!w.name.is_empty(), "unnamed weapon");
             assert!(
                 w.gun_path.starts_with("pd/") && w.gun_path.ends_with(".glb"),
@@ -611,7 +676,7 @@ mod tests {
     /// just as happily either way.
     #[test]
     fn every_pd_gun_sits_in_front_of_the_camera() {
-        for w in Arsenal::PerfectDark.weapons() {
+        for w in pd_arsenal_guns() {
             let z = w.model_offset.z + w.pivot_offset.z;
             assert!(
                 z < 0.0,
@@ -641,7 +706,7 @@ mod tests {
             .map(|w| -(w.model_offset.z + w.pivot_offset.z))
             .collect();
         let ge_max = ge_reach.iter().cloned().fold(0.0f32, f32::max);
-        for w in Arsenal::PerfectDark.weapons() {
+        for w in pd_arsenal_guns() {
             let reach = -(w.model_offset.z + w.pivot_offset.z);
             assert!(
                 reach > 0.02 && reach < ge_max * 3.0,
@@ -656,7 +721,7 @@ mod tests {
     /// documented two-models-per-gun trap.
     #[test]
     fn a_hunter_holds_the_third_person_model() {
-        for w in Arsenal::PerfectDark.weapons() {
+        for w in pd_arsenal_guns() {
             let def = super::super::enemy_def_for(w);
             let pd = pd_weapon_for(w.name).unwrap();
             assert_eq!(def.gun_path, pd.tp_glb, "{} should hold its chr* model", w.name);
@@ -690,7 +755,7 @@ mod tests {
         }
         let lum = |c: &[f32; 4]| (c[0] + c[1] + c[2]) / 3.0;
         let mut shaded = 0;
-        for w in Arsenal::PerfectDark.weapons() {
+        for w in pd_arsenal_guns() {
             let model = crate::combat::load_gun(&asset(w.gun_path)).unwrap();
             assert!(!model.vertices.is_empty(), "{} has no vertices", w.name);
             // Only the primitives drawn from their BASE colour. An env-mapped one is
@@ -762,7 +827,7 @@ mod tests {
             return;
         }
         let mut with_flash = 0;
-        for w in Arsenal::PerfectDark.weapons() {
+        for w in pd_arsenal_guns() {
             let pd = pd_weapon_for(w.name).unwrap();
             if pd.flash_glb.is_empty() {
                 continue;
@@ -810,7 +875,7 @@ mod tests {
             return;
         }
         let mut checked = 0;
-        for w in Arsenal::PerfectDark.weapons() {
+        for w in pd_arsenal_guns() {
             let pd = pd_weapon_for(w.name).unwrap();
             if pd.flash_glb.is_empty() {
                 continue;
@@ -860,7 +925,7 @@ mod tests {
             eprintln!("note: PD weapon assets absent");
             return;
         }
-        for w in Arsenal::PerfectDark.weapons() {
+        for w in pd_arsenal_guns() {
             let pd = pd_weapon_for(w.name).unwrap();
             for rel in [pd.fp_glb, pd.flash_glb].iter().filter(|r| !r.is_empty()) {
                 let (doc, _, _) = gltf::import(asset(rel)).unwrap();
@@ -967,7 +1032,7 @@ mod tests {
     /// than the flat rifle-class default the GoldenEye path invented.
     #[test]
     fn automatics_bridge_to_their_authored_cadence() {
-        for w in Arsenal::PerfectDark.weapons() {
+        for w in pd_arsenal_guns() {
             let pd = pd_weapon_for(w.name).expect("every bridged weapon traces back");
             if pd.primary.kind == PdFuncKind::Auto {
                 assert!(w.automatic, "{} should be automatic", w.name);
@@ -1069,7 +1134,7 @@ mod tests {
             );
         }
         // While every PD arsenal entry does.
-        for pd in Arsenal::PerfectDark.weapons() {
+        for pd in pd_arsenal_guns() {
             assert!(pd_weapon_for(pd.name).is_some(), "{} did not resolve", pd.name);
         }
     }
@@ -1090,7 +1155,7 @@ mod tests {
             return;
         }
         let mut loaded = 0;
-        for w in Arsenal::PerfectDark.weapons() {
+        for w in pd_arsenal_guns() {
             let path = asset(w.gun_path);
             let model = crate::combat::load_gun(&path)
                 .unwrap_or_else(|e| panic!("{} failed to load from {path}: {e}", w.name));
@@ -1257,7 +1322,7 @@ mod tests {
     /// families are live at once.
     #[test]
     fn the_two_families_share_no_names() {
-        for pd in Arsenal::PerfectDark.weapons() {
+        for pd in pd_arsenal_guns() {
             assert!(
                 !config::WEAPONS.iter().any(|ge| ge.name == pd.name),
                 "{} exists in both arsenals — name-keyed lookups would collide",

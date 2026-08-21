@@ -5,6 +5,26 @@
 use super::*;
 use super::editing::find_room_brushes;
 
+/// Put weapon `name` in the player's hands, owned and loaded.
+///
+/// The player starts **empty-handed** now (`DESIGN_PICKUPS.md`), so a test that
+/// wants to shoot has to arm itself first. Resolved by name against the live
+/// arsenal rather than by index: index 0 is the unarmed slot, and the whole reason
+/// weapon lookups are name-keyed is so a test can't quietly end up pinning a
+/// different gun than the one its assertions are calibrated for.
+fn arm_with(world: &mut World, name: &str) -> usize {
+    let idx = world
+        .arsenal
+        .weapons()
+        .iter()
+        .position(|w| w.name == name)
+        .unwrap_or_else(|| panic!("{name} is not in the live arsenal"));
+    world.owned[idx] = true;
+    world.weapons[idx].stock_bought();
+    world.weapon_index = idx;
+    idx
+}
+
     /// Free-aim: a small mouse delta floats the crosshair inside the boundary with
     /// no camera pan; a big delta pins it to the rim and spills the rest to a pan.
     #[test]
@@ -613,7 +633,7 @@ use super::editing::find_room_brushes;
             }
             assert!(world.ragdoll(), "the ragdoll is on — that is the point of this test");
             world.set_authored_reactions(authored);
-            world.weapon_index = 0;
+            arm_with(&mut world, "PP7");
             world.initial_meshes();
             world.toggle_mode();
             let feet = world.enemies[0].enemy.pos;
@@ -719,7 +739,7 @@ use super::editing::find_room_brushes;
                 return None;
             }
             world.enable_pd_lab(super::pd_lab::PdLabConfig::default());
-            world.weapon_index = 0; // PP7
+            arm_with(&mut world, "PP7");
             world.set_ragdoll(false); // isolate the canned reaction from the ragdoll
             world.set_hit_reactions(true);
             world.initial_meshes();
@@ -859,7 +879,7 @@ use super::editing::find_room_brushes;
             return;
         }
         world.enable_pd_lab(super::pd_lab::PdLabConfig::default());
-        world.weapon_index = 0; // PP7, non-lethal on a full-health hunter
+        arm_with(&mut world, "PP7"); // 25 dmg — non-lethal on a full-health hunter
         world.set_ragdoll(false); // isolate the canned death/flinch clips
         world.set_hit_reactions(true);
         world.initial_meshes();
@@ -1310,7 +1330,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn a_flinching_hunter_stops_firing() {
         let mut world = World::new();
-        world.weapon_index = 0; // PP7 — non-lethal on a full-health hunter
+        arm_with(&mut world, "PP7"); // 25 dmg — non-lethal on a full-health hunter
         world.set_wave_size(1);
         world.initial_meshes();
         world.toggle_mode(); // HUNT
@@ -1340,7 +1360,7 @@ use super::editing::find_room_brushes;
         // burst survives — that is the behaviour PD gives its own simulants, which never
         // reach the injury code at all.
         let mut sim = World::new();
-        sim.weapon_index = 0;
+        arm_with(&mut sim, "PP7");
         sim.set_wave_size(1);
         sim.set_ragdoll(false);
         sim.set_hit_reactions(false);
@@ -2185,7 +2205,7 @@ use super::editing::find_room_brushes;
         // Perfect Dark's animations (and so its authored reactions) by default now.
         world.set_goldeneye_clips(true);
         world.set_body_set(super::BodySet::GoldenEye);
-        world.weapon_index = 0; // PP7, 25 dmg — non-lethal on a 100-hp hunter
+        arm_with(&mut world, "PP7"); // 25 dmg — non-lethal on a 100-hp hunter
         world.set_ragdoll(false); // isolate the canned-flinch path (ragdoll would supersede it)
         world.initial_meshes();
         world.toggle_mode(); // HUNT: spawn one hunter
@@ -2235,7 +2255,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn four_shots_kill_the_hunter_then_it_fades_out() {
         let mut world = World::new();
-        world.weapon_index = 0; // pin PP7 (25 dmg hitscan); the default start weapon is dev-set elsewhere
+        arm_with(&mut world, "PP7"); // 25 dmg hitscan
         world.set_ragdoll(false); // this test covers the canned death-clip + fade path
         world.initial_meshes();
         world.toggle_mode(); // HUNT: bake nav + spawn hunter roster
@@ -2283,32 +2303,44 @@ use super::editing::find_room_brushes;
         );
     }
 
-    /// Economy: the player starts owning only the PP7, and weapon-cycling is gated by
-    /// ownership — with a single owned weapon a switch is a no-op, but marking another
-    /// owned makes the cycle target it.
+    /// The player starts **empty-handed** — the unarmed slot is the only thing owned
+    /// — and weapon-cycling is gated by ownership: with one owned slot a switch is a
+    /// no-op, and acquiring a gun makes the cycle target it.
     #[test]
-    fn starts_owning_only_pp7_and_cycle_is_ownership_gated() {
+    fn starts_unarmed_and_cycle_is_ownership_gated() {
         let mut world = World::new();
         world.initial_meshes();
+        // A gun on the floor, well out of reach. Without one the level authors no
+        // pickups at all, and `grant_fallback_sidearm` correctly hands the player a
+        // PP7 so the level is playable — which is the wrong world for this test.
+        crate::world::tools::pickup::tests::place_pickup(
+            &mut world,
+            crate::ecs::MeshId::WeaponPickup,
+            Vec3::new(4.0, 0.0, 4.0),
+            crate::ecs::Pickup::weapon("AR33"),
+        );
         world.toggle_mode(); // HUNT (weapon switching only runs in HUNT)
 
-        let pp7 = crate::combat::config::WEAPONS
+        let unarmed = world
+            .arsenal
+            .weapons()
             .iter()
-            .position(|w| w.name == "PP7")
+            .position(|w| w.is_unarmed())
             .unwrap();
-        assert_eq!(world.owned.iter().filter(|&&o| o).count(), 1, "exactly one weapon owned");
-        assert!(world.owns_weapon(pp7), "and it's the PP7");
+        assert_eq!(world.owned.iter().filter(|&&o| o).count(), 1, "exactly one slot owned");
+        assert!(world.owns_weapon(unarmed), "and it's the empty-handed one");
+        assert_eq!(world.weapon_index, unarmed, "holding nothing");
 
-        // Only the PP7 is owned → nothing to switch to.
+        // Empty hands are the only slot owned → nothing to switch to.
         world.begin_weapon_switch();
-        assert!(!world.switching, "a lone owned weapon can't cycle");
-        assert_eq!(world.weapon_index, pp7, "still on the PP7");
+        assert!(!world.switching, "a lone owned slot can't cycle");
+        assert_eq!(world.weapon_index, unarmed, "still empty-handed");
 
-        // Acquire a second weapon → the cycle now targets it.
-        let other = (pp7 + 5) % world.owned.len();
+        // Acquire a gun → the cycle now targets it.
+        let other = (unarmed + 5) % world.owned.len();
         world.owned[other] = true;
         world.begin_weapon_switch();
-        assert!(world.switching, "a switch begins once a second weapon is owned");
+        assert!(world.switching, "a switch begins once a second slot is owned");
         assert_eq!(world.switch_target, other, "cycle targets the newly-owned weapon");
     }
 
@@ -2318,7 +2350,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn killing_a_hunter_awards_credits() {
         let mut world = World::new();
-        world.weapon_index = 0; // PP7, 25 dmg — four torso hits kill a 100-hp hunter
+        arm_with(&mut world, "PP7"); // 25 dmg — four torso hits kill a 100-hp hunter
         world.initial_meshes();
         world.toggle_mode(); // HUNT: spawn the hunter roster
         assert!(!world.enemies.is_empty(), "hunter spawned");
@@ -2396,7 +2428,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn ragdoll_death_replaces_the_clip_then_settles_and_despawns() {
         let mut world = World::new();
-        world.weapon_index = 0; // PP7, 25 dmg hitscan
+        arm_with(&mut world, "PP7"); // 25 dmg hitscan
         assert!(world.ragdoll(), "ragdoll death is on by default");
         // A Perfect Dark hunter prefers its authored death table over the physics, and a
         // wave wears Perfect Dark now — so the ragdoll has to be isolated to be tested.
@@ -2458,7 +2490,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn nonlethal_hit_staggers_then_blends_back() {
         let mut world = World::new();
-        world.weapon_index = 0; // PP7, 25 dmg — non-lethal on a 100-hp hunter
+        arm_with(&mut world, "PP7"); // 25 dmg — non-lethal on a 100-hp hunter
         assert!(world.ragdoll(), "ragdoll feature on by default");
         world.set_authored_reactions(false); // isolate the physics stagger (see above)
         world.initial_meshes();
@@ -2491,7 +2523,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn nonlethal_hit_no_physics_reaction_when_ragdoll_off() {
         let mut world = World::new();
-        world.weapon_index = 0;
+        arm_with(&mut world, "PP7");
         world.set_ragdoll(false);
         world.initial_meshes();
         world.toggle_mode(); // HUNT
@@ -2511,7 +2543,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn ragdoll_bodies_are_cleared_on_mode_switch() {
         let mut world = World::new();
-        world.weapon_index = 0;
+        arm_with(&mut world, "PP7");
         world.set_authored_reactions(false); // isolate the physics death
         world.initial_meshes();
         world.toggle_mode(); // HUNT
@@ -2538,7 +2570,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn shooting_the_hunter_damages_it_a_wall_hit_sparks() {
         let mut world = World::new();
-        world.weapon_index = 0; // pin PP7 (hitscan) — the default start weapon is dev-set to the launcher
+        arm_with(&mut world, "PP7"); // hitscan, not the explosive default
         world.initial_meshes();
         world.toggle_mode(); // HUNT
 
@@ -2622,6 +2654,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn a_dead_hunter_stops_chasing() {
         let mut world = World::new();
+        arm_with(&mut world, "PP7"); // 25 dmg — four torso hits kill
         world.initial_meshes();
         world.toggle_mode(); // HUNT
         // Kill hunter 0 outright (torso hits, ×1 damage).
@@ -2680,6 +2713,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn hunters_carry_weapons_in_hunt() {
         let mut world = World::new();
+        arm_with(&mut world, "PP7"); // the player has to be armed to kill them below
         world.initial_meshes();
         world.toggle_mode(); // HUNT
         assert!(!world.enemy_weapon_lib().is_empty(), "weapon assets loaded");
@@ -2746,7 +2780,7 @@ use super::editing::find_room_brushes;
     #[test]
     fn hit_zones_scale_damage_by_impact_height() {
         let mut world = World::new();
-        world.weapon_index = 0; // pin PP7 (25 dmg hitscan) — zone multipliers are relative to it
+        arm_with(&mut world, "PP7"); // 25 dmg hitscan — zone multipliers are relative to it
         world.set_wave_size(6); // need a couple of hunters (gameplay default is 1)
         world.initial_meshes();
         world.toggle_mode(); // HUNT: spawn the roster

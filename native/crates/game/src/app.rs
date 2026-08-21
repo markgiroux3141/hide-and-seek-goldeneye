@@ -773,6 +773,35 @@ impl App {
         // panel and written back after, matching the light editor's borrow discipline.
         let mut door_edit = self.world.as_ref().and_then(|w| w.selected_door());
         let mut door_changed = false;
+        // Pickup settings. One buffer serves two jobs, which is the point: it edits
+        // the SELECTED pickup when one is picked in the 3D view, and otherwise the
+        // draft that the next placed pickup will carry. So the same three controls
+        // author and edit, and there is no second copy of the widget block.
+        let selected_pickup = self.world.as_ref().and_then(|w| w.selected_pickup());
+        let pickup_armed = self
+            .world
+            .as_ref()
+            .and_then(|w| w.armed_pickup_kind())
+            .is_some();
+        let mut pickup_edit = selected_pickup
+            .or_else(|| self.world.as_ref().map(|w| w.pickup_draft()))
+            .unwrap_or_else(|| crate::ecs::Pickup::weapon("PP7"));
+        let mut pickup_changed = false;
+        // The guns a pickup can name: the live arsenal minus the empty-handed slot,
+        // which is not something you can leave on the floor.
+        let pickup_weapons: Vec<&'static str> = self
+            .world
+            .as_ref()
+            .map(|w| {
+                w.arsenal_weapons()
+                    .iter()
+                    .filter(|c| !c.is_unarmed())
+                    .map(|c| c.name)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut arm_weapon_pickup: Option<&'static str> = None;
+        let armed_weapon = self.world.as_ref().and_then(|w| w.armed_pickup_weapon());
 
         // Lighting panel snapshot + edit buffers. The selected light's params (if the
         // selection is a light), the level ambient, and the placement/toggle states
@@ -1091,6 +1120,15 @@ impl App {
                                 }
                             });
 
+                            // ── Pickup settings, when the selection is one ──
+                            if selected_pickup.is_some() {
+                                pickup_changed |= pickup_settings_ui(
+                                    ui,
+                                    &mut pickup_edit,
+                                    &pickup_weapons,
+                                );
+                            }
+
                             // ── Door settings, when the selected prop is a door ──
                             if let Some(d) = door_edit.as_mut() {
                                 ui.separator();
@@ -1315,7 +1353,16 @@ impl App {
                                     .strong()
                                     .color(SHOP_GOLD_DIM),
                                 );
-                                if let Some(def) = prop_sel.and_then(|i| crate::props::CATALOG.get(i)) {
+                                // What the turntable is showing: a catalog prop, or —
+                                // for a weapon pickup, which has no catalog row — the
+                                // gun the pickup names.
+                                let preview_name = armed_weapon
+                                    .or_else(|| {
+                                        prop_sel
+                                            .and_then(|i| crate::props::CATALOG.get(i))
+                                            .map(|d| d.name)
+                                    });
+                                if let Some(name) = preview_name {
                                     ui.group(|ui| {
                                         ui.set_min_size(egui::vec2(196.0, 132.0));
                                         ui.vertical_centered(|ui| match preview_tex {
@@ -1335,7 +1382,19 @@ impl App {
                                             }
                                         });
                                     });
-                                    ui.label(egui::RichText::new(def.name).color(SHOP_GOLD).strong());
+                                    ui.label(egui::RichText::new(name).color(SHOP_GOLD).strong());
+                                }
+                                // While a pickup is armed, its settings sit above the
+                                // list — so the author sets "which gun / how much ammo
+                                // / how long until it returns" and then clicks the
+                                // floor repeatedly without re-opening anything.
+                                if pickup_armed && selected_pickup.is_none() {
+                                    pickup_changed |= pickup_settings_ui(
+                                        ui,
+                                        &mut pickup_edit,
+                                        &pickup_weapons,
+                                    );
+                                    ui.separator();
                                 }
                                 egui::ScrollArea::vertical().show(ui, |ui| {
                                     ui.set_width(206.0);
@@ -1347,6 +1406,23 @@ impl App {
                                                 .strong()
                                                 .color(SHOP_GOLD_DIM),
                                         );
+                                        // The guns are listed under Pickups but come
+                                        // from the ARSENAL, not the prop catalog — a
+                                        // weapon pickup draws the gun it names rather
+                                        // than a prop mesh, so there is no catalog row
+                                        // to iterate. One row per weapon, above the two
+                                        // ammo crates.
+                                        if cat == crate::props::PropCategory::Pickups {
+                                            for name in &pickup_weapons {
+                                                let on = armed_weapon == Some(*name);
+                                                if ui
+                                                    .selectable_label(on, format!("▸ {name}"))
+                                                    .clicked()
+                                                {
+                                                    arm_weapon_pickup = Some(name);
+                                                }
+                                            }
+                                        }
                                         for (i, def) in crate::props::CATALOG.iter().enumerate() {
                                             if def.category != cat {
                                                 continue;
@@ -2018,7 +2094,31 @@ impl App {
             if let (Some(world), Some(def)) =
                 (self.world.as_mut(), crate::props::CATALOG.get(sel))
             {
-                world.arm_prop_placement(def.mesh);
+                // A pickup arms through its own entry point, which keeps the draft's
+                // weapon/ammo/respawn settings across the switch — picking a green
+                // crate after a tan one shouldn't reset what's in it.
+                if crate::props::pickup_kind(def.mesh).is_some() {
+                    world.arm_ammo_pickup(def.mesh);
+                } else {
+                    world.arm_prop_placement(def.mesh);
+                }
+            }
+        }
+        // Arming a weapon pickup: the palette row names a gun, not a prop mesh.
+        if let (Some(world), Some(name)) = (self.world.as_mut(), arm_weapon_pickup) {
+            world.arm_weapon_pickup(name);
+            // No catalog row to highlight — the armed gun is marked by name instead.
+            self.props_selected = None;
+        }
+        // Pickup edits, written back once per frame (the panel edited a copy). A
+        // selection wins over the draft, matching which one the block was showing.
+        if pickup_changed {
+            if let Some(world) = self.world.as_mut() {
+                if selected_pickup.is_some() {
+                    world.set_selected_pickup(pickup_edit);
+                } else {
+                    world.set_pickup_draft(pickup_edit);
+                }
             }
         }
         // Door inspector edits, written back once per frame (the panel edited a copy).
@@ -2078,6 +2178,69 @@ impl App {
         }
         Some(frame)
     }
+}
+
+/// The pickup settings block: which weapon, how much ammo, how long until it comes
+/// back. Returns `true` if anything changed.
+///
+/// One function, two call sites, deliberately: it edits the **draft** while a pickup
+/// tool is armed and the **selected instance** when one is picked in the 3D view, so
+/// authoring and editing can never drift apart the way two copies of a widget block
+/// would.
+fn pickup_settings_ui(
+    ui: &mut egui::Ui,
+    p: &mut crate::ecs::Pickup,
+    weapons: &[&'static str],
+) -> bool {
+    use crate::ecs::PickupKind;
+    let mut changed = false;
+    let is_ammo = p.kind == PickupKind::Ammo;
+    ui.label(
+        egui::RichText::new(if is_ammo { "AMMO CRATE" } else { "WEAPON PICKUP" })
+            .small()
+            .strong()
+            .color(SHOP_GOLD_DIM),
+    );
+    // The crate is a visual choice; THIS is what decides what's inside it.
+    egui::ComboBox::from_id_salt("pickup-weapon")
+        .width(184.0)
+        .selected_text(p.weapon)
+        .show_ui(ui, |ui| {
+            for name in weapons {
+                if ui.selectable_label(p.weapon == *name, *name).clicked() && p.weapon != *name {
+                    p.weapon = name;
+                    changed = true;
+                }
+            }
+        });
+    let mut mags = p.mags;
+    let label = if is_ammo { "magazines" } else { "spare mags" };
+    if ui
+        .add(egui::Slider::new(&mut mags, 1..=20).text(label))
+        .changed()
+    {
+        p.mags = mags;
+        changed = true;
+    }
+    let mut respawn = p.respawn;
+    if ui
+        .add(egui::Slider::new(&mut respawn, 0.0..=60.0).text("returns after s"))
+        .changed()
+    {
+        p.respawn = respawn;
+        changed = true;
+    }
+    ui.label(
+        egui::RichText::new(if is_ammo {
+            "the crate is a look; the WEAPON above is what's inside it · 0 s = gone \
+             for the round"
+        } else {
+            "arrives loaded, plus the spare mags · 0 s = gone for the round"
+        })
+        .small()
+        .color(SHOP_DIM),
+    );
+    changed
 }
 
 /// Model-space AABB `(min, max)` of a textured model, from its raw vertices — used
@@ -2729,6 +2892,13 @@ impl ApplicationHandler for App {
                 Err(e) => log::warn!("prop '{}' load failed: {e}", def.name),
             }
         }
+        // A weapon pickup has no prop mesh of its own — it draws whichever gun the
+        // pickup names, from the weapon library uploaded just above. What it still
+        // needs is model bounds, since those drive the placement ghost, the click
+        // target and the gizmo. One nominal gun-sized box for every weapon, so the
+        // ghost doesn't jump around as the author flicks through the arsenal.
+        let (wp_min, wp_max) = crate::world::weapon_pickup_bounds();
+        world.register_prop_bounds(crate::ecs::MeshId::WeaponPickup, wp_min, wp_max);
         // Player Combat P3: upload the code-defined HUD glyph atlas once (the ammo
         // counter's bitmap font); the per-frame text quads are set below.
         let (hw, hh, hpx) = crate::hud::atlas_rgba();
@@ -3100,6 +3270,9 @@ impl ApplicationHandler for App {
                     // Advance the skinned character's animation once per frame
                     // (visual; JS mixer.update(delta) cadence, real dt).
                     world.advance_animation(dt);
+                    // Weapon pickups hover + turn on a render-frame clock (like the
+                    // animation mixer above) so the motion is smooth at any framerate.
+                    world.advance_pickups(dt);
                     // Player Combat: advance the weapon + fire on trigger (HUNT
                     // only; JS WeaponSystem.update(dt) cadence, real dt).
                     world.combat_step(dt, &self.input);
@@ -3322,7 +3495,13 @@ impl ApplicationHandler for App {
                     {
                         renderer.render_theme_preview(self.props_preview_angle);
                     } else if self.props_open {
-                        if let Some(def) =
+                        // A weapon pickup previews through the SHOP's weapon preview
+                        // (keyed by gun name) rather than the prop one — it is the same
+                        // mesh library the pickup itself draws from, so the panel shows
+                        // the actual gun that will land on the floor.
+                        if let Some(name) = world.armed_pickup_weapon() {
+                            renderer.render_weapon_preview(name, self.props_preview_angle);
+                        } else if let Some(def) =
                             self.props_selected.and_then(|i| crate::props::CATALOG.get(i))
                         {
                             renderer.render_prop_preview(def.key, self.props_preview_angle);

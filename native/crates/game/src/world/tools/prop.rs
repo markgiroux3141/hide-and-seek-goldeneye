@@ -232,17 +232,26 @@ impl World {
         let scale = crate::props::def(mesh).map(|d| d.scale).unwrap_or(1.0);
         self.record_undo();
         let id = self.ecs.alloc_id();
-        self.ecs.spawn_authored(&EntityData {
-            id,
-            components: vec![
-                ComponentData::Transform {
-                    pos: pos.to_array(),
-                    rot: Quat::IDENTITY.to_array(),
-                    scale: [scale, scale, scale],
-                },
-                ComponentData::Renderable { mesh },
-            ],
-        });
+        let mut components = vec![
+            ComponentData::Transform {
+                pos: pos.to_array(),
+                rot: Quat::IDENTITY.to_array(),
+                scale: [scale, scale, scale],
+            },
+            ComponentData::Renderable { mesh },
+        ];
+        // A pickup carries the panel's draft settings (which weapon, how much ammo,
+        // how long until it returns) onto the placed entity. Attached here so every
+        // pickup — whatever placed it — gets its component from one funnel.
+        if let Some(p) = self.pickup_for_placement(mesh) {
+            components.push(ComponentData::Pickup {
+                kind: p.kind,
+                weapon: p.weapon.to_string(),
+                mags: p.mags,
+                respawn: p.respawn,
+            });
+        }
+        self.ecs.spawn_authored(&EntityData { id, components });
         log::info!("placed prop {mesh:?} at {pos:?}");
         true
     }
@@ -258,7 +267,7 @@ impl World {
     /// for call-site symmetry with the other draw-list getters.
     pub fn prop_draws(&self, _aspect: f32) -> Vec<(&'static str, Mat4, [f32; 4])> {
         let mut out = Vec::new();
-        for (t, r, hp, destroyed, door, baked, turret) in self
+        for (t, r, hp, destroyed, door, baked, turret, pickup) in self
             .ecs
             .world()
             .query::<(
@@ -269,10 +278,19 @@ impl World {
                 Option<&crate::ecs::Door>,
                 Option<&crate::ecs::DoorGeom>,
                 Option<&crate::ecs::Turret>,
+                Option<&crate::ecs::Pickup>,
             )>()
             .iter()
         {
+            // A collected pickup leaves the floor until it respawns — the whole
+            // point of the respawn clock being visible.
+            if pickup.is_some_and(|p| p.taken()) {
+                continue;
+            }
             let Some(def) = crate::props::def(r.mesh) else {
+                // A weapon pickup has no catalog row on purpose: it draws from the
+                // world-space weapon library instead (`weapon_pickup_draws`), keyed
+                // by the gun's name rather than by a prop mesh.
                 continue;
             };
             // An articulated prop is several rigid pieces on one entity, so it emits
@@ -383,8 +401,16 @@ impl World {
             // fatal for a door — one baked solid here could never be opened for a
             // hunter. They go to the live `nav::set_doors` overlay instead (see
             // `World::door_solid_boxes`).
+            // Pickups are excluded for a different reason than doors: a pickup is
+            // something you walk *through* — it has no player collider either — so
+            // baking its footprint solid would have hunters detouring around an ammo
+            // crate the player walks straight over. (A weapon pickup is excluded
+            // anyway, having no catalog row; this is what makes the two crates agree
+            // with it rather than behaving like scenery that happens to be lootable.)
             .filter(|(_, r)| {
-                crate::props::def(r.mesh).is_some() && crate::props::door_def(r.mesh).is_none()
+                crate::props::def(r.mesh).is_some()
+                    && crate::props::door_def(r.mesh).is_none()
+                    && crate::props::pickup_kind(r.mesh).is_none()
             })
             .map(|(e, _)| e)
             .collect();

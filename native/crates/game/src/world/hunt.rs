@@ -421,6 +421,10 @@ impl World {
                     AiState::Investigate => {
                         inst.enemy.last_known().map(|p| p + Vec3::Y * PLAYER_AIM_Y)
                     }
+                    // Going shopping: look at what it is going for. A hunter that walks
+                    // past you to reach a gun reads as deliberate when its eyes are on
+                    // the gun, and as broken when they aren't.
+                    AiState::Fetch => inst.enemy.fetch_target().map(|p| p + Vec3::Y * PLAYER_AIM_Y),
                     // Blind & sweeping: the head visibly scans side to side (the readable
                     // cue for the invisible 360° perception sweep) while the body faces
                     // its travel direction — a point out along the scan direction.
@@ -792,9 +796,20 @@ impl World {
         if let Some(d) = self.preview_weapon_draw(vp) {
             out.push(d);
         }
+        // Guns lying on the ground ride this channel too — it is already keyed by
+        // weapon name with the whole arsenal uploaded, which is exactly what a
+        // pickup needs and why a weapon pickup is not a catalog prop. Unlike
+        // everything below, these draw in BUILD as well: the editor has to show what
+        // it is placing.
+        for (name, world) in self.weapon_pickup_draws() {
+            out.push((name, vp * world));
+        }
         for inst in &self.enemies {
             if inst.enemy.is_dead() {
                 continue; // drop the gun on death
+            }
+            if inst.weapon.is_unarmed() {
+                continue; // nothing in its hands to draw
             }
             let globals = self.inst_bone_globals(inst);
             if let Some(w) = self.weapon_world(&globals, inst.enemy.pos, inst.yaw(), &inst.weapon, false, inst.body, inst.pd_anims) {

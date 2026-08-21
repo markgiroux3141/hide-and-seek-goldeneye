@@ -281,11 +281,21 @@ impl World {
         if self.player_dead {
             Some(crate::hud::death_quads(aspect))
         } else {
-            let mut q = crate::hud::ammo_quads(
-                self.weapon().magazine(),
-                self.weapon().reserve(),
-                aspect,
-            );
+            // Empty hands have no ammo to count, so the counter is simply absent —
+            // showing `0 / 0` would read as a gun that is out rather than as no gun.
+            let mut q = if self.weapon().config().is_unarmed() {
+                Vec::new()
+            } else {
+                crate::hud::ammo_quads(
+                    self.weapon().magazine(),
+                    self.weapon().reserve(),
+                    aspect,
+                )
+            };
+            // What you just walked over, for a couple of seconds.
+            if let Some((what, _)) = self.pickup_message() {
+                q.extend(crate::hud::pickup_quads(what, aspect));
+            }
             // Live difficulty-dial readout along the top edge (`=` / `-` to change).
             q.extend(crate::hud::danger_quads(self.difficulty, DIFFICULTY_MAX, aspect));
             // Credit balance (top-left) — money earned from kills, spent in the shop.
@@ -392,6 +402,11 @@ impl World {
         let price = crate::shop::weapon_price(name);
         if self.economy.try_spend(price) {
             self.owned[idx] = true;
+            // A bought gun arrives loaded. Weapons now start with empty pools (ammo is
+            // something you find), so ownership alone would hand over a gun with
+            // nothing in it — the stock call is what keeps a purchase as generous as it
+            // was when every weapon was pre-filled.
+            self.weapons[idx].stock_bought();
             log::info!(
                 "bought {name} for ${price} — balance {}",
                 self.economy.credits()
@@ -1681,6 +1696,19 @@ impl World {
     /// visibly slower to shoot than one you walk up to. A GoldenEye hunter keeps the
     /// single clip its stack was built with.
     pub(crate) fn start_enemy_fire(&mut self, idx: usize) {
+        // Empty hands cannot start a burst. Gated **here**, at the entry point, rather
+        // than only in the per-shot pump: the pump stopped the rounds coming out, but
+        // the burst still started, so an unarmed hunter played the whole firing
+        // animation — arms up, aiming, "hunter firing (Unarmed, primary)" in the log —
+        // and simply dealt no damage. Which is worse than not firing, because it looks
+        // like broken combat rather than like a hunter with no gun.
+        if self
+            .enemies
+            .get(idx)
+            .is_some_and(|inst| inst.weapon.is_unarmed())
+        {
+            return;
+        }
         let row = self.pd_fire_row(idx);
         if let Some(row) = row {
             self.install_fire_row(idx, row);
@@ -1762,9 +1790,7 @@ impl World {
     /// Under `AI=ours` this is a no-op and hunters have unlimited ammunition, exactly
     /// as they always have.
     fn enemy_reload_step(&mut self, dt: f32) {
-        if !self.ai_mode.is_pd() {
-            return;
-        }
+        let pd = self.ai_mode.is_pd();
         for inst in &mut self.enemies {
             if inst.enemy.is_dead() {
                 continue;
@@ -1776,12 +1802,26 @@ impl World {
             if inst.reload_timer > 0.0 {
                 inst.reload_timer = (inst.reload_timer - dt).max(0.0);
                 if inst.reload_timer == 0.0 {
-                    inst.loaded = clip; // `botact_reload`
+                    // Drawn from the hunter's **reserve**, which is finite now that
+                    // ammo is something it has to find (`DESIGN_PICKUPS.md`). PD's
+                    // `botact_reload` just refills — a bot has unlimited magazines —
+                    // but a hunter that could never run dry would have no reason to
+                    // want an ammo crate, so the refill is metered.
+                    let load = clip.min(inst.reserve);
+                    inst.loaded = load;
+                    inst.reserve -= load;
                 }
                 continue;
             }
-            let unseen_2s = inst.enemy.time_since_seen() >= PD_RELOAD_UNSEEN;
-            if inst.loaded == 0 || (inst.loaded < clip / 2 && unseen_2s) {
+            // Empty magazine → reload, in **both** AI models: a dry gun is dry
+            // whichever brain is driving it. Topping up an unspent magazine early is
+            // Perfect Dark's own tactical rule (`bot.c:2470` — reload while the
+            // target can't see you) and stays PD-only.
+            let unseen_2s = pd && inst.enemy.time_since_seen() >= PD_RELOAD_UNSEEN;
+            let wants = inst.loaded == 0 || (unseen_2s && inst.loaded < clip / 2);
+            // Nothing to reload *from* is not a reload — it is a hunter that needs to
+            // go shopping, which `hunter_fetch_target` picks up from the same state.
+            if wants && inst.reserve > 0 {
                 inst.reload_timer = inst.weapon.reload_time.max(0.1);
                 inst.fire_elapsed = None; // drop the trigger while reloading
                 inst.shot_timer = 0.0;
@@ -1829,9 +1869,11 @@ impl World {
         // Hunters whose burst just ended on a sideways attack animation, to be handed
         // back to their stance's forward one (see the loop after the shots).
         let mut ended_sideways: Vec<usize> = Vec::new();
-        // Rounds only come out of a magazine under `AI=pd`, where PD's reload rule puts
-        // them back — see `enemy_reload_step`.
-        let count_ammo = self.ai_mode.is_pd();
+        // Rounds come out of the magazine in **both** AI models now. They used to be
+        // counted only under `AI=pd` (where PD's reload rule put them back) and `ours`
+        // had unlimited ammunition — which is no longer tenable: hunters have to find
+        // their ammo, so it has to be possible for them to run out of it.
+        let count_ammo = true;
         for (i, inst) in self.enemies.iter_mut().enumerate() {
             let Some(t) = inst.fire_elapsed else {
                 inst.shot_timer = 0.0;
@@ -1852,6 +1894,15 @@ impl World {
                 _ => (inst.weapon.fire_rate, inst.weapon.automatic),
             };
             let burst = inst.pdsim.is_some() && auto;
+            // Empty hands never fire. Checked separately from the magazine below,
+            // because an unarmed def has `clip == 0`, which that guard reads as an
+            // *unclipped* weapon (a thrown grenade) and lets through.
+            if inst.weapon.is_unarmed() {
+                inst.fire_elapsed = None;
+                inst.shot_timer = 0.0;
+                inst.burst_shot = 0;
+                continue;
+            }
             // An empty magazine ends the burst on the spot; `enemy_reload_step` picks
             // it up next frame and schedules the reload.
             if count_ammo && inst.weapon.clip > 0 && inst.loaded == 0 {

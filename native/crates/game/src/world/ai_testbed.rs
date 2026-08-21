@@ -21,6 +21,7 @@
 //! pinpoints a real defect to fix.
 
 use super::*;
+use crate::ecs::{MeshId, Pickup, PickupKind};
 use crate::enemy::AiState;
 
 // ─── Detector thresholds ─────────────────────────────────────────────────────
@@ -173,6 +174,50 @@ impl TestArena {
         world.camera.pos = Vec3::new(player_m.x, player_m.y.max(1.5), player_m.z);
         world.initial_meshes();
         world.toggle_mode();
+        let floor_y = world.player_pos().map(|p| p.y).unwrap_or(0.0);
+        Self { world, floor_y }
+    }
+
+    /// Like [`Self::build`], but **stocks the floor**: one pickup per entry in `stock`
+    /// (`(position in metres, kind, gun name)`), authored before the mode flip.
+    ///
+    /// The ordering is load-bearing twice over. `World::hunters_start_unarmed` gates the
+    /// whole empty-handed rule on the level actually authoring a weapon pickup, and the
+    /// wave's guns are handed out inside `toggle_mode` — so a pickup added afterwards
+    /// leaves every hunter armed and there is nothing to fetch. That guard is also why
+    /// every *other* arena in this lab keeps its armed hunters: none of them stock
+    /// anything.
+    fn build_stocked(
+        size: [f32; 3],
+        obstacles: &[[f32; 6]],
+        wave: usize,
+        player_m: Vec3,
+        stock: &[(Vec3, PickupKind, &'static str)],
+    ) -> Self {
+        let mut world = World::new();
+        let mut region = Region::new(0);
+        region
+            .brushes
+            .push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, size[0], size[1], size[2]));
+        for (k, o) in obstacles.iter().enumerate() {
+            region
+                .brushes
+                .push(Brush::new(2 + k as u32, Op::Add, o[0], o[1], o[2], o[3], o[4], o[5]));
+        }
+        world.regions = vec![region];
+        world.set_difficulty(DIFFICULTY_MAX);
+        world.set_wave_size(wave);
+        world.camera.pos = Vec3::new(player_m.x, player_m.y.max(1.5), player_m.z);
+        world.initial_meshes();
+        for &(at, kind, weapon) in stock {
+            let (mesh, p) = match kind {
+                PickupKind::Weapon => (MeshId::WeaponPickup, Pickup::weapon(weapon)),
+                PickupKind::Ammo => (MeshId::AmmoPickupTan, Pickup::ammo(weapon)),
+            };
+            super::tools::pickup::tests::place_pickup(&mut world, mesh, at, p);
+        }
+        world.toggle_mode(); // bake nav + physics, spawn the (now empty-handed) wave
+        world.toggle_invulnerable();
         let floor_y = world.player_pos().map(|p| p.y).unwrap_or(0.0);
         Self { world, floor_y }
     }
@@ -1578,17 +1623,26 @@ fn pd_mode_is_omniscient_even_with_the_kill_switch_off() {
     assert!(closest < 6.0, "and it comes through the gap to find you ({closest:.2} m)");
 }
 
-/// **PD's reload rule, out of ammo.** A hunter in a sustained firefight empties its
-/// magazine and is briefly out of the fight — the one opening the distance-band model
-/// leaves you, and something `AI=ours` hunters (who carry infinite ammunition) never do.
+/// **Running dry is now both models' problem.** A hunter in a sustained firefight
+/// empties its magazine and is briefly out of the fight — the one opening the
+/// distance-band model leaves you.
+///
+/// This assertion used to be the opposite for `AI=ours`: hunters carried unlimited
+/// ammunition and never reloaded, so magazine management was a PD-mode flourish. That
+/// stopped being tenable when hunters had to **find** their ammo
+/// (`DESIGN_PICKUPS.md`) — a hunter that can never run out has no reason to want an
+/// ammo crate, and "prioritise picking up ammo" would have had nothing to prioritise.
+/// So both models meter their rounds now, and what remains PD-only is the *tactical*
+/// clause: topping up a partial magazine while unseen (covered by
+/// `pd_mode_tops_up_a_partial_clip_once_you_are_out_of_sight`).
 #[test]
-fn pd_mode_hunters_run_dry_and_reload() {
+fn hunters_in_both_models_run_dry_and_reload() {
     use crate::enemy::AiMode;
     let pd = ab_run(AiMode::Pd, 20.0, true);
     let ours = ab_run(AiMode::Ours, 20.0, true);
     ab_report("reload rule", &ours, &pd);
     assert!(pd.reloaded, "a PD-mode hunter fired for 20 s without ever reloading");
-    assert!(!ours.reloaded, "an ours-mode hunter reloaded — that rule is PD-mode only");
+    assert!(ours.reloaded, "an ours-mode hunter fired for 20 s without ever reloading");
 }
 
 /// **PD's reload rule, the half-clip clause.** `bot.c:2470`: below half a clip *and* the
@@ -1658,4 +1712,251 @@ fn an_explicit_ai_mode_outranks_the_lab() {
     assert_eq!(world.ai_mode(), AiMode::Ours, "the lab must not pin the engagement model");
     world.set_ai_mode(AiMode::Pd);
     assert_eq!(world.ai_mode(), AiMode::Pd);
+}
+
+// ═══ Going shopping: a hunter that cannot shoot fetches what it needs ════════
+//
+// The measurement here is **direction**, and that is not a stylistic choice. The
+// first version of this behaviour was asserted as `!is_engaged()` over a few seconds,
+// which `Investigate` satisfies (`Enemy::is_engaged` covers Alert…Peek and not
+// Investigate) — so the test passed for months while the hunter walked straight at the
+// player with its hands empty. "Walks at me" and "walks at the gun" differ only in
+// which way the feet point, so only geometry can tell them apart.
+
+/// Flat (XZ) separation. Every fetch assertion is horizontal: a hunter's feet and a gun
+/// lying on the floor sit at slightly different heights, and the Y difference is noise.
+fn flat_dist(a: Vec3, b: Vec3) -> f32 {
+    Vec3::new(a.x - b.x, 0.0, a.z - b.z).length()
+}
+
+/// A 30 m empty room with the shopping list `stock` on the floor, one hunter in the
+/// middle and the player parked **on the opposite side of it from the goods**, so
+/// "fetch" and "beeline at the player" are 180° apart. Returns `(arena, player)`.
+fn fetch_arena(stock: &[(Vec3, PickupKind, &'static str)]) -> (TestArena, Vec3) {
+    let player = Vec3::new(26.0, 0.0, 15.0);
+    // 120 WT = 30 m. Player and goods each ~11 m from the hunter, inside the perception
+    // range at max difficulty — so the hunter can see the player the whole time and has
+    // to decline the fight on purpose rather than out of ignorance.
+    let mut arena = TestArena::build_stocked([120.0, 16.0, 120.0], &[], 1, player, stock);
+    arena.place_hunter(0, 15.0, 15.0);
+    (arena, player)
+}
+
+/// Run a stocked arena until hunter 0 can shoot again — it collected what it was short
+/// of — or `secs` elapse. Returns `(seconds to re-arm, closest approach to `goods`,
+/// closest approach to the player)`, the last two measured **only over the shopping
+/// window**: once it is armed, closing on the player is the correct behaviour and would
+/// wash the measurement out.
+///
+/// The player stands still in plain sight and **keeps firing** (the periodic
+/// `hear_noise` ping is what `World::alert_enemies_to_noise` does with a gunshot). That
+/// ping is the whole reason the beeline bug bites: it writes `last_known`, which zeroes
+/// the `Search` score (`Search` requires `last_known.is_none()`) and hands the decision
+/// to `Investigate` — whose executor walks to the last-known player position. Without a
+/// noisy player even the broken build wanders to the gun by accident, which is exactly
+/// how this shipped untested.
+fn shopping_run(
+    arena: &mut TestArena,
+    goods: Vec3,
+    player: Vec3,
+    secs: f32,
+) -> (Option<f32>, f32, f32) {
+    let dt = 1.0 / 60.0;
+    let start = arena.world.enemies[0].enemy.pos;
+    let (mut near_goods, mut near_player) = (flat_dist(start, goods), flat_dist(start, player));
+    let mut armed_at = None;
+    for f in 0..(secs / dt) as usize {
+        arena.set_player(player.x, player.z);
+        if f % 90 == 0 {
+            // …another shot, every 1.5 s.
+            let ppos = arena.world.player_pos().unwrap();
+            arena.world.enemies[0].enemy.hear_noise(ppos);
+        }
+        arena.step(dt);
+        if World::hunter_want(&arena.world.enemies[0]).is_none() {
+            armed_at = Some(f as f32 * dt);
+            break;
+        }
+        let p = arena.world.enemies[0].enemy.pos;
+        near_goods = near_goods.min(flat_dist(p, goods));
+        near_player = near_player.min(flat_dist(p, player));
+    }
+    (armed_at, near_goods, near_player)
+}
+
+/// **The headline claim.** An empty-handed hunter crosses the room to the gun and arms
+/// itself, while a plainly visible, noisily firing player stands the other way — and it
+/// never closes on that player, because it has nothing to close with.
+#[test]
+fn an_unarmed_hunter_walks_to_the_gun_not_to_the_player() {
+    let gun = Vec3::new(4.0, 0.0, 15.0);
+    let (mut arena, player) = fetch_arena(&[(gun, PickupKind::Weapon, "AR33")]);
+    assert!(
+        arena.world.enemies[0].weapon.is_unarmed(),
+        "the arena must put the hunter under the empty-handed rule"
+    );
+    let start = arena.world.enemies[0].enemy.pos;
+    let (d0_gun, d0_player) = (flat_dist(start, gun), flat_dist(start, player));
+    let (armed_at, near_gun, near_player) = shopping_run(&mut arena, gun, player, 25.0);
+    println!(
+        "gun {d0_gun:.1}m → {near_gun:.1}m, player {d0_player:.1}m → {near_player:.1}m, \
+         armed at {armed_at:?}"
+    );
+    let t = armed_at.unwrap_or_else(|| {
+        panic!(
+            "the hunter never armed itself in 25 s — it got from {start:?} to {:?}; the gun \
+             is at {gun:?} and the player at {player:?} (closest to the gun {near_gun:.1}m, \
+             to the player {near_player:.1}m)",
+            arena.world.enemies[0].enemy.pos
+        )
+    });
+    println!("armed itself {t:.1}s after spawning");
+    assert_eq!(arena.world.enemies[0].weapon.name, "AR33", "it took the gun that was there");
+    assert!(
+        near_gun < d0_gun - 8.0,
+        "it closed only {:.1}m of the {d0_gun:.1}m to the gun",
+        d0_gun - near_gun
+    );
+    assert!(
+        near_player > d0_player - 3.0,
+        "it closed to {near_player:.1}m of the player (from {d0_player:.1}m) while holding \
+         nothing — that is the beeline, not a shopping trip"
+    );
+}
+
+/// The other half of "cannot shoot": a hunter **holding a gun with no rounds anywhere**
+/// walks to a crate that feeds it, and likewise declines the fight on the way. Same
+/// behaviour, different want — which is the point of routing both through one score.
+#[test]
+fn a_dry_hunter_walks_to_the_ammo_not_to_the_player() {
+    let crate_at = Vec3::new(4.0, 0.0, 15.0);
+    // Only an ammo crate on the floor, so no weapon pickup exists and the wave spawns
+    // armed as it always did — then hunter 0 is emptied by hand, which is the state a
+    // real firefight leaves it in.
+    let (mut arena, player) = fetch_arena(&[(crate_at, PickupKind::Ammo, "AR33")]);
+    let ar33 = *arena
+        .world
+        .arsenal
+        .weapons()
+        .iter()
+        .find(|w| w.name == "AR33")
+        .expect("AR33 is in the GoldenEye arsenal");
+    {
+        let inst = &mut arena.world.enemies[0];
+        inst.weapon = crate::combat::enemy_def_for(&ar33);
+        inst.loaded = 0;
+        inst.reserve = 0;
+    }
+    assert_eq!(
+        World::hunter_want(&arena.world.enemies[0]),
+        Some(super::tools::pickup::HunterWant::Ammo),
+        "the precondition: a gun and nothing to put in it"
+    );
+    let start = arena.world.enemies[0].enemy.pos;
+    let (d0_crate, d0_player) = (flat_dist(start, crate_at), flat_dist(start, player));
+    let (armed_at, near_crate, near_player) = shopping_run(&mut arena, crate_at, player, 25.0);
+    println!(
+        "crate {d0_crate:.1}m → {near_crate:.1}m, player {d0_player:.1}m → {near_player:.1}m, \
+         reloaded at {armed_at:?}"
+    );
+    assert!(
+        armed_at.is_some(),
+        "the hunter never reached the crate in 25 s — it got from {start:?} to {:?} \
+         (closest to the crate {near_crate:.1}m)",
+        arena.world.enemies[0].enemy.pos
+    );
+    assert!(arena.world.enemies[0].reserve > 0, "it reached the crate but took no rounds");
+    assert!(
+        near_crate < d0_crate - 8.0,
+        "it closed only {:.1}m of the {d0_crate:.1}m to the crate",
+        d0_crate - near_crate
+    );
+    assert!(
+        near_player > d0_player - 3.0,
+        "a dry hunter closed to {near_player:.1}m of the player instead of going for ammo"
+    );
+}
+
+/// **`AI=pd` goes shopping too.** Perfect Dark's action ladder has a pick-up-a-weapon
+/// rung (`bot_pick_up_weapon`, `bot.c:2445`) and the port note under it used to read "no
+/// pickups in this game" — there are now, so it is ported rather than switched off. The
+/// other option on the table was arming PD hunters at spawn and leaving the deathmatch
+/// floor economy out of that mode entirely; this is the test that says we didn't.
+///
+/// A PD hunter is **omniscient**, which makes this the strongest version of the claim:
+/// it knows exactly where the player is, is walking the other way anyway, and its own
+/// distance-mode ladder would otherwise march it into the player's face to pull a
+/// trigger that does nothing.
+#[test]
+fn pd_mode_hunters_fetch_a_gun_before_fighting() {
+    use crate::enemy::AiMode;
+    let gun = Vec3::new(4.0, 0.0, 15.0);
+    let (mut arena, player) = fetch_arena(&[(gun, PickupKind::Weapon, "AR33")]);
+    arena.world.set_ai_mode(AiMode::Pd);
+    assert!(arena.world.enemies[0].weapon.is_unarmed(), "the PD hunter starts empty-handed");
+    let start = arena.world.enemies[0].enemy.pos;
+    let (d0_gun, d0_player) = (flat_dist(start, gun), flat_dist(start, player));
+    let (armed_at, near_gun, near_player) = shopping_run(&mut arena, gun, player, 25.0);
+    println!(
+        "AI=pd: gun {d0_gun:.1}m → {near_gun:.1}m, player {d0_player:.1}m → {near_player:.1}m, \
+         armed at {armed_at:?}"
+    );
+    assert!(
+        armed_at.is_some(),
+        "a PD hunter never armed itself in 25 s — it got from {start:?} to {:?}",
+        arena.world.enemies[0].enemy.pos
+    );
+    assert!(
+        near_gun < d0_gun - 8.0,
+        "it closed only {:.1}m of the {d0_gun:.1}m to the gun",
+        d0_gun - near_gun
+    );
+    assert!(
+        near_player > d0_player - 3.0,
+        "a PD hunter closed to {near_player:.1}m of the player with nothing in its hands"
+    );
+}
+
+/// The score has to be **zero for a hunter that can shoot** — otherwise every armed
+/// hunter on a stocked level goes shopping instead of fighting. Same arena, same gun on
+/// the floor, but the hunter starts armed: it must engage and fire, and never once walk
+/// to the pickup.
+#[test]
+fn an_armed_hunter_ignores_the_pickups_and_fights() {
+    let gun = Vec3::new(4.0, 0.0, 15.0);
+    let (mut arena, player) = fetch_arena(&[(gun, PickupKind::Weapon, "AR33")]);
+    // Arm it as the roster would on a level with no pickups — the kill-switch state.
+    let ar33 = *arena
+        .world
+        .arsenal
+        .weapons()
+        .iter()
+        .find(|w| w.name == "AR33")
+        .unwrap();
+    {
+        let inst = &mut arena.world.enemies[0];
+        inst.weapon = crate::combat::enemy_def_for(&ar33);
+        inst.loaded = inst.weapon.clip;
+        inst.reserve = inst.weapon.clip * 4;
+    }
+    let start = arena.world.enemies[0].enemy.pos;
+    let d0_player = flat_dist(start, player);
+    let mut mon = JankMonitor::new(1);
+    let dt = 1.0 / 60.0;
+    let mut near_gun = flat_dist(start, gun);
+    for _ in 0..(12.0 / dt) as usize {
+        arena.set_player(player.x, player.z);
+        arena.step(dt);
+        mon.sample(&mut arena.world, dt);
+        near_gun = near_gun.min(flat_dist(arena.world.enemies[0].enemy.pos, gun));
+    }
+    mon.report();
+    let near_player = flat_dist(arena.world.enemies[0].enemy.pos, player);
+    println!("armed hunter: player {d0_player:.1}m → {near_player:.1}m, gun no closer than {near_gun:.1}m");
+    assert!(mon.ever_fired[0], "an armed hunter with a clear sightline did not engage");
+    assert!(
+        near_gun > 8.0,
+        "an armed hunter detoured to within {near_gun:.1}m of a pickup it does not need"
+    );
+    assert!(mon.violations_of("stall").is_empty(), "the armed hunter stalled instead of fighting");
 }

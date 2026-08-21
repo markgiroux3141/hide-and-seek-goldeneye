@@ -1,0 +1,28 @@
+newmtl m0
+Ka 0 0 0
+illum 0
+Ns 64
+d 1.000000
+map_Kd tempImgEd0021.bmp
+
+newmtl m1
+Ka 0 0 0
+illum 0
+Ns 64
+d 1.000000
+map_Kd tempImgEd0023.bmp
+
+newmtl m2TopFlagTransparentClampSClampT
+Ka 0 0 0
+illum 0
+Ns 64
+d 1.000000
+map_Kd tempImgEd0025.bmp
+
+newmtl m3TopFlagTransparentClampSClampT
+Ka 0 0 0
+illum 0
+Ns 64
+d 1.000000
+map_Kd tempImgEd0028.bmp
+

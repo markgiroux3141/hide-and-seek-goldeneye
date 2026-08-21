@@ -310,6 +310,19 @@ fn spread_for(w: &WeaponStats, class: EnemyWeaponClass) -> f32 {
 /// stats; every other weapon gets its class defaults so the full arsenal is
 /// equippable. Asset paths + fire sound come straight off the player weapon (the
 /// enemy and player share the same GLBs).
+impl EnemyWeaponDef {
+    /// Whether this hunter is holding **nothing** — the empty-handed def bridged from
+    /// [`crate::combat::config::UNARMED`].
+    ///
+    /// Keyed on the name rather than on `clip == 0`, because those mean different
+    /// things: a clip of zero is also how an *unclipped* weapon (a thrown grenade) is
+    /// described, and the fire pump reads it as "never needs reloading". Empty hands
+    /// must not fire at all, so it needs its own answer.
+    pub fn is_unarmed(&self) -> bool {
+        self.name == crate::combat::config::UNARMED.name
+    }
+}
+
 pub fn enemy_def_for(w: &WeaponStats) -> EnemyWeaponDef {
     // One-handed or two? For a Perfect Dark weapon this is authored —
     // `WEAPONFLAG_ONEHANDED`, whose decomp comment is literally "Makes guards carry

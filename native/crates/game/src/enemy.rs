@@ -12,6 +12,10 @@
 //!   it last saw you rather than tracking you omnisciently.
 //! * **Investigate** — lost the player (LOS broke / a heard gunshot): go to the
 //!   last-known / noise position, scan around for a moment, then fall back to Search.
+//! * **Fetch** — cannot shoot (holding nothing, or holding a gun with no rounds
+//!   anywhere): walk to the pickup the `World` points at ([`Enemy::set_fetch_target`])
+//!   and ignore the player entirely until armed. Outscores every other behaviour,
+//!   because a hunter with nothing to shoot has no better option.
 //!
 //! Movement/perception constants are ported from `EnemyAI.ts`; the probabilistic
 //! shot roll + the fire-animation cadence live in the `World` combat layer (which
@@ -277,6 +281,19 @@ pub enum AiState {
     /// Popping out of cover to a cell that DOES see the player, firing a burst, then
     /// ducking back to cover (#4 peek-and-fire).
     Peek,
+    /// **Going shopping**: walking to the weapon or ammo pickup this hunter needs
+    /// ([`Self::set_fetch_target`]), ignoring the player entirely on the way.
+    ///
+    /// A first-class behaviour rather than a reuse of the search channel, and that is
+    /// the correction this state records. Fetching was originally smuggled through
+    /// `assign_search_target` on the reasoning that a hunter which cannot shoot drops
+    /// into the blind states and walks where it is told. It does not: `Search` scores
+    /// zero the moment a `last_known` exists (one gunshot is enough), so the scorer
+    /// picked `Investigate` — whose executor walks to the player's last-known position.
+    /// An empty-handed hunter therefore beelined at the player holding nothing, and the
+    /// test that was supposed to catch it asserted `!is_engaged()`, which `Investigate`
+    /// satisfies. Fetching is a *behaviour*; it belongs in the behaviour scorer.
+    Fetch,
 }
 
 const WT: f32 = WORLD_SCALE;
@@ -460,6 +477,29 @@ const ENGAGE_MEMORY: f32 = 5.0;
 /// the utility-layer analogue of the FSM's standoff/LOS-grace debouncing).
 const UTIL_INERTIA: f32 = 0.2;
 
+// ─── Going shopping ([`AiState::Fetch`]) ─────────────────────────────────────
+/// The utility score of fetching. Deliberately **dominant** — clear of every other
+/// behaviour plus [`UTIL_INERTIA`] — because a hunter that cannot shoot genuinely has no
+/// better option, which makes this one of the few honestly unconditional scores in the
+/// table. It is zero whenever the hunter has a working weapon, so an armed hunter never
+/// sees it (`an_armed_hunter_ignores_the_pickups_and_fights`).
+const FETCH_SCORE: f32 = 3.0;
+/// Speed (m/s) a hunter travels to a pickup: a jog, not the full chase run. It wants the
+/// gun urgently but it is not chasing anything.
+const SPEED_FETCH: f32 = SPEED_ADVANCE;
+/// How long (s) a fetching hunter may stand at its fetch point without the collect
+/// landing before it writes that pickup off.
+///
+/// Arrival is nav-grid arrival, and the grid steers the hunter's *centre* to a cell —
+/// so a gun on a ledge, or in a pocket A\* cannot path into, leaves a hunter parked
+/// [`ARRIVE_DIST`] from something it can never pick up. Standing there forever is the
+/// statue failure mode the AI lab exists to catch, so it gives up instead.
+const FETCH_STALL: f32 = 3.0;
+/// How long (s) fetching stays suppressed after a give-up, during which the hunter falls
+/// back to its ordinary fan-out search. It re-asks afterwards, because the pickup may
+/// simply have been contested — the World re-picks the nearest useful one every step.
+const FETCH_RETRY: f32 = 5.0;
+
 pub struct Enemy {
     /// Feet position, meters.
     pub pos: Vec3,
@@ -542,6 +582,22 @@ pub struct Enemy {
     /// rotates around the facing by this, so a searcher scans a full circle over time
     /// and can spot a player in plain sight behind it (see [`Self::perception_view`]).
     search_look: f32,
+
+    // ─── Going shopping ([`AiState::Fetch`]) ──
+    /// Where the pickup this hunter needs is, or `None` when it needs nothing (or
+    /// nothing on the floor would help). Written by the `World` every step — it owns
+    /// the pickups — via [`Self::set_fetch_target`].
+    ///
+    /// **Its own channel, deliberately not `search_target`.** The search point's owner
+    /// is the `World`'s fan-out coordinator, which hands out a fresh one on arrival;
+    /// two writers on one field is what made the search sweep and the shopping trip
+    /// fight each other.
+    fetch_target: Option<Vec3>,
+    /// Seconds stood at a fetch point without the collect landing (see [`FETCH_STALL`]).
+    fetch_stall: f32,
+    /// Seconds fetching stays suppressed after giving up on an unreachable pickup
+    /// (see [`FETCH_RETRY`]). Decays every step, in every decision layer.
+    fetch_block: f32,
 
     // ─── Burst-and-reposition ──
     /// Which way the hunter arcs when it repositions between bursts (+1 / −1),
@@ -673,6 +729,9 @@ impl Enemy {
             stuck_anchor: Vec3::ZERO,
             stuck_hold: 0.0,
             search_look: 0.0,
+            fetch_target: None,
+            fetch_stall: 0.0,
+            fetch_block: 0.0,
             strafe_dir: 1.0,
             reposition_target: None,
             dodge_dir: 1.0,
@@ -800,6 +859,41 @@ impl Enemy {
         if matches!(self.state, AiState::Idle) {
             self.state = AiState::Search;
         }
+    }
+
+    /// **Where this hunter should go shopping**, or `None` if it can fight (or nothing
+    /// on the floor would help). Set by the `World` every step from
+    /// `World::hunter_fetch_target`, which owns the pickups.
+    ///
+    /// While this is `Some`, [`AiState::Fetch`] outscores every other behaviour and the
+    /// hunter walks here ignoring the player — see [`FETCH_SCORE`]. A no-op once dead.
+    pub fn set_fetch_target(&mut self, target: Option<Vec3>) {
+        if self.dead {
+            return;
+        }
+        // A brand-new destination is a fresh trip: drop the give-up clock so a stall
+        // against the *previous* pickup can't cut this one short.
+        let moved = match (self.fetch_target, target) {
+            (Some(a), Some(b)) => a.distance(b) > ARRIVE_DIST,
+            (a, b) => a.is_some() != b.is_some(),
+        };
+        if moved {
+            self.fetch_stall = 0.0;
+        }
+        self.fetch_target = target;
+    }
+
+    /// The pickup this hunter is walking to, if any — read by the head look-at (a
+    /// shopping hunter looks at what it is going for) and by the AI lab.
+    pub fn fetch_target(&self) -> Option<Vec3> {
+        self.fetch_target
+    }
+
+    /// Whether this hunter is currently going shopping — the fetch behaviour is live
+    /// AND not suppressed by a give-up. The single predicate all three decision layers
+    /// gate on, so they cannot disagree about it.
+    fn wants_fetch(&self) -> bool {
+        self.fetch_target.is_some() && self.fetch_block <= 0.0
     }
 
     /// Set which side this hunter flanks from (+1 / −1) — the `World` assigns it at
@@ -1186,7 +1280,14 @@ impl Enemy {
     /// what lets a searcher spot a player in plain sight behind it. Perception-only:
     /// the model keeps facing its travel direction.
     fn perception_view(&mut self, dt: f32) -> (Vec3, f32) {
-        if matches!(self.state, AiState::Search | AiState::Investigate | AiState::Idle) {
+        // `Fetch` counts as blindly hunting: it is walking somewhere with no target, and
+        // a hunter crossing a room for a gun should still notice a player in plain sight
+        // on the way (it is the `World` that suppresses its knowledge while shopping —
+        // that is a policy about what it may act on, not about where it looks).
+        if matches!(
+            self.state,
+            AiState::Search | AiState::Investigate | AiState::Idle | AiState::Fetch
+        ) {
             self.search_look += SEARCH_SWEEP_RATE * dt;
             let (s, c) = self.search_look.sin_cos();
             let h = self.heading;
@@ -1294,6 +1395,11 @@ impl Enemy {
                 EVADE_INTERVAL_LO + (EVADE_INTERVAL_HI - EVADE_INTERVAL_LO) * tuning.dodge;
         }
 
+        // Fetch give-up suppression decays here rather than inside any one layer, so a
+        // hunter that gave up on an unreachable gun comes back to the idea at the same
+        // rate under `AI=pd`, the utility scorer and the FSM alike.
+        self.fetch_block = (self.fetch_block - dt).max(0.0);
+
         let mut step = EnemyStep::default();
         // ── `AI=pd`: Perfect Dark's action ladder, ahead of both of ours ──
         // Neither the utility scorer nor the FSM runs; see `pd_step` for the ladder and
@@ -1318,7 +1424,20 @@ impl Enemy {
         // blind — PD's `bot_choose_general_target` always hands it a target, so it goes
         // straight into the engagement chain and never sweeps for you.
         let acquired = perceived || self.omniscient;
+        // Shopping outranks the whole engagement chain, whatever state we were in — the
+        // FSM's copy of the dominant `Fetch` score. The kill-switch keeps the behaviour
+        // rather than degrading, because "hunters charge you bare-handed" is exactly the
+        // symptom the switch would be flipped to rule out.
+        if self.wants_fetch() {
+            self.state = AiState::Fetch;
+        } else if self.state == AiState::Fetch {
+            // Got what it came for (or gave up): rejoin the sweep and let the ordinary
+            // transitions take over from there.
+            self.state = AiState::Search;
+            self.search_target = None;
+        }
         match self.state {
+            AiState::Fetch => self.fetch_step(dt, nav, SPEED_FETCH * tuning.speed_mult),
             AiState::Idle => {
                 // Unaware and with nowhere assigned to search — the `World` will give
                 // it a point (spawn-in / stuck fallback). Acquire on sight meanwhile.
@@ -1697,6 +1816,17 @@ impl Enemy {
         match s {
             // Baseline floor — only wins when nothing else applies (blind, nowhere to go).
             AiState::Idle => 0.1,
+            // **Cannot shoot → go and get something to shoot with.** Dominant by design
+            // (see [`FETCH_SCORE`]): it is not weighed against fighting, because a hunter
+            // holding nothing has nothing to weigh. Zero the instant the `World` stops
+            // handing it a fetch point, which is the instant it can fight again.
+            AiState::Fetch => {
+                if self.wants_fetch() {
+                    FETCH_SCORE
+                } else {
+                    0.0
+                }
+            }
             AiState::Search => {
                 if !engaged && !perceived && self.last_known.is_none() {
                     0.6
@@ -1796,8 +1926,9 @@ impl Enemy {
         attack_range: f32,
         tuning: AiTuning,
     ) -> AiState {
-        const CANDIDATES: [AiState; 8] = [
+        const CANDIDATES: [AiState; 9] = [
             AiState::Idle,
+            AiState::Fetch,
             AiState::Search,
             AiState::Investigate,
             AiState::Alert,
@@ -1842,6 +1973,14 @@ impl Enemy {
             AiState::Chase => self.chase_timer = 0.0,
             AiState::Attack => self.enter_attack(),
             AiState::Investigate => self.scan_timer = 0.0,
+            // Break off whatever it was walking toward and plan a fresh path to the
+            // pickup — a hunter that ran dry mid-chase is holding a path to the player.
+            AiState::Fetch => {
+                self.path.clear();
+                self.repath_timer = 0.0;
+                self.holding = false;
+                self.is_attacking = false;
+            }
             AiState::TakeCover => {
                 match self.sample_cover_cell(self.pos, target_pos, nav, physics, self_collider, false) {
                     Some(spot) => {
@@ -1917,6 +2056,7 @@ impl Enemy {
         // ── Execute the committed behaviour (`self.state`, which `util_enter` may have
         // redirected TakeCover→Cooldown). Movement/fire come from the shared helpers.
         match self.state {
+            AiState::Fetch => self.fetch_step(dt, nav, SPEED_FETCH * tuning.speed_mult),
             AiState::Idle => {
                 if !perceived {
                     step.needs_search_target = true;
@@ -2075,7 +2215,10 @@ impl Enemy {
     //                             and with omniscience on there is always a target (the
     //                             player, if a chosen packmate dies). Left unwritten
     //                             rather than written and dead.
-    //   7. pick up a weapon ..... no pickups in this game.
+    //   7. pick up a weapon ..... ported (`bot_pick_up_weapon`) — see the fetch rung at
+    //                             the top of this function. The port note here used to
+    //                             read "no pickups in this game"; there are now, and a
+    //                             bot that cannot shoot has nothing to run rung 5 with.
     //
     // What is NOT in that ladder is as load-bearing as what is: no search, no
     // investigate, no reaction-delay state, no cover, no strafe. A PD bot's answer to
@@ -2105,6 +2248,19 @@ impl Enemy {
         fire_anim: bool,
     ) {
         let target_pos = target.pos;
+        // ── Rung 7, hoisted: pick up a weapon ──
+        // PD runs `bot_pick_up_weapon` *below* attacking, and for a bot with a working
+        // gun the order is invisible either way. For one that cannot shoot it is the
+        // whole behaviour: rung 5 would walk it into the target's face to pull a trigger
+        // that does nothing. So a hunter that wants something goes and gets it first, and
+        // the deathmatch floor economy reaches `AI=pd` instead of being switched off for
+        // it (the alternative on the table was arming PD hunters at spawn).
+        if self.wants_fetch() {
+            self.state = AiState::Fetch;
+            self.fetch_step(dt, nav, SPEED_CHASE * tuning.speed_mult); // every PD move runs
+            self.last_known = Some(target_pos); // a PD bot's knowledge never goes stale
+            return;
+        }
         // `aibot->targetinsight` is a raw line of sight, not a view cone: PD's 45° cone
         // gates *firing* (in `pdsim`), never seeing. So this deliberately does not go
         // through `perceives`.
@@ -2160,6 +2316,37 @@ impl Enemy {
             DistMode::Advance | DistMode::Goto => AiState::Chase,
         };
         self.last_known = Some(target_pos); // a PD bot's knowledge never goes stale
+    }
+
+    /// Walk to the fetch point and stand on it until the `World` hands over the goods.
+    ///
+    /// **One executor, three decision layers** (the utility scorer, the legacy FSM and
+    /// Perfect Dark's ladder), which is the lesson from the last attempt: the fetch
+    /// destination was reachable from exactly one of them, so the default layer steered
+    /// by something else entirely and nobody noticed.
+    ///
+    /// Arrival means "hold here": the collect is the `World`'s (`hunter_pickup_step`,
+    /// on a radius wider than [`ARRIVE_DIST`]), so there is nothing to do but be still
+    /// and let it land. [`FETCH_STALL`] is the guard against holding forever at
+    /// something unreachable.
+    fn fetch_step(&mut self, dt: f32, nav: &NavWorld, speed: f32) {
+        let Some(to) = self.fetch_target else {
+            self.fetch_stall = 0.0;
+            return;
+        };
+        // `move_toward` reports `true` for arrived AND for unreachable — both mean "no
+        // more walking will help", which is exactly what the give-up clock times.
+        if self.move_toward(dt, to, nav, speed) {
+            self.face(to);
+            self.fetch_stall += dt;
+            if self.fetch_stall >= FETCH_STALL {
+                self.fetch_stall = 0.0;
+                self.fetch_block = FETCH_RETRY;
+                self.path.clear();
+            }
+        } else {
+            self.fetch_stall = 0.0;
+        }
     }
 
     /// Begin the reaction delay after acquiring the player.
@@ -3436,5 +3623,97 @@ mod tests {
             gap >= clearance,
             "held {gap:.2} m from the doorway, needs at least the {clearance:.2} m swing"
         );
+    }
+
+    /// **The scoring regression, isolated.** A hunter holding a fresh `last_known` — one
+    /// heard gunshot is enough — used to have `Search` scored at zero (it requires
+    /// `last_known.is_none()`) and so fell to `Investigate`, which walks to the player's
+    /// last-known position. That was the beeline: an empty-handed hunter closing on the
+    /// player because the only behaviour available to it happened to point that way.
+    ///
+    /// The fetch point sits 9 m one way and the belief 9 m the other, so "went shopping"
+    /// and "beelined" are opposite signs. Run in **all three** decision layers, because
+    /// the last version of this reached exactly one of them.
+    #[test]
+    fn a_fetch_target_outranks_the_belief_that_used_to_cause_the_beeline() {
+        let nav = open_room();
+        let dt = 1.0 / 60.0;
+        let start = Vec3::new(10.0, 0.05, 10.0);
+        let gun = Vec3::new(1.0, 0.05, 10.0);
+        let player = Vec3::new(19.0, 0.05, 10.0);
+
+        for (label, utility, pd) in [("utility", true, false), ("fsm", false, false), ("pd", false, true)] {
+            let mut physics = PhysicsWorld::new();
+            let collider = physics.add_enemy_collider(start, 0.24, 0.48);
+            let mut e = Enemy::new(start, player);
+            e.set_utility(utility);
+            let tuning = AiTuning {
+                mode: if pd { AiMode::Pd } else { AiMode::Ours },
+                ..AiTuning::default()
+            };
+            // The hunter cannot see the player (shopping suppression) but DOES believe it
+            // knows where they are — the state a gunshot leaves it in.
+            e.set_detectable(false);
+            e.hear_noise(player);
+            assert_eq!(e.last_known, Some(player), "the precondition: a live belief");
+            e.set_fetch_target(Some(gun));
+
+            // Stop on arrival rather than running a fixed window: nothing here grants
+            // the pickup (there is no `World`), so a longer run would hit the
+            // [`FETCH_STALL`] give-up — which is its own test.
+            let mut arrived = false;
+            for _ in 0..300 {
+                drive(&mut e, dt, player, 4.8, tuning, false, &nav, &mut physics, false, collider);
+                if e.dist_to(gun) < 1.0 {
+                    arrived = true;
+                    break;
+                }
+            }
+            assert_eq!(e.state, AiState::Fetch, "{label}: it stopped shopping");
+            assert!(
+                arrived,
+                "{label}: it never reached the gun — it walked from {start:?} to {:?}, the gun \
+                 is at {gun:?} and the player at {player:?}",
+                e.pos
+            );
+        }
+    }
+
+    /// A hunter must never become a **statue** next to something it cannot pick up. The
+    /// nav grid steers its centre to a cell, so a pickup on a ledge or in an unreachable
+    /// pocket leaves it parked short of the collect radius; after [`FETCH_STALL`] it
+    /// writes that pickup off and goes back to searching for [`FETCH_RETRY`].
+    ///
+    /// Modelled by leaving the fetch target where the hunter already stands, which is
+    /// what "arrived and nothing happened" looks like from inside the behaviour.
+    #[test]
+    fn a_pickup_that_never_arrives_is_given_up_on_rather_than_stood_next_to() {
+        let nav = open_room();
+        let dt = 1.0 / 60.0;
+        let start = Vec3::new(10.0, 0.05, 10.0);
+        let mut physics = PhysicsWorld::new();
+        let collider = physics.add_enemy_collider(start, 0.24, 0.48);
+        let mut e = Enemy::new(start, Vec3::NEG_Z);
+        e.set_utility(true);
+        e.set_detectable(false);
+        e.set_fetch_target(Some(start)); // standing on it, and it never grants
+        e.assign_search_target(Vec3::new(1.0, 0.05, 10.0));
+
+        let mut gave_up_at = None;
+        for f in 0..(60.0 * (FETCH_STALL + 1.0)) as usize {
+            drive(&mut e, dt, Vec3::new(19.0, 0.05, 10.0), 4.8, AiTuning::default(),
+                  false, &nav, &mut physics, false, collider);
+            if gave_up_at.is_none() && e.state != AiState::Fetch {
+                gave_up_at = Some(f as f32 * dt);
+            }
+        }
+        let t = gave_up_at.expect("the hunter stood at an uncollectable pickup forever");
+        assert!(
+            (FETCH_STALL..FETCH_STALL + 0.5).contains(&t),
+            "gave up after {t:.1}s; the clock is {FETCH_STALL:.0}s"
+        );
+        // And it goes back to hunting rather than standing there, then re-asks later.
+        assert_eq!(e.state, AiState::Search, "it gave up into {:?}", e.state);
+        assert!(e.fetch_block > 0.0, "the retry suppression is what stops it re-committing");
     }
 }

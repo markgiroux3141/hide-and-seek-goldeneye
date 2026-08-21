@@ -137,6 +137,24 @@ impl Weapon {
         }
     }
 
+    /// A weapon the player does **not** have: identical to [`Self::new`] but with
+    /// every pool at zero.
+    ///
+    /// The distinction matters now that ammo is something you find. `new` hands out a
+    /// full magazine and ten more in reserve, which was right when the inventory was
+    /// "every weapon, most of them locked" — but it means a weapon picked up (or
+    /// bought) arrives pre-stocked no matter what the pickup authored, and that a
+    /// loadout "reset" on death silently refills every gun in the arsenal. So an
+    /// unowned weapon is created empty and [`Self::stock`] is what puts rounds in it.
+    pub fn empty(config: WeaponStats) -> Self {
+        let mut w = Weapon::new(config);
+        w.magazine = 0;
+        w.reserve = 0;
+        w.magazine2 = 0;
+        w.reserve2 = 0;
+        w
+    }
+
     // ── Firing function (Perfect Dark's `functions[2]`) ─────────────────────
 
     /// Whether this weapon has a second firing function to switch to.
@@ -276,9 +294,31 @@ impl Weapon {
         }
     }
 
-    /// Add `rounds` to the reserve pool (a shop ammo purchase). Saturates.
+    /// Add `rounds` to the reserve pool (a shop ammo purchase, or an ammo crate off
+    /// the floor). Saturates.
     pub fn add_reserve(&mut self, rounds: u32) {
         self.reserve = self.reserve.saturating_add(rounds);
+    }
+
+    /// Stock a weapon that has just come into the player's hands: a **full
+    /// magazine** plus `spare_mags` magazines in reserve.
+    ///
+    /// Distinct from [`Self::add_reserve`] because acquiring a gun and buying rounds
+    /// for one you already carry are different events: a gun found on the floor
+    /// arrives loaded, and the magazine is not something reserve rounds can fill
+    /// without a reload the player never asked for.
+    pub fn stock(&mut self, spare_mags: u32) {
+        let cap = self.config().magazine_size;
+        self.magazine = cap;
+        self.reserve = self.reserve.saturating_add(cap.saturating_mul(spare_mags));
+    }
+
+    /// The default stock for a weapon acquired **with credits** — a full magazine
+    /// and the [`RESERVE_MULTIPLIER`] reserve every weapon used to start the session
+    /// with. Keeps a shop purchase exactly as generous as it was before ammo became
+    /// something you find.
+    pub fn stock_bought(&mut self) {
+        self.stock(RESERVE_MULTIPLIER);
     }
 
     /// Whether a reload is currently in progress (drives the HUD "RELOADING" text).
@@ -305,6 +345,15 @@ impl Weapon {
     /// also auto-reloads. Manual reload is [`Self::request_reload`].
     pub fn update(&mut self, dt: f32, trigger: bool) -> bool {
         self.game_time += dt;
+        // Empty hands: no shot, and no dry-click either — there is no gun to click.
+        // This is the whole of the unarmed slot's behaviour (see `config::UNARMED`),
+        // and it is one early return rather than a branch in each of the fire,
+        // reload and cue paths below.
+        if self.config().is_unarmed() {
+            self.prev_trigger = trigger;
+            self.view.tick(dt);
+            return false;
+        }
         if self.flash_timer > 0.0 {
             self.flash_timer = (self.flash_timer - dt).max(0.0);
         }

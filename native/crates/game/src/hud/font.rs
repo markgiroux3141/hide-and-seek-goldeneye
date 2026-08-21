@@ -19,7 +19,13 @@ pub const PAD: u32 = 1;
 /// [`crate::hud::layout_text`] skips any char without a cell. So this must cover every
 /// character the HUD actually prints, or a string quietly loses letters (`SIMS WIN`
 /// rendered as `SIS IN` before `M` and `W` were added for the scoreboard).
-pub const CHARSET: &str = "0123456789/- YOUDIEPRSANGWM$";
+/// Covers the digits, the punctuation the readouts use, and the **whole** uppercase
+/// alphabet. The alphabet stopped being optional with the pickup banner: it prints a
+/// weapon name, and the arsenal is full of letters no other HUD string needed
+/// (`KLOBB`, `CYCLONE`, `ZZT`) plus the parentheses of `D5K (SILENCED)`. Anything
+/// missing is dropped silently, so covering the alphabet once is cheaper than
+/// chasing the next name that loses a letter.
+pub const CHARSET: &str = "0123456789/-().,$ ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 
 /// Full atlas cell width = glyph + the transparent [`PAD`] column(s).
 pub const fn cell_width() -> u32 {
@@ -62,6 +68,23 @@ pub fn glyph(c: char) -> Option<[u8; 7]> {
         'Y' => [0b10001, 0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100],
         // `$` — an S with a vertical bar struck through it (credits readout).
         '$' => [0b00100, 0b01111, 0b10100, 0b01110, 0b00101, 0b11110, 0b00100],
+        // The rest of the alphabet + punctuation, for the pickup banner's weapon
+        // names (`KLOBB`, `RC-P90`, `D5K (SILENCED)`).
+        'B' => [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110],
+        'C' => [0b01111, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b01111],
+        'F' => [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000],
+        'H' => [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
+        'J' => [0b00111, 0b00010, 0b00010, 0b00010, 0b00010, 0b10010, 0b01100],
+        'K' => [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001],
+        'Q' => [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101],
+        'T' => [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100],
+        'V' => [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b00100],
+        'X' => [0b10001, 0b10001, 0b01010, 0b00100, 0b01010, 0b10001, 0b10001],
+        'Z' => [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111],
+        '(' => [0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010],
+        ')' => [0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000],
+        '.' => [0b00000, 0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b01100],
+        ',' => [0b00000, 0b00000, 0b00000, 0b00000, 0b01100, 0b00100, 0b01000],
         _ => return None,
     };
     Some(rows)

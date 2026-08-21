@@ -8,6 +8,9 @@ pub(crate) mod door;
 mod gizmo;
 mod light;
 mod opening;
+/// `pub(crate)` so the prop draw list + the panel can reach the pickup helpers, and
+/// so the pickup tests' fixtures are shared like `spawn_point`'s.
+pub(crate) mod pickup;
 mod placement;
 mod platform;
 mod prop;

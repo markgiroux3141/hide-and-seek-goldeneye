@@ -194,6 +194,17 @@ pub struct WeaponStats {
 }
 
 impl WeaponStats {
+    /// Whether this "weapon" is the empty-handed slot — no mesh, no rounds, no
+    /// shot. See [`UNARMED`].
+    ///
+    /// Keyed on the **magazine size** rather than the name, because that is the
+    /// field the fire gate actually reads: a slot that cannot hold a round cannot
+    /// fire one, so there is a single source of truth for "this does nothing"
+    /// instead of a name comparison that a rename would silently break.
+    pub fn is_unarmed(&self) -> bool {
+        self.magazine_size == 0
+    }
+
     /// Whether this weapon came from the Perfect Dark table rather than the
     /// GoldenEye one.
     ///
@@ -219,6 +230,52 @@ const PI: f32 = std::f32::consts::PI;
 
 const RELOAD_SND: &str = "sounds/weapons/reload.wav";
 const EMPTY_SND: &str = "sounds/weapons/empty.wav";
+
+// ─── Empty hands ──────────────────────────────────────────────────────────────
+
+/// The **unarmed** slot: what you hold when you hold nothing.
+///
+/// You start a deathmatch empty-handed and find your guns on the floor (see
+/// `DESIGN_PICKUPS.md`), so "no weapon" has to be a state the whole combat stack
+/// can already represent. Making it a [`WeaponStats`] rather than a new
+/// `Option<usize>` on the world means the viewmodel, the HUD, the weapon cycle and
+/// the ammo counter need no branch for it — they drive this entry like any other.
+///
+/// Everything about it is the absence of a weapon rather than a weak one:
+///
+/// * `magazine_size: 0` — the fire gate ([`WeaponStats::is_unarmed`],
+///   checked in `Weapon::update`). A zero-capacity magazine cannot be loaded, so
+///   the trigger does nothing and does not even dry-click.
+/// * `gun_path: ""` — no mesh, so nothing renders in your hands. The weapon
+///   loader already warns-and-returns-`None` on a path it can't read; this asks it
+///   not to try.
+///
+/// There is **no melee yet**. The slot is deliberately inert, and it is where a
+/// punch (Perfect Dark's `FUNCFLAG` melee function, or PD's own Unarmed entry)
+/// lands when it arrives — at which point only this const and the fire gate move.
+pub const UNARMED: WeaponStats = WeaponStats {
+    name: "Unarmed",
+    fire_cooldown: 0.4,
+    magazine_size: 0,
+    reload_time: 0.0,
+    damage: 0.0,
+    range: 0.0,
+    fire_sound: "",
+    reload_sound: "",
+    empty_sound: "",
+    gun_path: "",
+    muzzle_path: "",
+    model_scale: DEFAULT_SCALE,
+    model_offset: Vec3::ZERO,
+    pivot_offset: Vec3::ZERO,
+    muzzle_offset: DEFAULT_MUZZLE,
+    model_rotation: Vec3::ZERO,
+    recoil_z: 0.0,
+    recoil_rot: 0.0,
+    automatic: false,
+    fire_kind: FireKind::Hitscan,
+    secondary: None,
+};
 
 // ─── Pistols (semi-auto) ──────────────────────────────────────────────────────
 
@@ -934,10 +991,19 @@ pub const REMOTE_MINE: WeaponStats = WeaponStats {
 // held weapon: pad A+B together, or the keyboard detonate key. See `world::combat`
 // `detonate_remote_mines` and the input wiring in `app`/`gamepad`.)
 
-/// The player's cycle-order inventory (JS `ALL_WEAPONS`): pistols → PP7 variants →
-/// SMGs → rifles → shotguns → special. Index 0 (PP7) is the weapon spawned first.
-/// `Q` (keyboard) / `A` (N64 pad) steps through this list.
+/// The player's cycle-order inventory (JS `ALL_WEAPONS`): unarmed → pistols → PP7
+/// variants → SMGs → rifles → shotguns → special.
+///
+/// **Index 0 is [`UNARMED`], not the PP7.** You start a deathmatch empty-handed and
+/// pick your guns up off the floor, so the empty-handed slot leads every arsenal
+/// (`Arsenal::weapons`) — including Perfect Dark's. Nothing resolves a weapon by
+/// index: the starting sidearm, the shop prices and the enemy defs are all keyed by
+/// **name**, which is the convention this table already followed.
+///
+/// `Q` (keyboard) / `A` (N64 pad) steps through this list, visiting only what the
+/// player owns.
 pub const WEAPONS: &[WeaponStats] = &[
+    UNARMED, // empty hands — the slot you spawn in
     PP7, DD44, MAGNUM, GOLDEN_GUN, // pistols
     GOLD_PP7, SILVER_PP7, PP7_SILENCER, // pp7 variants
     KLOBB, DK5, DK5_SILENCER, PHANTOM, ZMG, // smgs

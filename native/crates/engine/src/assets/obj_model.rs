@@ -12,10 +12,32 @@
 //! file, so unlike the split GLBs there is nothing to merge.
 //!
 //! Deliberately small: it handles the subset the editor emits — `v`, `vt`, `f`
-//! (triangulated `v/vt` corners), `usemtl`, `mtllib`; and `Kd` / `map_Kd` in the
-//! MTL. Normals are synthesised flat (the prop shader ignores them). Material-name
-//! render hints (`EnvMapping`, `CullBoth`, `ClampS/T`) are ignored — the prop pipeline
-//! is already unlit, cull-none, and repeat-wrapped.
+//! (triangulated `v/vt` corners), `usemtl`, `mtllib`, the `#vcolor` /
+//! `#fvcolorindex` vertex-colour pair; and `Kd` / `map_Kd` in the MTL. Normals are
+//! synthesised flat (the prop shader ignores them). Material-name render hints
+//! (`EnvMapping`, `CullBoth`, `ClampS/T`) are ignored — the prop pipeline is already
+//! unlit, cull-none, and repeat-wrapped.
+//!
+//! # `#vcolor` is data, not a comment
+//!
+//! The editor writes per-vertex colour as **`#`-prefixed lines**, which every OBJ
+//! parser in the world is entitled to skip:
+//!
+//! ```text
+//! #vcolor 108.000000 187.000000 135.000000 255.000000   ← palette entry (1-based)
+//! f 6/13 1/14 4/15
+//! #fvcolorindex 2 2 3                                   ← one index per corner
+//! ```
+//!
+//! Skipping them is not lossless. Some exports carry **no `Kd` at all** and put the
+//! object's entire colour here — the green ammo crate is one, and dropping its
+//! palette rendered a green crate grey, since a missing `Kd` defaults to white and
+//! white × a grey N64 texture is grey. So the palette is folded into the vertex
+//! colour alongside `Kd` (`texel × colour × tint` in the shader), which is the same
+//! place the GLB props' `baseColorFactor` ends up.
+//!
+//! Alpha rides along: the editor's decal materials author it below 255 (the crate's
+//! stencils are `…, 140`), and that is the only place their translucency is stated.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -45,10 +67,37 @@ struct ParsedObj {
     uvs: Vec<[f32; 2]>,
     /// `(material, [(v_idx, vt_idx); 3])` per triangle, in file order.
     faces: Vec<(String, [(usize, usize); 3])>,
+    /// Per-triangle vertex-colour palette indices (one per corner), parallel to
+    /// [`Self::faces`]. `None` for a triangle the export gave no `#fvcolorindex`, and
+    /// for every file that carries no palette at all.
+    face_colors: Vec<Option<[usize; 3]>>,
+    /// The `#vcolor` palette, linear 0–1 RGBA, in file order. Indices in
+    /// [`Self::face_colors`] are **1-based** into this (0 means "none").
+    palette: Vec<[f32; 4]>,
     materials: HashMap<String, Material>,
     images: Vec<TexImage>,
     /// Texture filename → index into `images`.
     tex_index: HashMap<String, usize>,
+}
+
+impl ParsedObj {
+    /// The vertex colour for corner `corner` of triangle `fi`: the material's `Kd`
+    /// scaled by the `#vcolor` palette entry, or `Kd` alone where the export gave no
+    /// palette. Multiplying rather than choosing means neither channel is thrown
+    /// away — and since an export that authors a palette leaves `Kd` at the white
+    /// default (and vice versa), in practice exactly one of the two is doing the work.
+    fn corner_color(&self, fi: usize, corner: usize, kd: [f32; 4]) -> [f32; 4] {
+        let Some(v) = self
+            .face_colors
+            .get(fi)
+            .copied()
+            .flatten()
+            .and_then(|idx| self.palette.get(idx[corner].wrapping_sub(1)).copied())
+        else {
+            return kd;
+        };
+        [kd[0] * v[0], kd[1] * v[1], kd[2] * v[2], kd[3] * v[3]]
+    }
 }
 
 /// Load a Wavefront OBJ (with its sibling MTL + textures) into a [`TexturedModel`],
@@ -161,10 +210,38 @@ fn parse_obj(path: &str) -> Result<ParsedObj, String> {
     let mut cur_mat = String::new();
     // (material, [(v_idx, vt_idx); 3]) per triangle.
     let mut faces: Vec<(String, [(usize, usize); 3])> = Vec::new();
+    // The `#vcolor` palette, and the per-triangle corner indices into it. Indices are
+    // recorded against the triangles emitted by the *preceding* `f` line, since
+    // `#fvcolorindex` follows its face.
+    let mut palette: Vec<[f32; 4]> = Vec::new();
+    let mut face_colors: Vec<Option<[usize; 3]>> = Vec::new();
+    // How many triangles the last `f` line produced, so a fan-triangulated polygon's
+    // corner indices are distributed the same way its corners were.
+    let mut last_face_corners: Vec<usize> = Vec::new();
 
     for line in text.lines() {
         let mut it = line.split_whitespace();
         match it.next() {
+            // Palette entry: RGBA in 0–255, in file order (referenced 1-based).
+            Some("#vcolor") => {
+                let c: Vec<f32> = it.take(4).filter_map(|s| s.parse::<f32>().ok()).collect();
+                if c.len() == 4 {
+                    palette.push([c[0] / 255.0, c[1] / 255.0, c[2] / 255.0, c[3] / 255.0]);
+                }
+            }
+            // One palette index per corner of the face just read. Re-fanned to match
+            // how that face was triangulated, so corner→colour stays aligned for the
+            // polygon case (the editor emits triangles, where this is the identity).
+            Some("#fvcolorindex") => {
+                let idx: Vec<usize> = it.filter_map(|s| s.parse::<usize>().ok()).collect();
+                if idx.len() == last_face_corners.len() && idx.len() >= 3 {
+                    let tris = idx.len() - 2;
+                    let start = face_colors.len() - tris;
+                    for (t, slot) in face_colors[start..].iter_mut().enumerate() {
+                        *slot = Some([idx[0], idx[t + 1], idx[t + 2]]);
+                    }
+                }
+            }
             Some("v") => {
                 let p: Vec<f32> = it.take(3).filter_map(|s| s.parse().ok()).collect();
                 if p.len() == 3 {
@@ -197,7 +274,9 @@ fn parse_obj(path: &str) -> Result<ParsedObj, String> {
                     .collect();
                 for i in 1..corners.len().saturating_sub(1) {
                     faces.push((cur_mat.clone(), [corners[0], corners[i], corners[i + 1]]));
+                    face_colors.push(None);
                 }
+                last_face_corners = (0..corners.len()).collect();
             }
             _ => {}
         }
@@ -226,7 +305,23 @@ fn parse_obj(path: &str) -> Result<ParsedObj, String> {
         }
     }
 
-    Ok(ParsedObj { positions, uvs, faces, materials, images, tex_index })
+    if !palette.is_empty() {
+        log::debug!(
+            "{path}: {} vertex-colour palette entries over {} triangles",
+            palette.len(),
+            face_colors.iter().filter(|c| c.is_some()).count()
+        );
+    }
+    Ok(ParsedObj {
+        positions,
+        uvs,
+        faces,
+        face_colors,
+        palette,
+        materials,
+        images,
+        tex_index,
+    })
 }
 
 /// Build one [`TexturedModel`] from a subset of a [`ParsedObj`]'s faces, or `None` if
@@ -237,7 +332,7 @@ fn parse_obj(path: &str) -> Result<ParsedObj, String> {
 /// 14-texture parts sheet into six pieces doesn't hand each piece all 14.
 fn build_model(p: &ParsedObj, face_idx: &[usize]) -> Option<TexturedModel> {
     let mut vertices: Vec<TexVertex> = Vec::new();
-    let mut vert_map: HashMap<(usize, usize, usize), u32> = HashMap::new();
+    let mut vert_map: HashMap<(usize, usize, usize, usize), u32> = HashMap::new();
     let mut buckets: Vec<Vec<u32>> = Vec::new();
     let mut bucket_of: HashMap<usize, usize> = HashMap::new();
     let mut bucket_image: Vec<Option<usize>> = Vec::new();
@@ -275,14 +370,19 @@ fn build_model(p: &ParsedObj, face_idx: &[usize]) -> Option<TexturedModel> {
             .collect();
         let normal = (q[1] - q[0]).cross(q[2] - q[0]).normalize_or_zero().to_array();
 
-        for &(v, vt) in corners {
-            let key = (mkey, v, vt);
+        for (ci, &(v, vt)) in corners.iter().enumerate() {
+            // The palette index joins the dedupe key: two triangles can share a
+            // `(material, position, uv)` corner while shading it differently (the
+            // crate's lid does exactly this — `2 2 3` next to `2 3 3`), and merging
+            // those would quietly flatten the shading to whichever came first.
+            let cidx = p.face_colors.get(fi).copied().flatten().map(|i| i[ci]).unwrap_or(0);
+            let key = (mkey, v, vt, cidx);
             let vi = *vert_map.entry(key).or_insert_with(|| {
                 vertices.push(TexVertex {
                     pos: p.positions.get(v).copied().unwrap_or([0.0; 3]),
                     normal,
                     uv: p.uvs.get(vt).copied().unwrap_or([0.0, 0.0]),
-                    color: kd,
+                    color: p.corner_color(fi, ci, kd),
                 });
                 (vertices.len() - 1) as u32
             });
@@ -446,6 +546,78 @@ mod tests {
         let img = decode_bmp32(&bytes).expect("a 32-bit BMP");
         // Every texel should carry the translucent alpha (144), not opaque 255.
         assert!(img.rgba.chunks_exact(4).all(|px| px[3] == 144));
+    }
+
+    /// The `#vcolor` palette is read, and it is what makes the green ammo crate green.
+    ///
+    /// This asset states its colour **only** in those `#`-prefixed lines — its MTL has
+    /// no `Kd` at all — so a parser that treats them as comments (which is the
+    /// defensible reading of the OBJ spec, and what this loader did at first) renders a
+    /// green crate grey: no `Kd` defaults to white, and white × a grey N64 texture is
+    /// grey. The invariant is therefore about the *hue*, since that is exactly what
+    /// dropping the palette loses.
+    #[test]
+    fn the_vertex_colour_palette_is_read_and_the_green_crate_is_green() {
+        let p = format!(
+            "{}/../../assets/props/green_ammo_crate/green_ammo_crate.obj",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let m = load_obj(&p).expect("the green crate loads");
+        assert!(!m.vertices.is_empty());
+
+        // The crate reads GREEN overall. Stated as the mean rather than per vertex,
+        // because the palette is honestly not all green: three entries are the dark
+        // red of the stencil decals and one is the neutral grey behind them. Losing
+        // the palette gives a perfectly neutral result (r == g == b everywhere), so
+        // "the average has a green cast" is precisely the property at stake.
+        let n = m.vertices.len() as f32;
+        let mean = m.vertices.iter().fold([0.0f32; 3], |a, v| {
+            [a[0] + v.color[0] / n, a[1] + v.color[1] / n, a[2] + v.color[2] / n]
+        });
+        assert!(
+            mean[1] > mean[0] && mean[1] > mean[2],
+            "the crate's mean colour {mean:?} is not green-dominant — the palette \
+             was dropped, which renders it grey"
+        );
+        // And several vertices are *unmistakably* green, not merely tinted.
+        let green = m
+            .vertices
+            .iter()
+            .filter(|v| v.color[1] > v.color[0] * 1.3 && v.color[1] > v.color[2] * 1.3)
+            .count();
+        assert!(green >= 8, "only {green} clearly-green vertices");
+        // The shading varies: 9 palette entries, so a flat result would mean only one
+        // of them was ever applied.
+        let lum = |c: &[f32; 4]| c[0] + c[1] + c[2];
+        let lo = m.vertices.iter().map(|v| lum(&v.color)).fold(f32::MAX, f32::min);
+        let hi = m.vertices.iter().map(|v| lum(&v.color)).fold(f32::MIN, f32::max);
+        assert!(hi - lo > 0.1, "vertex shading is flat ({lo}..{hi}) — one entry reused");
+
+        // The decals keep their authored translucency (alpha 140/255), which is the
+        // only place that fact is stated.
+        assert!(
+            m.vertices.iter().any(|v| v.color[3] < 0.9 && v.color[3] > 0.0),
+            "the stencil decals lost their alpha"
+        );
+    }
+
+    /// An export with **no** palette is untouched — it still takes its colour from the
+    /// MTL's `Kd`. Four of the five editor OBJ props are like this, so this is the
+    /// guard that adding vertex colours changed nothing for them.
+    #[test]
+    fn an_export_without_a_palette_still_uses_kd() {
+        let p = format!(
+            "{}/../../assets/props/grey_table/grey_table.obj",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        let m = load_obj(&p).expect("the grey table loads");
+        // Its MTL authors a neutral grey, and every vertex should be exactly that —
+        // fully opaque and unshaded.
+        for v in &m.vertices {
+            assert_eq!(v.color[0], v.color[1], "not neutral: {:?}", v.color);
+            assert_eq!(v.color[1], v.color[2], "not neutral: {:?}", v.color);
+            assert_eq!(v.color[3], 1.0, "alpha moved: {:?}", v.color);
+        }
     }
 
     /// A model without an OBJ still errors cleanly rather than panicking.

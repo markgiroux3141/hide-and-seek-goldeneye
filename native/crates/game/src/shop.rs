@@ -14,7 +14,11 @@ pub const AMMO_MAGS_PER_BUY: u32 = 2;
 /// then falls back to a nominal default, and the coverage test flags the omission.
 fn listed_price(name: &str) -> Option<u32> {
     Some(match name {
-        "PP7" => 0, // the free starter — owned from the first frame, never buyable
+        // Empty hands: owned from the first frame and not a thing you can buy. Listed
+        // (rather than left to the fallback) so the coverage test keeps covering the
+        // whole arsenal.
+        "Unarmed" => 0,
+        "PP7" => 300, // no longer the free starter — you start empty-handed now
         // Pistols / PP7 variants
         "DD44 Dostovei" => 300,
         "PP7 (Silenced)" => 700,
@@ -61,6 +65,7 @@ pub fn weapon_price(name: &str) -> u32 {
 /// single header can be emitted whenever the category changes while iterating.
 pub fn weapon_category(name: &str) -> &'static str {
     match name {
+        "Unarmed" => "UNARMED",
         "PP7" | "DD44 Dostovei" | "Cougar Magnum" | "Golden Gun" | "Gold PP7"
         | "Silver PP7" | "PP7 (Silenced)" => "PISTOLS",
         "Klobb" | "D5K Deutsche" | "D5K (Silenced)" | "Phantom" | "ZMG 9mm" => "SMGS",
@@ -99,14 +104,17 @@ mod tests {
         }
     }
 
-    /// The PP7 is free (the starter) and every other weapon costs something.
+    /// Empty hands are free (you start with them and they can't be bought); every
+    /// actual weapon costs something — including the PP7, which stopped being the
+    /// free starter when the player started spawning unarmed.
     #[test]
-    fn pp7_is_free_others_cost() {
-        assert_eq!(weapon_price("PP7"), 0);
+    fn only_the_unarmed_slot_is_free() {
+        assert_eq!(weapon_price("Unarmed"), 0);
         for w in config::WEAPONS {
-            if w.name != "PP7" {
-                assert!(weapon_price(w.name) > 0, "{} should cost credits", w.name);
+            if w.is_unarmed() {
+                continue;
             }
+            assert!(weapon_price(w.name) > 0, "{} should cost credits", w.name);
         }
     }
 

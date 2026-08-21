@@ -27,8 +27,9 @@ mod tests;
 
 pub use components::{
     AmbientSettings, Destroyed, Door, DoorAccess, DoorGeom, DoorState, Health, HingeSide, Interactable,
-    MeshId, OpeningType, PointLight, Renderable, SpawnPoint, Transform, Turret,
-    DOOR_AUTO_CLOSE, DOOR_OPEN_ANGLE, DOOR_USE_RADIUS,
+    MeshId, OpeningType, Pickup, PickupKind, PointLight, Renderable, SpawnPoint, Transform, Turret,
+    DOOR_AUTO_CLOSE, DOOR_OPEN_ANGLE, DOOR_USE_RADIUS, PICKUP_AMMO_MAGS, PICKUP_AMMO_RESPAWN,
+    PICKUP_WEAPON_MAGS, PICKUP_WEAPON_RESPAWN,
 };
 pub use persist::{ComponentData, EntityData};
 pub use systems::{Command, SystemCtx};

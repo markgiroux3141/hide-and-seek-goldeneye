@@ -101,6 +101,18 @@ pub enum MeshId {
     Lamp,
     TestTubes,
     BodyArmour,
+    // ── Pickups ──
+    /// A gun lying on the ground. **Not a catalog prop**: the mesh is chosen by the
+    /// [`Pickup`]'s weapon name and drawn from the world-space weapon render
+    /// library (the one the hunters' guns already use), so there is one mesh id for
+    /// every gun in the arsenal rather than one per weapon.
+    WeaponPickup,
+    /// An ammo crate — the GoldenEye tan box (`ammo_crate.glb`, shared with the
+    /// destructible [`MeshId::AmmoCrate`] prop) as a collectable.
+    AmmoPickupTan,
+    /// An ammo crate — the green Setup-Editor crate. A purely visual alternative to
+    /// [`MeshId::AmmoPickupTan`]; the rounds it holds are authored, not implied.
+    AmmoPickupGreen,
     // ── Doors (static props; mechanics later) ──
     MetalDoor,
     MetalDoor2,
@@ -242,6 +254,93 @@ impl Default for Turret {
             cooldown: 0.0,
             reacquire: 0.0,
         }
+    }
+}
+
+/// What a [`Pickup`] hands over when the player walks onto it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PickupKind {
+    /// The gun itself: grants ownership, a loaded magazine and some reserve.
+    Weapon,
+    /// A crate of rounds for one weapon: reserve only.
+    Ammo,
+}
+
+/// A weapon or ammo crate lying on the ground for the player to collect.
+///
+/// The deathmatch pivot in one component (`DESIGN_PICKUPS.md`): you spawn holding
+/// nothing, and the level is stocked with these. Placed as an ordinary authored
+/// entity, so it inherits the whole object pipeline — palette, ghost, gizmos,
+/// duplicate, undo, persistence — with no new tooling.
+///
+/// # The weapon is NAMED, not indexed
+///
+/// `weapon` is an arsenal **display name**, matching what [`crate::shop`] prices and
+/// what [`crate::combat::enemy_def_for`] resolves — both name-keyed on purpose, so
+/// that reordering a weapon table cannot silently repoint authored data. It stays a
+/// `&'static str` (keeping this `Copy`) because
+/// [`crate::combat::arsenal::resolve_name`] hands back the table's own string, and it
+/// resolves across **both** weapon families so a level authored under one arsenal
+/// still loads under the other.
+///
+/// # What persists
+///
+/// Everything except `cooldown`, which is HUNT-only runtime — an authored level
+/// always opens with every pickup sitting on the floor, the same rule
+/// [`Turret`] and [`DoorGeom`] follow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pickup {
+    pub kind: PickupKind,
+    /// Which weapon this is, or which weapon's rounds it holds.
+    pub weapon: &'static str,
+    /// Magazines granted. For a [`PickupKind::Weapon`] this is the reserve handed
+    /// over *on top of* the full magazine it arrives loaded with.
+    pub mags: u32,
+    /// Seconds until it returns after being taken. `0.0` = gone for the round.
+    pub respawn: f32,
+    /// Runtime: seconds left until it comes back. `> 0.0` means taken — the draw
+    /// list skips it and it cannot be collected again. Never persisted.
+    pub cooldown: f32,
+}
+
+/// Default reserve a weapon pickup hands over, in magazines. Two spare mags is
+/// enough to fight with and few enough that ammo crates still matter.
+pub const PICKUP_WEAPON_MAGS: u32 = 2;
+/// Default rounds in an ammo crate, in magazines of the weapon it feeds.
+pub const PICKUP_AMMO_MAGS: u32 = 3;
+/// Default respawn for a weapon pickup, in seconds — long enough that taking the
+/// good gun is worth something, short enough that the level keeps flowing.
+pub const PICKUP_WEAPON_RESPAWN: f32 = 20.0;
+/// Default respawn for an ammo crate. Shorter than a weapon's: rounds are the
+/// consumable, so they should come back faster than the gun that eats them.
+pub const PICKUP_AMMO_RESPAWN: f32 = 10.0;
+
+impl Pickup {
+    /// A weapon lying on the ground, with the authoring defaults.
+    pub fn weapon(name: &'static str) -> Self {
+        Pickup {
+            kind: PickupKind::Weapon,
+            weapon: name,
+            mags: PICKUP_WEAPON_MAGS,
+            respawn: PICKUP_WEAPON_RESPAWN,
+            cooldown: 0.0,
+        }
+    }
+
+    /// An ammo crate feeding `name`, with the authoring defaults.
+    pub fn ammo(name: &'static str) -> Self {
+        Pickup {
+            kind: PickupKind::Ammo,
+            weapon: name,
+            mags: PICKUP_AMMO_MAGS,
+            respawn: PICKUP_AMMO_RESPAWN,
+            cooldown: 0.0,
+        }
+    }
+
+    /// Whether it has been taken and is waiting to come back (or gone for good).
+    pub fn taken(&self) -> bool {
+        self.cooldown > 0.0
     }
 }
 
