@@ -442,6 +442,91 @@ pub(crate) mod tests {
         }
     }
 
+    /// A 40 m room split by a solid wall with a gap at one end, so the two halves are
+    /// connected for nav but **blind to each other**.
+    ///
+    /// Line of sight is what makes Perfect Dark's spawn filter discriminate: `very_bad` is
+    /// "an enemy can see this pad", so in one open room every pad is very bad from
+    /// everywhere, passes 1–2 find nothing, and only the desperate pass ever runs. A level
+    /// with interior walls — which is every real level — is the case the filter is for, and
+    /// testing spawn choice in an open box measures nothing.
+    fn partitioned_room(side_m: f32) -> World {
+        let mut world = World::new();
+        let wt = side_m / WORLD_SCALE;
+        let mut region = Region::new(0);
+        region.brushes.push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, wt, 16.0, wt));
+        // Full-height slab across the middle, stopping 15% short of the far wall.
+        region
+            .brushes
+            .push(Brush::new(2, Op::Add, 0.0, 0.0, wt * 0.5, wt * 0.85, 16.0, 4.0));
+        world.regions = vec![region];
+        world.initial_meshes();
+        world
+    }
+
+    /// **You do not respawn in the middle of the pack.** The whole feature, end to end
+    /// through the real respawn path, on the pool shape that used to defeat it.
+    ///
+    /// Four pads — the shipping level's count — with the wave loitering by three of them
+    /// and the fourth alone behind the wall. PD's filter identifies that fourth pad every
+    /// time; the bug was that its desperate pass then topped the shortlist up with the
+    /// other three, because on a four-pad level "whatever is left" is the whole level, and
+    /// the roll went uniform. Repeated 30 times because the failure was probabilistic —
+    /// one respawn in four was fine, which is exactly why it read as bad luck.
+    ///
+    /// The pack stands **4 m off** its pads rather than on them: PD's desperate pass
+    /// already refuses a pad with a body inside 2 m, so bodies parked on the pads hide the
+    /// defect completely. Loitering nearby is also the real case — hunters roam.
+    #[test]
+    fn a_respawning_player_does_not_come_back_in_the_pack() {
+        let mut world = partitioned_room(40.0);
+        world.set_wave_size(6);
+        world.set_score_limit(0);
+        let pads = [
+            Vec3::new(8.0, 0.0, 8.0),
+            Vec3::new(20.0, 0.0, 8.0),
+            Vec3::new(32.0, 0.0, 8.0),
+            Vec3::new(20.0, 0.0, 32.0), // alone on the far side of the wall
+        ];
+        for p in pads {
+            place_pad(&mut world, p, 0.0);
+        }
+        world.camera.pos = Vec3::new(20.0, 2.0, 20.0);
+        world.toggle_mode();
+        assert_eq!(world.enemies.len(), 6, "a real wave is in the level");
+
+        for round in 0..30 {
+            // Park the pack two-to-a-pad beside the three near pads, every round, so the
+            // level state is the reported one rather than wherever the AI wandered to.
+            for (i, inst) in world.enemies.iter_mut().enumerate() {
+                let at = pads[i / 2] + Vec3::new(0.6 * (i % 2) as f32, 0.0, 4.0);
+                inst.enemy.pos = Vec3::new(at.x, inst.enemy.pos.y, at.z);
+                let c = inst.collider;
+                world.physics.update_enemy_collider(c, inst.enemy.pos);
+            }
+            world.take_player_damage(1e6);
+            let dt = 1.0 / 60.0;
+            let input = InputState::default();
+            for _ in 0..((crate::world::RESPAWN_DELAY + 0.2) / dt) as usize {
+                world.fixed_step(dt, &input);
+            }
+            assert!(!world.is_player_dead(), "round {round}: never respawned");
+            let feet = world.player_pos().expect("a live player");
+            let nearest = world
+                .enemies
+                .iter()
+                .filter(|e| !e.enemy.is_dead())
+                .map(|e| Vec3::new(e.enemy.pos.x - feet.x, 0.0, e.enemy.pos.z - feet.z).length())
+                .fold(f32::INFINITY, f32::min);
+            assert!(
+                nearest > 10.0,
+                "round {round}: respawned {nearest:.1} m from a hunter at {feet:?} — the pad \
+                 at {:?}, behind the wall, was clear",
+                pads[3]
+            );
+        }
+    }
+
     /// A marker means "a pad is here", so an un-authored level draws none: the fresh
     /// starting room is bare floor. Authored pads then render in BOTH modes.
     ///

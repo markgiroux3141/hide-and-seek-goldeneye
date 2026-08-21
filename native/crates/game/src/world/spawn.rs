@@ -46,6 +46,28 @@
 //! Everything else is PD's, at PD's numbers: 1 PD unit is 1 cm, so its `1000 * 1000`
 //! and `200 * 200` squared thresholds are 10 m and 2 m here, exactly.
 //!
+//! ## The one deliberate deviation: the desperate pass does not dilute
+//!
+//! PD's third pass runs `while (sllen < 4)` — it **tops up** a shortlist that already
+//! holds good pads with whatever is left, in descending-distance order. That is safe in
+//! Perfect Dark and ruinous here, and the difference is pool size, not rule quality:
+//! `player_choose_spawn_location` is written against `pads[24]` and a PD multiplayer
+//! level authors most of that, so passes 1–2 normally fill all four slots and the
+//! desperate pass never runs at all.
+//!
+//! Our levels author a handful. With four pads — the real shipping level at the time
+//! this was written — the arithmetic collapses: pass 1 finds the one pad clear of the
+//! pack, the desperate pass tops the shortlist up with the other three *because they are
+//! all that is left*, and the final roll is uniform over every pad in the level. The
+//! filter computes a perfectly good answer and then throws it away three times out of
+//! four. That is the "I respawned in the middle of them" report.
+//!
+//! So the desperate pass runs **only when the shortlist is empty** — which is what it is
+//! for: a level where nothing is safe still has to spawn somebody. Whenever any pad
+//! passes the filter, only filtered pads are rolled between. Everything upstream of that
+//! line is unchanged, and with a PD-sized pool the two behave identically, because there
+//! the desperate pass was already unreachable.
+//!
 //! PD also validates each candidate with `chr_adjust_pos_for_spawn` (does the body
 //! fit?) and only shortlists it if that succeeds. That check happens earlier here —
 //! `World::prepare_spawn` resolves every authored pad to a standable nav cell when the
@@ -81,7 +103,7 @@ pub(crate) enum Spawning {
 
 /// Shortlist capacity — PD's `slpositions[4]` (`player.c:242`). Four candidates is
 /// what makes the final pick a roll rather than a formula.
-const SHORTLIST: usize = 4;
+pub(crate) const SHORTLIST: usize = 4;
 
 /// Minimum distance (m) from the nearest enemy for a pad to be shortlisted in the
 /// first two passes — PD's `padsqdists[p] > 1000 * 1000` (`player.c:329`), 1000 PD
@@ -106,6 +128,22 @@ struct PadInfo {
     dist_sq: Option<f32>,
     bad: bool,
     very_bad: bool,
+}
+
+/// The chosen pad plus what it took to get there — the second half exists because
+/// "I spawned in the middle of them" is otherwise unfalsifiable from a play session.
+/// [`super::World::choose_spawn_pad`] logs it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SpawnChoice {
+    /// Index into the pad pool the caller passed in.
+    pub pad: usize,
+    /// Metres from that pad to the nearest body already in the level, or infinity when
+    /// the level is empty (match start). This is the number the complaint is about.
+    pub enemy_dist: f32,
+    /// Which pass shortlisted the winner: `1` clear and not bad, `2` clear but bad,
+    /// `3` the desperate pass (**nothing** was safe), `0` the empty-pool fallback.
+    /// A `3` in the log means the level, not the rule, is out of good answers.
+    pub pass: u8,
 }
 
 /// xorshift64 → an index in `[0, n)`, run on the caller's RNG state so spawn choice is
@@ -137,7 +175,7 @@ pub(crate) fn choose_spawn(
     occupants: &[Vec3],
     physics: &mut PhysicsWorld,
     rng: &mut u64,
-) -> Option<usize> {
+) -> Option<SpawnChoice> {
     if pads.is_empty() {
         return None;
     }
@@ -167,25 +205,38 @@ pub(crate) fn choose_spawn(
         })
         .collect();
 
-    let mut shortlist: Vec<usize> = Vec::with_capacity(SHORTLIST);
+    // Nearest-occupant distance per pad, kept aside for the diagnostic — `info` consumes
+    // `dist_sq` as the passes claim pads, so it can't be read back afterwards.
+    let nearest: Vec<f32> = info
+        .iter()
+        .map(|p| p.dist_sq.map_or(f32::INFINITY, f32::sqrt))
+        .collect();
+
+    // `(pad index, which pass took it)`.
+    let mut shortlist: Vec<(usize, u8)> = Vec::with_capacity(SHORTLIST);
 
     // ── Pass 1: clear of everyone (>10 m) and not bad. ──
     // PD walks circularly from a random index so that with more qualifying pads than
     // shortlist slots it isn't always the same four — the randomisation is in the
     // *start*, not just the final pick.
-    circular_fill(&mut shortlist, &mut info, rng, |p| {
+    circular_fill(&mut shortlist, &mut info, rng, 1, |p| {
         p.dist_sq.is_some_and(|d| d > min_sq) && !p.bad
     });
 
     // ── Pass 2: still >10 m, now accepting *bad* pads but not *very bad* ones. ──
-    circular_fill(&mut shortlist, &mut info, rng, |p| {
+    circular_fill(&mut shortlist, &mut info, rng, 2, |p| {
         p.dist_sq.is_some_and(|d| d > min_sq) && !p.very_bad
     });
 
     // ── Pass 3: desperate — take what's left, farthest first. ──
-    // No distance gate and no exposure filter: a small level where every pad is
-    // watched still has to spawn somebody.
-    while shortlist.len() < SHORTLIST {
+    // No distance gate and no exposure filter: a level where every pad is watched still
+    // has to spawn somebody.
+    //
+    // **Only when nothing survived the filter.** PD tops up a partly-filled shortlist
+    // here; with a pool barely larger than the shortlist that dissolves the filter into a
+    // uniform pick over the whole level. See the module docs — this is the one deviation,
+    // and it is a no-op on a PD-sized pool.
+    while shortlist.is_empty() {
         let Some((best_i, best_sq)) = info
             .iter()
             .enumerate()
@@ -196,20 +247,24 @@ pub(crate) fn choose_spawn(
         };
         // PD stops here rather than shortlisting a pad with someone standing on it —
         // unless nothing has been shortlisted, in which case a bad spawn beats none.
+        // Reaching this loop at all means the shortlist IS empty, so the guard reduces to
+        // "take it anyway"; kept explicit because the condition is PD's and the next
+        // person to widen the loop needs to see it.
         if best_sq <= DESPERATE_DIST * DESPERATE_DIST && !shortlist.is_empty() {
             break;
         }
         info[best_i].dist_sq = None;
-        shortlist.push(best_i);
+        shortlist.push((best_i, 3));
     }
 
     // ── Roll between the candidates. ──
-    Some(if shortlist.is_empty() {
+    let (pad, pass) = if shortlist.is_empty() {
         // PD's own fallback: a uniform pick over the full set.
-        rand_below(rng, pads.len())
+        (rand_below(rng, pads.len()), 0)
     } else {
         shortlist[rand_below(rng, shortlist.len())]
-    })
+    };
+    Some(SpawnChoice { pad, enemy_dist: nearest[pad], pass })
 }
 
 /// One of PD's shortlist passes: walk the pads circularly from a random start,
@@ -217,9 +272,10 @@ pub(crate) fn choose_spawn(
 /// wraps. Consumes each pad it takes (`dist_sq = None`) so a later pass can't re-take
 /// it — PD's `padsqdists[p] = -1.0f`.
 fn circular_fill(
-    shortlist: &mut Vec<usize>,
+    shortlist: &mut Vec<(usize, u8)>,
     info: &mut [PadInfo],
     rng: &mut u64,
+    pass: u8,
     accept: impl Fn(&PadInfo) -> bool,
 ) {
     let n = info.len();
@@ -234,7 +290,7 @@ fn circular_fill(
         let p = (start + k) % n;
         if accept(&info[p]) {
             info[p].dist_sq = None;
-            shortlist.push(p);
+            shortlist.push((p, pass));
         }
     }
 }
@@ -266,7 +322,7 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         let mut rng = 0x1234_5678;
         for _ in 0..60 {
-            seen.insert(choose_spawn(&pads, &[], &mut physics, &mut rng).expect("a pad"));
+            seen.insert(choose_spawn(&pads, &[], &mut physics, &mut rng).expect("a pad").pad);
         }
         assert!(seen.len() > 1, "the pick varies across the pool, got {seen:?}");
     }
@@ -283,8 +339,8 @@ mod tests {
         let occupants = [Vec3::ZERO];
         let mut rng = 0xABCD_EF01;
         for _ in 0..40 {
-            let i = choose_spawn(&pads, &occupants, &mut physics, &mut rng).expect("a pad");
-            assert_eq!(pads[i].pos.x, 80.0, "always the pad clear of the occupant");
+            let c = choose_spawn(&pads, &occupants, &mut physics, &mut rng).expect("a pad");
+            assert_eq!(pads[c.pad].pos.x, 80.0, "always the pad clear of the occupant");
         }
     }
 
@@ -316,11 +372,79 @@ mod tests {
             .collect();
         let mut shortlist = Vec::new();
         let mut rng = 99;
-        circular_fill(&mut shortlist, &mut info, &mut rng, |_| true);
+        circular_fill(&mut shortlist, &mut info, &mut rng, 1, |_| true);
         assert_eq!(shortlist.len(), SHORTLIST);
         // …and the chooser still returns an index into the pool.
         let mut rng2 = 99;
-        let i = choose_spawn(&pads, &[], &mut physics, &mut rng2).expect("a pad");
-        assert!(i < pads.len());
+        let c = choose_spawn(&pads, &[], &mut physics, &mut rng2).expect("a pad");
+        assert!(c.pad < pads.len());
+    }
+
+    /// **A small pool must not dilute its own filter.** The regression for "I respawned in
+    /// the middle of them", and it is arithmetic rather than taste.
+    ///
+    /// PD's desperate pass tops up a partly-filled shortlist, which is free when the pool
+    /// is `pads[24]`: passes 1–2 fill all four slots and it never runs. With a four-pad
+    /// level — the real one this was reported on — pass 1 finds the single clear pad and
+    /// the desperate pass then adds *the other three, because they are all that is left*,
+    /// so the final roll is uniform over every pad including the ones the pack is next to.
+    /// Three times in four the filter's answer is discarded.
+    ///
+    /// **Two things this arena has to get right, and both were wrong the first time.**
+    /// The bodies stand ~4 m off the near pads, not on them: PD's desperate pass already
+    /// refuses a pad with someone inside [`DESPERATE_DIST`], so occupants *on* the pads
+    /// make the dilution invisible. And there is a **wall**, because `very_bad` is "an
+    /// enemy can see the pad" — in open space every pad is visible from everywhere, every
+    /// pad is very bad, passes 1–2 find nothing and the desperate pass is the only one that
+    /// ever runs. A level with walls is the case this filter exists for.
+    #[test]
+    fn a_small_pool_still_avoids_the_pads_the_pack_is_near() {
+        let mut physics = PhysicsWorld::new();
+        // A solid slab across z ≈ 20, blinding the two halves to each other. A door
+        // collider is the cheapest way to get world geometry into a bare `PhysicsWorld`,
+        // and `raycast_world_only` treats it as the wall it is.
+        physics.add_door_collider(Vec3::new(-40.0, -1.0, 19.0), Vec3::new(40.0, 3.0, 21.0));
+        // Three pads on the near side, one alone behind the wall.
+        let pads = vec![pad(0.0, 0.0), pad(8.0, 0.0), pad(16.0, 0.0), pad(8.0, 40.0)];
+        // Two bodies loitering 4 m off each near pad — close enough to make it *bad*,
+        // far enough that PD's own 2 m bail-out does not already reject it.
+        let occupants: Vec<Vec3> = pads[..3]
+            .iter()
+            .flat_map(|p| [p.pos + Vec3::new(0.0, 0.0, 4.0), p.pos + Vec3::new(0.6, 0.0, 4.0)])
+            .collect();
+        let mut rng = 0x0BAD_F00D;
+        let mut picks = std::collections::HashMap::new();
+        for _ in 0..200 {
+            let c = choose_spawn(&pads, &occupants, &mut physics, &mut rng).expect("a pad");
+            *picks.entry(c.pad).or_insert(0) += 1;
+        }
+        assert_eq!(
+            picks.keys().copied().collect::<Vec<_>>(),
+            vec![3],
+            "spawned somewhere other than the one pad clear of the pack: {picks:?}"
+        );
+        // …and it got there through the filter, not through the desperate pass.
+        let c = choose_spawn(&pads, &occupants, &mut physics, &mut rng).expect("a pad");
+        assert_eq!(c.pass, 1, "the clear pad should be a pass-1 pick");
+        assert!(c.enemy_dist > 30.0, "and genuinely far from everyone");
+    }
+
+    /// …and the desperate pass is still reachable, still reports itself, and still picks
+    /// the **farthest** pad rather than rolling. With every pad compromised there is no
+    /// good answer, so a deterministic best one beats a random bad one — and `pass == 3`
+    /// in the log is what tells the author the level is short of pads.
+    #[test]
+    fn with_nothing_safe_the_desperate_pass_takes_the_farthest_pad() {
+        let mut physics = PhysicsWorld::new();
+        // All three within the 10 m gate of the occupant, so passes 1 and 2 find nothing.
+        let pads = vec![pad(1.0, 0.0), pad(4.0, 0.0), pad(9.0, 0.0)];
+        let occupants = [Vec3::ZERO];
+        let mut rng = 5;
+        for _ in 0..40 {
+            let c = choose_spawn(&pads, &occupants, &mut physics, &mut rng).expect("a pad");
+            assert_eq!(c.pass, 3, "this is the desperate pass, and it should say so");
+            assert_eq!(pads[c.pad].pos.x, 9.0, "the farthest of a bad set");
+            assert!((c.enemy_dist - 9.0).abs() < 1e-3, "and it reports the real distance");
+        }
     }
 }

@@ -829,8 +829,11 @@ impl World {
             // A pad's authored yaw *is* the spawn facing (PD hands back the pad's look
             // angle from `player_choose_spawn_location`); pitch is level.
             Some((i, pad)) => {
-                log::info!("player enters at pad {i} {:?}", pad.pos);
-                (pad.pos, pad.yaw, 0.0)
+                // Nobody is in the level yet at G, so the step-aside is a no-op here —
+                // called for uniformity with the respawn path, which is where it matters.
+                let at = self.spawn_clear_of_bodies(Spawning::Player, pad.pos);
+                log::info!("player enters at pad {i} {at:?}");
+                (at, pad.yaw, 0.0)
             }
             None => (cam_feet, self.camera.yaw, self.camera.pitch),
         };
@@ -900,13 +903,18 @@ impl World {
         if let Some(c) = per_pad.get_mut(pi) {
             *c += 1;
         }
-        if n == 0 {
-            return pad.pos; // the first body on a pad stands on the authored point
-        }
-        let ang = n as f32 * 2.399_963; // golden angle
-        let r = SPAWN_CLUSTER_RADIUS * (n as f32).sqrt();
-        let raw = pad.pos + Vec3::new(ang.cos(), 0.0, ang.sin()) * r;
-        nav.nearest_standable(raw.x, raw.y.max(0.1), raw.z, 6).unwrap_or(pad.pos)
+        let ringed = if n == 0 {
+            pad.pos // the first body on a pad stands on the authored point
+        } else {
+            let ang = n as f32 * 2.399_963; // golden angle
+            let r = SPAWN_CLUSTER_RADIUS * (n as f32).sqrt();
+            let raw = pad.pos + Vec3::new(ang.cos(), 0.0, ang.sin()) * r;
+            nav.nearest_standable(raw.x, raw.y.max(0.1), raw.z, 6).unwrap_or(pad.pos)
+        };
+        // The ring spaces this wave out; the step-aside handles anyone ALREADY standing
+        // there (the player, or a hunter that survived a `restart_hunt`) — which the ring
+        // knows nothing about. Last, and once, so the two don't compound.
+        self.spawn_clear_of_bodies(Spawning::Hunter(i), ringed)
     }
 
     /// Flood the wave in: `wave_size` hunters, **each drawing its own pad from the

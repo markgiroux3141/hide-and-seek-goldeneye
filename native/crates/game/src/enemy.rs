@@ -487,18 +487,24 @@ const FETCH_SCORE: f32 = 3.0;
 /// Speed (m/s) a hunter travels to a pickup: a jog, not the full chase run. It wants the
 /// gun urgently but it is not chasing anything.
 const SPEED_FETCH: f32 = SPEED_ADVANCE;
-/// How long (s) a fetching hunter may stand at its fetch point without the collect
-/// landing before it writes that pickup off.
+/// How long (s) a fetching hunter may make **no progress** toward its fetch point before
+/// it writes that pickup off.
 ///
-/// Arrival is nav-grid arrival, and the grid steers the hunter's *centre* to a cell —
-/// so a gun on a ledge, or in a pocket A\* cannot path into, leaves a hunter parked
-/// [`ARRIVE_DIST`] from something it can never pick up. Standing there forever is the
-/// statue failure mode the AI lab exists to catch, so it gives up instead.
+/// Progress, not arrival, and that distinction is the whole guard. Three ways a hunter
+/// can fail to reach a pickup: it arrives at the nav cell but the collect needs a
+/// *vertical* window too (a gun on the floor above), A\* finds no route at all, or it is
+/// wedged. Only the first looks like "arrived" from inside the executor. Timing the
+/// distance instead catches all three, and — the bug this replaces — it does not depend on
+/// which frames [`REPATH_INTERVAL`] happens to run A\* on.
 const FETCH_STALL: f32 = 3.0;
-/// How long (s) fetching stays suppressed after a give-up, during which the hunter falls
-/// back to its ordinary fan-out search. It re-asks afterwards, because the pickup may
-/// simply have been contested — the World re-picks the nearest useful one every step.
-const FETCH_RETRY: f32 = 5.0;
+/// How much closer (m) to its pickup a fetching hunter must get inside [`FETCH_STALL`] for
+/// the trip to count as going anywhere. A little over a walking second, so a hunter
+/// shuffling around an obstacle still counts as progressing.
+const FETCH_PROGRESS: f32 = 1.0;
+/// How long (s) a written-off pickup is ignored for. The hunter goes for the next-nearest
+/// one it might actually reach ([`Self::fetch_reject`] is read by the `World`'s pickup
+/// search), and falls back to its ordinary fan-out search if there is no other.
+const FETCH_RETRY: f32 = 10.0;
 
 pub struct Enemy {
     /// Feet position, meters.
@@ -593,10 +599,16 @@ pub struct Enemy {
     /// two writers on one field is what made the search sweep and the shopping trip
     /// fight each other.
     fetch_target: Option<Vec3>,
-    /// Seconds stood at a fetch point without the collect landing (see [`FETCH_STALL`]).
+    /// Seconds in the current no-progress window, and how far the hunter was from its
+    /// pickup when that window opened (see [`FETCH_STALL`] / [`FETCH_PROGRESS`]).
     fetch_stall: f32,
-    /// Seconds fetching stays suppressed after giving up on an unreachable pickup
-    /// (see [`FETCH_RETRY`]). Decays every step, in every decision layer.
+    fetch_anchor: f32,
+    /// A pickup written off as unreachable. Read by the `World`, which then offers the
+    /// **next-nearest** one — so a hunter that cannot reach this gun goes and gets a
+    /// different gun instead of standing under it for the rest of the round.
+    fetch_reject: Option<Vec3>,
+    /// Seconds the write-off above stays in force ([`FETCH_RETRY`]). Decays every step,
+    /// in every decision layer.
     fetch_block: f32,
 
     // ─── Burst-and-reposition ──
@@ -731,6 +743,8 @@ impl Enemy {
             search_look: 0.0,
             fetch_target: None,
             fetch_stall: 0.0,
+            fetch_anchor: 0.0,
+            fetch_reject: None,
             fetch_block: 0.0,
             strafe_dir: 1.0,
             reposition_target: None,
@@ -889,11 +903,26 @@ impl Enemy {
         self.fetch_target
     }
 
-    /// Whether this hunter is currently going shopping — the fetch behaviour is live
-    /// AND not suppressed by a give-up. The single predicate all three decision layers
-    /// gate on, so they cannot disagree about it.
+    /// A pickup this hunter has written off as unreachable, if any — read by the `World`,
+    /// which offers it the next-nearest one instead. See [`FETCH_RETRY`].
+    pub(crate) fn fetch_reject(&self) -> Option<Vec3> {
+        self.fetch_block.gt(&0.0).then_some(self.fetch_reject).flatten()
+    }
+
+    /// Whether this hunter is currently going shopping. The single predicate all three
+    /// decision layers gate on, so they cannot disagree about it.
+    ///
+    /// The write-off is **per pickup**, not a blanket cooldown: offered a *different*
+    /// pickup the hunter goes at once, and only the one it just failed to reach is
+    /// refused. A blanket cooldown sent it straight back to the same unreachable gun,
+    /// because the `World` re-picks the nearest useful pickup every step and the nearest
+    /// one had not changed.
     fn wants_fetch(&self) -> bool {
-        self.fetch_target.is_some() && self.fetch_block <= 0.0
+        match (self.fetch_target, self.fetch_reject()) {
+            (None, _) => false,
+            (Some(t), Some(r)) => t.distance(r) > ARRIVE_DIST,
+            (Some(_), None) => true,
+        }
     }
 
     /// Set which side this hunter flanks from (+1 / −1) — the `World` assigns it at
@@ -1395,10 +1424,13 @@ impl Enemy {
                 EVADE_INTERVAL_LO + (EVADE_INTERVAL_HI - EVADE_INTERVAL_LO) * tuning.dodge;
         }
 
-        // Fetch give-up suppression decays here rather than inside any one layer, so a
+        // The written-off pickup expires here rather than inside any one layer, so a
         // hunter that gave up on an unreachable gun comes back to the idea at the same
         // rate under `AI=pd`, the utility scorer and the FSM alike.
         self.fetch_block = (self.fetch_block - dt).max(0.0);
+        if self.fetch_block <= 0.0 {
+            self.fetch_reject = None; // worth another try — it may have been contested
+        }
 
         let mut step = EnemyStep::default();
         // ── `AI=pd`: Perfect Dark's action ladder, ahead of both of ours ──
@@ -2334,18 +2366,50 @@ impl Enemy {
             self.fetch_stall = 0.0;
             return;
         };
-        // `move_toward` reports `true` for arrived AND for unreachable — both mean "no
-        // more walking will help", which is exactly what the give-up clock times.
-        if self.move_toward(dt, to, nav, speed) {
+        let arrived = self.move_toward(dt, to, nav, speed);
+        if arrived {
             self.face(to);
-            self.fetch_stall += dt;
-            if self.fetch_stall >= FETCH_STALL {
-                self.fetch_stall = 0.0;
-                self.fetch_block = FETCH_RETRY;
-                self.path.clear();
-            }
-        } else {
+        }
+        // ── The give-up clock, timed on DISTANCE and not on `arrived` ──
+        // `move_toward` reports `true` for arrived AND for unreachable, so keying the
+        // clock off it looks right and is not: A\* only runs on the frames
+        // [`REPATH_INTERVAL`] lets through, and on all the others an unreachable target
+        // walks the (empty) path and reports `false`. The clock was therefore reset 23
+        // frames out of 24 and never reached [`FETCH_STALL`] — a hunter whose gun was
+        // unreachable stood on the spot for the entire round, blind (the `World`
+        // suppresses a shopping hunter's knowledge) and re-running a failing full-region
+        // A\* every 0.4 s. That is the "some enemies just get lazy" playtest report.
+        //
+        // Distance to the goal is the honest measure: it catches the unreachable case,
+        // the wedged case, and the case that looks most like success — arriving at the
+        // nav cell under a gun that is on the floor above, where the collect's *vertical*
+        // window can never be satisfied no matter how long it stands there.
+        let d = self.dist_to(to);
+        if self.fetch_stall <= 0.0 {
+            self.fetch_anchor = d;
+        }
+        self.fetch_stall += dt;
+        if self.fetch_anchor - d >= FETCH_PROGRESS {
+            self.fetch_stall = 0.0; // genuinely closing → new window
+        } else if self.fetch_stall >= FETCH_STALL && !self.moving {
+            // `!self.moving` guards the one false positive the distance test has: a route
+            // that leads *away* first — around a wall, up a stairwell — can spend more
+            // than the window not closing while the hunter is walking the whole time. A
+            // hunter with no path, or parked at a cell it cannot collect from, is not
+            // walking, and that is what this is for.
+            // Write this pickup off and let the `World` offer another. Keeping the
+            // rejected POINT (not just a timer) is what stops the cycle: the World
+            // re-picks the nearest useful pickup every step, which is the same
+            // unreachable one, so a bare cooldown would send it straight back.
+            log::debug!(
+                "hunter gave up on the pickup at {to:?} — {d:.1} m away and no closer in \
+                 {FETCH_STALL:.0}s; trying elsewhere"
+            );
+            self.fetch_reject = Some(to);
+            self.fetch_block = FETCH_RETRY;
             self.fetch_stall = 0.0;
+            self.path.clear();
+            self.repath_timer = 0.0;
         }
     }
 

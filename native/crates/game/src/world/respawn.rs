@@ -78,6 +78,8 @@ impl World {
         // happened to die.
         let pad = self.choose_spawn_pad(Spawning::Hunter(idx)).map(|(_, p)| p);
         let spawn = pad.map(|p| p.pos).unwrap_or(self.spawn_point);
+        // …and don't come back standing inside whoever is there now.
+        let spawn = self.spawn_clear_of_bodies(Spawning::Hunter(idx), spawn);
         // Face the player, as the wave does at G — if it's out of sight the search FSM
         // takes over immediately, and if it's in view engaging is the right response.
         let watch = self.player_pos().unwrap_or(spawn);
@@ -209,11 +211,17 @@ impl World {
         // and puts you back to empty hands. This is what makes the weapons on the
         // floor worth crossing the level for (`DESIGN_PICKUPS.md`).
         self.reset_loadout();
-        let entry = (self.spawn_pad_count() > 0)
+        // The pad, then the step-aside — the level is full of bodies by now, which is the
+        // whole reason a respawn needs this and the initial entry does not.
+        let entry = match (self.spawn_pad_count() > 0)
             .then(|| self.choose_spawn_pad(Spawning::Player))
             .flatten()
-            .map(|(_, pad)| (pad.pos, pad.yaw, 0.0))
-            .or(self.hunt_spawn);
+        {
+            Some((_, pad)) => {
+                Some((self.spawn_clear_of_bodies(Spawning::Player, pad.pos), pad.yaw, 0.0))
+            }
+            None => self.hunt_spawn,
+        };
         if let Some((feet, yaw, pitch)) = entry {
             self.character = Some(CharacterController::new(feet, yaw, pitch));
             log::info!("respawned at {feet:?}");

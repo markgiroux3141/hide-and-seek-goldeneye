@@ -23,6 +23,53 @@ const MAX_STEP: i32 = 1;
 /// [`NavWorld::wall_clearance_offset`].
 const WALL_PROBE_Y: f32 = 0.75;
 
+// ─── A* instrumentation ──────────────────────────────────────────────────────
+// Counters, not a profiler: A* cost is dominated by how many cells it *expands*, and a
+// path that does not exist expands every reachable cell before returning `None`. That
+// asymmetry is invisible in a wall-clock average and obvious in these numbers, so they
+// are cheap enough to leave in permanently (three relaxed atomic adds per query).
+static PATH_CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PATH_FAILS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static PATH_EXPANDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Zero the A\* counters (call before a measured window).
+pub fn reset_path_stats() {
+    use std::sync::atomic::Ordering::Relaxed;
+    PATH_CALLS.store(0, Relaxed);
+    PATH_FAILS.store(0, Relaxed);
+    PATH_EXPANDED.store(0, Relaxed);
+}
+
+/// Raw A\* counters: `(calls, failures, cells expanded)`.
+pub fn path_counts() -> (u64, u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (
+        PATH_CALLS.load(Relaxed),
+        PATH_FAILS.load(Relaxed),
+        PATH_EXPANDED.load(Relaxed),
+    )
+}
+
+/// One line of A\* accounting: calls, how many found nothing, and cells expanded.
+///
+/// **The failure count is the interesting one.** A successful path expands cells roughly
+/// in proportion to its length; a failed one expands the entire connected region it
+/// started in. A few hunters walking toward somewhere they cannot reach will therefore
+/// dominate a frame while every other number looks healthy.
+pub fn path_stats() -> String {
+    use std::sync::atomic::Ordering::Relaxed;
+    let (calls, fails, exp) = (
+        PATH_CALLS.load(Relaxed),
+        PATH_FAILS.load(Relaxed),
+        PATH_EXPANDED.load(Relaxed),
+    );
+    format!(
+        "{calls} A* calls, {fails} failed ({:.0}%), {exp} cells expanded ({} per call)",
+        if calls == 0 { 0.0 } else { fails as f64 / calls as f64 * 100.0 },
+        if calls == 0 { 0 } else { exp / calls },
+    )
+}
+
 /// A* penalty for routing through a **shut but openable** door — large enough to
 /// prefer an already-open detour, finite so a hunter will still work a door when that
 /// is the only way through. JS `navWorld.DOOR_COST` is 25 on a base move cost of 1;
@@ -78,6 +125,15 @@ pub struct NavWorld {
     doors: Vec<NavDoor>,
     /// cellIdx → (doorIndex + 1); 0 = no door. Empty until `set_doors`.
     door_grid: Vec<u16>,
+    /// cellIdx → connected-component id (0 = not standable), from [`Self::label_components`].
+    ///
+    /// **This is what makes "you cannot get there" cheap.** A\* answers *reachable* fast
+    /// and *unreachable* catastrophically: with no route it expands every cell in the
+    /// region before returning `None`. A hunter walking toward somewhere cut off therefore
+    /// pays a full-grid search every `REPATH_INTERVAL`, for as long as it keeps wanting to
+    /// go there — which on a real level is the rest of the round. Labelling once at bake
+    /// turns that into an integer comparison.
+    comp: Vec<u32>,
 }
 
 impl NavWorld {
@@ -253,6 +309,64 @@ impl NavWorld {
 
     /// A cell is standable if it's air, the cell below is solid, and there is
     /// AGENT_HEIGHT_CELLS of air above for head clearance.
+    /// Flood-fill every standable cell into connected components, using the **same
+    /// adjacency A\* walks** (4 cardinal, ±[`MAX_STEP`] vertical, no corner-clipping on a
+    /// step) but **ignoring doors**.
+    ///
+    /// Ignoring doors is deliberate and is what keeps the early-out sound. A door can only
+    /// ever *remove* connectivity (a shut impassable one is a wall to A\*), never add it —
+    /// so two cells in different door-free components can never be joined by any door
+    /// state. "Different component" therefore means *definitely* unreachable, and it is
+    /// safe to refuse without searching. "Same component" says nothing and still runs A\*.
+    fn label_components(&mut self) {
+        self.comp = vec![0u32; self.solid.len()];
+        let mut next = 1u32;
+        let mut stack: Vec<(i32, i32, i32)> = Vec::new();
+        for iy in 0..self.ny {
+            for iz in 0..self.nz {
+                for ix in 0..self.nx {
+                    let k = self.idx(ix, iy, iz);
+                    if self.comp[k] != 0 || !self.is_standable(ix, iy, iz) {
+                        continue;
+                    }
+                    let id = next;
+                    next += 1;
+                    self.comp[k] = id;
+                    stack.push((ix, iy, iz));
+                    while let Some(cur) = stack.pop() {
+                        for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                            for dy in -MAX_STEP..=MAX_STEP {
+                                let (nx_, ny_, nz_) = (cur.0 + dx, cur.1 + dy, cur.2 + dz);
+                                if !self.is_standable(nx_, ny_, nz_) {
+                                    continue;
+                                }
+                                if dy != 0 && self.is_solid_cell(cur.0, cur.1 + dy.max(0), cur.2) {
+                                    continue;
+                                }
+                                let nk = self.idx(nx_, ny_, nz_);
+                                if self.comp[nk] == 0 {
+                                    self.comp[nk] = id;
+                                    stack.push((nx_, ny_, nz_));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        log::info!("nav: {} connected walkable component(s)", next - 1);
+    }
+
+    /// The connected-component id of the standable cell at (or nearest to) `m`, or `None`
+    /// where there is no standable cell at all. Two positions with different ids cannot
+    /// walk to each other whatever the doors do — see [`Self::label_components`].
+    pub fn component_at(&self, m: Vec3) -> Option<u32> {
+        let c = self
+            .cell_at(m.x, m.y, m.z)
+            .or_else(|| self.nearest_cell(m))?;
+        self.comp.get(self.idx(c.0, c.1, c.2)).copied().filter(|&id| id != 0)
+    }
+
     fn is_standable(&self, ix: i32, iy: i32, iz: i32) -> bool {
         if self.is_solid_cell(ix, iy, iz) {
             return false;
@@ -494,6 +608,24 @@ impl NavWorld {
             .cell_at(goal_m.x, goal_m.y, goal_m.z)
             .or_else(|| self.nearest_cell(goal_m))?;
 
+        // ── The O(1) refusal ──
+        // Different walkable components → no route exists, so do not spend a full-region
+        // expansion discovering that. This is the fix for a 10 fps playtest: the player
+        // spawned on a nav island, four hunters each ran a failing full-grid A* every
+        // 0.4 s trying to reach them, and the sim went from 0.7 ms to 140 ms a frame.
+        let (ca, cb) = (
+            self.comp.get(self.idx(start.0, start.1, start.2)).copied(),
+            self.comp.get(self.idx(goal.0, goal.1, goal.2)).copied(),
+        );
+        if let (Some(a), Some(b)) = (ca, cb) {
+            if a != 0 && b != 0 && a != b {
+                use std::sync::atomic::Ordering::Relaxed;
+                PATH_CALLS.fetch_add(1, Relaxed);
+                PATH_FAILS.fetch_add(1, Relaxed);
+                return None;
+            }
+        }
+
         let goal_key = self.idx(goal.0, goal.1, goal.2);
         let h = |c: (i32, i32, i32)| {
             2 * ((c.0 - goal.0).abs() + (c.1 - goal.1).abs() + (c.2 - goal.2).abs())
@@ -510,9 +642,15 @@ impl NavWorld {
         g_score.insert(start_key, 0);
         open.push(std::cmp::Reverse((h(start), counter, start)));
 
+        use std::sync::atomic::Ordering::Relaxed;
+        PATH_CALLS.fetch_add(1, Relaxed);
+        let mut expanded = 0u64;
+
         while let Some(std::cmp::Reverse((_f, _, cur))) = open.pop() {
+            expanded += 1;
             let ck = self.idx(cur.0, cur.1, cur.2);
             if ck == goal_key {
+                PATH_EXPANDED.fetch_add(expanded, Relaxed);
                 return Some(self.reconstruct(&came, cur));
             }
             let cur_g = *g_score.get(&ck).unwrap();
@@ -553,6 +691,9 @@ impl NavWorld {
                 }
             }
         }
+        // Exhausted the whole connected region without reaching the goal.
+        PATH_EXPANDED.fetch_add(expanded, Relaxed);
+        PATH_FAILS.fetch_add(1, Relaxed);
         None
     }
 
@@ -662,7 +803,7 @@ pub fn bake(regions: &mut [Region], structure_solids: &[[f32; 6]]) -> Option<Nav
         }
     }
 
-    Some(NavWorld {
+    let mut nav = NavWorld {
         x0,
         y0,
         z0,
@@ -672,7 +813,10 @@ pub fn bake(regions: &mut [Region], structure_solids: &[[f32; 6]]) -> Option<Nav
         solid,
         doors: Vec::new(),
         door_grid: Vec::new(),
-    })
+        comp: Vec::new(),
+    };
+    nav.label_components();
+    Some(nav)
 }
 
 #[cfg(test)]
@@ -696,6 +840,52 @@ mod tests {
         assert!(!stand.is_empty(), "room should have standable floor cells");
         // Floor cells sit at the cavity bottom (y≈0 m).
         assert!(stand.iter().all(|c| c.y.abs() < 0.3));
+    }
+
+    /// **An unreachable destination must be refused for free.**
+    ///
+    /// A\* is fast at finding a route and pathological at proving there isn't one: with no
+    /// path it pops every cell in the region before returning `None`. That asymmetry cost a
+    /// playtest 10 fps — the player spawned on a walkable island, and four hunters each ran
+    /// a doomed full-region search every 0.4 s trying to reach them, taking the sim from
+    /// 0.7 ms to 140 ms a frame while the renderer sat idle at 0.7 ms.
+    ///
+    /// Asserted as **cells expanded**, not wall-clock: the guarantee is algorithmic (an
+    /// integer comparison against the baked component labels) and a timing assertion would
+    /// be flaky for no extra information.
+    #[test]
+    fn an_unreachable_goal_is_refused_without_searching() {
+        // A room, plus a platform floating two cells above the floor: standable on top,
+        // and with no step up to it (MAX_STEP is one cell), so it is its own component.
+        let mut regions = room();
+        let island: [f32; 6] = [8.0, 3.0, 8.0, 6.0, 1.0, 6.0];
+        let nav = bake(&mut regions, &[island]).expect("bake");
+        let floor = Vec3::new(0.5, 0.1, 0.5);
+        let top = Vec3::new(2.75, 1.05, 2.75); // on top of the island (m; WT ×0.25)
+        assert_ne!(
+            nav.component_at(floor),
+            nav.component_at(top),
+            "the arena must actually be two components, or this proves nothing"
+        );
+
+        // The control: a reachable goal still searches and still finds a route.
+        reset_path_stats();
+        assert!(nav.find_path(floor, Vec3::new(5.5, 0.1, 5.5)).is_some());
+        let (_, _, reachable_cells) = path_counts();
+        assert!(
+            reachable_cells > 0,
+            "a real path should have expanded cells; got {reachable_cells}"
+        );
+
+        // The claim: the unreachable goal is refused having expanded nothing at all.
+        reset_path_stats();
+        assert!(nav.find_path(floor, top).is_none(), "there is no way up");
+        let (calls, fails, expanded) = path_counts();
+        assert_eq!((calls, fails), (1, 1), "the refusal is still counted as a call");
+        assert_eq!(
+            expanded, 0,
+            "refusing an unreachable goal expanded {expanded} cells — it should search none"
+        );
     }
 
     #[test]

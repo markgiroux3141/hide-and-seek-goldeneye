@@ -24,6 +24,14 @@ use engine::render::renderer::{EguiFrame, Renderer};
 use crate::gamepad::N64Pad;
 use crate::world::{World, PUSH_PULL_STEP};
 
+/// A frame this slow (ms) is worth a line of its own. Two and a half times the 60 Hz
+/// budget: past this the drop is visible, and below it the once-per-second average is
+/// the better instrument.
+const SLOW_FRAME_MS: f32 = 40.0;
+/// At most this many per-frame warnings per second. A sustained 5 fps would otherwise
+/// print every frame forever, and the per-second line already carries the full count.
+const SLOW_FRAME_BURST: u32 = 4;
+
 /// Fixed simulation rate (120 Hz), sim-step cap per frame (8), and render FPS
 /// cap (240) — driven by the engine [`FrameClock`]. Fixed-timestep sim keeps
 /// physics/movement frame-rate independent; the FPS cap stops the loop burning
@@ -145,6 +153,14 @@ struct App {
     fps_frames: u32,
     fps_elapsed: f32,
     fps_worst_ms: f32,
+    /// Where the second went, accumulated per frame and reported with the fps line
+    /// below. Three numbers rather than one, because "the frame rate is terrible" is
+    /// unactionable and "sim 0.4, render 190" names the culprit in one line. `render`
+    /// includes submit + present, so GPU backpressure lands there.
+    fps_sim_ms: f32,
+    fps_render_ms: f32,
+    /// Frames over [`SLOW_FRAME_MS`] this second (the per-frame warn is capped, this is not).
+    slow_frames: u32,
     /// Last player health/armor uploaded to the radial-HUD texture, so it's only
     /// re-baked + re-uploaded when they change. `-1` forces the first upload.
     last_hud_health: f32,
@@ -234,6 +250,9 @@ impl App {
             fps_frames: 0,
             fps_elapsed: 0.0,
             fps_worst_ms: 0.0,
+            fps_sim_ms: 0.0,
+            fps_render_ms: 0.0,
+            slow_frames: 0,
             last_hud_health: -1.0,
             last_hud_armor: -1.0,
             egui_ctx: egui::Context::default(),
@@ -3263,6 +3282,8 @@ impl ApplicationHandler for App {
                         world.look(&mut self.input, dt);
                     }
                 }
+                let mut render_ms = 0.0f32;
+                let t_sim = std::time::Instant::now();
                 if let Some(world) = self.world.as_mut() {
                     for _ in 0..steps {
                         world.fixed_step(fixed_dt, &self.input);
@@ -3280,6 +3301,8 @@ impl ApplicationHandler for App {
                     // the player damage-flash / HUD-pop timers (HUNT only).
                     world.enemy_combat_step(dt);
                 }
+                let sim_ms = t_sim.elapsed().as_secs_f32() * 1000.0;
+                self.fps_sim_ms += sim_ms;
                 // A weapon switch swaps the gun/muzzle meshes at the bottom of its
                 // dip (mid-`combat_step`); re-upload them to the GPU when it does.
                 if self.world.as_mut().map(|w| w.take_models_dirty()).unwrap_or(false) {
@@ -3530,7 +3553,34 @@ impl ApplicationHandler for App {
                         real_lighting,
                     );
                     let view_proj = world.view_proj(renderer.aspect());
+                    let t_render = std::time::Instant::now();
                     renderer.render(view_proj, egui_frame);
+                    // `render` owns the surface acquire (`get_current_texture`) as well as
+                    // submit, so a GPU that cannot keep up blocks in here — which is what
+                    // makes this number the one that separates "the game is doing too much"
+                    // from "the GPU is busy".
+                    render_ms = t_render.elapsed().as_secs_f32() * 1000.0;
+                    self.fps_render_ms += render_ms;
+                }
+
+                // ── The loud half of the telemetry ──
+                // A once-per-second average hides a burst: eight good frames and one 200 ms
+                // frame average out to something unremarkable. Any single frame over the
+                // threshold says so immediately, with its own phase split, so a slowdown
+                // that lasts a few seconds leaves a precise record instead of a mood.
+                let frame_ms = sim_ms + render_ms;
+                if frame_ms >= SLOW_FRAME_MS {
+                    self.slow_frames += 1;
+                    if self.slow_frames <= SLOW_FRAME_BURST {
+                        log::warn!(
+                            "slow frame: {frame_ms:.0} ms — sim {sim_ms:.1}, render+present                              {render_ms:.1} ({})",
+                            if render_ms > sim_ms * 2.0 {
+                                "GPU/present bound"
+                            } else {
+                                "CPU bound"
+                            }
+                        );
+                    }
                 }
 
                 // Frame-time telemetry, logged once per second.
@@ -3539,15 +3589,23 @@ impl ApplicationHandler for App {
                 self.fps_worst_ms = self.fps_worst_ms.max(dt * 1000.0);
                 if self.fps_elapsed >= 1.0 {
                     let avg_ms = self.fps_elapsed * 1000.0 / self.fps_frames as f32;
+                    let n = self.fps_frames as f32;
+                    let (sim, render) = (self.fps_sim_ms / n, self.fps_render_ms / n);
                     log::info!(
-                        "{:.0} fps (avg {:.2} ms/frame, worst {:.2} ms)",
+                        "{:.0} fps (avg {avg_ms:.2} ms/frame, worst {:.2} ms) — sim {sim:.2},                          render+present {render:.2}, other {:.2}; {} slow frame(s); nav {}",
                         self.fps_frames as f32 / self.fps_elapsed,
-                        avg_ms,
-                        self.fps_worst_ms
+                        self.fps_worst_ms,
+                        (avg_ms - sim - render).max(0.0),
+                        self.slow_frames,
+                        engine::sim::nav::path_stats(),
                     );
+                    engine::sim::nav::reset_path_stats();
+                    self.slow_frames = 0;
                     self.fps_frames = 0;
                     self.fps_elapsed = 0.0;
                     self.fps_worst_ms = 0.0;
+                    self.fps_sim_ms = 0.0;
+                    self.fps_render_ms = 0.0;
                 }
             }
             _ => {}

@@ -109,6 +109,11 @@ pub(crate) const HUNTER_SPAWN_MAGS: u32 = 4;
 /// is the failure mode this radius exists to avoid.
 const HUNTER_GRAB_RADIUS: f32 = 1.6;
 
+/// How close (m) a pickup has to be to a hunter's written-off point to count as *the*
+/// one it gave up on. Small — pickups are distinct entities metres apart, and the point
+/// is matched against the exact position the hunter was walking to.
+const REJECT_RADIUS: f32 = 1.0;
+
 /// What a hunter is short of, and therefore what it will cross the level for.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum HunterWant {
@@ -479,7 +484,11 @@ impl World {
     /// almost nothing. A gun behind a wall is still the right gun to want.
     pub(crate) fn hunter_fetch_target(&self, inst: &EnemyInstance) -> Option<Vec3> {
         let want = Self::hunter_want(inst)?;
-        self.best_pickup_for(want, inst.weapon.name, inst.enemy.pos)
+        // Skip whatever this hunter has already failed to reach, so it is offered the
+        // next-nearest gun rather than the same unreachable one every step. Without this
+        // the hunter's own give-up is useless: nearest-first is a pure function of
+        // position, and the hunter is not moving.
+        self.best_pickup_for_avoiding(want, inst.weapon.name, inst.enemy.pos, inst.enemy.fetch_reject())
             .map(|(_, pos)| pos)
     }
 
@@ -496,6 +505,22 @@ impl World {
         want: HunterWant,
         holding: &str,
         from: Vec3,
+    ) -> Option<(hecs::Entity, Vec3)> {
+        self.best_pickup_for_avoiding(want, holding, from, None)
+    }
+
+    /// [`Self::best_pickup_for`], ignoring any pickup at `avoid` — a point the asking
+    /// hunter has written off as unreachable ([`crate::enemy::Enemy::fetch_reject`]).
+    ///
+    /// Only the *choice* honours the write-off. Collection never does: if a hunter walks
+    /// over the gun it gave up on, it picks it up, because at that point reachability is
+    /// no longer in question.
+    fn best_pickup_for_avoiding(
+        &self,
+        want: HunterWant,
+        holding: &str,
+        from: Vec3,
+        avoid: Option<Vec3>,
     ) -> Option<(hecs::Entity, Vec3)> {
         let mut best: Option<(hecs::Entity, Vec3, f32)> = None;
         for (e, tr, p) in self
@@ -514,6 +539,9 @@ impl World {
             };
             if !useful {
                 continue;
+            }
+            if avoid.is_some_and(|a| tr.pos.distance(a) <= REJECT_RADIUS) {
+                continue; // this hunter already tried and failed to reach this one
             }
             let d = tr.pos.distance(from);
             if best.is_none_or(|(_, _, bd)| d < bd) {

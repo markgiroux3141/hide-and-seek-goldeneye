@@ -1824,6 +1824,75 @@ fn an_unarmed_hunter_walks_to_the_gun_not_to_the_player() {
     );
 }
 
+/// **A gun it cannot reach must not take a hunter out of the round.** The playtest
+/// report was "some enemies just get lazy — this one is literally hanging out on a spawn
+/// point ignoring me", and it was a hunter stuck in `Fetch` for the whole match: blind
+/// (the `World` suppresses a shopping hunter's knowledge), motionless, and re-running a
+/// failing full-region A\* every 0.4 s.
+///
+/// Two independent causes, both fixed here:
+///
+/// 1. **The give-up clock was keyed off `move_toward`'s return value.** That looks right
+///    — it reports `true` for arrived *and* unreachable — but A\* only runs on the frames
+///    `REPATH_INTERVAL` lets through, and on the other 23 in 24 an unreachable target
+///    walks its empty path and reports `false`. The clock was reset almost every frame
+///    and never reached `FETCH_STALL`. It times **distance progress** now.
+/// 2. **Giving up achieved nothing.** The `World` re-picks the nearest useful pickup every
+///    step, and for a hunter that has not moved that is the same unreachable one. The
+///    hunter now writes off the *point* and is offered the next-nearest instead.
+///
+/// **The gun sits on top of a 2 m block**, with a reachable one further off. That
+/// geometry is chosen precisely, and the first version of this test got it wrong: a gun
+/// merely floating in the air is *arrived at* (nav arrives on flat distance, so the
+/// hunter reaches the cell underneath and `move_toward` returns `true` every frame from
+/// its early-out) and the old clock did catch that. The case that actually shipped broken
+/// is a gun with **no A\* route at all** — a step of 2 m exceeds the grid's one-cell climb
+/// — because there `move_toward` gets as far as the repath gate and returns `false` on
+/// every frame that is not a repath frame. That is the 23-in-24 reset.
+#[test]
+fn an_unreachable_gun_does_not_strand_a_hunter() {
+    // A 2×2 m block 2 m tall, at 10–12 m along x and 14–16 m along z (WT: ×4).
+    let block = [40.0, 0.0, 56.0, 8.0, 8.0, 8.0];
+    let unreachable = Vec3::new(11.0, 2.05, 15.0); // on top of it — no route up
+    let reachable = Vec3::new(27.0, 0.0, 15.0);
+    let player = Vec3::new(15.0, 0.0, 4.0);
+    let mut arena = TestArena::build_stocked(
+        [120.0, 16.0, 120.0],
+        &[block],
+        1,
+        player,
+        &[
+            (unreachable, PickupKind::Weapon, "AR33"),
+            (reachable, PickupKind::Weapon, "Klobb"),
+        ],
+    );
+    arena.place_hunter(0, 16.0, 15.0);
+    let start = arena.world.enemies[0].enemy.pos;
+    assert!(
+        start.distance(unreachable) < start.distance(reachable),
+        "the arena must offer the unreachable gun first, or it proves nothing"
+    );
+    let (armed_at, _, _) = shopping_run(&mut arena, reachable, player, 30.0);
+    let p = arena.world.enemies[0].enemy.pos;
+    println!(
+        "armed at {armed_at:?}; ended {:.1} m from the gun on the block, {:.1} m from the \
+         floor one",
+        flat_dist(p, unreachable),
+        flat_dist(p, reachable)
+    );
+    assert!(
+        armed_at.is_some(),
+        "the hunter never armed itself in 30 s — it ended at {p:?}, {:.1} m from the gun it \
+         could not reach at {unreachable:?} and {:.1} m from the one it could at {reachable:?}",
+        flat_dist(p, unreachable),
+        flat_dist(p, reachable)
+    );
+    assert_eq!(
+        arena.world.enemies[0].weapon.name, "Klobb",
+        "it should have given up and taken the gun it could actually reach"
+    );
+}
+
 /// The other half of "cannot shoot": a hunter **holding a gun with no rounds anywhere**
 /// walks to a crate that feeds it, and likewise declines the fight on the way. Same
 /// behaviour, different want — which is the point of routing both through one score.

@@ -927,6 +927,62 @@ impl World {
         } else {
             authored.into_iter().map(snap).collect()
         };
+        // ── Drop pads that are cut off from the rest of the level ──
+        // A pad on a nav island is not a spawn, it is a trap, and it is a trap for
+        // *whoever* draws it. A hunter there can never path anywhere, so no behaviour can
+        // move it and it stands still all round (the "some enemies just get lazy" report).
+        // The **player** there is worse: everyone hunting them runs a doomed A* every
+        // `REPATH_INTERVAL`, and since a failed search expands the whole region, four
+        // hunters took the sim from 0.7 ms to 140 ms a frame — a 10 fps playtest whose
+        // cause was one spawn pad on a roof.
+        //
+        // Perfect Dark has the same guard in the same place: `chr_adjust_pos_for_spawn`
+        // validates each candidate and a pad that fails is never shortlisted
+        // (`player.c:340`). Ours validates connectivity rather than fit, because fit is
+        // already handled by the snap above.
+        //
+        // (`nav` is the parameter, not `self.nav` — the caller has taken the field, which
+        // is why `prepare_spawn` receives it at all.)
+        if self.spawn_pads.len() > 1 {
+            // Group pads by walkable component, then keep the largest group: "connected to
+            // the level" means "connected to where everyone else is", and the biggest
+            // group is the only non-arbitrary way to say which side that is.
+            let comps: Vec<Option<u32>> = self
+                .spawn_pads
+                .iter()
+                .map(|p| nav.component_at(p.pos))
+                .collect();
+            let mut counts: std::collections::HashMap<Option<u32>, usize> =
+                std::collections::HashMap::new();
+            for c in &comps {
+                *counts.entry(*c).or_insert(0) += 1;
+            }
+            let main = counts
+                .iter()
+                .max_by_key(|(c, n)| (**n, c.unwrap_or(0)))
+                .map(|(c, _)| *c)
+                .unwrap_or(None);
+            for (i, c) in comps.iter().enumerate() {
+                if *c != main {
+                    log::warn!(
+                        "spawn: IGNORING pad {i} at {:?} — it is on a walkable island, cut off \
+                         from the rest of the level. Anyone spawning there would be stranded. \
+                         Give it a route (stairs / platform) or move it.",
+                        self.spawn_pads[i].pos
+                    );
+                }
+            }
+            let kept: Vec<spawn::SpawnPad> = self
+                .spawn_pads
+                .iter()
+                .zip(&comps)
+                .filter(|(_, c)| **c == main)
+                .map(|(p, _)| *p)
+                .collect();
+            if !kept.is_empty() {
+                self.spawn_pads = kept;
+            }
+        }
         // The wave's reference point (search-pool seed + search fallback).
         self.spawn_point = self.spawn_pads[0].pos;
         // Fan-out search pool: spread standable cells across the whole level, seeded
@@ -942,6 +998,105 @@ impl World {
             },
             self.search_points.len()
         );
+        // A pool no larger than the shortlist is the authoring shape that makes spawns
+        // feel random: every pad is a candidate every time, so the "not near an enemy"
+        // filter has nothing left to prefer. Perfect Dark's rule is written against
+        // `pads[24]` and its levels author most of that. Worth saying out loud, because
+        // the symptom (respawning in the pack) reads as a code bug and is not one.
+        // A pad the rest of the level cannot be walked to from is a trap: whoever draws
+        // it is out of the round, because every path request from it fails and no
+        // behaviour can move a hunter that A* will not route. In play that reads as a
+        // hunter loitering and ignoring you, so it is worth naming the pad at `G` rather
+        // than leaving it to be discovered as an AI bug.
+        let n = self.spawn_pad_count();
+        if n > 0 && n <= spawn::SHORTLIST {
+            log::warn!(
+                "spawn: only {n} pad(s) authored — at or below the {}-slot shortlist, so \
+                 every pad is always a candidate and the away-from-the-enemy filter has \
+                 little to choose between. Place more pads (O → SPAWNS), spread through \
+                 the level, for spawns that can actually avoid the pack.",
+                spawn::SHORTLIST
+            );
+        }
+    }
+
+    /// Whether each spawn pad can actually **get anywhere**: for every pad, whether A\*
+    /// finds a route from it to each other pad.
+    ///
+    /// A pad the nav grid cannot path out of is a trap, not a spawn. Whoever draws it
+    /// stands there for the whole round — every path request fails, so `move_toward`
+    /// reports "arrived or unreachable" forever and no behaviour can move it. It reads in
+    /// play as a hunter that has gone lazy and is ignoring you, which is a long way from
+    /// the actual cause, so this is worth being able to ask directly.
+    pub fn spawn_reachability_report(&self) -> String {
+        use std::fmt::Write;
+        let Some(nav) = self.nav.as_ref() else {
+            return "no nav baked (call this in HUNT)".into();
+        };
+        let pads = &self.spawn_pads;
+        let mut s = format!("{} pad(s), reachability by A*:\n", pads.len());
+        for (i, a) in pads.iter().enumerate() {
+            let reachable = pads
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .filter(|(_, b)| nav.find_path(a.pos, b.pos).is_some())
+                .count();
+            let _ = writeln!(
+                s,
+                "  pad {i} ({:6.1},{:6.1},{:6.1}) → reaches {reachable}/{} other pad(s){}",
+                a.pos.x,
+                a.pos.y,
+                a.pos.z,
+                pads.len() - 1,
+                if reachable == 0 { "   ** STRANDED **" } else { "" }
+            );
+        }
+        s
+    }
+
+    /// One line per hunter: what it is doing, what it is holding, and — when it is going
+    /// shopping — where its pickup is *relative to its own feet*, split into flat and
+    /// vertical.
+    ///
+    /// That split is the point. A hunter navigates in XZ and arrives on flat distance, but
+    /// a pickup is collected inside a **vertical** window too, so "flat 0.1 m, rise 3.4 m"
+    /// is a hunter standing directly under a gun on the floor above, arriving forever and
+    /// collecting never. No amount of watching it would tell you that; two numbers do.
+    pub fn hunter_report(&self) -> String {
+        use std::fmt::Write;
+        let mut s = format!("{} hunter(s):\n", self.enemies.len());
+        for (i, inst) in self.enemies.iter().enumerate() {
+            let p = inst.enemy.pos;
+            let _ = write!(
+                s,
+                "  h{i}: {:?} at ({:5.1},{:5.1},{:5.1}) holding {:12} {:2}/{:<3}",
+                inst.enemy.state(),
+                p.x,
+                p.y,
+                p.z,
+                inst.weapon.name,
+                inst.loaded,
+                inst.reserve,
+            );
+            if inst.enemy.is_dead() {
+                let _ = write!(s, " DEAD");
+            }
+            if let Some(want) = Self::hunter_want(inst) {
+                let _ = write!(s, " wants {want:?}");
+                match self.hunter_fetch_target(inst) {
+                    Some(t) => {
+                        let flat = Vec3::new(t.x - p.x, 0.0, t.z - p.z).length();
+                        let _ = write!(s, " → flat {flat:5.1} m, rise {:+5.1} m", t.y - p.y);
+                    }
+                    None => {
+                        let _ = write!(s, " → nothing on the floor to fetch");
+                    }
+                }
+            }
+            s.push('\n');
+        }
+        s
     }
 
     /// Pick a pad for a body entering the level, applying Perfect Dark's rule (see
@@ -958,6 +1113,31 @@ impl World {
         if pads.is_empty() {
             return None;
         }
+        let occupants = self.spawn_occupants(spawning);
+        let c = spawn::choose_spawn(&pads, &occupants, &mut self.physics, &mut self.spawn_rng)?;
+        // One line naming the pad, how close the nearest body is, and which pass produced
+        // it. `pass=3` says the filter found nothing safe — that is a level with too few
+        // pads for the size of the wave, not a bug in the rule.
+        log::debug!(
+            "spawn: {spawning:?} → pad {} of {} ({:?}), nearest body {:.1} m, pass {}",
+            c.pad,
+            pads.len(),
+            pads[c.pad].pos,
+            c.enemy_dist,
+            c.pass
+        );
+        Some((c.pad, pads[c.pad]))
+    }
+
+    /// Everyone already in the level that `spawning` must be kept away from: the player
+    /// (unless the player is who is spawning, or is dead) and every live hunter but
+    /// `spawning` itself.
+    ///
+    /// PD filters to *enemies* (`chr_compare_teams(..., COMPARE_ENEMIES)`), which in the
+    /// teamless deathmatch this game's hunters run is everyone. Excluding the spawning
+    /// body is PD's `prop != g_Vars.players[i]->prop` — a hunter must not be pushed off a
+    /// good pad by where its own corpse is lying.
+    fn spawn_occupants(&self, spawning: Spawning) -> Vec<Vec3> {
         let mut occupants: Vec<Vec3> = Vec::new();
         if spawning != Spawning::Player && !self.player_dead {
             if let Some(p) = self.player_pos() {
@@ -970,8 +1150,92 @@ impl World {
             }
             occupants.push(e.enemy.pos);
         }
-        let i = spawn::choose_spawn(&pads, &occupants, &mut self.physics, &mut self.spawn_rng)?;
-        Some((i, pads[i]))
+        occupants
+    }
+
+    /// Final step of every spawn: `at`, moved aside if a body is standing within
+    /// [`SPAWN_BODY_CLEAR`] of it. Returns `at` unchanged in the ordinary case.
+    ///
+    /// **Applied once per spawn, and last.** `hunter_entry` rings a whole wave out around
+    /// its pad before calling this, so running it earlier would displace twice — the wave
+    /// spread wider than its own ring and the "clustered at the marker" invariant broke.
+    ///
+    pub(crate) fn spawn_clear_of_bodies(&mut self, spawning: Spawning, at: Vec3) -> Vec3 {
+        let occupants = self.spawn_occupants(spawning);
+        match self.spawn_body_clearance(at, &occupants) {
+            Some(clear) => {
+                log::debug!(
+                    "spawn: {spawning:?} stepped {:.1} m aside — a body was standing there",
+                    at.distance(clear)
+                );
+                clear
+            }
+            None => at,
+        }
+    }
+
+    /// If a body is standing within [`SPAWN_BODY_CLEAR`] of `at`, the nearest spot to
+    /// step aside to — else `None` (the spawn point is already clear, the usual case).
+    ///
+    /// This is the half of Perfect Dark's `chr_adjust_pos_for_spawn` (`chraction.c:15018`)
+    /// that our port dropped. PD runs that function **per shortlist candidate**, and it
+    /// does two things: check the body fits, and if the spot is occupied, try eight
+    /// directions at 60 cm and take the first that is clear — rejecting the pad outright
+    /// if none is. We hoisted the "does it fit" half to pool-build time (`prepare_spawn`
+    /// resolves every pad to a standable cell) and lost the occupancy half with it,
+    /// because at pool-build time there are no bodies in the level yet.
+    ///
+    /// The distance gates upstream make this near-unreachable on a level with a real pool
+    /// — a pad with someone within 60 cm fails the 10 m gate and the 2 m desperate bail
+    /// alike. It fires on the case that has no alternative: the single-pad fallback pool
+    /// of a level that authored no pads, where the whole wave and the player share one
+    /// point. Materialising *inside* a hunter there is the one outcome worth a special
+    /// case.
+    ///
+    /// PD's ring test is `cd_test_los_oobok_getfinalroom_autoflags(..., CDTYPE_BG)` — a
+    /// line-of-sight check against background geometry — so the world-only raycast here is
+    /// its direct analogue and keeps the step from crossing a wall.
+    fn spawn_body_clearance(&mut self, at: Vec3, occupants: &[Vec3]) -> Option<Vec3> {
+        let clear_of = |p: Vec3, occ: &[Vec3]| {
+            occ.iter().all(|o| {
+                Vec3::new(o.x - p.x, 0.0, o.z - p.z).length() >= SPAWN_BODY_CLEAR
+                    && (o.y - p.y).abs() < 2.0 * SPAWN_BODY_CLEAR
+            })
+        };
+        // Nobody in the way (and note a body on another floor is not in the way).
+        if occupants.iter().all(|o| {
+            Vec3::new(o.x - at.x, 0.0, o.z - at.z).length() >= SPAWN_BODY_CLEAR
+                || (o.y - at.y).abs() >= 2.0 * SPAWN_BODY_CLEAR
+        }) {
+            return None;
+        }
+        // PD's eight directions at 60 cm, then two wider rings — the fallback pool can
+        // have a whole wave stacked on one point, which one ring cannot clear.
+        let eye = Vec3::new(0.0, 1.0, 0.0);
+        for ring in 1..=3 {
+            let r = SPAWN_BODY_CLEAR * ring as f32 * 1.5;
+            for k in 0..8 {
+                let a = std::f32::consts::FRAC_PI_4 * k as f32;
+                let to = at + Vec3::new(a.sin() * r, 0.0, a.cos() * r);
+                if !clear_of(to, occupants) {
+                    continue;
+                }
+                let d = to - at;
+                let len = d.length();
+                if len < 1e-3 {
+                    continue;
+                }
+                // Don't step through a wall to get there.
+                let blocked = self
+                    .physics
+                    .raycast_world_only(at + eye, d / len, len)
+                    .is_some_and(|hit| (hit.point - (at + eye)).length() < len - 0.1);
+                if !blocked {
+                    return Some(to);
+                }
+            }
+        }
+        None // hemmed in on every side — spawn on the pad and let the sim sort it out
     }
 
     /// Drain a breaching door's hp; on break, remove its panel collider and flip

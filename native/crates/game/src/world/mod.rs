@@ -860,6 +860,12 @@ pub(crate) const SPAWN_MARKER_POS: Vec3 = Vec3::new(3.0, 0.0, 3.0);
 /// they don't all stack on one cell. (With one pad in the pool this reproduces the old
 /// fixed-marker ring exactly.)
 const SPAWN_CLUSTER_RADIUS: f32 = 0.7;
+/// How far (m) a body entering the level must be from anyone already in it before the
+/// spawn point is accepted as-is. Perfect Dark's `chr_adjust_pos_for_spawn` steps aside
+/// in 60 cm increments (`chraction.c:15064`), which is that number; a hunter capsule is
+/// 0.24 m in radius, so this is comfortably more than two bodies touching. See
+/// [`World::spawn_body_clearance`] for why this only ever fires on a padless level.
+const SPAWN_BODY_CLEAR: f32 = 0.6;
 
 /// Seconds between a death and the respawn that follows it, both sides.
 ///
