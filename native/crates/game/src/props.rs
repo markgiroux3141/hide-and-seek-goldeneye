@@ -551,13 +551,17 @@ pub const CATALOG: &[PropDef] = &[
         scale: PROP_SCALE,
         destructible: None,
     },
+    // The sentry gun is the one *articulated* prop: its export is a parts sheet, so it
+    // loads split into six pieces and draws as six matrices driven by
+    // [`crate::turret`]. `key` names the whole prop (panel, placement, persistence);
+    // the pieces have their own renderer keys in `turret::PARTS`.
     PropDef {
         mesh: MeshId::SentryGun,
         key: "sentry_gun",
         name: "Sentry Gun",
         category: PropCategory::Electronics,
         glb: "sentry_gun/sentry_gun.obj",
-        scale: PROP_SCALE,
+        scale: crate::turret::RIG_SCALE,
         destructible: None,
     },
     PropDef {
@@ -646,6 +650,19 @@ pub fn secondary_glb(mesh: MeshId) -> Option<&'static str> {
         // NB: SecurityCamera is now a self-contained OBJ (no secondary GLB).
         _ => return None,
     })
+}
+
+/// Whether a prop bolts to the **ceiling** rather than standing on the floor.
+///
+/// A ceiling prop differs in both directions of the placement flow: it is picked
+/// against a down-facing face instead of an up-facing one, and its authored position
+/// is its *mount* point rather than the centre of its base — so its model anchor is
+/// the model origin, which such a prop's rig authors at the point it hangs from.
+///
+/// A side table rather than a [`PropDef`] field for the same reason as
+/// [`secondary_glb`]: the ~50 floor-standing rows shouldn't each carry a `false`.
+pub fn ceiling_mounted(mesh: MeshId) -> bool {
+    matches!(mesh, MeshId::SentryGun)
 }
 
 /// How a door panel moves when it opens. The catalog fixes this per model (a sliding

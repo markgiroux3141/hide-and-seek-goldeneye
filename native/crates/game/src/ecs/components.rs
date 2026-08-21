@@ -200,6 +200,51 @@ impl Health {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Destroyed;
 
+/// A live auto-turret's articulation and firing state.
+///
+/// **Not persisted** (no [`super::persist::ComponentData`] arm), for the same reason
+/// [`DoorGeom`] isn't: every field is runtime. A sentry gun in the level file is a
+/// plain `Transform` + `Renderable`; this is attached to each one at BUILD→HUNT and
+/// stripped on the way back, so the editor always shows the turret parked at rest and
+/// no level file has to change to gain a working turret.
+///
+/// Angles are in **rig space** — the prop's own frame, before its authored rotation —
+/// so [`crate::turret`] can build the draw matrices from them directly.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Turret {
+    /// Rotation about the mount's vertical axis, radians. Unlimited: it hangs on a ring.
+    pub yaw: f32,
+    /// Elevation about the trunnion, radians, clamped to
+    /// [`crate::turret::PITCH_MIN`]..[`crate::turret::PITCH_MAX`].
+    pub pitch: f32,
+    /// Barrel-bundle angle about the bore, radians, wrapped to one turn.
+    pub spin: f32,
+    /// Current barrel speed, radians/sec — ramps up while a target is held and coasts
+    /// down when it is lost. The gun will not fire until this is near full, which is
+    /// the turret's spin-up tell and the player's (and the hunters') warning.
+    pub spin_speed: f32,
+    /// Roster index of the hunter being tracked, if any.
+    pub target: Option<usize>,
+    /// Seconds until the next round may leave the barrel.
+    pub cooldown: f32,
+    /// Seconds until the turret looks for a better target.
+    pub reacquire: f32,
+}
+
+impl Default for Turret {
+    fn default() -> Self {
+        Turret {
+            yaw: 0.0,
+            pitch: 0.0,
+            spin: 0.0,
+            spin_speed: 0.0,
+            target: None,
+            cooldown: 0.0,
+            reacquire: 0.0,
+        }
+    }
+}
+
 /// Marker + parameters for something the player can "use" (a door, a terminal).
 /// The interaction input + resolution are future work; this reserves the shape so
 /// interactable props persist their reach from the start.

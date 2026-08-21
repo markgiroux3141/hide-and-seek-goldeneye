@@ -1298,11 +1298,22 @@ impl App {
                             PanelTab::Objects => {
                                 // A 3D turntable of the highlighted catalog prop, above
                                 // the (scrolling) list.
+                                // The hint names the surface the *highlighted* prop
+                                // actually mounts on: a sentry gun bolts to a ceiling
+                                // and refuses a floor pick, so a blanket "click floor"
+                                // reads as the tool being broken.
+                                let mounts_overhead = prop_sel
+                                    .and_then(|i| crate::props::CATALOG.get(i))
+                                    .is_some_and(|d| crate::props::ceiling_mounted(d.mesh));
                                 ui.label(
-                                    egui::RichText::new("PLACE PROP — click floor to drop")
-                                        .small()
-                                        .strong()
-                                        .color(SHOP_GOLD_DIM),
+                                    egui::RichText::new(if mounts_overhead {
+                                        "PLACE PROP — click a ceiling to hang it"
+                                    } else {
+                                        "PLACE PROP — click floor to drop"
+                                    })
+                                    .small()
+                                    .strong()
+                                    .color(SHOP_GOLD_DIM),
                                 );
                                 if let Some(def) = prop_sel.and_then(|i| crate::props::CATALOG.get(i)) {
                                     ui.group(|ui| {
@@ -2665,6 +2676,37 @@ impl ApplicationHandler for App {
         // meshes load through the same path as the guns.
         for def in crate::props::CATALOG {
             let path = format!("{}/../../assets/props/{}", env!("CARGO_MANIFEST_DIR"), def.glb);
+            // The sentry gun is an articulated prop, not a static one: its export is a
+            // parts sheet, so it loads split into its six pieces and uploads one mesh
+            // per piece under its own key. The turret then draws as six matrices off
+            // one entity (see `crate::turret`), which is what lets the head track and
+            // the barrels spin. Its registered AABB is the *assembled* rig, not the
+            // sheet's, so placement measures the turret rather than the exploded parts.
+            if def.mesh == crate::ecs::MeshId::SentryGun {
+                match engine::assets::obj_model::load_obj_components(&path) {
+                    Ok(parts) if parts.len() == crate::turret::PARTS.len() => {
+                        for (part, model) in crate::turret::PARTS.iter().zip(&parts) {
+                            renderer.upload_prop(part.key, model);
+                        }
+                        let (min, max) = crate::turret::assembled_bounds(&parts);
+                        world.register_prop_bounds(def.mesh, min, max);
+                        log::info!(
+                            "loaded prop {} as {} rigged parts ({} verts)",
+                            def.name,
+                            parts.len(),
+                            parts.iter().map(|p| p.vertices.len()).sum::<usize>()
+                        );
+                    }
+                    Ok(parts) => log::warn!(
+                        "prop '{}' split into {} pieces, rig expects {} — turret disabled",
+                        def.name,
+                        parts.len(),
+                        crate::turret::PARTS.len()
+                    ),
+                    Err(e) => log::warn!("prop '{}' load failed: {e}", def.name),
+                }
+                continue;
+            }
             match crate::props::load_prop_model(&path) {
                 Ok(mut model) => {
                     // Consolidate the alpha-cutout "secondary" half (glass/chain-link/

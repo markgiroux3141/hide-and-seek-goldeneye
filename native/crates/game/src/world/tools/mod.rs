@@ -16,3 +16,4 @@ mod prop_gizmo;
 // `big_room` fixtures — a level with authored pads is the precondition for both.
 pub(crate) mod spawn_point;
 mod stairs;
+mod turret;

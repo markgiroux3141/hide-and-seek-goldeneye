@@ -155,7 +155,12 @@ impl World {
         let t = self.prop_transform(e)?;
         let mesh = self.prop_mesh_id(e)?;
         let (min, max) = self.prop_bounds.get(&mesh).copied()?;
-        let anchor = Vec3::new((min.x + max.x) * 0.5, min.y, (min.z + max.z) * 0.5);
+        // Through the *shared* anchor, never a local copy of the formula: the pick box
+        // has to sit where the prop is drawn, and the two only agree if they resolve
+        // the anchor the same way. A ceiling-mounted prop anchors at its model origin
+        // rather than its base, and an inlined base-centre here put a turret's pick box
+        // above the ceiling it hangs from — visible, unclickable.
+        let anchor = self.prop_anchor(mesh);
         let lo = t.pos + (min - anchor) * t.scale;
         let hi = t.pos + (max - anchor) * t.scale;
         Some((lo.min(hi), lo.max(hi)))
@@ -171,8 +176,13 @@ impl World {
         let t = self.prop_transform(e)?;
         let mesh = self.prop_mesh_id(e)?;
         let (min, max) = self.prop_bounds.get(&mesh).copied()?;
-        let half_h = (max.y - min.y) * 0.5 * t.scale.y;
-        Some(t.pos + Vec3::new(0.0, half_h, 0.0))
+        // The centre of the prop's own bounds, relative to whatever it anchors by —
+        // which for a floor prop is exactly the old "half its height above the base"
+        // and for a hanging one is the middle of the gun, not a point up in the
+        // ceiling. Same anchor as the draw and the pick box, so the handles land on
+        // the object in both cases.
+        let centre = (min + max) * 0.5 - self.prop_anchor(mesh);
+        Some(t.pos + centre * t.scale)
     }
 
     /// The click-pick AABB for a selectable authored entity: a prop's world bounds,

@@ -62,7 +62,16 @@ impl World {
     /// A prop's model-space anchor: horizontal centre + vertical base. The render +
     /// ghost matrices place this point at the prop's translation, so a prop authored
     /// on the floor rests its base there, centred. Zero if bounds weren't registered.
-    fn prop_anchor(&self, mesh: MeshId) -> Vec3 {
+    ///
+    /// A **ceiling-mounted** prop ([`crate::props::ceiling_mounted`]) anchors at its
+    /// model origin instead. Deriving its anchor from bounds would be wrong twice
+    /// over: the mount is not at the centre of a turret that cantilevers its barrel
+    /// forward, and it is the rig — not the bounding box — that knows which point
+    /// actually touches the ceiling.
+    pub(crate) fn prop_anchor(&self, mesh: MeshId) -> Vec3 {
+        if crate::props::ceiling_mounted(mesh) {
+            return Vec3::ZERO;
+        }
         match self.prop_bounds.get(&mesh) {
             Some((min, max)) => Vec3::new((min.x + max.x) * 0.5, min.y, (min.z + max.z) * 0.5),
             None => Vec3::ZERO,
@@ -86,16 +95,38 @@ impl World {
     /// the cursor, so placement is mouse-picked, not crosshair-aimed).
     pub fn update_prop_preview(&mut self, origin: Vec3, dir: Vec3) -> Option<CpuMesh> {
         let mesh = self.prop_tool?;
-        // Floor pick along the cursor ray, gated to an up-facing floor face.
+        // Surface pick along the cursor ray, gated to the horizontal face this prop
+        // mounts on: the floor (up-facing, `Side::Min`) for everything that stands, the
+        // ceiling (down-facing, `Side::Max`) for a prop that hangs.
+        let ceiling = crate::props::ceiling_mounted(mesh);
+        let want = if ceiling { Side::Max } else { Side::Min };
         let (sel, hit_wt) = self.pick_face_hit_from(origin, dir)?;
-        if sel.axis != Axis::Y || sel.side != Side::Min {
+        if sel.axis != Axis::Y || sel.side != want {
             self.prop_preview_pos = None;
             return None;
         }
-        // Grounded metric contact point (WT → metres).
+        // Metric contact point (WT → metres) — the floor it rests on, or the ceiling
+        // it bolts to.
         let pos = hit_wt * WORLD_SCALE;
         self.prop_preview_pos = Some(pos);
         let s = WORLD_SCALE;
+
+        // A hanging prop's ghost is its assembled bounds taken straight off the mount
+        // point, not a box centred under the cursor: its anchor is the model origin,
+        // so `min`/`max` are already relative to where it will hang.
+        if ceiling {
+            let (min, max) = self.prop_bounds.get(&mesh).copied()?;
+            let scale = crate::props::def(mesh).map(|d| d.scale).unwrap_or(1.0);
+            let (lo, hi) = (pos + min * scale, pos + max * scale);
+            return Some(boxes_mesh(&[[
+                lo.x / s,
+                lo.y / s,
+                lo.z / s,
+                (hi.x - lo.x) / s,
+                (hi.y - lo.y) / s,
+                (hi.z - lo.z) / s,
+            ]]));
+        }
 
         // A door aimed near a doorway snaps into it, fitted to the hole. The ghost
         // shows the fit — one box per leaf — so a double opening visibly previews as
@@ -227,7 +258,7 @@ impl World {
     /// for call-site symmetry with the other draw-list getters.
     pub fn prop_draws(&self, _aspect: f32) -> Vec<(&'static str, Mat4, [f32; 4])> {
         let mut out = Vec::new();
-        for (t, r, hp, destroyed, door, baked) in self
+        for (t, r, hp, destroyed, door, baked, turret) in self
             .ecs
             .world()
             .query::<(
@@ -237,12 +268,34 @@ impl World {
                 Option<&Destroyed>,
                 Option<&crate::ecs::Door>,
                 Option<&crate::ecs::DoorGeom>,
+                Option<&crate::ecs::Turret>,
             )>()
             .iter()
         {
             let Some(def) = crate::props::def(r.mesh) else {
                 continue;
             };
+            // An articulated prop is several rigid pieces on one entity, so it emits
+            // one draw per piece — each the placement matrix with that piece's rig
+            // matrix composed in. The draw list is already `(key, matrix, tint)` with
+            // no cap on entries per key, so this needs nothing from the renderer.
+            //
+            // A turret in BUILD has no `Turret` component (it is HUNT-only runtime
+            // state), which is exactly right: it draws parked at rest while authoring.
+            if r.mesh == MeshId::SentryGun {
+                let (yaw, pitch, spin) = turret
+                    .map(|g| (g.yaw, g.pitch, g.spin))
+                    .unwrap_or((0.0, 0.0, 0.0));
+                let place = self.prop_model_matrix(r.mesh, t.pos, t.rot, t.scale);
+                for part in &crate::turret::PARTS {
+                    out.push((
+                        part.key,
+                        place * crate::turret::part_matrix(part, yaw, pitch, spin),
+                        [1.0, 1.0, 1.0, 1.0],
+                    ));
+                }
+                continue;
+            }
             // A door draws through the door matrix — its placement matrix with the
             // mirror and any swing/slide composed in; everything else is a plain prop.
             //

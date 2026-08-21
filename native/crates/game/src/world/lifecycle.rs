@@ -218,6 +218,11 @@ impl World {
                         }
                     }
                 }
+                // Placed sentry guns track and fire. Not an ECS system: a turret needs
+                // the hunter roster and the damage path, which `SystemCtx` carries
+                // neither of by design (see `world::tools::turret`). Before the hunter
+                // FSM, so a hunter reacts this step to being shot at.
+                self.turret_step(dt);
                 // Advance each hunter's perception FSM. Take the roster out so it
                 // isn't borrowed while each FSM needs `&self.nav` + `&mut self.physics`
                 // (the LOS raycast). Fire requests are collected + applied after the
@@ -705,6 +710,10 @@ impl World {
                 // mesh bounds and give it a moving collider. After the nav bake, since
                 // doors are excluded from it by design.
                 self.spawn_doors();
+                // Arm the placed sentry guns: attach each one's runtime tracking +
+                // firing state. After the doors, so a turret's first shot can already
+                // be blocked by a panel that starts shut.
+                self.spawn_turrets();
                 // Attach the doors to the nav overlay. After the grid bake on purpose:
                 // the overlay rides the *frozen* grid and is read live, which is what
                 // lets a door open mid-hunt and reroute hunters with no re-bake.
@@ -743,6 +752,9 @@ impl World {
                 // Drop the door panels + reset every door to shut, so a door left open
                 // this hunt is closed again in the authored level.
                 self.clear_doors();
+                // Disarm the turrets, so an authored sentry gun returns to the editor
+                // parked at rest rather than frozen mid-track.
+                self.clear_turrets();
                 self.mode = Mode::Build;
                 log::info!("→ BUILD");
             }

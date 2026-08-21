@@ -20,6 +20,7 @@ pub mod props;
 pub mod shop;
 pub mod theme_editor;
 pub mod theme_review;
+pub mod turret;
 pub mod world;
 
 /// Launch the game: open the window and run the event loop.

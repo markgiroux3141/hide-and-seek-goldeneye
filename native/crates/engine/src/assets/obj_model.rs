@@ -38,11 +38,115 @@ struct Material {
     map_kd: Option<String>,
 }
 
+/// A parsed OBJ before it becomes one or more [`TexturedModel`]s: the raw arrays plus
+/// the decoded textures, shared by [`load_obj`] and [`load_obj_components`].
+struct ParsedObj {
+    positions: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    /// `(material, [(v_idx, vt_idx); 3])` per triangle, in file order.
+    faces: Vec<(String, [(usize, usize); 3])>,
+    materials: HashMap<String, Material>,
+    images: Vec<TexImage>,
+    /// Texture filename → index into `images`.
+    tex_index: HashMap<String, usize>,
+}
+
 /// Load a Wavefront OBJ (with its sibling MTL + textures) into a [`TexturedModel`],
 /// normalised to metres. Textures + the MTL are resolved relative to the OBJ's own
 /// directory. Errors only if the OBJ can't be read or yields no geometry; a missing
 /// texture degrades to an untextured (white-fallback) primitive rather than failing.
 pub fn load_obj(path: &str) -> Result<TexturedModel, String> {
+    let parsed = parse_obj(path)?;
+    let all: Vec<usize> = (0..parsed.faces.len()).collect();
+    build_model(&parsed, &all).ok_or_else(|| format!("{path}: no drawable geometry"))
+}
+
+/// Load an OBJ split into its **connected components** — one [`TexturedModel`] per
+/// island of triangles that share vertex positions — instead of one merged model.
+///
+/// Some GoldenEye Setup Editor exports are not assembled objects at all but *parts
+/// sheets*: the editor writes each sub-part at its own local origin and leaves the
+/// assembly to the game, so the file holds several disjoint pieces sitting apart in
+/// model space. The sentry gun is one (six pieces on three shelves). Recovering the
+/// pieces is what lets a static export become an articulated prop, since each piece
+/// can then be posed by its own matrix.
+///
+/// Components come back in a **deterministic** order — most triangles first, ties
+/// broken by earliest face in the file — because callers index into this list to say
+/// which piece is which. Each model carries only the textures its own faces use.
+pub fn load_obj_components(path: &str) -> Result<Vec<TexturedModel>, String> {
+    let parsed = parse_obj(path)?;
+    let groups = connected_components(&parsed);
+    let out: Vec<TexturedModel> = groups
+        .iter()
+        .filter_map(|g| build_model(&parsed, g))
+        .collect();
+    if out.is_empty() {
+        return Err(format!("{path}: no drawable geometry"));
+    }
+    Ok(out)
+}
+
+/// Partition the parsed faces into connected components, joined through **welded**
+/// vertex positions: the editor duplicates a vertex per face corner, so identity of
+/// index means nothing and identity of position means everything. Returns face-index
+/// lists ordered largest-first, ties by earliest face — see [`load_obj_components`].
+fn connected_components(p: &ParsedObj) -> Vec<Vec<usize>> {
+    // Weld positions to a canonical id. Quantised to 0.1 mm, well under the coarsest
+    // GoldenEye vertex spacing and well over float32 noise in the ASCII round-trip.
+    const WELD: f32 = 1e-4;
+    let mut canon: HashMap<[i64; 3], usize> = HashMap::new();
+    let mut vid = Vec::with_capacity(p.positions.len());
+    for q in &p.positions {
+        let key = [
+            (q[0] / WELD).round() as i64,
+            (q[1] / WELD).round() as i64,
+            (q[2] / WELD).round() as i64,
+        ];
+        let next = canon.len();
+        vid.push(*canon.entry(key).or_insert(next));
+    }
+
+    // Union-find over canonical vertices.
+    let mut parent: Vec<usize> = (0..canon.len()).collect();
+    fn find(parent: &mut [usize], mut a: usize) -> usize {
+        while parent[a] != a {
+            parent[a] = parent[parent[a]];
+            a = parent[a];
+        }
+        a
+    }
+    for (_mat, corners) in &p.faces {
+        let ids: Vec<usize> = corners.iter().map(|&(v, _)| vid[v]).collect();
+        for w in ids.windows(2) {
+            let (ra, rb) = (find(&mut parent, w[0]), find(&mut parent, w[1]));
+            if ra != rb {
+                parent[ra] = rb;
+            }
+        }
+    }
+
+    // Bucket faces by root, remembering each bucket's first face for the tie-break.
+    let mut order: Vec<usize> = Vec::new(); // root → bucket, in first-seen order
+    let mut of_root: HashMap<usize, usize> = HashMap::new();
+    let mut buckets: Vec<Vec<usize>> = Vec::new();
+    for (fi, (_mat, corners)) in p.faces.iter().enumerate() {
+        let root = find(&mut parent, vid[corners[0].0]);
+        let b = *of_root.entry(root).or_insert_with(|| {
+            order.push(root);
+            buckets.push(Vec::new());
+            buckets.len() - 1
+        });
+        buckets[b].push(fi);
+    }
+    // Largest first; equal sizes keep file order, which is what `order` already is.
+    let mut idx: Vec<usize> = (0..buckets.len()).collect();
+    idx.sort_by(|&a, &b| buckets[b].len().cmp(&buckets[a].len()).then(a.cmp(&b)));
+    idx.into_iter().map(|i| std::mem::take(&mut buckets[i])).collect()
+}
+
+/// Read + decode an OBJ, its MTL and its textures into the shared [`ParsedObj`].
+fn parse_obj(path: &str) -> Result<ParsedObj, String> {
     let dir = Path::new(path)
         .parent()
         .map(|p| p.to_path_buf())
@@ -122,59 +226,74 @@ pub fn load_obj(path: &str) -> Result<TexturedModel, String> {
         }
     }
 
-    // Build vertices + per-material index buckets. Vertices are deduped per (material,
-    // v_idx, vt_idx) so each carries its material's Kd colour without cross-material
-    // bleed. Bucketing by material yields one contiguous primitive per material.
+    Ok(ParsedObj { positions, uvs, faces, materials, images, tex_index })
+}
+
+/// Build one [`TexturedModel`] from a subset of a [`ParsedObj`]'s faces, or `None` if
+/// the subset is empty. Vertices are deduped per `(material, v_idx, vt_idx)` so each
+/// carries its material's Kd colour without cross-material bleed, and bucketing by
+/// material yields one contiguous primitive per material. Only the images this subset
+/// actually samples are copied in, and their indices are remapped, so splitting a
+/// 14-texture parts sheet into six pieces doesn't hand each piece all 14.
+fn build_model(p: &ParsedObj, face_idx: &[usize]) -> Option<TexturedModel> {
     let mut vertices: Vec<TexVertex> = Vec::new();
     let mut vert_map: HashMap<(usize, usize, usize), u32> = HashMap::new();
-    let mut buckets: Vec<(usize, Vec<u32>)> = Vec::new(); // (material sort-key, indices)
+    let mut buckets: Vec<Vec<u32>> = Vec::new();
     let mut bucket_of: HashMap<usize, usize> = HashMap::new();
-    let mut bucket_image: HashMap<usize, Option<usize>> = HashMap::new();
-    // Stable material ordering (declaration order in the MTL, else first-seen).
-    let mut mat_order: HashMap<String, usize> = HashMap::new();
+    let mut bucket_image: Vec<Option<usize>> = Vec::new();
+    // Stable material ordering (first-seen within this subset).
+    let mut mat_order: HashMap<&str, usize> = HashMap::new();
+    // Source image index → index into this model's own `images`.
+    let mut images: Vec<TexImage> = Vec::new();
+    let mut image_remap: HashMap<usize, usize> = HashMap::new();
 
-    for (mat_name, corners) in &faces {
-        let mat = materials.get(mat_name);
+    for &fi in face_idx {
+        let (mat_name, corners) = &p.faces[fi];
+        let mat = p.materials.get(mat_name);
         let kd = mat.map(|m| m.kd).unwrap_or([1.0, 1.0, 1.0, 1.0]);
         let image = mat
             .and_then(|m| m.map_kd.as_ref())
-            .and_then(|f| tex_index.get(f).copied());
-        let mat_key = mat_order.len();
-        let mkey = *mat_order.entry(mat_name.clone()).or_insert(mat_key);
+            .and_then(|f| p.tex_index.get(f).copied())
+            .map(|src| {
+                *image_remap.entry(src).or_insert_with(|| {
+                    images.push(p.images[src].clone());
+                    images.len() - 1
+                })
+            });
+        let next_key = mat_order.len();
+        let mkey = *mat_order.entry(mat_name.as_str()).or_insert(next_key);
         let bucket_idx = *bucket_of.entry(mkey).or_insert_with(|| {
-            buckets.push((mkey, Vec::new()));
+            buckets.push(Vec::new());
+            bucket_image.push(image);
             buckets.len() - 1
         });
 
         // Flat face normal (unused by the prop shader; correct-enough for reuse).
-        let p: Vec<Vec3> = corners
+        let q: Vec<Vec3> = corners
             .iter()
-            .map(|&(v, _)| Vec3::from(positions.get(v).copied().unwrap_or([0.0; 3])))
+            .map(|&(v, _)| Vec3::from(p.positions.get(v).copied().unwrap_or([0.0; 3])))
             .collect();
-        let normal = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero().to_array();
+        let normal = (q[1] - q[0]).cross(q[2] - q[0]).normalize_or_zero().to_array();
 
         for &(v, vt) in corners {
             let key = (mkey, v, vt);
             let vi = *vert_map.entry(key).or_insert_with(|| {
                 vertices.push(TexVertex {
-                    pos: positions.get(v).copied().unwrap_or([0.0; 3]),
+                    pos: p.positions.get(v).copied().unwrap_or([0.0; 3]),
                     normal,
-                    uv: uvs.get(vt).copied().unwrap_or([0.0, 0.0]),
+                    uv: p.uvs.get(vt).copied().unwrap_or([0.0, 0.0]),
                     color: kd,
                 });
                 (vertices.len() - 1) as u32
             });
-            buckets[bucket_idx].1.push(vi);
+            buckets[bucket_idx].push(vi);
         }
-        // Record the image on the bucket via a side note (all faces of a material share
-        // it); stash it in a parallel map keyed by bucket.
-        bucket_image.entry(bucket_idx).or_insert(image);
     }
 
     // Flatten buckets → one index buffer + one primitive per material.
     let mut indices: Vec<u32> = Vec::new();
     let mut primitives: Vec<TexturedPrimitive> = Vec::new();
-    for (bi, (_key, bucket)) in buckets.iter().enumerate() {
+    for (bi, bucket) in buckets.iter().enumerate() {
         if bucket.is_empty() {
             continue;
         }
@@ -183,15 +302,15 @@ pub fn load_obj(path: &str) -> Result<TexturedModel, String> {
         primitives.push(TexturedPrimitive {
             index_start: start,
             index_count: bucket.len() as u32,
-            image: bucket_image.get(&bi).copied().flatten(),
+            image: bucket_image[bi],
             emissive: None,
         });
     }
 
     if vertices.is_empty() {
-        return Err(format!("{path}: no drawable geometry"));
+        return None;
     }
-    Ok(TexturedModel { vertices, indices, primitives, images })
+    Some(TexturedModel { vertices, indices, primitives, images })
 }
 
 /// Parse the subset of an MTL we consume: `newmtl` blocks with `Kd` + `map_Kd`.
@@ -333,5 +452,77 @@ mod tests {
     #[test]
     fn missing_obj_errors() {
         assert!(load_obj("does/not/exist.obj").is_err());
+        assert!(load_obj_components("does/not/exist.obj").is_err());
+    }
+
+    fn sentry_path() -> String {
+        format!(
+            "{}/../../assets/props/sentry_gun/sentry_gun.obj",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    }
+
+    /// The sentry gun splits into its six authored pieces, in the documented order,
+    /// with the documented sizes.
+    ///
+    /// The turret rig indexes this list by position — component 0 is the barrel
+    /// bundle it spins, component 1 the housing it pitches — so an ordering change
+    /// would silently re-wire which piece moves how. Pinning the triangle count *and*
+    /// the measured size of each piece means a re-export that renumbers or reshapes
+    /// them fails here rather than in-game.
+    #[test]
+    fn sentry_gun_splits_into_its_six_parts() {
+        let parts = load_obj_components(&sentry_path()).expect("sentry gun loads");
+        // (triangles, size in metres, rounded to mm) — see tools/sentry/sentry_rig.py.
+        let expect = [
+            (18, [0.600, 0.208, 0.240]), // barrel bundle
+            (12, [0.800, 0.500, 0.250]), // housing
+            (12, [0.600, 0.200, 0.250]), // cowl + dish
+            (7, [0.100, 0.400, 0.300]),  // yaw fin
+            (6, [0.100, 0.100, 0.400]),  // trunnion
+            (2, [0.000, 0.200, 0.250]),  // panel
+        ];
+        assert_eq!(parts.len(), expect.len(), "component count");
+        for (i, (tris, size)) in expect.iter().enumerate() {
+            let p = &parts[i];
+            assert_eq!(p.indices.len(), tris * 3, "component {i} triangle count");
+            let mut lo = [f32::MAX; 3];
+            let mut hi = [f32::MIN; 3];
+            for v in &p.vertices {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(v.pos[k]);
+                    hi[k] = hi[k].max(v.pos[k]);
+                }
+            }
+            for k in 0..3 {
+                assert!(
+                    ((hi[k] - lo[k]) - size[k]).abs() < 1e-3,
+                    "component {i} axis {k}: got {:.3} want {:.3}",
+                    hi[k] - lo[k],
+                    size[k]
+                );
+            }
+        }
+    }
+
+    /// Splitting is lossless and non-duplicating: every triangle in the merged model
+    /// lands in exactly one component, and each component carries only the textures
+    /// its own faces sample rather than the whole sheet's.
+    #[test]
+    fn components_partition_the_model_and_trim_their_textures() {
+        let whole = load_obj(&sentry_path()).expect("sentry gun loads");
+        let parts = load_obj_components(&sentry_path()).expect("sentry gun splits");
+        let split_tris: usize = parts.iter().map(|p| p.indices.len()).sum();
+        assert_eq!(split_tris, whole.indices.len(), "triangles conserved");
+        for (i, p) in parts.iter().enumerate() {
+            let used: std::collections::HashSet<usize> =
+                p.primitives.iter().filter_map(|pr| pr.image).collect();
+            assert_eq!(p.images.len(), used.len(), "component {i} carries dead images");
+            assert!(
+                p.images.len() < whole.images.len(),
+                "component {i} kept all {} sheet textures",
+                whole.images.len()
+            );
+        }
     }
 }

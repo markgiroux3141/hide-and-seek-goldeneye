@@ -281,8 +281,58 @@ impl World {
         // authored set; derived per-entity runtime state (colliders, nav overlays,
         // meshes) is re-established at HUNT bake, mirroring how geometry is derived.
         self.ecs.load_authored(&file.entities);
+        self.migrate_legacy_turrets();
 
         meshes
+    }
+
+    /// Lift sentry guns authored **before** the turret rig up out of the floor.
+    ///
+    /// A sentry gun used to be an ordinary floor prop: dropped on a floor pick, at
+    /// `PROP_SCALE`, anchored by the centre of its base. It is now a ceiling fixture
+    /// anchored by its mount point ([`crate::props::ceiling_mounted`]), so those old
+    /// placements re-read as "hang a turret from this floor point" — the whole gun
+    /// ends up *below* the floor it was authored on, invisible and effectively
+    /// unclickable.
+    ///
+    /// There is no honest way to guess which ceiling the author meant, so this does
+    /// the one thing that is clearly right: raise the mount by the turret's own drop,
+    /// so the gun occupies the space it used to occupy, just hanging from a point
+    /// above it instead of standing on one below it. It lands visible, selectable and
+    /// working, where the author put it — and if that is not where they want it, the
+    /// gizmo and the delete key now reach it.
+    ///
+    /// Legacy placements are told apart by their authored scale: the catalog is the
+    /// only thing that ever sets it (there is no scale gizmo), so a sentry gun not at
+    /// [`crate::turret::RIG_SCALE`] predates the rig.
+    pub(crate) fn migrate_legacy_turrets(&mut self) {
+        let drop = self
+            .prop_bounds
+            .get(&crate::ecs::MeshId::SentryGun)
+            .map(|(min, max)| max.y - min.y)
+            .unwrap_or(0.0);
+        let mut moved = 0;
+        for (t, r) in self
+            .ecs
+            .world_mut()
+            .query_mut::<(&mut crate::ecs::Transform, &crate::ecs::Renderable)>()
+        {
+            if r.mesh != crate::ecs::MeshId::SentryGun
+                || (t.scale.x - crate::turret::RIG_SCALE).abs() < 1e-4
+            {
+                continue;
+            }
+            t.scale = Vec3::splat(crate::turret::RIG_SCALE);
+            t.pos.y += drop * crate::turret::RIG_SCALE;
+            moved += 1;
+        }
+        if moved > 0 {
+            log::info!(
+                "migrated {moved} pre-rig sentry gun(s): re-scaled to the turret rig and \
+                 raised {:.2} m so they hang above their authored point instead of below it",
+                drop * crate::turret::RIG_SCALE
+            );
+        }
     }
 
     /// Save to numbered quick-slot `slot`, returning the path written (for the

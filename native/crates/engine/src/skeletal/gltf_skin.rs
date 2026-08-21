@@ -16,6 +16,10 @@ use crate::render::mesh::SkinVertex;
 use crate::skeletal::Skeleton;
 
 /// One decoded RGBA8 texture image from the GLB.
+///
+/// `Clone` so a model can be split into pieces that each keep only the textures they
+/// sample (see [`crate::assets::obj_model::load_obj_components`]).
+#[derive(Clone)]
 pub struct TexImage {
     pub width: u32,
     pub height: u32,

@@ -43,6 +43,12 @@ pub enum Killer {
     Player,
     /// The hunter in this roster slot.
     Hunter(usize),
+    /// A turret the player placed. Credited to the player's side: the round is one
+    /// player against the hunter pack, and a fixture the player built and sited is
+    /// that player's doing. Kept distinct from [`Killer::Player`] rather than folded
+    /// into it so "shot it myself" and "my turret got it" stay separable — which is
+    /// the number that says whether turrets are pulling their weight.
+    Turret,
     /// Nobody identifiable — a splash kill from an explosive, which carries no owner
     /// through the projectile/mine sim. The victim still takes the death; no kill is
     /// credited. (Threading an owner through `combat::explosives` would close this;
@@ -106,7 +112,8 @@ impl World {
             s.deaths += 1;
         }
         match killer {
-            Killer::Player => self.player_score.kills += 1,
+            // A turret kill is the player's side's kill — see [`Killer::Turret`].
+            Killer::Player | Killer::Turret => self.player_score.kills += 1,
             // Hunter-on-hunter: the pack's side total gains nothing from shooting its
             // own, so only the individual slot is credited. Otherwise a free-for-all
             // pack would win the round against itself without ever touching the player.

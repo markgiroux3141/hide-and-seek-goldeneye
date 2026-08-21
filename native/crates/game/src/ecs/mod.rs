@@ -27,8 +27,8 @@ mod tests;
 
 pub use components::{
     AmbientSettings, Destroyed, Door, DoorAccess, DoorGeom, DoorState, Health, HingeSide, Interactable,
-    MeshId, OpeningType, PointLight, Renderable, SpawnPoint, Transform, DOOR_AUTO_CLOSE,
-    DOOR_OPEN_ANGLE, DOOR_USE_RADIUS,
+    MeshId, OpeningType, PointLight, Renderable, SpawnPoint, Transform, Turret,
+    DOOR_AUTO_CLOSE, DOOR_OPEN_ANGLE, DOOR_USE_RADIUS,
 };
 pub use persist::{ComponentData, EntityData};
 pub use systems::{Command, SystemCtx};
