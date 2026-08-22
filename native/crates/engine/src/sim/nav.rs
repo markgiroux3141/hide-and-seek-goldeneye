@@ -357,6 +357,22 @@ impl NavWorld {
         log::info!("nav: {} connected walkable component(s)", next - 1);
     }
 
+    /// Every walkable component as `(id, cell count)`, largest first — the raw material
+    /// for a "why can't the hunters get there" report: one big component and a scatter of
+    /// tiny ones is a **quantization** story (slivers the bake carved off), while two large
+    /// ones is a genuine severed route.
+    pub fn component_sizes(&self) -> Vec<(u32, usize)> {
+        let mut counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        for &c in &self.comp {
+            if c != 0 {
+                *counts.entry(c).or_insert(0) += 1;
+            }
+        }
+        let mut out: Vec<(u32, usize)> = counts.into_iter().collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        out
+    }
+
     /// The connected-component id of the standable cell at (or nearest to) `m`, or `None`
     /// where there is no standable cell at all. Two positions with different ids cannot
     /// walk to each other whatever the doors do — see [`Self::label_components`].

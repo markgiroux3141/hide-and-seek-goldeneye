@@ -1028,6 +1028,40 @@ impl World {
     /// reports "arrived or unreachable" forever and no behaviour can move it. It reads in
     /// play as a hunter that has gone lazy and is ignoring you, which is a long way from
     /// the actual cause, so this is worth being able to ask directly.
+    /// Walkable-component sizes plus which one each spawn pad sits in — the crude first
+    /// version of the nav-issues report (`DESIGN_NAV_VALIDATION.md`).
+    pub fn nav_component_report(&self) -> String {
+        use std::fmt::Write;
+        let Some(nav) = self.nav.as_ref() else {
+            return "no nav baked (call this in HUNT)".into();
+        };
+        let sizes = nav.component_sizes();
+        let total: usize = sizes.iter().map(|(_, n)| n).sum();
+        let mut s = format!(
+            "{} walkable component(s), {total} standable cells:
+",
+            sizes.len()
+        );
+        for (id, n) in sizes.iter().take(12) {
+            let pads: Vec<usize> = self
+                .spawn_pads
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| nav.component_at(p.pos) == Some(*id))
+                .map(|(i, _)| i)
+                .collect();
+            let _ = writeln!(
+                s,
+                "  comp {id}: {n} cells ({:.1}%)  pads {pads:?}",
+                *n as f32 / total.max(1) as f32 * 100.0
+            );
+        }
+        if sizes.len() > 12 {
+            let _ = writeln!(s, "  … and {} more", sizes.len() - 12);
+        }
+        s
+    }
+
     pub fn spawn_reachability_report(&self) -> String {
         use std::fmt::Write;
         let Some(nav) = self.nav.as_ref() else {

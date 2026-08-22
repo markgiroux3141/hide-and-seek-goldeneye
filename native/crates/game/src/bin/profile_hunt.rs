@@ -115,4 +115,5 @@ fn main() {
     println!();
     println!("{}", world.hunter_report());
     println!("{}", world.spawn_reachability_report());
+    println!("{}", world.nav_component_report());
 }
