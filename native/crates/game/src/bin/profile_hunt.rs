@@ -116,4 +116,9 @@ fn main() {
     println!("{}", world.hunter_report());
     println!("{}", world.spawn_reachability_report());
     println!("{}", world.nav_component_report());
+    // The full validation pass — the same findings the BUILD NAV tab shows, which is
+    // where the *diagnosis* lives: component sizes say a level is broken, the nearest-gap
+    // and orphan lines say where and why.
+    println!("── nav validation ──");
+    println!("{}", world.nav_issue_report());
 }

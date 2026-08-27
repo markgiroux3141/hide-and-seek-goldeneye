@@ -943,45 +943,28 @@ impl World {
         //
         // (`nav` is the parameter, not `self.nav` — the caller has taken the field, which
         // is why `prepare_spawn` receives it at all.)
-        if self.spawn_pads.len() > 1 {
-            // Group pads by walkable component, then keep the largest group: "connected to
-            // the level" means "connected to where everyone else is", and the biggest
-            // group is the only non-arbitrary way to say which side that is.
-            let comps: Vec<Option<u32>> = self
-                .spawn_pads
-                .iter()
-                .map(|p| nav.component_at(p.pos))
-                .collect();
-            let mut counts: std::collections::HashMap<Option<u32>, usize> =
-                std::collections::HashMap::new();
-            for c in &comps {
-                *counts.entry(*c).or_insert(0) += 1;
+        //
+        // The grouping rule lives in `world::nav_issues` and is called from here, so the
+        // BUILD NAV tab's "G will IGNORE pad 3" list is produced by the same code that
+        // does the ignoring — a second copy of this rule would eventually report
+        // confidently on a decision the runtime no longer makes.
+        let (_, dropped) = super::nav_issues::partition_pads(&self.spawn_pads, nav);
+        if !dropped.is_empty() && dropped.len() < self.spawn_pads.len() {
+            for &i in &dropped {
+                log::warn!(
+                    "spawn: IGNORING pad {i} at {:?} — it is on a walkable island, cut off \
+                     from the rest of the level. Anyone spawning there would be stranded. \
+                     Give it a route (stairs / platform) or move it. (BUILD: O → NAV → \
+                     Calculate shows how far off the route it is.)",
+                    self.spawn_pads[i].pos
+                );
             }
-            let main = counts
-                .iter()
-                .max_by_key(|(c, n)| (**n, c.unwrap_or(0)))
-                .map(|(c, _)| *c)
-                .unwrap_or(None);
-            for (i, c) in comps.iter().enumerate() {
-                if *c != main {
-                    log::warn!(
-                        "spawn: IGNORING pad {i} at {:?} — it is on a walkable island, cut off \
-                         from the rest of the level. Anyone spawning there would be stranded. \
-                         Give it a route (stairs / platform) or move it.",
-                        self.spawn_pads[i].pos
-                    );
-                }
-            }
-            let kept: Vec<spawn::SpawnPad> = self
-                .spawn_pads
-                .iter()
-                .zip(&comps)
-                .filter(|(_, c)| **c == main)
-                .map(|(p, _)| *p)
-                .collect();
-            if !kept.is_empty() {
-                self.spawn_pads = kept;
-            }
+            let mut i = 0;
+            self.spawn_pads.retain(|_| {
+                let keep = !dropped.contains(&i);
+                i += 1;
+                keep
+            });
         }
         // The wave's reference point (search-pool seed + search fallback).
         self.spawn_point = self.spawn_pads[0].pos;

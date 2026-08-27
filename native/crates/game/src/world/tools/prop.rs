@@ -567,13 +567,13 @@ mod tests {
 
         let mut regions = std::mem::take(&mut world.regions);
         // Just above the floor at the crate's spot is open air without the prop…
-        let open = nav::bake(&mut regions, &[]).expect("bake");
+        let open = nav::bake(&mut regions, &[], &[]).expect("bake");
         assert!(
             !open.is_solid_meters(3.0, 0.1, 3.0),
             "the spot is walkable air before the prop blocks it"
         );
         // …and feeding the prop footprint marks that cell solid (enemies path around).
-        let blocked = nav::bake(&mut regions, &props).expect("bake with prop solids");
+        let blocked = nav::bake(&mut regions, &props, &[]).expect("bake with prop solids");
         assert!(
             blocked.is_solid_meters(3.0, 0.1, 3.0),
             "the crate blocks its nav cell"

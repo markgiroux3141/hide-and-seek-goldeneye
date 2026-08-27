@@ -58,12 +58,18 @@ enum PanelTab {
     Lighting,
     Spawns,
     Textures,
+    Nav,
 }
 
 impl PanelTab {
     /// Every tab, in display order (also the cycle order).
-    const ALL: [PanelTab; 4] =
-        [PanelTab::Objects, PanelTab::Lighting, PanelTab::Spawns, PanelTab::Textures];
+    const ALL: [PanelTab; 5] = [
+        PanelTab::Objects,
+        PanelTab::Lighting,
+        PanelTab::Spawns,
+        PanelTab::Textures,
+        PanelTab::Nav,
+    ];
 
     /// The header title for this tab.
     fn title(self) -> &'static str {
@@ -72,6 +78,7 @@ impl PanelTab {
             PanelTab::Lighting => "LIGHTING",
             PanelTab::Spawns => "SPAWNS",
             PanelTab::Textures => "TEXTURES",
+            PanelTab::Nav => "NAV",
         }
     }
 
@@ -97,6 +104,11 @@ const SHOP_GOLD_DIM: egui::Color32 = egui::Color32::from_rgb(150, 122, 60);
 const SHOP_TEXT: egui::Color32 = egui::Color32::from_rgb(222, 222, 228);
 /// Dimmed text — unaffordable prices / disabled hints.
 const SHOP_DIM: egui::Color32 = egui::Color32::from_rgb(110, 110, 118);
+/// NAV tab verdicts: a clean finding, and one that means something in the level is
+/// unreachable. Green/red rather than gold because these are pass/fail, not emphasis —
+/// and the same two colours the 3D overlay uses for reachable / cut-off floor.
+const NAV_OK: egui::Color32 = egui::Color32::from_rgb(96, 200, 116);
+const NAV_BAD: egui::Color32 = egui::Color32::from_rgb(232, 96, 88);
 
 /// Apply the shop's gold-on-black theme to the egui context (once at startup). Only
 /// egui (the menus) is affected — the in-world bitmap HUD is untouched.
@@ -236,6 +248,9 @@ struct App {
     theme_slot_labels: std::collections::HashMap<usize, String>,
     /// Whether the preview room geometry has been uploaded this session.
     theme_preview_uploaded: bool,
+    /// Which revision of the NAV overlay is on the GPU (`None` = nothing uploaded).
+    /// The mesh is far too big to re-upload per frame — see `World::nav_overlay_rev`.
+    nav_overlay_uploaded: Option<u32>,
 }
 
 impl App {
@@ -278,6 +293,7 @@ impl App {
             theme_status: String::new(),
             theme_slot_labels: std::collections::HashMap::new(),
             theme_preview_uploaded: false,
+            nav_overlay_uploaded: None,
         }
     }
 }
@@ -844,6 +860,18 @@ impl App {
             .unwrap_or(false);
         let spawn_pad_count = self.world.as_ref().map(|w| w.spawn_pad_count()).unwrap_or(0);
         let mut toggle_spawn_place = false;
+        // NAV tab: the cached findings rendered as (text, severity) pairs, plus the two
+        // deferred actions. Nothing here is computed per frame — `lines()` reads a cached
+        // report and the Calculate that produces it is an explicit button.
+        let nav_lines: Vec<(String, crate::world::NavSeverity)> = self
+            .world
+            .as_ref()
+            .and_then(|w| w.nav_issues())
+            .map(|i| i.lines().into_iter().map(|l| (l.text, l.sev)).collect())
+            .unwrap_or_default();
+        let mut nav_overlay_ui = self.world.as_ref().is_some_and(|w| w.nav_overlay_on());
+        let mut nav_calculate = false;
+        let mut nav_toggle_overlay = false;
         let mut real_lighting_ui = self.build_real_lighting;
         let mut set_real_lighting: Option<bool> = None;
         let panel_tab = self.panel_tab;
@@ -1351,6 +1379,75 @@ impl App {
                                     .small()
                                     .color(SHOP_DIM),
                                 );
+                            }
+                            PanelTab::Nav => {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Can the hunters walk your level? They move on a \
+                                         0.25 m grid that climbs one cell and never jumps \
+                                         — you autostep the same, but you also fall and \
+                                         jump 0.76 m, so you can reach places they cannot.",
+                                    )
+                                    .small()
+                                    .color(SHOP_DIM),
+                                );
+                                ui.add_space(4.0);
+                                if ui
+                                    .add_sized(
+                                        [200.0, 28.0],
+                                        egui::Button::new(
+                                            egui::RichText::new("CALCULATE")
+                                                .color(egui::Color32::BLACK)
+                                                .strong(),
+                                        )
+                                        .fill(SHOP_GOLD),
+                                    )
+                                    .on_hover_text(
+                                        "Bakes the nav grid and checks it — about half a \
+                                         second on a big level, which is why it isn't live",
+                                    )
+                                    .clicked()
+                                {
+                                    nav_calculate = true;
+                                }
+                                if ui
+                                    .checkbox(&mut nav_overlay_ui, "Show walkable overlay")
+                                    .on_hover_text(
+                                        "Green = the main walkable area. Any other colour is \
+                                         an island nothing can reach. Red posts are corridors \
+                                         too narrow for a body; orange posts are steps that \
+                                         would reconnect an island.",
+                                    )
+                                    .changed()
+                                {
+                                    nav_toggle_overlay = true;
+                                }
+                                ui.separator();
+                                if nav_lines.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "Nothing calculated yet — press CALCULATE.",
+                                        )
+                                        .small()
+                                        .color(SHOP_DIM),
+                                    );
+                                } else {
+                                    egui::ScrollArea::vertical().show(ui, |ui| {
+                                        ui.set_width(206.0);
+                                        for (text, sev) in &nav_lines {
+                                            use crate::world::NavSeverity as S;
+                                            let col = match sev {
+                                                S::Ok => NAV_OK,
+                                                S::Info => SHOP_DIM,
+                                                S::Warn => SHOP_GOLD,
+                                                S::Error => NAV_BAD,
+                                            };
+                                            ui.label(
+                                                egui::RichText::new(text).small().color(col),
+                                            );
+                                        }
+                                    });
+                                }
                             }
                             PanelTab::Objects => {
                                 // A 3D turntable of the highlighted catalog prop, above
@@ -2169,6 +2266,19 @@ impl App {
                 world.arm_spawn_point_placement();
             }
         }
+        // NAV tab. Calculate is deliberately the only thing that runs the bake, and the
+        // overlay toggle is independent of it — leave the overlay up, edit the level,
+        // press Calculate again to see whether the island closed.
+        if nav_calculate {
+            if let Some(world) = self.world.as_mut() {
+                world.calculate_nav_issues();
+            }
+        }
+        if nav_toggle_overlay {
+            if let Some(world) = self.world.as_mut() {
+                world.toggle_nav_overlay();
+            }
+        }
         // Lighting edits (arm/disarm light placement, flat/real preference, ambient,
         // selected-light params) — applied after the `state` borrow ends.
         if toggle_light_place {
@@ -2933,7 +3043,7 @@ impl ApplicationHandler for App {
             world.attach_audio(audio);
         }
         log::info!(
-            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door(scroll=single/double)  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  F1-F8=load level slot  Ctrl+F1-F8=save level slot  Y=proc-anim preview(Z=fire)  I=invincible  N=invisible  J=hunters on/off  G=HUNT  M=shop menu (N64 Start)  [HUNT: click=fire  RMB=aim  B=use/open door  R=reload  Q=weapon  F=detonate mines]"
+            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door(scroll=single/double)  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=simple F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  F1-F8=load level slot  Ctrl+F1-F8=save level slot  Y=proc-anim preview(Z=fire)  I=invincible  N=invisible  [/]=wave size  F10=hunter telemetry  J=hunters on/off  G=HUNT  M=shop menu (N64 Start)  [HUNT: click=fire  RMB=aim  B=use/open door  R=reload  Q=weapon  F=detonate mines]"
         );
 
         window.request_redraw();
@@ -3460,6 +3570,13 @@ impl ApplicationHandler for App {
                     // The fixed enemy spawn-point marker (colored floor square) —
                     // drawn in both modes so the builder can author around it.
                     renderer.set_marker_mesh(world.spawn_marker_mesh().as_ref());
+                    // The nav overlay is the one colored channel NOT rebuilt per frame:
+                    // it is ~90k vertices and only changes when the author presses
+                    // Calculate or toggles it, so it uploads on a revision change.
+                    if self.nav_overlay_uploaded != Some(world.nav_overlay_rev()) {
+                        renderer.set_nav_overlay_mesh(world.nav_overlay_mesh());
+                        self.nav_overlay_uploaded = Some(world.nav_overlay_rev());
+                    }
                     renderer.set_spark_mesh(world.spark_mesh().as_ref());
                     // Explosion fireballs (additive textured billboards, world-space).
                     renderer.set_blast_mesh(world.blast_mesh().as_ref());
@@ -3775,6 +3892,31 @@ impl App {
                 return;
             }
         }
+        // F10 captures hunter telemetry to a file — the "it is happening RIGHT NOW"
+        // button. A frozen hunter tells you nothing from the outside: this writes what
+        // each one thinks it is doing, what it is walking to, which gate refused its last
+        // step and for how long, plus whether A* can even route it to you. Appends, so a
+        // session of presses is one timeline rather than a file you have to catch.
+        if code == KeyCode::F10 {
+            if let Some(world) = self.world.as_ref() {
+                let dump = world.hunter_telemetry();
+                print!("{dump}");
+                let path = "hunter_telemetry.log";
+                let wrote = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .and_then(|mut f| {
+                        use std::io::Write as _;
+                        writeln!(f, "{dump}")
+                    });
+                match wrote {
+                    Ok(()) => log::info!("hunter telemetry appended to {path}"),
+                    Err(e) => log::warn!("could not write {path}: {e}"),
+                }
+            }
+            return;
+        }
         // I toggles player invincibility (dev/observe): enemies keep aiming + firing
         // but you take no damage, so you can watch them chase + shoot. Works anytime.
         if code == KeyCode::KeyI {
@@ -3815,6 +3957,19 @@ impl App {
             if let Some(world) = self.world.as_mut() {
                 let up = matches!(code, KeyCode::Equal | KeyCode::NumpadAdd);
                 world.change_difficulty(if up { 1 } else { -1 });
+            }
+            return;
+        }
+        // `[` / `]` set how many hunters the wave floods in, live: mid-HUNT it
+        // re-floods immediately (like the difficulty dial), in BUILD it takes effect at
+        // the next G. Works in both modes — the brackets are bound to nothing else.
+        //
+        // The reason it is a live dial and not a menu: its first job is bisecting a
+        // stall. One hunter that walks a corridor cleanly where four jam is a crowding
+        // bug; one that jams either way is not, and that is two keypresses to find out.
+        if matches!(code, KeyCode::BracketLeft | KeyCode::BracketRight) {
+            if let Some(world) = self.world.as_mut() {
+                world.change_wave_size(if code == KeyCode::BracketRight { 1 } else { -1 });
             }
             return;
         }

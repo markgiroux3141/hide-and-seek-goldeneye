@@ -18,6 +18,26 @@ use crate::geometry::geom;
 pub const AGENT_HEIGHT_CELLS: i32 = 6;
 /// Max vertical step an agent climbs between adjacent cells (stairs rise 1 WT).
 const MAX_STEP: i32 = 1;
+/// Max vertical step **inside authored stair geometry** (2 WT = 0.5 m).
+///
+/// A relaxation, and a deliberately local one. A stair-run's steps are laid out as
+/// `step_run = total_run / steps`, so a run steeper than 45° gets treads *shallower than
+/// one cell* — and then some tread has no cell centre in it at all, loses its standable
+/// cell, and the walkable strip skips it. The gap between the cells that survive is two
+/// cells, and with a flat [`MAX_STEP`] the grid severs the flight in the middle. On
+/// `slot1` that was 3,488 cells (15% of the level) behind two staircases the *player*
+/// walks up at 48°, comfortably inside their 50° slope limit.
+///
+/// Raising [`MAX_STEP`] globally would fix it by letting every hunter everywhere climb
+/// half a metre — twice the player's autostep — to paper over a stair-sampling artifact.
+/// This applies only where the level actually contains stairs (see the `stair` grid), so
+/// it cannot be used to scale a wall, and hunters take a skipped tread as one 0.5 m step
+/// on a staircase, which is what a person does anyway.
+///
+/// A run steeper than 2:1 would skip *two* treads and need 3 here. Nothing silently
+/// breaks if that happens — the NAV tab reports the island exactly as it did before, with
+/// a "0.75 m above" gap line.
+const STAIR_STEP: i32 = 2;
 /// Torso probe height (m above feet) for the wall-clearance nudge — samples wall
 /// solidity at body height rather than at the feet (near the floor). See
 /// [`NavWorld::wall_clearance_offset`].
@@ -125,6 +145,10 @@ pub struct NavWorld {
     doors: Vec<NavDoor>,
     /// cellIdx → (doorIndex + 1); 0 = no door. Empty until `set_doors`.
     door_grid: Vec<u16>,
+    /// cellIdx → 1 where the cell is inside (or standing on) authored stair geometry.
+    /// The only place [`STAIR_STEP`] applies instead of [`MAX_STEP`]. Empty = no stairs,
+    /// which reads as all-zero.
+    stair: Vec<u8>,
     /// cellIdx → connected-component id (0 = not standable), from [`Self::label_components`].
     ///
     /// **This is what makes "you cannot get there" cheap.** A\* answers *reachable* fast
@@ -134,6 +158,76 @@ pub struct NavWorld {
     /// go there — which on a real level is the rest of the round. Labelling once at bake
     /// turns that into an integer comparison.
     comp: Vec<u32>,
+}
+
+// ─── Validation findings (the BUILD NAV tab) ─────────────────────────────────
+// Types returned by the "explain this grid" queries below. They exist because the
+// authoring question is never "is there a path" — A* answers that — but *why not*,
+// and every answer needs its own shape.
+
+/// The closest approach between two walkable components: the cell pair, and the gap
+/// split into its **flat** and **vertical** parts.
+///
+/// That split is the whole diagnosis, and it is why this is not one distance.
+/// `flat 0.25, rise 0.50` is a single step half a metre too tall — fix the geometry or
+/// the step limit. `flat 4.20, rise 0.00` is a pit the author meant to be there — build
+/// a bridge. A 3D distance of 0.56 vs 4.20 cannot tell those two apart, and the fixes
+/// have nothing in common.
+#[derive(Clone, Copy, Debug)]
+pub struct NavGap {
+    /// A cell on the first component's side of the gap (the island).
+    pub from: Vec3,
+    /// The nearest cell on the second's (the level).
+    pub to: Vec3,
+    /// Horizontal (XZ) distance between them, metres.
+    pub flat: f32,
+    /// Height of `to` above `from`, metres. Negative = the island is the higher side.
+    pub rise: f32,
+}
+
+/// A standable cell in a corridor narrower than an agent's body.
+///
+/// **Not a connectivity fault.** A\* will happily route through it — the grid is a
+/// 4-connected line of cell *centres* with no body width — and then the mover's
+/// wall-clearance nudge has to fit a real body down it. That is a different bug with a
+/// different fix, so it gets a different finding.
+#[derive(Clone, Copy, Debug)]
+pub struct NavPinch {
+    pub pos: Vec3,
+    /// Free width (metres) across the corridor at its narrowest axis.
+    pub width: f32,
+}
+
+/// A step up that the player can take and a hunter cannot: taller than [`MAX_STEP`],
+/// inside the height a player clears by walking or jumping.
+///
+/// Reported as **information, not an error**. Some of these are the level being wrong;
+/// some are the *hunter* being less mobile than the player, which is a legitimate design
+/// state. Only `joins` distinguishes them.
+#[derive(Clone, Copy, Debug)]
+pub struct NavClimb {
+    /// The lower cell.
+    pub from: Vec3,
+    /// The cell above it that a hunter cannot reach from there.
+    pub to: Vec3,
+    /// Height of the step, metres.
+    pub rise: f32,
+    /// The two component ids this climb would join, when they differ — i.e. this edge
+    /// is *why* something is cut off, and closing it reconnects the level. `None` when
+    /// both ends are already the same component (a shortcut, not a severed route).
+    pub joins: Option<(u32, u32)>,
+}
+
+/// Nav cell size in metres — one WT. Callers reporting on the grid have to be able to
+/// say "0.5 m" rather than "2 cells".
+pub const fn cell_size_m() -> f32 {
+    WORLD_SCALE
+}
+
+/// The tallest step a hunter climbs, in metres ([`MAX_STEP`] cells). The player's
+/// autostep and jump apex are the numbers this wants comparing against.
+pub const fn max_step_m() -> f32 {
+    MAX_STEP as f32 * WORLD_SCALE
 }
 
 impl NavWorld {
@@ -209,6 +303,23 @@ impl NavWorld {
         self.doors.len()
     }
 
+    /// How many grid cells door `i` actually marks.
+    ///
+    /// **Zero means the door does not exist as far as pathing is concerned** — hunters
+    /// walk through it and nothing in the door system ever fires. That is a live hazard
+    /// rather than a hypothetical: [`Self::set_doors`] marks a cell when the cell's
+    /// *centre* falls inside the panel's box, and a door panel is thin — a few
+    /// centimetres against a 0.25 m cell. Whether a given door catches a centre or slips
+    /// between two is decided by where the author happened to place it, which is why the
+    /// symptom is "they walk through doors *sometimes*".
+    pub fn door_cells(&self, i: usize) -> usize {
+        if self.door_grid.is_empty() {
+            return 0;
+        }
+        let marker = (i + 1) as u16;
+        self.door_grid.iter().filter(|&&m| m == marker).count()
+    }
+
     /// Whether door `i` currently stands open. An out-of-range index reads as open,
     /// so a stale index can never wall a hunter in.
     pub fn door_is_open(&self, i: usize) -> bool {
@@ -240,6 +351,16 @@ impl NavWorld {
     /// How far back a hunter must stand to be clear of door `i`'s swing, in metres.
     pub fn door_clearance(&self, i: usize) -> Option<f32> {
         self.doors.get(i).map(|d| d.clearance)
+    }
+
+    /// The door whose cells contain `m`, if any.
+    ///
+    /// The question "am I standing *in* the doorway" — which is different from "is a door
+    /// in my way", and has to be asked separately: an agent refusing to enter a shut
+    /// door's cells is right, and an agent refusing to *leave* them is entombed the moment
+    /// a door auto-closes on it.
+    pub fn door_at(&self, m: Vec3) -> Option<usize> {
+        self.cell_index_meters(m).and_then(|ci| self.door_at_cell_idx(ci))
     }
 
     /// Door index at a cell index, or `None` (JS `_doorAtCellIdx`).
@@ -310,8 +431,8 @@ impl NavWorld {
     /// A cell is standable if it's air, the cell below is solid, and there is
     /// AGENT_HEIGHT_CELLS of air above for head clearance.
     /// Flood-fill every standable cell into connected components, using the **same
-    /// adjacency A\* walks** (4 cardinal, ±[`MAX_STEP`] vertical, no corner-clipping on a
-    /// step) but **ignoring doors**.
+    /// adjacency A\* walks** ([`Self::can_step`], shared with `find_path`) but **ignoring
+    /// doors**.
     ///
     /// Ignoring doors is deliberate and is what keeps the early-out sound. A door can only
     /// ever *remove* connectivity (a shut impassable one is a wall to A\*), never add it —
@@ -335,18 +456,15 @@ impl NavWorld {
                     stack.push((ix, iy, iz));
                     while let Some(cur) = stack.pop() {
                         for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                            for dy in -MAX_STEP..=MAX_STEP {
-                                let (nx_, ny_, nz_) = (cur.0 + dx, cur.1 + dy, cur.2 + dz);
-                                if !self.is_standable(nx_, ny_, nz_) {
+                            for dy in -STAIR_STEP..=STAIR_STEP {
+                                let n = (cur.0 + dx, cur.1 + dy, cur.2 + dz);
+                                if !self.in_bounds(n.0, n.1, n.2) || !self.can_step(cur, n) {
                                     continue;
                                 }
-                                if dy != 0 && self.is_solid_cell(cur.0, cur.1 + dy.max(0), cur.2) {
-                                    continue;
-                                }
-                                let nk = self.idx(nx_, ny_, nz_);
+                                let nk = self.idx(n.0, n.1, n.2);
                                 if self.comp[nk] == 0 {
                                     self.comp[nk] = id;
-                                    stack.push((nx_, ny_, nz_));
+                                    stack.push(n);
                                 }
                             }
                         }
@@ -381,6 +499,56 @@ impl NavWorld {
             .cell_at(m.x, m.y, m.z)
             .or_else(|| self.nearest_cell(m))?;
         self.comp.get(self.idx(c.0, c.1, c.2)).copied().filter(|&id| id != 0)
+    }
+
+    /// Whether this cell is inside (or standing on) authored stair geometry.
+    #[inline]
+    fn is_stair_cell(&self, ix: i32, iy: i32, iz: i32) -> bool {
+        if self.stair.is_empty() || !self.in_bounds(ix, iy, iz) {
+            return false;
+        }
+        self.stair[self.idx(ix, iy, iz)] == 1
+    }
+
+    /// The tallest step allowed between two cells: [`STAIR_STEP`] when **both** ends are
+    /// stair cells, otherwise [`MAX_STEP`].
+    ///
+    /// Both ends, not either: a hunter beside a staircase must not get half a metre of
+    /// climb onto unrelated floor just for standing next to it.
+    #[inline]
+    fn step_limit(&self, a: (i32, i32, i32), b: (i32, i32, i32)) -> i32 {
+        if self.is_stair_cell(a.0, a.1, a.2) && self.is_stair_cell(b.0, b.1, b.2) {
+            STAIR_STEP
+        } else {
+            MAX_STEP
+        }
+    }
+
+    /// **The single definition of nav adjacency**: can an agent standing at `a` move to
+    /// the neighbouring cell `b`?
+    ///
+    /// One function on purpose. [`Self::label_components`] and [`Self::find_path`] have to
+    /// agree *exactly*, because the O(1) unreachable refusal in `find_path` trusts the
+    /// component labels: if labelling were ever stricter than the search, the refusal
+    /// would deny a route that exists. They were two copies of this rule until the stair
+    /// step gave them a third thing to disagree about.
+    fn can_step(&self, a: (i32, i32, i32), b: (i32, i32, i32)) -> bool {
+        if !self.is_standable(b.0, b.1, b.2) {
+            return false;
+        }
+        let dy = b.1 - a.1;
+        if dy.abs() > self.step_limit(a, b) {
+            return false;
+        }
+        // Climbing: every cell of the agent's own column between here and there must be
+        // clear, or it would clip up through a wall corner. (Descending needs no check —
+        // the cell it leaves is already air.)
+        for k in 1..=dy.max(0) {
+            if self.is_solid_cell(a.0, a.1 + k, a.2) {
+                return false;
+            }
+        }
+        true
     }
 
     fn is_standable(&self, ix: i32, iy: i32, iz: i32) -> bool {
@@ -426,13 +594,70 @@ impl NavWorld {
             .map(|(ix, iy, iz)| self.cell_floor_meters(ix, iy, iz).y)
     }
 
+    /// Raw (unclamped, unchecked) cell coordinates for a metres point.
+    #[inline]
+    fn cell_coords(&self, m: Vec3) -> (i32, i32, i32) {
+        (
+            (m_to_wt(m.x) - self.x0 as f32).floor() as i32,
+            (m_to_wt(m.y) - self.y0 as f32).floor() as i32,
+            (m_to_wt(m.z) - self.z0 as f32).floor() as i32,
+        )
+    }
+
+    /// The walking surface an agent whose feet are at `feet` should be standing on — the
+    /// floor it can actually **step onto** from there, looking as far *up* as the grid's
+    /// own step limit allows before scanning down.
+    ///
+    /// This exists because [`Self::floor_height_at`] only ever looks **downward** from the
+    /// height it is given, and every caller was giving it one step's worth of headroom.
+    /// Inside stair geometry the grid allows [`STAIR_STEP`], so a tread half a metre up is
+    /// a legal move that the surface probe could not see: the agent stepped into the riser,
+    /// its feet stayed at the old height, and — since a path waypoint is matched on 3D
+    /// distance — the waypoint 0.5 m above could never be reached. It ground to a halt
+    /// mid-flight on exactly the staircases the relaxed step limit had just opened up.
+    ///
+    /// So the reach has to be read from the same place the step limit is, or the mover and
+    /// the grid disagree about what "walkable" means. Outside stairs this is identical to
+    /// probing one step up.
+    pub fn walk_surface_at(&self, feet: Vec3) -> Option<f32> {
+        self.floor_height_at(feet.x, feet.z, feet.y + self.step_reach_at(feet) + 1e-3)
+    }
+
+    /// How far up an agent standing here may step, in metres: one cell normally,
+    /// [`STAIR_STEP`] inside stair geometry.
+    ///
+    /// **The mover's single source for this number.** It was written out by hand in two
+    /// places — the floor snap and [`Self::ground_path_clear`] — and a hunter needs *both*
+    /// to agree with the grid or it stalls: the snap decides whether its feet find the next
+    /// tread, and the ground check decides whether the step is permitted at all. Fixing
+    /// only one of them moves the stall rather than curing it.
+    ///
+    /// The tag is read off the raw cell, which may well be *solid* — that is the case that
+    /// matters. Mid-step into a riser the agent is inside the stair's own volume, and stair
+    /// volumes are tagged through their solid interior precisely so this stays answerable
+    /// there.
+    fn step_reach_at(&self, m: Vec3) -> f32 {
+        let (ix, iy, iz) = self.cell_coords(m);
+        let cells = if self.is_stair_cell(ix, iy, iz) {
+            STAIR_STEP
+        } else {
+            MAX_STEP
+        };
+        wt_to_m(cells as f32)
+    }
+
     /// Whether the straight XZ path `from`→`to` stays on continuous, climbable
     /// ground: every sampled column has a standable floor and no two adjacent
-    /// samples differ in floor height by more than one step ([`MAX_STEP`]). This
-    /// gates the hunter's beeline so it only shortcuts across ground it could
-    /// actually walk — never diagonally across an open stairwell or off a
-    /// platform edge (where it would clip the cosmetic railing and drop). When
-    /// this is false the caller falls back to A*, which steps up tread-by-tread.
+    /// samples differ in floor height by more than a step ([`Self::step_reach_at`], so
+    /// [`STAIR_STEP`] on a staircase). This gates the hunter's beeline so it only
+    /// shortcuts across ground it could actually walk — never diagonally across an open
+    /// stairwell or off a platform edge (where it would clip the cosmetic railing and
+    /// drop) — and, via `try_step`, gates **every** committed move.
+    ///
+    /// That second job is why the tolerance has to be the grid's own. A\* will route up a
+    /// flight whose treads came out shallower than a cell, taking one riser two cells at a
+    /// time; a flat one-cell tolerance here vetoes that step, so the hunter arrives at the
+    /// riser and freezes against it with a valid path in hand.
     pub fn ground_path_clear(&self, from: Vec3, to: Vec3) -> bool {
         let flat = Vec3::new(to.x - from.x, 0.0, to.z - from.z);
         let dist = flat.length();
@@ -441,21 +666,24 @@ impl NavWorld {
         }
         // ~2 samples per WT cell so a one-cell gap can't be stepped over.
         let n = (m_to_wt(dist) * 2.0).ceil().max(1.0) as i32;
-        let tol = wt_to_m(MAX_STEP as f32) + 1e-3;
-        let margin = wt_to_m(1.0);
-        // Search each column from a bit above the straight-line height so the
-        // local tread is the first standable cell found (cell_at scans down).
-        let mut prev = self.floor_height_at(from.x, from.z, from.y + margin);
+        // Each column is probed from a step above the straight-line height, so the local
+        // tread is the first standable cell found (cell_at scans down).
+        let mut prev = self.walk_surface_at(from);
+        let mut prev_reach = self.step_reach_at(from);
         for i in 1..=n {
             let t = i as f32 / n as f32;
             let p = from + flat * t;
-            let lerp_y = from.y + (to.y - from.y) * t;
-            let cur = self.floor_height_at(p.x, p.z, lerp_y + margin);
+            let here = Vec3::new(p.x, from.y + (to.y - from.y) * t, p.z);
+            let cur = self.walk_surface_at(here);
+            let reach = self.step_reach_at(here);
             match (prev, cur) {
-                (Some(a), Some(b)) if (a - b).abs() <= tol => {}
+                // The looser of the two ends: stepping *off* a staircase is as much a
+                // stair move as stepping onto one.
+                (Some(a), Some(b)) if (a - b).abs() <= prev_reach.max(reach) + 1e-3 => {}
                 _ => return false,
             }
             prev = cur;
+            prev_reach = reach;
         }
         true
     }
@@ -516,6 +744,279 @@ impl NavWorld {
                 for ix in 0..self.nx {
                     if self.is_standable(ix, iy, iz) {
                         out.push(self.cell_floor_meters(ix, iy, iz));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    // ─── Validation queries (the BUILD NAV tab) ──────────────────────────
+    // One-off queries answering "why can't the hunters get there", run on a button
+    // press rather than in a frame. They therefore favour being exactly right over
+    // being fast — see [`Self::nearest_gap`], which is a brute-force closest pair.
+
+    /// Every standable cell as `(floor position, component id)` — the overlay's raw
+    /// material. Reads the baked labels rather than re-testing standability, so it
+    /// shows exactly what A\* is walking.
+    pub fn standable_with_components(&self) -> Vec<(Vec3, u32)> {
+        let mut out = Vec::new();
+        for iy in 0..self.ny {
+            for iz in 0..self.nz {
+                for ix in 0..self.nx {
+                    let c = self.comp[self.idx(ix, iy, iz)];
+                    if c != 0 {
+                        out.push((self.cell_floor_meters(ix, iy, iz), c));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The largest walkable component — "the level", as against the islands. Every
+    /// other finding is phrased relative to this one, because a report of "4 components"
+    /// with no main one named is a fact rather than a diagnosis.
+    pub fn main_component(&self) -> Option<u32> {
+        self.component_sizes().first().map(|(id, _)| *id)
+    }
+
+    /// Component id at a cell, `0` outside the grid or off the walkable set.
+    ///
+    /// The bounds check is not decoration: [`Self::is_standable`] answers *true* for a
+    /// cell just outside the baked volume (out-of-bounds below the world reads as solid
+    /// ground), so a neighbour probe can legitimately land off-grid, and `idx` would
+    /// silently alias it onto an unrelated cell.
+    #[inline]
+    fn comp_at_cell(&self, ix: i32, iy: i32, iz: i32) -> u32 {
+        if !self.in_bounds(ix, iy, iz) {
+            return 0;
+        }
+        self.comp[self.idx(ix, iy, iz)]
+    }
+
+    /// Every cell belonging to one component.
+    fn cells_of(&self, id: u32) -> Vec<(i32, i32, i32)> {
+        let mut out = Vec::new();
+        for iy in 0..self.ny {
+            for iz in 0..self.nz {
+                for ix in 0..self.nx {
+                    if self.comp[self.idx(ix, iy, iz)] == id {
+                        out.push((ix, iy, iz));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The narrowest place between two components, as a [`NavGap`].
+    ///
+    /// A brute-force closest pair — every cell of `from` against every cell of `to`.
+    /// On the shipping level that is a few thousand against twenty thousand, so tens of
+    /// millions of integer distances: ~0.1 s, against a bake that already costs 0.5 s,
+    /// and it runs on a button. Pruning to boundary cells would be faster and **wrong**
+    /// in the one case that matters most — a platform directly above a floor, where the
+    /// closest cell on the lower side is an interior one — so it stays exhaustive.
+    pub fn nearest_gap(&self, from: u32, to: u32) -> Option<NavGap> {
+        let a = self.cells_of(from);
+        let b = self.cells_of(to);
+        if a.is_empty() || b.is_empty() {
+            return None;
+        }
+        let mut best: Option<((i32, i32, i32), (i32, i32, i32), i64)> = None;
+        for &p in &a {
+            for &q in &b {
+                let (dx, dy, dz) = (
+                    (q.0 - p.0) as i64,
+                    (q.1 - p.1) as i64,
+                    (q.2 - p.2) as i64,
+                );
+                let d = dx * dx + dy * dy + dz * dz;
+                if best.is_none_or(|(_, _, bd)| d < bd) {
+                    best = Some((p, q, d));
+                }
+            }
+        }
+        let (p, q, _) = best?;
+        let pm = self.cell_floor_meters(p.0, p.1, p.2);
+        let qm = self.cell_floor_meters(q.0, q.1, q.2);
+        Some(NavGap {
+            from: pm,
+            to: qm,
+            flat: Vec3::new(qm.x - pm.x, 0.0, qm.z - pm.z).length(),
+            rise: qm.y - pm.y,
+        })
+    }
+
+    /// The component this one comes **closest to** — any component, not necessarily the
+    /// main one — and the gap between them.
+    ///
+    /// Nearest-to-*main* is the intuitive query and it is misleading, measurably so. On
+    /// the shipping level a 1,380-cell area sits 3.5 m below the main component, which
+    /// reads as a drop nobody can fix; its actual nearest neighbour is a 32-cell sliver
+    /// half a metre away, and that sliver is half a metre from the level. Two 0.5 m steps,
+    /// not a 3.5 m cliff — and only this query can say so.
+    ///
+    /// Same brute force as [`Self::nearest_gap`], against every other component at once
+    /// (one pass to bucket them, so the cost is `|this| × |everything else|` rather than
+    /// a grid scan per pair).
+    pub fn nearest_neighbour_gap(&self, id: u32) -> Option<(u32, NavGap)> {
+        let mine = self.cells_of(id);
+        if mine.is_empty() {
+            return None;
+        }
+        let mut others: Vec<(i32, i32, i32, u32)> = Vec::new();
+        for iy in 0..self.ny {
+            for iz in 0..self.nz {
+                for ix in 0..self.nx {
+                    let c = self.comp[self.idx(ix, iy, iz)];
+                    if c != 0 && c != id {
+                        others.push((ix, iy, iz, c));
+                    }
+                }
+            }
+        }
+        let mut best: Option<((i32, i32, i32), (i32, i32, i32), u32, i64)> = None;
+        for &p in &mine {
+            for &(qx, qy, qz, c) in &others {
+                let (dx, dy, dz) = ((qx - p.0) as i64, (qy - p.1) as i64, (qz - p.2) as i64);
+                let d = dx * dx + dy * dy + dz * dz;
+                if best.is_none_or(|(_, _, _, bd)| d < bd) {
+                    best = Some((p, (qx, qy, qz), c, d));
+                }
+            }
+        }
+        let (p, q, c, _) = best?;
+        let pm = self.cell_floor_meters(p.0, p.1, p.2);
+        let qm = self.cell_floor_meters(q.0, q.1, q.2);
+        Some((
+            c,
+            NavGap {
+                from: pm,
+                to: qm,
+                flat: Vec3::new(qm.x - pm.x, 0.0, qm.z - pm.z).length(),
+                rise: qm.y - pm.y,
+            },
+        ))
+    }
+
+    /// How many cells you can **walk** from `(ix, iy, iz)` in one XZ direction before the
+    /// floor runs out, stopping at `cap`. Excludes the starting cell.
+    ///
+    /// It follows the surface up and down within [`MAX_STEP`], using A\*'s own adjacency,
+    /// and that is not a refinement — it is the difference between the query meaning
+    /// anything and not. Measured at a *fixed* height, every step of every staircase is a
+    /// one-cell-deep strip (a tread is exactly 1 WT deep and the next one is 1 WT up), so
+    /// a fixed-height version reports the entire stairwell as a 0.25 m corridor: on the
+    /// shipping level that was 1,423 cells of pure false positive, swamping the handful of
+    /// real ones.
+    fn free_run(&self, ix: i32, iy: i32, iz: i32, dx: i32, dz: i32, cap: i32) -> i32 {
+        let mut n = 0;
+        let mut y = iy;
+        while n < cap {
+            let (nx_, nz_) = (ix + dx * (n + 1), iz + dz * (n + 1));
+            // Prefer level ground, then the smallest step either way — same order of
+            // preference a walking agent has.
+            let step = (0..=STAIR_STEP)
+                .flat_map(|d| if d == 0 { vec![0] } else { vec![d, -d] })
+                .find(|&dy| self.can_step((ix + dx * n, y, iz + dz * n), (nx_, y + dy, nz_)));
+            match step {
+                Some(dy) => {
+                    y += dy;
+                    n += 1;
+                }
+                None => break,
+            }
+        }
+        n
+    }
+
+    /// Every standable cell whose corridor is narrower than `min_width_m` across.
+    ///
+    /// Width is the **walkable span** through that cell (floor running out on both
+    /// sides), taken along whichever of X/Z is narrower — not the distance to the nearest
+    /// wall. That distinction is what keeps an open room quiet: a cell pressed against
+    /// one wall of a big room still has the whole room's span in both axes, and only a
+    /// cell with walls close on *both* sides is a pinch. And the span follows the surface
+    /// up and down, so a staircase is a corridor as long as the flight, not a file of
+    /// one-tread slivers — see [`Self::free_run`].
+    ///
+    /// Runs are capped at the width being tested, so the cost is per-cell constant.
+    pub fn pinch_points(&self, min_width_m: f32) -> Vec<NavPinch> {
+        let need = (min_width_m / WORLD_SCALE).ceil().max(1.0) as i32;
+        let mut out = Vec::new();
+        for iy in 0..self.ny {
+            for iz in 0..self.nz {
+                for ix in 0..self.nx {
+                    if self.comp[self.idx(ix, iy, iz)] == 0 {
+                        continue;
+                    }
+                    let wx = 1
+                        + self.free_run(ix, iy, iz, 1, 0, need)
+                        + self.free_run(ix, iy, iz, -1, 0, need);
+                    let wz = 1
+                        + self.free_run(ix, iy, iz, 0, 1, need)
+                        + self.free_run(ix, iy, iz, 0, -1, need);
+                    let width = wx.min(wz) as f32 * WORLD_SCALE;
+                    if width < min_width_m {
+                        out.push(NavPinch {
+                            pos: self.cell_floor_meters(ix, iy, iz),
+                            width,
+                        });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Every adjacent step taller than a hunter can climb but no taller than
+    /// `max_rise_m` — the band where the player walks or jumps up and the hunter is
+    /// looking at a wall.
+    ///
+    /// Only reported where the neighbouring column has **no** cell a hunter could reach
+    /// normally: if there is already a legal step there, the taller ledge beside it is a
+    /// shortcut, not a severed route, and listing it would bury the real findings.
+    pub fn overclimb_edges(&self, max_rise_m: f32) -> Vec<NavClimb> {
+        let hi = (max_rise_m / WORLD_SCALE).floor() as i32;
+        if hi <= MAX_STEP {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for iy in 0..self.ny {
+            for iz in 0..self.nz {
+                for ix in 0..self.nx {
+                    let ca = self.comp[self.idx(ix, iy, iz)];
+                    if ca == 0 {
+                        continue;
+                    }
+                    for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                        let (nx_, nz_) = (ix + dx, iz + dz);
+                        // Already walkable in this direction → nothing to report. Uses
+                        // `can_step`, so a legal stair step is not listed as a climb the
+                        // hunter cannot make.
+                        if (-STAIR_STEP..=STAIR_STEP)
+                            .any(|dy| self.can_step((ix, iy, iz), (nx_, iy + dy, nz_)))
+                        {
+                            continue;
+                        }
+                        // The first floor above the step limit, if any.
+                        for dy in (MAX_STEP + 1)..=hi {
+                            if !self.is_standable(nx_, iy + dy, nz_) {
+                                continue;
+                            }
+                            let from = self.cell_floor_meters(ix, iy, iz);
+                            let to = self.cell_floor_meters(nx_, iy + dy, nz_);
+                            let cb = self.comp_at_cell(nx_, iy + dy, nz_);
+                            out.push(NavClimb {
+                                from,
+                                to,
+                                rise: to.y - from.y,
+                                joins: (cb != 0 && cb != ca).then_some((ca, cb)),
+                            });
+                            break;
+                        }
                     }
                 }
             }
@@ -672,13 +1173,12 @@ impl NavWorld {
             let cur_g = *g_score.get(&ck).unwrap();
 
             for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                for dy in -MAX_STEP..=MAX_STEP {
+                for dy in -STAIR_STEP..=STAIR_STEP {
                     let (nx, ny, nz) = (cur.0 + dx, cur.1 + dy, cur.2 + dz);
-                    if !self.is_standable(nx, ny, nz) {
-                        continue;
-                    }
-                    // Don't clip through a wall corner when stepping up/down.
-                    if dy != 0 && self.is_solid_cell(cur.0, cur.1 + dy.max(0), cur.2) {
+                    // Same adjacency the component labels were built from — see
+                    // `can_step`. If these two ever disagree, the O(1) refusal above
+                    // starts denying routes that exist.
+                    if !self.in_bounds(nx, ny, nz) || !self.can_step(cur, (nx, ny, nz)) {
                         continue;
                     }
                     let nk = self.idx(nx, ny, nz);
@@ -765,7 +1265,17 @@ impl NavWorld {
 /// (2) the caller-supplied free-standing structures (platform slabs +
 /// stair-run step blocks) — the `collectExtraSolids` port, so grid nav walks
 /// geometry the CSG mesh alone doesn't describe. Returns `None` if nothing built.
-pub fn bake(regions: &mut [Region], structure_solids: &[[f32; 6]]) -> Option<NavWorld> {
+///
+/// `stair_volumes` are the boxes the caller knows to be **stairs** (the free-standing
+/// stair-run steps; each region's own [`StairDesc`] treads are found here and tagged
+/// automatically). They are treated as solid like any other extra *and* tagged, so
+/// passing a box in both lists is harmless — the tag is what matters. Inside them the
+/// vertical step limit relaxes to [`STAIR_STEP`]; see that constant for why.
+pub fn bake(
+    regions: &mut [Region],
+    structure_solids: &[[f32; 6]],
+    stair_volumes: &[[f32; 6]],
+) -> Option<NavWorld> {
     if regions.is_empty() {
         return None;
     }
@@ -775,10 +1285,12 @@ pub fn bake(regions: &mut [Region], structure_solids: &[[f32; 6]]) -> Option<Nav
 
     // Stair treads + free-standing platform/stair-run boxes — solid volumes that
     // live outside the CSG brush set but that agents must stand on / be blocked by.
-    let mut extras: Vec<[f32; 6]> = regions
+    let stairs: Vec<[f32; 6]> = regions
         .iter()
         .flat_map(|r| r.stairs.iter().flat_map(|s| s.solid_boxes()))
+        .chain(stair_volumes.iter().copied())
         .collect();
+    let mut extras: Vec<[f32; 6]> = stairs.clone();
     extras.extend_from_slice(structure_solids);
 
     let mut min = Vec3::splat(f32::INFINITY);
@@ -819,6 +1331,34 @@ pub fn bake(regions: &mut [Region], structure_solids: &[[f32; 6]]) -> Option<Nav
         }
     }
 
+    // Tag the stair cells. Each box is grounded (solid from the floor to its tread), so
+    // the cells that actually matter — the standable ones *on* the flight — sit above it:
+    // hence the upward extension by an agent's height. Widened by one cell in XZ too, so
+    // the landing at either end of a flight is inside the relaxation and a skipped tread
+    // right at the top can still be stepped onto.
+    let mut stair = vec![0u8; (nx * ny * nz) as usize];
+    for b in &stairs {
+        let (bx0, by0, bz0) = (b[0] - 1.0, b[1], b[2] - 1.0);
+        let (bx1, by1, bz1) = (
+            b[0] + b[3] + 1.0,
+            b[1] + b[4] + AGENT_HEIGHT_CELLS as f32,
+            b[2] + b[5] + 1.0,
+        );
+        let lo = |v: f32, o: i32| ((v - o as f32).floor() as i32).max(0);
+        for iy in lo(by0, y0)..=(((by1 - y0 as f32).ceil() as i32) - 1).min(ny - 1) {
+            let cy = y0 as f32 + iy as f32 + 0.5;
+            for iz in lo(bz0, z0)..=(((bz1 - z0 as f32).ceil() as i32) - 1).min(nz - 1) {
+                let cz = z0 as f32 + iz as f32 + 0.5;
+                for ix in lo(bx0, x0)..=(((bx1 - x0 as f32).ceil() as i32) - 1).min(nx - 1) {
+                    let cx = x0 as f32 + ix as f32 + 0.5;
+                    if cx >= bx0 && cx < bx1 && cy >= by0 && cy < by1 && cz >= bz0 && cz < bz1 {
+                        stair[((iy * nz + iz) * nx + ix) as usize] = 1;
+                    }
+                }
+            }
+        }
+    }
+
     let mut nav = NavWorld {
         x0,
         y0,
@@ -827,6 +1367,7 @@ pub fn bake(regions: &mut [Region], structure_solids: &[[f32; 6]]) -> Option<Nav
         ny,
         nz,
         solid,
+        stair,
         doors: Vec::new(),
         door_grid: Vec::new(),
         comp: Vec::new(),
@@ -851,7 +1392,7 @@ mod tests {
     #[test]
     fn bake_produces_a_walkable_floor() {
         let mut regions = room();
-        let nav = bake(&mut regions, &[]).expect("room bakes");
+        let nav = bake(&mut regions, &[], &[]).expect("room bakes");
         let stand = nav.all_standable();
         assert!(!stand.is_empty(), "room should have standable floor cells");
         // Floor cells sit at the cavity bottom (y≈0 m).
@@ -875,7 +1416,7 @@ mod tests {
         // and with no step up to it (MAX_STEP is one cell), so it is its own component.
         let mut regions = room();
         let island: [f32; 6] = [8.0, 3.0, 8.0, 6.0, 1.0, 6.0];
-        let nav = bake(&mut regions, &[island]).expect("bake");
+        let nav = bake(&mut regions, &[island], &[]).expect("bake");
         let floor = Vec3::new(0.5, 0.1, 0.5);
         let top = Vec3::new(2.75, 1.05, 2.75); // on top of the island (m; WT ×0.25)
         assert_ne!(
@@ -907,7 +1448,7 @@ mod tests {
     #[test]
     fn path_crosses_the_room() {
         let mut regions = room();
-        let nav = bake(&mut regions, &[]).expect("bake");
+        let nav = bake(&mut regions, &[], &[]).expect("bake");
         // Opposite corners of the room interior, in meters.
         let a = Vec3::new(0.5, 0.1, 0.5);
         let b = Vec3::new(5.5, 0.1, 5.5);
@@ -924,7 +1465,7 @@ mod tests {
         // overlay is attached AFTER the bake and mutated in place — the thesis:
         // no re-voxelization when the door's state changes.
         let mut regions = room();
-        let mut nav = bake(&mut regions, &[]).expect("bake");
+        let mut nav = bake(&mut regions, &[], &[]).expect("bake");
 
         let mut door = Brush::new(1, Op::Subtract, 12.0, 0.0, 0.0, 1.0, 7.0, 24.0);
         door.door = true;
@@ -957,7 +1498,7 @@ mod tests {
     #[test]
     fn an_impassable_shut_door_walls_hunters_out() {
         let mut regions = room();
-        let mut nav = bake(&mut regions, &[]).expect("bake");
+        let mut nav = bake(&mut regions, &[], &[]).expect("bake");
         let mut door = Brush::new(1, Op::Subtract, 12.0, 0.0, 0.0, 1.0, 7.0, 24.0);
         door.door = true;
         nav.set_doors(&[door]);
@@ -983,7 +1524,7 @@ mod tests {
         // middle, solid down to the floor.
         let mut regions = room();
         let slab = [8.0, 0.0, 8.0, 8.0, 8.0, 8.0]; // WT [x,y,z,w,h,d]
-        let nav = bake(&mut regions, &[slab]).expect("bake");
+        let nav = bake(&mut regions, &[slab], &[]).expect("bake");
 
         // Flat floor → continuous, climbable ground (beeline allowed).
         let a = Vec3::new(2.0 * WORLD_SCALE, 0.1, 2.0 * WORLD_SCALE);
@@ -1004,7 +1545,7 @@ mod tests {
     #[test]
     fn wall_clearance_pushes_off_walls_but_not_in_the_open() {
         let mut regions = room(); // 24×16×24 WT cavity → interior walls at x,z ≈ 0 and 6 m
-        let nav = bake(&mut regions, &[]).expect("bake");
+        let nav = bake(&mut regions, &[], &[]).expect("bake");
         let radius = 0.22;
 
         // Deep in the open middle of the room → no wall within radius → no nudge.
@@ -1025,10 +1566,201 @@ mod tests {
         assert!(!nav.is_solid_meters(moved.x, moved.y + WALL_PROBE_Y, moved.z));
     }
 
+    // ─── Validation queries ──────────────────────────────────────────────
+
+    /// **The gap report has to name the height, not just the distance.**
+    ///
+    /// A ledge two cells up is the shipping level's actual defect (every island there
+    /// sits behind one 0.5 m climb), and the fix depends entirely on which number is
+    /// large: `flat 0.25, rise 0.50` says raise the step or add a tread, `flat 4.0`
+    /// would say build a bridge. Asserted on both halves for that reason.
+    #[test]
+    fn a_severed_ledge_reports_its_height_and_the_edge_that_would_join_it() {
+        // Room floor at y=0, plus a slab whose top is TWO cells up (0.5 m) — one more
+        // than MAX_STEP, so the top is walkable and unreachable at the same time.
+        let mut regions = room();
+        let slab: [f32; 6] = [8.0, 0.0, 8.0, 6.0, 2.0, 6.0]; // WT
+        let nav = bake(&mut regions, &[slab], &[]).expect("bake");
+
+        let sizes = nav.component_sizes();
+        assert_eq!(sizes.len(), 2, "floor + ledge, got {sizes:?}");
+        let main = nav.main_component().expect("a main component");
+        let island = sizes.iter().map(|(id, _)| *id).find(|id| *id != main).unwrap();
+
+        let gap = nav.nearest_gap(island, main).expect("the two are close by");
+        assert!(gap.flat <= 0.26, "the ledge is one cell across, got {:.2} m", gap.flat);
+        assert!(
+            (gap.rise + 0.5).abs() < 1e-3,
+            "the floor is 0.5 m BELOW the ledge, got rise {:+.2} m",
+            gap.rise
+        );
+
+        // And the same defect from the other side: an over-climb edge that would
+        // reconnect the level, which is what tells the author it is a step problem
+        // rather than a distance problem.
+        let climbs = nav.overclimb_edges(0.8);
+        let joiners: Vec<&NavClimb> = climbs.iter().filter(|c| c.joins.is_some()).collect();
+        assert!(
+            !joiners.is_empty(),
+            "the step onto the ledge should be reported as joining two components"
+        );
+        assert!(
+            joiners.iter().all(|c| (c.rise - 0.5).abs() < 1e-3),
+            "every joining climb here is exactly the 0.5 m step"
+        );
+    }
+
+    /// A corridor two cells (0.5 m) wide is a **legal path** the grid is happy with —
+    /// so the pinch report is what makes it visible at all. Its threshold is exclusive:
+    /// a corridor exactly as wide as the body asked for is not a pinch.
+    #[test]
+    fn a_narrow_corridor_is_reported_as_a_pinch_and_an_open_room_is_not() {
+        let mut regions = room();
+        // Fill the room except a 2-cell strip along X at z = 10..12.
+        let solids = [
+            [0.0, 0.0, 0.0, 24.0, 16.0, 10.0],
+            [0.0, 0.0, 12.0, 24.0, 16.0, 12.0],
+        ];
+        let nav = bake(&mut regions, &solids, &[]).expect("bake");
+
+        let pinches = nav.pinch_points(0.6);
+        assert!(!pinches.is_empty(), "a 0.5 m corridor should be flagged at 0.6 m");
+        assert!(
+            pinches.iter().all(|p| (p.width - 0.5).abs() < 1e-3),
+            "each flagged cell reports the corridor's own width"
+        );
+        assert!(
+            nav.pinch_points(0.5).is_empty(),
+            "a corridor exactly 0.5 m wide is not narrower than 0.5 m"
+        );
+
+        // The control: the same query over open floor finds nothing, which is the
+        // property that keeps the report readable on a real level.
+        let mut open = room();
+        let plain = bake(&mut open, &[], &[]).expect("bake");
+        assert!(plain.pinch_points(0.6).is_empty(), "open floor is not a pinch");
+    }
+
+    /// **A staircase is not a tight corridor**, and a width query that says otherwise is
+    /// useless on a real level.
+    ///
+    /// Treads are one cell deep by construction (`StairDesc::solid_boxes` emits 1 WT
+    /// boxes, and a stair-run's are about that), so measuring the free span at a *fixed
+    /// height* makes every step of every flight a 0.25 m corridor. On the shipping level
+    /// that was 1,423 false positives — more findings than the level has real problems,
+    /// which is the same as having no report at all.
+    #[test]
+    fn a_staircase_is_not_reported_as_a_pinch() {
+        let mut regions = room();
+        // Ten steps across the full width of the room: 1 WT tread, 1 WT riser — exactly
+        // what the CSG stair tool emits. Descending toward +X so the bottom tread meets
+        // the room floor (a flight whose base is walled off is its own component and
+        // would prove nothing).
+        let steps: Vec<[f32; 6]> = (0..10)
+            .map(|k| [k as f32, 0.0, 0.0, 1.0, 10.0 - k as f32, 24.0])
+            .collect();
+        let nav = bake(&mut regions, &steps, &[]).expect("bake");
+        // Sanity: the flight really is there and really is walkable as one component.
+        let top = nav.cell_floor_meters(0, 10, 12);
+        let floor = Vec3::new(20.0 * WORLD_SCALE, 0.1, 12.0 * WORLD_SCALE);
+        assert_eq!(
+            nav.component_at(top),
+            nav.component_at(floor),
+            "a 1-cell-per-step flight must be walkable, or this tests nothing"
+        );
+        assert!(
+            nav.pinch_points(0.73).is_empty(),
+            "a wide staircase reported {} pinch cell(s) — the width query must follow \
+             the surface, not a fixed height",
+            nav.pinch_points(0.73).len()
+        );
+    }
+
+    /// **A staircase steeper than 45° stays walkable — and only the staircase does.**
+    ///
+    /// The shipping level's real defect. A stair run lays its steps out as
+    /// `step_run = total_run / steps`, so a run steeper than 45° gets treads shallower
+    /// than a nav cell; some tread then has no cell centre in it, loses its standable
+    /// cell, and the strip skips it. That leaves a two-cell gap mid-flight, and a flat
+    /// `MAX_STEP` severs the level there (3,488 cells, 15%, on `slot1`).
+    ///
+    /// The arena is that geometry exactly: 9 treads over 8 columns, so one column serves
+    /// two treads. The control matters as much as the claim — the identical 0.5 m step
+    /// built out of a *platform* must stay a wall, or the fix is just a global
+    /// `MAX_STEP = 2` wearing a disguise.
+    #[test]
+    fn a_stair_with_sub_cell_treads_stays_walkable_but_a_ledge_does_not() {
+        // 9 steps of 1 WT rise spread over 8 WT of run: tread depth 8/9 = 0.889 WT,
+        // the same as the shipping level's stair run 10. Descending toward +X so the
+        // bottom tread meets the room floor.
+        let steps: Vec<[f32; 6]> = (0..9)
+            .map(|k| {
+                let lo = 8.0 - (k as f32 + 1.0) * 8.0 / 9.0;
+                [lo, 0.0, 0.0, 8.0 / 9.0, k as f32 + 1.0, 24.0]
+            })
+            .collect();
+
+        // Untagged: the flight is severed, which is the bug this fixes.
+        let mut regions = room();
+        let blind = bake(&mut regions, &steps, &[]).expect("bake");
+        assert!(
+            blind.component_sizes().len() > 1,
+            "sub-cell treads must sever the flight when nav doesn't know it's a stair — \
+             if this passes, the arena isn't reproducing the defect"
+        );
+
+        // Tagged as stairs: one component, the whole flight walkable.
+        let mut regions = room();
+        let nav = bake(&mut regions, &steps, &steps).expect("bake");
+        assert_eq!(
+            nav.component_sizes().len(),
+            1,
+            "the tagged flight should join the floor, got {:?}",
+            nav.component_sizes()
+        );
+        let top = nav.cell_floor_meters(0, 9, 12);
+        let floor = Vec3::new(20.0 * WORLD_SCALE, 0.1, 12.0 * WORLD_SCALE);
+        assert!(
+            nav.find_path(floor, top).is_some(),
+            "and A* should route up it — labels and search must agree"
+        );
+
+        // The control: the same 0.5 m rise as a plain ledge is still a wall.
+        let mut regions = room();
+        let ledge: [f32; 6] = [8.0, 0.0, 8.0, 6.0, 2.0, 6.0];
+        let with_ledge = bake(&mut regions, &[ledge], &[]).expect("bake");
+        assert_eq!(
+            with_ledge.component_sizes().len(),
+            2,
+            "a 0.5 m ledge that is NOT stairs must stay unreachable — the relaxation is \
+             local to stair geometry, not a global step increase"
+        );
+    }
+
+    /// A level with nothing wrong must be *provably* clean, not merely quiet: one
+    /// component covering every standable cell, no islands, no climbs.
+    #[test]
+    fn an_open_room_reports_no_issues_at_all() {
+        let mut regions = room();
+        let nav = bake(&mut regions, &[], &[]).expect("bake");
+        let sizes = nav.component_sizes();
+        assert_eq!(sizes.len(), 1, "one room, one component");
+
+        let cells = nav.standable_with_components();
+        assert_eq!(
+            cells.len(),
+            nav.all_standable().len(),
+            "the overlay must cover every standable cell"
+        );
+        let main = nav.main_component().unwrap();
+        assert!(cells.iter().all(|(_, c)| *c == main), "all of it is the main component");
+        assert!(nav.overclimb_edges(0.8).is_empty(), "flat floor has no steps");
+    }
+
     #[test]
     fn los_blocked_by_the_wall() {
         let mut regions = room();
-        let nav = bake(&mut regions, &[]).expect("bake");
+        let nav = bake(&mut regions, &[], &[]).expect("bake");
         // A point inside vs. a point well outside the room (through the wall).
         let inside = Vec3::new(3.0, 1.0, 3.0);
         let outside = Vec3::new(3.0, 1.0, -5.0);

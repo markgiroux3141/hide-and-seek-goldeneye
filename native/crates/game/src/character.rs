@@ -24,6 +24,23 @@ const WALK_SPEED: f32 = 6.4; // m/s
 const GRAVITY: f32 = 20.0; // m/s²
 const JUMP_VELOCITY: f32 = 5.5; // m/s
 
+/// The player's standing height and horizontal half-width (m) — the capsule as the rest
+/// of the game needs to measure it.
+///
+/// Exposed for blast damage, which is measured to the *body* rather than to a point
+/// inside it: a grenade at your boots has to read as touching you, and that is a question
+/// about the capsule's extent (see `combat::blast_distance_to_body`).
+pub(crate) const PLAYER_HEIGHT: f32 = HEIGHT;
+pub(crate) const PLAYER_RADIUS: f32 = RADIUS;
+
+/// How high the player's jump actually reaches (`v²/2g` ≈ 0.76 m) — the ceiling on
+/// what they can climb that hunters, who cannot jump at all, cannot.
+///
+/// Exposed because the nav validation report is a statement about *the difference*
+/// between the two mobility models, so it has to read this from the same place the
+/// jump does rather than restate it (see `world::nav_issues`).
+pub(crate) const JUMP_APEX: f32 = JUMP_VELOCITY * JUMP_VELOCITY / (2.0 * GRAVITY);
+
 /// Capsule cylinder half-height: total = 2·(half + radius) = HEIGHT.
 const HALF_HEIGHT: f32 = (HEIGHT - 2.0 * RADIUS) * 0.5; // 0.5 m
 /// Capsule midpoint sits this far above the feet.

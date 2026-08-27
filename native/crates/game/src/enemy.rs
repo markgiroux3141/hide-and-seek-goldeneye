@@ -477,6 +477,10 @@ const ENGAGE_MEMORY: f32 = 5.0;
 /// the utility-layer analogue of the FSM's standoff/LOS-grace debouncing).
 const UTIL_INERTIA: f32 = 0.2;
 
+/// A flank aim point nearer than this (m) is discarded for the believed position — it is
+/// either inside geometry or effectively underfoot, and chasing it stalls the pursuit.
+const FLANK_MIN_OFFSET: f32 = 1.0;
+
 // ─── Going shopping ([`AiState::Fetch`]) ─────────────────────────────────────
 /// The utility score of fetching. Deliberately **dominant** — clear of every other
 /// behaviour plus [`UTIL_INERTIA`] — because a hunter that cannot shoot genuinely has no
@@ -517,6 +521,23 @@ pub struct Enemy {
     /// drained into [`EnemyStep::open_door`] so the `World` (which owns the door
     /// entities and the audio) can work it. Cleared each step it isn't needed.
     pending_door: Option<usize>,
+    /// Why the last committed step was refused, and how long this hunter has been
+    /// asking to move without going anywhere. Diagnostics only — nothing reads these
+    /// to make a decision — but they are what turns "it's stuck" into a cause. See
+    /// [`StepBlock`].
+    last_block: StepBlock,
+    block_streak: u32,
+    stuck_secs: f32,
+    /// The point the last `move_toward` was actually aimed at, and whether that call
+    /// reported "arrived or unreachable". Diagnostics only.
+    ///
+    /// A hunter walks to what it *believes*, which on a long pursuit is rarely where you
+    /// are: `Chase` aims at `known_target_pos` swung out by a flank offset, and `Fetch`
+    /// aims at a gun on the floor. Reporting its position without its target makes a
+    /// hunter standing on its own destination indistinguishable from one that is stuck,
+    /// and those have nothing in common.
+    last_target: Option<Vec3>,
+    last_target_done: bool,
     /// How long this hunter has been held up at a shut door. A safety valve only: a
     /// door it may open swings in well under a second, so this fires solely if
     /// something has gone wrong, and it lets the hunter carry on rather than stand
@@ -536,7 +557,7 @@ pub struct Enemy {
     /// instead of committing `pos` directly; the `World` runs ORCA over every hunter's
     /// preferred velocity + the player, then commits the resolved velocity through
     /// [`Self::integrate_move`]. Reset to zero at the top of each [`Self::update`].
-    desired_vel: Vec3,
+    pub(crate) desired_vel: Vec3,
     /// The actual planar velocity committed last step (post-avoidance). Fed back into
     /// ORCA as this agent's current velocity so the reciprocal responsibility split is
     /// stable + smooth across frames. Zero until the first move.
@@ -717,6 +738,11 @@ impl Enemy {
             path_idx: 0,
             repath_timer: 0.0,
             pending_door: None,
+            last_block: StepBlock::None,
+            block_streak: 0,
+            stuck_secs: 0.0,
+            last_target: None,
+            last_target_done: false,
             door_wait: 0.0,
             heading,
             moving: false,
@@ -945,6 +971,56 @@ impl Enemy {
         self.pending_door
     }
 
+    /// Which gate refused this hunter's last committed step ([`StepBlock::None`] if it
+    /// moved). The single most useful number when a hunter has stopped.
+    pub fn step_block(&self) -> StepBlock {
+        self.last_block
+    }
+
+    /// Consecutive steps this hunter has asked to move and not moved.
+    pub fn block_streak(&self) -> u32 {
+        self.block_streak
+    }
+
+    /// How many A* waypoints this hunter is holding, and which one it is walking to.
+    /// A path of 0 means it never got a route; an index pinned at one value while the
+    /// clock runs is the signature of a hunter frozen against a gate.
+    pub fn path_len(&self) -> usize {
+        self.path.len()
+    }
+
+    pub fn path_index(&self) -> usize {
+        self.path_idx
+    }
+
+    /// Where the last movement request was aimed, and whether it reported arrival. The
+    /// column that distinguishes "stuck" from "standing on the spot it was walking to".
+    pub fn last_target(&self) -> Option<Vec3> {
+        self.last_target
+    }
+
+    pub fn last_target_done(&self) -> bool {
+        self.last_target_done
+    }
+
+    /// Seconds left on the anti-grind settle ([`STUCK_HOLD`]) — nonzero means this
+    /// hunter is deliberately standing still because a previous attempt got nowhere.
+    ///
+    /// Exposed because the hold **hides** every other diagnostic: while it runs the
+    /// hunter requests no velocity, so `stuck_secs` stays 0 and `try_step` is never
+    /// called to record a refusal. A hunter cycling in and out of this reads, on every
+    /// other column, exactly like one that is calmly standing where it means to be.
+    pub fn stuck_hold(&self) -> f32 {
+        self.stuck_hold
+    }
+
+    /// Seconds this hunter has been asking to move without travelling. A hunter that is
+    /// *deliberately* standing still (holding at a door, in band, idle) has no requested
+    /// velocity and so never accrues this — it counts frustrated motion only.
+    pub fn stuck_secs(&self) -> f32 {
+        self.stuck_secs
+    }
+
     /// Report this hunter's ACTUAL net horizontal travel (`actual_m`) over the step
     /// just taken — called by the `World` after movement AND the separation nudge, so
     /// it captures the true displacement, not just the intended step. If the hunter
@@ -1106,6 +1182,16 @@ impl Enemy {
         }
         let actual = Vec3::new(self.pos.x - start.x, 0.0, self.pos.z - start.z);
         self.vel = if dt > 1e-6 { actual / dt } else { Vec3::ZERO };
+        // Frustrated motion: it asked to move and did not. A hunter holding position on
+        // purpose requests no velocity, so standing at a door or waiting in band never
+        // reads as stuck — only being refused does.
+        if actual.length() >= 1e-4 {
+            self.stuck_secs = 0.0;
+            self.block_streak = 0;
+        } else if self.desired_vel.length_squared() > 1e-8 {
+            self.stuck_secs += dt;
+            self.block_streak = self.block_streak.saturating_add(1);
+        }
     }
 
     /// Try to move `v·dt` in the plane from the current position: applies + snaps to
@@ -1119,15 +1205,78 @@ impl Enemy {
         }
         let dest = self.pos + flat * dt;
         let up = Vec3::new(0.0, 0.5, 0.0);
-        if nav.los_clear(self.pos + up, dest + up) && nav.ground_path_clear(self.pos, dest) {
-            self.pos = Vec3::new(dest.x, self.pos.y, dest.z);
-            self.snap_to_floor(nav);
-            true
-        } else {
-            false
+        // ── The panel is not solid, so this is what stops a hunter walking through it ──
+        // A shut door rides the nav *overlay*: it is not a solid cell, so neither
+        // `los_clear` nor `ground_path_clear` sees it. [`Self::door_gate`] holds the
+        // hunter politely back from one on its path, but the gate only guards the two
+        // `move_toward` branches — and every displacement this hunter makes is committed
+        // here, including ORCA's avoidance velocity (which can shove a hunter waiting at a
+        // door straight through it when packmates queue up behind), the combat backpedal,
+        // and the evade sidestep. None of those consulted a door. Refusing here covers all
+        // of them at once, and asks for the door on the way.
+        if let Some(di) = nav.door_blocking(self.pos + up, dest + up) {
+            // Unless it is *already* in the doorway: a door that auto-closed on a hunter
+            // mid-passage must not wall it in, so standing in the panel's own cells is
+            // always allowed to move.
+            if nav.door_at(self.pos) != Some(di) {
+                self.pending_door = Some(di);
+                self.last_block = StepBlock::Door;
+                return false;
+            }
         }
+        // Split rather than `&&`-ed so the refusal can be *attributed*. Which of these
+        // two said no is the whole diagnosis when a hunter stops walking, and it used to
+        // be thrown away.
+        if !nav.los_clear(self.pos + up, dest + up) {
+            self.last_block = StepBlock::Sightline;
+            return false;
+        }
+        if !nav.ground_path_clear(self.pos, dest) {
+            self.last_block = StepBlock::Ground;
+            return false;
+        }
+        self.last_block = StepBlock::None;
+        self.pos = Vec3::new(dest.x, self.pos.y, dest.z);
+        self.snap_to_floor(nav);
+        true
     }
 
+    }
+
+/// Why a hunter's committed step was refused — the half of the answer `try_step` used
+/// to throw away.
+///
+/// Every "the hunters are stuck" bug in this project has been a refused step, and each
+/// one was diagnosed by reading code and guessing which gate said no: the steep stairs
+/// were `Ground` (a two-cell riser against a one-cell tolerance), the doors were `Door`
+/// (a panel that is not a solid cell). A boolean cannot tell those apart, so the tools
+/// could only ever report *that* a hunter had stopped. This is what makes the nav probe's
+/// verdict a diagnosis instead of an observation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum StepBlock {
+    /// Nothing refused it (it moved, or nothing was asked of it).
+    #[default]
+    None,
+    /// A shut door's cells lay between here and the destination.
+    Door,
+    /// Solid geometry across the step at knee height — a wall.
+    Sightline,
+    /// The floor ran out, or stepped further than the grid allows there.
+    Ground,
+}
+
+impl StepBlock {
+    pub fn label(self) -> &'static str {
+        match self {
+            StepBlock::None => "-",
+            StepBlock::Door => "door",
+            StepBlock::Sightline => "wall",
+            StepBlock::Ground => "ground",
+        }
+    }
+}
+
+impl Enemy {
     /// The current FSM state (for inspection / tests).
     pub fn state(&self) -> AiState {
         self.state
@@ -1577,7 +1726,7 @@ impl Enemy {
                     // wider with `flank`, and packmates split sides so the pack surrounds.
                     let base = self.known_target_pos(target_pos).unwrap_or(target_pos);
                     let flank_angle = FLANK_MAX_ANGLE * tuning.flank * self.flank_dir;
-                    let target = flank_point(base, self.pos, flank_angle);
+                    let target = self.chase_aim_point(base, flank_angle, nav);
                     // Arriving at the believed spot without eyes on = they got away →
                     // go poke at it. `lose_contact` keeps an omniscient hunter chasing
                     // (its "believed spot" is the live one, so there is nothing to poke).
@@ -2135,7 +2284,15 @@ impl Enemy {
                 let chase_speed = if firing { SPEED_ADVANCE } else { SPEED_CHASE };
                 let base = self.known_target_pos(target_pos).unwrap_or(target_pos);
                 let flank_angle = FLANK_MAX_ANGLE * tuning.flank * self.flank_dir;
-                let target = flank_point(base, self.pos, flank_angle);
+                let target = self.chase_aim_point(base, flank_angle, nav);
+                // The return is deliberately ignored here, unlike the FSM arm. It reports
+                // "arrived **or unreachable**", and a flank aim point sits only
+                // `FLANK_CLOSE_FRAC` of the way in — so a hunter closing normally reaches
+                // it again and again while still far from the player. Treating that as
+                // lost contact churns the state machine (the lab's thrash detector catches
+                // it immediately). The freeze this arm used to suffer is fixed at the
+                // source instead, by never handing it an aim point it cannot walk to —
+                // see `chase_aim_point`.
                 self.move_toward(dt, target, nav, chase_speed * tuning.speed_mult);
             }
             AiState::Attack => {
@@ -2451,13 +2608,19 @@ impl Enemy {
     /// cardinal-only A* waypoints. Only when the line is blocked (a wall/corner) does
     /// it fall back to A* (the JS "LOS → beeline" shortcut). Shared by Chase, Search,
     /// and Investigate.
-    /// Drop the hunter's feet to the standable floor beneath it (bounded, so a
-    /// transient bad step can't teleport it across a full drop). Enemies have no
-    /// gravity or collide-and-slide of their own — their Y comes only from the
-    /// path they follow — so the flat beeline branch needs this to stay on the
-    /// surface rather than floating over a rise.
+    /// Put the hunter's feet on the walking surface (bounded, so a transient bad step
+    /// can't teleport it across a full drop). Enemies have no gravity or
+    /// collide-and-slide of their own — their Y comes only from the path they follow —
+    /// so the flat beeline branch needs this to stay on the surface rather than
+    /// floating over a rise.
+    ///
+    /// Goes through [`NavWorld::walk_surface_at`] rather than probing the floor directly,
+    /// because how far *up* the probe may reach is a property of the grid (one step
+    /// normally, two inside stairs) and reading it anywhere else lets the mover and the
+    /// pathfinder disagree. When they disagreed, a hunter would path onto a steep flight,
+    /// walk into a riser it could not climb, and grind there for the rest of the round.
     fn snap_to_floor(&mut self, nav: &NavWorld) {
-        if let Some(fy) = nav.floor_height_at(self.pos.x, self.pos.z, self.pos.y + 0.25) {
+        if let Some(fy) = nav.walk_surface_at(self.pos) {
             if (fy - self.pos.y).abs() <= 1.0 {
                 self.pos.y = fy;
             }
@@ -2545,7 +2708,22 @@ impl Enemy {
         self.pending_door = Some(di);
         self.door_wait += dt;
         if self.door_wait > DOOR_WAIT_MAX {
-            return false; // safety valve — never stand at a door forever
+            // Safety valve — never stand at one door forever. It used to release the
+            // *hold*, which (with nothing else checking doors) let the hunter walk through
+            // the panel: a door that failed to open became a door hunters strolled
+            // through. Now the pass is refused in `try_step` regardless, so releasing the
+            // hold would only produce a hunter walk-cycling on the spot. Give up on the
+            // route instead — drop the path and re-plan, which will pick up any other door
+            // that has opened meanwhile — and keep the feet still while doing it.
+            log::warn!(
+                "hunter waited {DOOR_WAIT_MAX}s on door {di} without it opening — repathing"
+            );
+            self.door_wait = 0.0;
+            self.path.clear();
+            self.repath_timer = 0.0;
+            self.moving = false;
+            self.move_speed = 0.0;
+            return true;
         }
         let Some(c) = nav.door_center(di) else { return false };
         // Stand clear of the panel's swing, not merely near the doorway: a door opening
@@ -2559,7 +2737,36 @@ impl Enemy {
         true
     }
 
-    fn move_toward(&mut self, dt: f32, target: Vec3, nav: &NavWorld, speed: f32) -> bool {
+    /// Where a chasing hunter should actually walk: the flank-offset approach bearing if
+    /// that lands on real ground, and the believed target position otherwise.
+    ///
+    /// The offset is a heuristic and it is computed **flat, on this hunter's own floor**
+    /// ([`flank_point`] takes `pos.y`), so swinging it by an angle can put it inside a
+    /// wall — and when the player is on another storey the point is on the wrong floor
+    /// entirely. Nav then snaps such a goal to the nearest standable cell within ~6 m,
+    /// which can be *the one under our own feet*: A\* returns a one-cell path, the mover
+    /// requests nothing, and the pursuit dies where it stands.
+    ///
+    /// Measured before this existed: a hunter 14 m from the player, on the floor below,
+    /// held Chase for 82 seconds without moving, aiming at a point 5.5 m away on its own
+    /// floor. The believed position is the safe fallback — by construction it is
+    /// somewhere a body was standing.
+    fn chase_aim_point(&self, base: Vec3, flank_angle: f32, nav: &NavWorld) -> Vec3 {
+        let flanked = flank_point(base, self.pos, flank_angle);
+        match nav.nearest_standable(flanked.x, flanked.y + 0.1, flanked.z, 4) {
+            Some(p) if self.dist_to(p) > FLANK_MIN_OFFSET => p,
+            _ => base,
+        }
+    }
+
+    pub(crate) fn move_toward(&mut self, dt: f32, target: Vec3, nav: &NavWorld, speed: f32) -> bool {
+        self.last_target = Some(target);
+        let done = self.move_toward_inner(dt, target, nav, speed);
+        self.last_target_done = done;
+        done
+    }
+
+    fn move_toward_inner(&mut self, dt: f32, target: Vec3, nav: &NavWorld, speed: f32) -> bool {
         // Anti-grind hold: if we were stuck (crowd/separation fight) give it a beat —
         // stand put (legs idle) so the pack settles instead of walk-cycling in place.
         if self.stuck_hold > 0.0 {
@@ -2608,10 +2815,31 @@ impl Enemy {
         if self.repath_timer <= 0.0 {
             self.repath_timer = REPATH_INTERVAL;
             match nav.find_path(self.pos, target) {
-                Some(path) => {
-                    let last = path.len().saturating_sub(1);
+                // A route has to have somewhere to go. `find_path` snaps an off-mesh goal
+                // onto the nearest standable cell within ~6 m, and when the target is a
+                // point you cannot stand on — a flank offset swung into a wall, a spot in
+                // mid-air — that snap can land on **the cell the hunter is already
+                // standing in**. The result is a one-cell path whose only waypoint is
+                // here.
+                //
+                // Treated as a route, that is a permanent freeze: `path_idx` clamps to 0,
+                // the waypoint is underfoot, so nothing is requested and `move_toward`
+                // reports `false` — meaning "still going" — so `Chase` never calls
+                // `lose_contact` and the hunter stands in Chase forever, believing it is
+                // en route. Measured on the shipping level: a hunter 14 m from the player
+                // held this for 82 seconds without moving.
+                //
+                // It is not a route, it is the absence of one, and this function already
+                // has a word for that: "arrived **or unreachable**". Saying so lets the
+                // caller re-target.
+                Some(path) if path.len() >= 2 => {
+                    let last = path.len() - 1;
                     self.path = path;
                     self.path_idx = 1.min(last); // skip the start cell
+                }
+                Some(_) => {
+                    self.path.clear();
+                    return true;
                 }
                 None => {
                     // Nowhere to walk and no clear line → treat as arrived so the
@@ -2978,7 +3206,7 @@ mod tests {
             r.brushes.push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 80.0, 16.0, 80.0));
             vec![r]
         };
-        engine::sim::nav::bake(&mut regions, &[]).expect("room bakes")
+        engine::sim::nav::bake(&mut regions, &[], &[]).expect("room bakes")
     }
 
     /// Drive one FSM step then commit the movement the way the `World` does for a lone
@@ -3540,7 +3768,7 @@ mod tests {
             r.brushes.push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 24.0, 16.0, 24.0));
             vec![r]
         };
-        let mut navw = nav::bake(&mut regions, &[]).expect("bake");
+        let mut navw = nav::bake(&mut regions, &[], &[]).expect("bake");
         let mut door = Brush::new(1, Op::Subtract, 12.0, 0.0, 0.0, 1.0, 7.0, 24.0);
         door.door = true;
         navw.set_doors(&[door]);
@@ -3583,6 +3811,159 @@ mod tests {
         assert!(e.pos.x > 12.0 * WT, "and the hunter is through the doorway");
     }
 
+    /// **No committed move can carry a hunter through a shut panel.**
+    ///
+    /// `door_gate` guards the two `move_toward` branches, and for a while that was taken
+    /// to mean doors were handled. It isn't: *every* displacement is committed by
+    /// `integrate_move` → `try_step`, and that includes ORCA's avoidance velocity, the
+    /// combat backpedal and the evade sidestep — none of which asked the FSM's opinion. A
+    /// shut door is not a solid cell (it rides the overlay), so `los_clear` and
+    /// `ground_path_clear` wave all of those straight through the panel. In play it read as
+    /// hunters *sometimes* opening doors and sometimes strolling through them.
+    ///
+    /// Driven through `integrate_move` directly, deliberately bypassing the FSM, because
+    /// that is exactly the path the gate could not see.
+    #[test]
+    fn no_movement_path_walks_a_hunter_through_a_shut_door() {
+        use engine::geometry::csg_runtime::{Brush, Op, Region};
+        use engine::sim::nav;
+
+        let mut regions = {
+            let mut r = Region::new(0);
+            r.brushes.push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 24.0, 16.0, 24.0));
+            vec![r]
+        };
+        let mut navw = nav::bake(&mut regions, &[], &[]).expect("bake");
+        let mut door = Brush::new(1, Op::Subtract, 12.0, 0.0, 0.0, 1.0, 7.0, 24.0);
+        door.door = true;
+        navw.set_doors(&[door]);
+
+        // Shove the hunter bodily at the panel, as avoidance would.
+        let mut e = Enemy::new(Vec3::new(10.0 * WT, 0.0, 12.0 * WT), Vec3::X);
+        let dt = 1.0 / 120.0;
+        for _ in 0..600 {
+            e.integrate_move(Vec3::X * 4.0, dt, &navw);
+        }
+        assert!(
+            e.pos.x < 12.0 * WT,
+            "a raw committed move must not cross a shut panel; got x={:.2} WT",
+            e.pos.x / WT
+        );
+        assert_eq!(e.pending_door, Some(0), "and it asks for the door it is stuck behind");
+
+        // Opened, the same push carries it through — the refusal is the door's state,
+        // not a wall.
+        navw.set_door_open(0, true);
+        for _ in 0..600 {
+            e.integrate_move(Vec3::X * 4.0, dt, &navw);
+        }
+        assert!(e.pos.x > 13.0 * WT, "an open door lets it through, got x={:.2} WT", e.pos.x / WT);
+    }
+
+    /// **A door that shuts on a hunter must not entomb it.** The refusal above is "do not
+    /// *enter* a shut panel's cells"; an agent standing in them has to be free to leave,
+    /// or a 4-second auto-close turns every doorway into a trap.
+    #[test]
+    fn a_door_closing_on_a_hunter_does_not_wall_it_in() {
+        use engine::geometry::csg_runtime::{Brush, Op, Region};
+        use engine::sim::nav;
+
+        let mut regions = {
+            let mut r = Region::new(0);
+            r.brushes.push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 24.0, 16.0, 24.0));
+            vec![r]
+        };
+        let mut navw = nav::bake(&mut regions, &[], &[]).expect("bake");
+        let mut door = Brush::new(1, Op::Subtract, 12.0, 0.0, 0.0, 1.0, 7.0, 24.0);
+        door.door = true;
+        navw.set_doors(&[door]);
+        navw.set_door_open(0, true);
+
+        // Walk into the doorway, then slam it.
+        let mut e = Enemy::new(Vec3::new(11.0 * WT, 0.0, 12.0 * WT), Vec3::X);
+        let dt = 1.0 / 120.0;
+        while e.pos.x < 12.5 * WT {
+            e.integrate_move(Vec3::X * 4.0, dt, &navw);
+        }
+        assert_eq!(navw.door_at(e.pos), Some(0), "the hunter is standing in the doorway");
+        navw.set_door_open(0, false);
+
+        let x0 = e.pos.x;
+        for _ in 0..240 {
+            e.integrate_move(Vec3::X * 4.0, dt, &navw);
+        }
+        assert!(
+            e.pos.x > x0 + 0.2,
+            "it must be able to walk out of a doorway that closed on it (x {:.2} → {:.2} WT)",
+            x0 / WT,
+            e.pos.x / WT
+        );
+    }
+
+    /// **A hunter can actually walk up a staircase the grid says it can walk up.**
+    ///
+    /// The pair to `nav`'s `a_stair_with_sub_cell_treads_stays_walkable_but_a_ledge_does_not`:
+    /// that one proves A\* will *route* up a flight whose treads came out shallower than a
+    /// nav cell, this one proves the mover can follow it. They were briefly out of step,
+    /// and the result was worse than the original bug — before, the flight was severed and
+    /// hunters never went near it; after, they pathed onto it, walked into the one riser
+    /// that rises two cells, and ground there. The mover's surface probe only ever looked
+    /// 0.25 m up, so the tread it was told to climb was invisible to it, and because a
+    /// waypoint is matched on **3D** distance the waypoint half a metre overhead could
+    /// never be reached.
+    ///
+    /// Asserted on arrival at the top, not on any internal state: "it climbed the stairs"
+    /// is the only claim worth making here.
+    #[test]
+    fn a_hunter_climbs_a_stair_whose_treads_are_shallower_than_a_nav_cell() {
+        use engine::geometry::csg_runtime::{Brush, Op, Region};
+        use engine::sim::nav;
+
+        let mut regions = {
+            let mut r = Region::new(0);
+            r.brushes.push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 24.0, 16.0, 24.0));
+            vec![r]
+        };
+        // 9 risers of 1 WT over 8 WT of run — tread depth 0.889 WT, the shipping level's
+        // stair run 10 — climbing toward −X from the floor onto a landing at 9 WT. One
+        // tread (the 7th) gets no cell centre, so the walkable strip jumps two cells
+        // there: that single riser is the whole test.
+        let mut steps: Vec<[f32; 6]> = (0..9)
+            .map(|k| {
+                let lo = 16.0 - (k as f32 + 1.0) * 8.0 / 9.0;
+                [lo, 0.0, 0.0, 8.0 / 9.0, k as f32 + 1.0, 24.0]
+            })
+            .collect();
+        // A landing at the top, so the destination is somewhere to stand rather than the
+        // last tread — otherwise the hunter reports "arrived" from ARRIVE_DIST away while
+        // still below the flight, and the test passes or fails on that instead.
+        let landing: [f32; 6] = [0.0, 0.0, 0.0, 8.0, 9.0, 24.0];
+        steps.push(landing);
+        let navw = nav::bake(&mut regions, &steps, &steps).expect("bake");
+
+        let start = Vec3::new(20.0 * WT, 0.0, 12.0 * WT);
+        let top = Vec3::new(4.5 * WT, 9.0 * WT, 12.0 * WT);
+        let mut e = Enemy::new(start, -Vec3::X);
+
+        let dt = 1.0 / 120.0;
+        for _ in 0..1200 {
+            // 10 s
+            e.desired_vel = Vec3::ZERO;
+            e.move_toward(dt, top, &navw, 3.0);
+            let v = e.desired_vel;
+            e.integrate_move(v, dt, &navw);
+            if e.pos.distance(top) < 0.6 {
+                break;
+            }
+        }
+        assert!(
+            e.pos.y > 8.0 * WT,
+            "the hunter should have climbed the flight; it got to y={:.2} m (x={:.2})",
+            e.pos.y,
+            e.pos.x
+        );
+    }
+
     /// The door request must survive the **real** `update` path, whichever AI branch is
     /// live. `update` returns from three places (Perfect Dark's ladder, the default-on
     /// utility scorer, the legacy FSM), and the first version of this feature reported
@@ -3610,7 +3991,7 @@ mod tests {
                     vec![r]
                 };
                 let nav = {
-                    let mut n = nav::bake(&mut regions, &[]).expect("bake");
+                    let mut n = nav::bake(&mut regions, &[], &[]).expect("bake");
                     let mut door = Brush::new(1, Op::Subtract, 12.0, 0.0, 0.0, 1.0, 7.0, 24.0);
                     door.door = true;
                     n.set_doors(&[door]);
@@ -3656,7 +4037,7 @@ mod tests {
             r.brushes.push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 24.0, 16.0, 24.0));
             vec![r]
         };
-        let mut navw = nav::bake(&mut regions, &[]).expect("bake");
+        let mut navw = nav::bake(&mut regions, &[], &[]).expect("bake");
         let mut door = Brush::new(1, Op::Subtract, 12.0, 0.0, 9.0, 1.0, 7.0, 6.0);
         door.door = true;
         navw.set_doors(&[door]);

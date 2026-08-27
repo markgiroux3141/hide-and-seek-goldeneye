@@ -526,9 +526,6 @@ impl World {
                     if step.needs_search_target {
                         needs_target.push(i);
                     }
-                    if let Some(di) = inst.enemy.pending_door() {
-                        door_requests.push(di);
-                    }
                     if step.caught {
                         any_caught = true;
                     }
@@ -635,9 +632,23 @@ impl World {
                         inst.enemy.assign_search_target(target);
                     }
                 }
-                // Work the doors hunters pulled up at. Deduplicated, since a whole pack
-                // funnelling through one doorway would otherwise re-trigger the open
-                // sound once per hunter per step.
+                // ── Collect the door requests AFTER the move is committed ──
+                // Both halves of the movement pipeline can raise one: the FSM's
+                // `door_gate` when a door sits on the hunter's path, and `try_step` when
+                // the *committed* step (ORCA's, the backpedal's, the evade's) runs into a
+                // panel the FSM never looked at. Collecting inside the FSM loop lost the
+                // second kind entirely — `door_gate` clears `pending_door` whenever no
+                // door is on the waypoint line, so next step's FSM pass wiped the request
+                // before anything read it. The hunter then refused the step forever
+                // against a door nobody was ever asked to open. Reading it here, after
+                // `integrate_move`, catches both.
+                for inst in self.enemies.iter() {
+                    if let Some(di) = inst.enemy.pending_door() {
+                        door_requests.push(di);
+                    }
+                }
+                // Deduplicated, since a whole pack funnelling through one doorway would
+                // otherwise re-trigger the open sound once per hunter per step.
                 door_requests.sort_unstable();
                 door_requests.dedup();
                 for di in door_requests {
@@ -711,7 +722,10 @@ impl World {
                 // footprint cells so hunters path around crates/furniture (enemies
                 // ignore physics colliders — see the nav-vs-physics split).
                 structure_solids.extend(self.prop_solid_boxes());
-                match nav::bake(&mut self.regions, &structure_solids) {
+                // Which of those boxes are stairs — the grid allows a taller step inside
+                // them, so a flight with sub-cell treads stays walkable.
+                let stair_volumes = self.stair_run_solid_boxes();
+                match nav::bake(&mut self.regions, &structure_solids, &stair_volumes) {
                     Some(nav) => {
                         let bake_ms = t0.elapsed().as_secs_f32() * 1000.0;
                         log::info!(

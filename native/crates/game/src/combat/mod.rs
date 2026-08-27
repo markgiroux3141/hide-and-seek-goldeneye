@@ -31,7 +31,9 @@ pub use config::{
 pub use enemy_weapons::{
     enemy_def_for, standoff_for, EnemySecondary, EnemyWeaponClass, EnemyWeaponDef,
 };
-pub use explosives::{falloff_damage, Mine, Projectile};
+pub use explosives::{
+    blast_distance_to_body, falloff_damage, in_lethal_core, Mine, Projectile, LETHAL_CORE_FRAC,
+};
 pub use shooting::{cast, HitResult};
 pub use viewmodel::{load_flash, load_gun, ViewModel};
 

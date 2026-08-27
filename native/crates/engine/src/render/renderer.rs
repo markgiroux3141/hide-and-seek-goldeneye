@@ -472,6 +472,11 @@ pub struct Renderer {
     /// depth-tested spark pipeline; drawn in BOTH modes so the builder can see where
     /// the wave comes in while authoring. Static — rebuilt each frame from the mark.
     marker_mesh: Option<GpuMesh>,
+    /// The BUILD nav overlay: a colored square per walkable nav cell, one colour per
+    /// connected component. Same depth-tested pipeline as the marker, and its own
+    /// channel because it is *large* (~90k vertices on a real level) and changes rarely
+    /// — the caller uploads it when the author presses Calculate, not per frame.
+    nav_overlay_mesh: Option<GpuMesh>,
 
     // Explosion fireballs (explosives): additive camera-facing textured billboards
     // sampling the baked GoldenEye fireball atlas. Depth-tested (occluded by walls)
@@ -2152,6 +2157,7 @@ impl Renderer {
             spark_pipeline,
             spark_mesh: None,
             marker_mesh: None,
+            nav_overlay_mesh: None,
             blast_pipeline,
             blast_atlas_bind,
             blast_mesh: None,
@@ -2888,6 +2894,18 @@ impl Renderer {
         };
     }
 
+    /// Set (or clear) the BUILD nav-validation overlay.
+    ///
+    /// **Call this only when it changes.** Unlike every other colored channel here, this
+    /// mesh is not rebuilt per frame: it is tens of thousands of quads, and re-uploading
+    /// it every frame would cost more than the level it is drawn over.
+    pub fn set_nav_overlay_mesh(&mut self, mesh: Option<&ColoredMesh>) {
+        self.nav_overlay_mesh = match mesh {
+            Some(m) if !m.indices.is_empty() => Some(GpuMesh::upload_colored(&self.device, m)),
+            _ => None,
+        };
+    }
+
     pub fn set_spark_mesh(&mut self, mesh: Option<&ColoredMesh>) {
         self.spark_mesh = match mesh {
             Some(m) if !m.indices.is_empty() => Some(GpuMesh::upload_colored(&self.device, m)),
@@ -3592,6 +3610,17 @@ impl Renderer {
                 rp.set_vertex_buffer(0, mk.vertex_buf.slice(..));
                 rp.set_index_buffer(mk.index_buf.slice(..), wgpu::IndexFormat::Uint32);
                 rp.draw_indexed(0..mk.index_count, 0, 0..1);
+            }
+
+            // 2.07) The nav-validation overlay (BUILD): walkable cells coloured by
+            // connected component. Before the sparks so a pinch/climb marker drawn in
+            // the same buffer still reads over its own floor square.
+            if let Some(nv) = &self.nav_overlay_mesh {
+                rp.set_pipeline(&self.spark_pipeline);
+                rp.set_bind_group(0, &self.camera_bind_group, &[]);
+                rp.set_vertex_buffer(0, nv.vertex_buf.slice(..));
+                rp.set_index_buffer(nv.index_buf.slice(..), wgpu::IndexFormat::Uint32);
+                rp.draw_indexed(0..nv.index_count, 0, 0..1);
             }
 
             // 2.1) Hit sparks (opaque, depth-tested, bright unlit markers).

@@ -1,161 +1,187 @@
-# Handoff — a BUILD tool that shouts about unwalkable geometry
+# Nav validation — SHIPPED, both phases
 
-> Written 2026-08-21 at the end of the pickups/spawn playtest session. **Nothing in the
-> tool is built.** The diagnosis is measured, not guessed; the design brainstorm is
-> `DESIGN_NAV_VALIDATION.md` and this is the working script for building it.
+> Rewritten 2026-08-22. **Phase 1 (report + panel + overlay) and phase 2 (the stair-aware
+> step limit) are both SHIPPED and green**; awaiting playtest. `slot1` went from 4 walkable
+> components with 15% of its floor cut off to **one component, 22,686 cells, zero
+> orphans**. Both of the original handoff's open questions are answered with measurements
+> rather than argument.
 >
-> Companion memories: `nav-vs-player-mobility`, `perf-diagnostic-tools`,
-> `spawn-points-respawn-pivot`, `ai-navmesh-attempt-reverted`.
+> Design doc: `DESIGN_NAV_VALIDATION.md`. Memories: `nav-vs-player-mobility`,
+> `perf-diagnostic-tools`, `spawn-points-respawn-pivot`, `ai-navmesh-attempt-reverted`.
 
-## The report
+## What shipped
 
-> "I can reach all the spawn points when I run through the level and there are no spawn
-> points on rooftops. I do notice however that there are certain parts of the map with
-> steep stairs, tight hallways where the enemies stop moving on the radar which means they
-> might not have a route to me. This tells me the nav mesh they are using might have
-> different accessibility than I do."
+**`O` → NAV → Calculate.** An explicit button because it bakes a grid (~0.5 s on a real
+level) and then spends ~150–200 ms measuring it — far too slow to run per edit.
 
-That reading is correct, and it is now measured.
+| piece | where |
+| --- | --- |
+| Engine queries | `sim/nav.rs`: `standable_with_components`, `main_component`, `nearest_gap`, `nearest_neighbour_gap`, `pinch_points`, `overclimb_edges`, `cell_size_m`, `max_step_m` |
+| Findings + report | `game/src/world/nav_issues.rs` — `NavIssues` / `NavIsland` / `NavOrphan` / `NavLine`, `World::calculate_nav_issues`, `nav_issue_report` |
+| Panel | `app.rs` — `PanelTab::Nav`, Calculate + overlay toggle + the coloured line list |
+| Overlay | `Renderer::set_nav_overlay_mesh` (its own channel; ~90k verts, uploaded on a revision change, **not** per frame) |
+| Headless | `profile_hunt` prints the whole validation block after the three older reports |
 
-## What is confirmed
+What it reports, and why each line is shaped the way it is:
 
-`levels/slot1.json`, via `World::nav_component_report()` (`world/hunt.rs:1033`):
+- **Components**, with an explicit clean verdict — "1 walkable component — all N cells of
+  floor connect". A panel that says nothing is indistinguishable from a panel that is
+  broken (the old open decision 3).
+- **Per island: the nearest gap, split into flat + rise.** One 3D distance cannot tell
+  "one step too tall" from "a 3.5 m drop", and those have nothing in common as fixes. The
+  line names which of the three it is.
+- **Orphans** — pads, pickups, turrets, doors that nothing can walk to.
+- **The pads `G` will silently drop**, by the runtime's own rule (see below).
+- **Pinch points** — corridors under `2·(ENEMY_RADIUS + half a cell)` = 0.73 m, the width
+  below which the body clips wall geometry *while walking the grid line*. Derived, not
+  tuned. Errors below `2·ENEMY_RADIUS` = 0.48 m, where it does not fit at all.
+- **Player-only climbs**, 0.50–0.76 m, flagged as information — except the ones that
+  would reconnect a cut-off area, which are errors and listed first.
+- **The 3D overlay**: green = the main component, one colour per island, red posts on
+  pinches, orange on reconnecting climbs. Independent toggle, so you leave it up, edit,
+  and re-Calculate to see whether the island closed.
+
+### Three things the implementation got wrong first, worth not repeating
+
+1. **Measure each island against its nearest component, not against main.** Islands
+   *chain*. On `slot1`, comp 1 (1,380 cells) is 3.5 m below main and 0.5 m from a 32-cell
+   sliver that is itself 0.5 m from main. Measured against main it reads as an unfixable
+   cliff; against its actual neighbour it is two small steps. `nearest_neighbour_gap`
+   exists for exactly this, and `NavIsland::gap_to` names the neighbour so the author can
+   follow the chain one line down the list.
+2. **`NavWorld::is_standable` answers *true* for cells just outside the baked grid** —
+   out-of-bounds below the world counts as solid ground — so any neighbour probe that
+   then indexes `comp` must bounds-check first or `idx` silently aliases an unrelated
+   cell. `comp_at_cell` does. (`label_components` and `find_path` both have the same
+   latent aliasing; harmless there, since the aliased cell is in the same component.)
+3. **Phrasing is part of the diagnosis.** The first version said "3.50 m below the level —
+   one step too tall", which sends the author to fix the wrong thing. The report now picks
+   between *one step too tall* / *you jump this, hunters cannot* / *a drop, needs stairs* /
+   *a distance, needs a bridge* from the two numbers.
+
+### Island spawn pads: still excluded, and now said out loud
+
+User call, 2026-08-22: keep the exclusion (it is what stopped the 10 fps), and surface it.
+The grouping rule is **one function** — `nav_issues::partition_pads` — called by both
+`prepare_spawn` and the panel, so "G will IGNORE pad 1 at (12.1, 24.0, -4.6)" is produced
+by the same code that does the ignoring. A second copy of that rule would eventually
+report confidently on a decision the runtime no longer makes.
+
+## The measurement on `levels/slot1.json`
 
 ```
-4 walkable component(s), 22686 standable cells:
-  comp 2: 19198 cells (84.6%)   ← every spawn pad
-  comp 4:  2076 cells (9.2%)    ← nothing
-  comp 1:  1380 cells (6.1%)    ← nothing
-  comp 3:    32 cells (0.1%)
+4 walkable components — 15% of the floor is cut off
+  main: 19198 cells (85%)
+  island comp 4: 2076 cells (9.2%) — 0.50 m above the level          at ( 13.6, 10.0,  -1.9)
+  island comp 1: 1380 cells (6.1%) — 0.50 m below island comp 3      at ( -8.9, -9.0, -11.1)
+  island comp 3:   32 cells (0.1%) — 0.50 m above island comp 1      at ( -8.9, -8.5, -10.9)
+9 authored objects nobody can walk to: 2 spawn pads, 6 pickups, 1 door
+1423 cells in corridors under 0.73 m — narrowest 0.25 m (a body is 0.48 m across)
+71 player-only climbs 0.50–0.76 m; 12 of them would RECONNECT a cut-off area
+calculated in ~190 ms (HUNT, reusing the frozen grid)
 ```
 
-**15% of the walkable floor is unreachable from the rest**, in two chunks large enough to
-be rooms. The author can walk to all of it. So the grid is severing real routes, and the
-job is to find out where and why.
+## ~~Open decision 2~~ ANSWERED: sub-cell stair treads, not real 0.5 m steps
 
-### The mobility asymmetry, from the source
+The old handoff left this open, correctly: raising `MAX_STEP` to 2 reconnects the whole
+level, but only *if* those 0.5 m gaps are a sampling artifact rather than steps the author
+built. They are an artifact, and the chain is now complete:
 
-Two independently-correct models nobody reconciled. Player = rapier collide-and-slide
-(`engine/src/sim/physics.rs:120-126`, `game/src/character.rs:20-25`); hunters = grid A\*
-(`engine/src/sim/nav.rs:18-20`).
+1. Every reconnecting climb sits on **stair run 10 or 13**.
+2. `resolve_run` (`geometry/structures.rs:295`) does `steps = round(rise / step_height)`
+   and `step_run = total_run / steps`. Runs 10 and 13 are **steeper than 45°** — rise/run
+   `18/16` and `14/13` — so with 1 WT risers their treads come out **0.889 and 0.929 WT
+   deep: shallower than one nav cell.**
+3. Cell-centre sampling therefore misses some treads entirely. The walkable strip skips a
+   tread and the vertical gap between consecutive standable cells becomes 2 cells.
+4. **Exactly 2 of the level's 17 stair runs have sub-cell treads, and they are the two
+   that produce all three islands.** The other 15 (treads 1.14–2.30 WT) are clean.
 
-| | player | hunter |
-| --- | --- | --- |
-| step up | 0.25 m `autostep.max_height` | 0.25 m (`MAX_STEP` = 1 cell, `nav.rs:20`) |
-| step down | 0.25 m snap, **then falls any distance** | 0.25 m — a bigger drop is a wall |
-| jump | **0.76 m apex** (`JUMP_VELOCITY` 5.5 / `GRAVITY` 20) | none |
-| slope | **50°** `max_slope_climb_angle` | ~45°, and every intermediate cell must be standable |
-| body | capsule r 0.25 m, h 1.5 m, slides on walls | 0.25 m cells, 4-connected, + a ~0.24 m wall-clearance nudge |
-| geometry | true mesh collision | **is the cell centre inside a brush** (`nav.rs` bake loop, ~`:750`) |
+| run | rise (WT) | run (WT) | steps | tread depth |
+| --- | --- | --- | --- | --- |
+| 10 | 18 | 16 | 18 | **0.889** |
+| 13 | 14 | 13 | 14 | **0.929** |
+| the other 15 | — | — | — | 1.14 – 2.30 |
 
-Four ways to make a one-way route by accident — a drop over 0.25 m, a jump-up in
-0.25–0.76 m, a stair/ramp over ~45°, and a **floor thinner than 0.25 m** (`is_standable`,
-`nav.rs:386`, needs the cell *below the centre* solid → an invisible hole over
-solid-looking geometry; the prime suspect for "steep stairs").
+So `MAX_STEP = 2` would hide a 2-in-17 authoring/sampling artifact by making *every*
+hunter out-climb the player *everywhere*. It is one constant and it is tempting; it is
+also the least honest option on the table now that the cause is known.
 
-**And one that is not connectivity at all.** A 2-cell (0.5 m) corridor is a legal
-4-connected path, but the hunter body is ~0.5 m wide and `wall_clearance_offset`
-(`nav.rs:572`) pushes it 0.24 m off each wall. It cannot satisfy both, so it stalls
-**mid-route**. That is the "tight hallways" half of the report and it needs its own
-detector — "no path" and "a path it cannot walk" are different bugs with different fixes.
+## Phase 2 SHIPPED — a stair-aware step limit
 
-## What is already built — do not rebuild it
+User call, 2026-08-22: teach nav about stairs rather than move the author's geometry.
 
-- `NavWorld::label_components` (`nav.rs:321`) — flood-fills standable cells into connected
-  components at bake, using A\*'s own adjacency but **ignoring doors** (a door can only
-  *remove* connectivity, so a cross-component refusal is always sound).
-- `component_at` (`:379`), `component_sizes` (`:364`) — the queries the panel needs.
-- The **O(1) unreachable refusal** in `find_path` (`nav.rs:627`). Keep it: it is what stopped
-  a 10 fps playtest (four hunters each running a doomed full-region A\* every 0.4 s).
-- `nav::path_stats()` / `path_counts()` / `reset_path_stats()` — A\* calls / failures / cells
-  expanded. **The failure count is the signal**; a failed search expands the whole region.
-- `World::nav_component_report()` (`hunt.rs:1033`), `spawn_reachability_report()` (`:1065`),
-  `hunter_report()` (`:1100`) — text versions of what the panel should draw.
-- `cargo run --release --bin profile_hunt -- 1 20` — loads a real slot, enters HUNT, prints
-  the step profile plus all three reports. This is the iteration loop; use it before the game.
-- Island spawn pads are **excluded** from the pool at `prepare_spawn` (`hunt.rs:930`), with a
-  per-pad warning. See the open decision below.
+`nav::STAIR_STEP = 2` cells (0.5 m) applies **only where both ends of a move are stair
+cells**; everywhere else `MAX_STEP` stays 1. `bake` now takes a third argument, the stair
+volumes (each region's own `StairDesc` treads are found and tagged automatically; the
+caller passes the free-standing stair-run boxes, hence
+`World::stair_run_solid_boxes()`), and tags their cells — widened one cell in XZ and
+`AGENT_HEIGHT_CELLS` upward, because the cells that matter are the standable ones *on* the
+flight, not the ones inside the solid.
 
-## Suggested order
+Two things this deliberately is **not**: a global `MAX_STEP = 2` (a hunter beside a
+staircase gains nothing — both ends must be stair cells), and a change to what is solid
+(LOS, clearance and collision queries are untouched).
 
-**Phase 1 — report, no behaviour change.** Safe, and it tells us which phase-2 fix is worth
-doing.
+The refactor that came with it matters as much: **`NavWorld::can_step` is now the single
+definition of nav adjacency**, called by `label_components`, `find_path`, `free_run` and
+`overclimb_edges`. Those were separate copies of the same rule, and the O(1) unreachable
+refusal in `find_path` is only sound while labelling and search agree exactly — the stair
+step would have given them a third thing to drift on. `can_step` also bounds-checks (see
+trap 2 above) and, for a 2-cell climb, checks *both* intervening cells of the agent's own
+column rather than only the top one.
 
-1. `nav_issues()` on `World`, returning structured findings rather than a string: component
-   summary; per-island **nearest gap** to the main component (closest cell pair, with the
-   horizontal distance *and* the height delta); orphaned entities (pads, pickups, doors,
-   turrets not in the main component); pinch points; over-climb edges (adjacent floor deltas
-   in 0.25–0.8 m, i.e. player-only). The nearest-gap number is the whole diagnosis — "0.35 m
-   too high at (12.4, 23.8, -4.2)" says fix the step limit, "4.2 m across a pit" says build
-   a bridge.
-2. A **NAV tab** in the `O` panel. Add a `PanelTab::Nav` variant (`app.rs:56`, and to
-   `ALL`/`title` at `:64`/`:71`), then a body arm beside `PanelTab::Spawns =>`
-   (`app.rs:1313`). It needs an explicit **Calculate** button: the bake is ~520 ms on this
-   level, far too slow to run per edit.
-3. The **3D overlay** — main component green, each island its own colour. This is the part
-   that actually fixes levels; a list of coordinates never does. Follow the existing
-   coloured-mesh channel rather than inventing one: `World::spawn_marker_mesh`
-   (`tools/spawn_point.rs:168`) → `Renderer::set_marker_mesh`
-   (`render/renderer.rs:2884`). A second channel of the same shape is the cheap path.
-   `NavWorld::all_standable()` (`nav.rs:512`) already hands back the cells.
+### Result on `levels/slot1.json`
 
-**Phase 2 — make the grid agree with the player.** Options, cheapest first, all listed in
-the design doc with their risks: raise `MAX_STEP` to 2 cells; let descent be free; sample the
-cell *volume* instead of its centre; off-mesh links (where the reverted navmesh attempt
-already concluded we should go). Measure with `profile_hunt` before and after — component
-count and the orphan list are the acceptance criteria.
+```
+before:  4 components, 15% of the floor cut off, 9 orphaned objects, 2 pads dropped at G
+after:   1 walkable component — all 22686 cells connect
+         0 orphaned objects, all 10 pads in the pool
+         0 A* failures over 10 s of sim (the failures were the 10 fps)
+         bake 553 ms (unchanged), validation 51 ms, sim 0.47 ms/step
+```
 
-## Traps
+Same outcome the handoff measured for a global `MAX_STEP = 2`, reached without giving every
+hunter half a metre of climb everywhere. The island-pad exclusion in `prepare_spawn` is now
+dead code *on this level* and stays as a guard.
 
-- **Do not "fix" this by making the grid more permissive than the hunter's body.** The two
-  reported symptoms pull in opposite directions: connectivity wants a looser grid, tight
-  hallways want a stricter one. A single knob will trade one bug for the other.
+### A correction: the pinch count was almost entirely false
+
+An earlier version of this document reported "1,423 cells in corridors under 0.73 m,
+narrowest 0.25 m" and argued that it pulled against loosening the grid. It did not, because
+it was not real. `free_run` measured the free span at a **fixed height**, and a stair tread
+is one cell deep with the next tread one cell up — so every step of every flight read as a
+0.25 m corridor. With the span following the walkable surface (`can_step`), the count on
+`slot1` is **0**. There is no corridor-width problem on this level, and the "tight
+hallways" half of the original report was the same severed-staircase bug all along.
+
+### Still open
+
+- **`profile_hunt` bakes without props.** `prop_solid_boxes` needs registered GLB bounds,
+  which the headless binary has none of, so its nav is missing every crate. In-game the
+  same level reported 9 components where the headless run said 4 — the extra five were
+  9–20 cell pockets **walled off by placed props**. The panel is the authority; the
+  headless report under-states.
+- Volume-sampling the cell (instead of its centre) is still the general fix for thin
+  floors and misaligned geometry. Nothing currently demands it.
+- Off-mesh links on the existing grid, if jumps ever need to be authorable
+  (`ai-navmesh-attempt-reverted`).
+
+## Traps that still apply
+
+- **Do not make the grid more permissive than the hunter's body.** See above.
 - **"I can get there" does not prove a hunter can.** The player jumps 0.76 m and hunters
-  cannot jump at all, so some islands may be legitimately unwalkable. The tool has to
-  distinguish, not assume — that is why over-climb edges are reported as *player-only*
-  rather than as errors.
-- **An open room cannot test any of this.** Line-of-sight and connectivity both need interior
-  geometry; see `partitioned_room` in the spawn_point tests for the pattern.
+  cannot jump at all, so some islands may be legitimately unwalkable. Over-climb edges are
+  reported as *player-only* rather than as errors for that reason.
+- **An open room cannot test any of this.** Connectivity and line of sight both need
+  interior geometry; `nav_issues`'s own fixtures stack `Platform`s to make a severed ledge,
+  and `partitioned_room` in the spawn_point tests is the LOS pattern.
 - **`prepare_spawn` receives `nav` as a parameter and `self.nav` is `None` there** — the
-  caller has taken the field. The first version of the island filter read `self.nav` and
-  silently did nothing.
-- **The bake is already ~520 ms.** Anything phase 2 adds to it (volume sampling especially)
-  lands on the `G` keypress, which is a real hitch the user will feel.
-- Component labelling deliberately ignores doors. If phase 2 makes doors affect
-  connectivity, the O(1) refusal in `find_path` stops being sound.
-
-## Open decisions for the fresh context
-
-1. **Do island spawn pads stay excluded?** They are today (commit `9132839`) and that is what
-   stopped the 10 fps — but the author placed them and can walk to them, so the exclusion
-   silently overrules a deliberate choice. If phase 2 reconnects those areas it becomes dead
-   code. Options: keep it, downgrade to a loud warning that still spawns there, or keep it
-   only for components under some size. **Ask before choosing.**
-2. ~~**Is `MAX_STEP` = 1 cell the actual bug?**~~ **Measured before this handoff was filed —
-   yes.** One constant, `nav.rs:20`:
-
-   ```
-   MAX_STEP = 1 (0.25 m):  4 components — 19198 / 2076 / 1380 / 32 cells, 8 of 10 pads usable
-   MAX_STEP = 2 (0.50 m):  1 component  — 22686 cells (100%), all 10 pads
-   MAX_STEP = 3 (0.75 m):  1 component  — no further change
-   ```
-
-   Every island is behind a **single 0.5 m climb**. Two readings, and the phase-1
-   nearest-gap report is what distinguishes them:
-
-   - **Real 0.5 m steps.** Then the *player* cannot walk up them either (autostep is
-     0.25 m) — they are jumping without thinking about it — and raising `MAX_STEP` makes
-     hunters *more* mobile than the player. Defensible, but state it out loud.
-   - **A quantized ramp**, which is likelier for "steep stairs". On a slope, consecutive
-     standable cells can sit 2 cells apart vertically because the cell centre *between*
-     them falls inside the ramp and reads as solid. The geometry is continuously walkable
-     at the player's 50° and the grid has stepped it into 0.5 m jumps. Here raising
-     `MAX_STEP` is not a cheat, it is a **correction for a sampling artifact** — and
-     volume sampling would fix it more honestly at bake cost.
-
-   So: do not just raise the constant and declare victory. Get the nearest-gap readout,
-   look at what is actually there, and decide which of those two it is — the answer changes
-   whether the shipped fix is `MAX_STEP`, volume sampling, or both.
-3. **What is the tool's verdict on a level with no issues?** A panel that says nothing is
-   indistinguishable from a panel that is broken. It should say "1 component, 0 orphans" out
-   loud.
+  caller has taken the field.
+- **Component labelling deliberately ignores doors.** A door can only *remove*
+  connectivity, so a cross-component refusal in `find_path` is always sound. If phase 2
+  makes doors affect connectivity, that O(1) refusal stops being sound — and it is what
+  stopped a 10 fps playtest.
+- **The nav overlay is the one coloured channel not rebuilt per frame.** ~90k vertices;
+  `World::nav_overlay_rev()` gates the upload. A toggle that forgets to bump it shows a
+  stale overlay (there is a test).

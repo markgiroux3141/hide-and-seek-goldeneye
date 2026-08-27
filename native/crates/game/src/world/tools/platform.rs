@@ -605,6 +605,20 @@ impl World {
                 boxes.push(b);
             }
         }
+        boxes.extend(self.stair_run_solid_boxes());
+        boxes
+    }
+
+    /// Just the free-standing stair-runs' step blocks (WT).
+    ///
+    /// Split out from [`Self::structure_solid_boxes`] because the nav bake needs to know
+    /// which of those boxes are **stairs**: inside stair geometry the grid allows a taller
+    /// step, which is what lets hunters use a flight whose treads came out shallower than
+    /// a nav cell (see `nav::STAIR_STEP`). A platform slab must not get that relaxation,
+    /// so "all the structure solids" is not a usable answer.
+    pub(crate) fn stair_run_solid_boxes(&self) -> Vec<[f32; 6]> {
+        let brushes = self.all_region_brushes();
+        let mut boxes = Vec::new();
         for r in &self.stair_runs {
             let (fp, tp) = self.run_platforms(r);
             boxes.extend(structures::stair_run_boxes(r, fp.as_ref(), tp.as_ref(), &brushes));

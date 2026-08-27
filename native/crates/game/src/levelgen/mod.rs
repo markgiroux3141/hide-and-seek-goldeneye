@@ -85,13 +85,16 @@ pub fn analyze_and_print(built: &BuiltLevel) {
     let brushes = region.brushes.clone();
     let mut regions = vec![region];
 
-    // Structure solids: platform slabs + stair-run step blocks (the nav extras).
+    // Structure solids: platform slabs + stair-run step blocks (the nav extras). The
+    // stair boxes are kept apart as well as included, because the bake relaxes its step
+    // limit inside stair geometry and must be told which boxes those are.
     let mut solids: Vec<[f32; 6]> = Vec::new();
     for p in &built.platforms {
         if let Some(b) = p.solid_box(&brushes) {
             solids.push(b);
         }
     }
+    let mut stair_volumes: Vec<[f32; 6]> = Vec::new();
     for r in &built.stair_runs {
         let fp = r
             .from_platform
@@ -99,10 +102,11 @@ pub fn analyze_and_print(built: &BuiltLevel) {
         let tp = r
             .to_platform
             .and_then(|id| built.platforms.iter().find(|p| p.id == id));
-        solids.extend(structures::stair_run_boxes(r, fp, tp, &brushes));
+        stair_volumes.extend(structures::stair_run_boxes(r, fp, tp, &brushes));
     }
+    solids.extend_from_slice(&stair_volumes);
 
-    match nav::bake(&mut regions, &solids) {
+    match nav::bake(&mut regions, &solids, &stair_volumes) {
         Some(navw) => {
             let a = analyze::Analysis::new(&navw, &regions, built);
             print!("{}", a.report());

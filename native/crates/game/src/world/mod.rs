@@ -52,6 +52,11 @@ mod geom;
 mod history;
 mod hunt;
 mod lifecycle;
+mod jank;
+mod nav_probe;
+pub use nav_probe::{ProbeResult, ProbeSample};
+mod nav_issues;
+pub use nav_issues::{NavIssues, NavLine, NavSeverity};
 pub mod pd_lab;
 mod persist;
 mod pick;
@@ -78,7 +83,7 @@ mod ai_testbed;
 // / `brushes_touching` are used only within `editing`, so they aren't re-exported.)
 pub(crate) use geom::{
     append_textured_collision, boxes_mesh, make_stair_void, make_wall_brush, push_colored_box,
-    structure_collider_mesh,
+    push_colored_quad_y, structure_collider_mesh,
 };
 pub(crate) use hunt::band_for_speed;
 pub(crate) use lifecycle::pick_spread_spawns;
@@ -399,6 +404,10 @@ pub(crate) const CHAR_HIT_START: usize = 7;
 /// on the smaller body. Total height ≈ 1.44 m.
 pub(crate) const ENEMY_RADIUS: f32 = 0.24; // 0.3 × 0.8
 pub(crate) const ENEMY_HALF_HEIGHT: f32 = 0.48; // 0.6 × 0.8
+/// The capsule's full standing height (≈1.44 m) — for anything that has to measure to a
+/// hunter's *body* rather than to a point on it, blast damage being the one that cares
+/// (see `combat::blast_distance_to_body`).
+pub(crate) const ENEMY_BODY_HEIGHT: f32 = 2.0 * (ENEMY_HALF_HEIGHT + ENEMY_RADIUS);
 /// The body height those constants were tuned against — a GoldenEye body renders
 /// 1.50 m. A **Perfect Dark** body is 1.73 m, so a fixed capsule would leave its head
 /// 23 cm in the open air: unhittable, and never a headshot. [`World::body_capsule`]
@@ -580,6 +589,11 @@ pub(crate) const ENEMY_COUNT: usize = 1;
 /// flanking approach angles, squad suppression, cover — actually reads in playtest;
 /// bump/lower freely while tuning. Set in `app.rs` right after the difficulty pin.
 pub const PLAYTEST_WAVE_SIZE: usize = 4;
+
+/// Ceiling on the live wave-size dial (`[` / `]`). Not a design limit — spawn pads and
+/// the frame budget bite long before this — just a guard so a held key cannot ask for a
+/// thousand hunters.
+pub const WAVE_SIZE_MAX: usize = 16;
 
 /// Top of the difficulty dial ([`World::difficulty`] runs `0..=DIFFICULTY_MAX`). 0 is
 /// the original baseline; DIFFICULTY_MAX is brutal. Driven live with the `=` / `-`
@@ -1953,6 +1967,18 @@ pub struct World {
     character: Option<CharacterController>,
     /// Baked nav grid; `Some` only in HUNT mode.
     nav: Option<NavWorld>,
+    /// Last result of the NAV tab's **Calculate** (`world::nav_issues`), or `None` until
+    /// it is pressed. Cached rather than live because the grid bake it needs costs ~0.5 s
+    /// on a real level — far too slow to re-run per edit.
+    nav_issues: Option<NavIssues>,
+    /// The walkable-component overlay mesh built alongside those findings.
+    nav_overlay: Option<ColoredMesh>,
+    /// Whether that overlay is drawn. Separate from the findings on purpose: you leave it
+    /// on, edit the geometry, and re-Calculate to see whether the island closed.
+    nav_overlay_on: bool,
+    /// Bumped on every change to the overlay. It runs to ~90k vertices, so the app
+    /// uploads on a revision change rather than rebuilding a GPU buffer every frame.
+    nav_overlay_rev: u32,
     /// The live hunters (HUNT only) — one per [`ENEMY_ROSTER`] entry that found a
     /// spawn cell. Each carries its own mixer/weapon/collider and wears a body from
     /// [`Self::char_models`] (its `body` id). Empty in BUILD.
@@ -2823,6 +2849,10 @@ impl World {
             theme_hotkeys: std::collections::BTreeMap::new(),
             character: None,
             nav: None,
+            nav_issues: None,
+            nav_overlay: None,
+            nav_overlay_on: false,
+            nav_overlay_rev: 0,
             enemies: Vec::new(),
             spawn_enemies: true,
             char_models,
@@ -3003,7 +3033,35 @@ impl World {
     /// Set how many hunters the next HUNT spawns (default 1 — "duel mode"). Dev/test
     /// knob; tests bump it to exercise multi-hunter separation/squad behaviour.
     pub fn set_wave_size(&mut self, n: usize) {
-        self.wave_size = n;
+        self.wave_size = n.clamp(1, WAVE_SIZE_MAX);
+    }
+
+    /// How many hunters the next HUNT will flood in.
+    pub fn wave_size(&self) -> usize {
+        self.wave_size
+    }
+
+    /// Nudge the wave size and, mid-hunt, re-flood immediately — the `[` / `]` keys.
+    ///
+    /// Live rather than next-round because its first use is bisecting a defect: a hunter
+    /// that stalls in a corridor with four in the level and walks it cleanly with one is
+    /// a **crowding** problem (ORCA, separation, doorway queueing), and one that stalls
+    /// either way is not. Being able to drop to a single hunter without leaving HUNT,
+    /// reloading and re-walking there is the difference between testing that hypothesis
+    /// in seconds and in minutes. Mirrors [`Self::change_difficulty`], which restarts the
+    /// duel for the same reason.
+    pub fn change_wave_size(&mut self, delta: i32) {
+        let new = (self.wave_size as i32 + delta).clamp(1, WAVE_SIZE_MAX as i32) as usize;
+        if new == self.wave_size {
+            return; // already at the floor/ceiling
+        }
+        self.wave_size = new;
+        log::info!(
+            "WAVE SIZE -> {} hunter(s){}",
+            self.wave_size,
+            if self.mode == Mode::Hunt { " — re-flooding the wave" } else { " (takes effect at G)" }
+        );
+        self.restart_hunt(); // no-op outside HUNT
     }
 
     /// The difficulty dial as a 0..=1 fraction — what the PD tier interpolation

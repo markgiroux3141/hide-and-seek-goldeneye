@@ -1510,7 +1510,7 @@ mod tests {
     /// up and attach them to the overlay.
     fn go_live(world: &mut World) {
         let mut regions = std::mem::take(&mut world.regions);
-        let nav = nav::bake(&mut regions, &[]).expect("nav bakes");
+        let nav = nav::bake(&mut regions, &[], &[]).expect("nav bakes");
         world.regions = regions;
         world.nav = Some(nav);
         world.spawn_doors();

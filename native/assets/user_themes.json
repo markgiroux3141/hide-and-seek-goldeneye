@@ -32,6 +32,40 @@
           "texture": "floor_doorframe"
         }
       }
+    },
+    "custom_02": {
+      "label": "Test",
+      "zones": {
+        "0": {
+          "repeat": 0.44999998807907104,
+          "texture": "tempImgEd00AF"
+        },
+        "1": {
+          "offset_x": 0.10000000149011612,
+          "offset_y": -0.10000000149011612,
+          "repeat": 0.17000000178813934,
+          "texture": "tempImgEd05FC"
+        },
+        "2": {
+          "offset_y": 0.05000000074505806,
+          "repeat": 0.25,
+          "texture": "tempImgEd0139"
+        },
+        "3": {
+          "offset_x": -0.10000000149011612,
+          "offset_y": -0.6000000238418579,
+          "repeat": 0.10000000149011612,
+          "texture": "tempImgEd05BC"
+        },
+        "5": {
+          "repeat": 1.0,
+          "texture": "stair_gradient"
+        },
+        "6": {
+          "repeat": 0.3499999940395355,
+          "texture": "floor_doorframe"
+        }
+      }
     }
   }
 }

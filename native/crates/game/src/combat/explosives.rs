@@ -263,6 +263,46 @@ pub fn falloff_damage(explosion: &Explosion, dist: f32) -> f32 {
     }
 }
 
+/// Fraction of the blast radius inside which an explosion simply **kills**, whatever the
+/// victim's health or armour.
+///
+/// A deliberate cliff in an otherwise smooth curve, and it is there because the smooth
+/// curve alone gets point-blank wrong in a way players notice immediately. For a hand
+/// grenade (radius 4 m) this is 1.4 m; for a rocket (5 m), 1.75 m — measured to the
+/// *body*, so it means "the fireball is on top of you".
+///
+/// One constant, easy to move. Raising it makes explosives dominate; dropping it to 0
+/// restores the pure falloff.
+pub const LETHAL_CORE_FRAC: f32 = 0.35;
+
+/// Distance from a blast centre to the nearest point of a **body**, rather than to a
+/// single point inside it.
+///
+/// This is the fix for point-blank, and it is a measurement bug rather than a tuning
+/// question. Damage used to be sampled at one centre-mass point 0.7–0.9 m above the feet,
+/// so a grenade that rolled to a stop *against your boots* was scored as though it were
+/// nearly a metre away: with the squared falloff that is 60% of peak, and the player
+/// walked away from a grenade at their own feet with 10 HP. The body is a capsule; the
+/// blast should be measured to it.
+///
+/// `feet` is the body's ground position, `height` its full standing height, `radius` its
+/// horizontal half-width.
+pub fn blast_distance_to_body(center: Vec3, feet: Vec3, height: f32, radius: f32) -> f32 {
+    // Vertical: clamp the blast into the body's own span, so anything alongside it — at
+    // the boots, at the head, or level with the chest — reads as touching.
+    let dy = center.y - center.y.clamp(feet.y, feet.y + height);
+    // Horizontal: to the capsule's surface, not to its axis.
+    let flat = (Vec3::new(center.x - feet.x, 0.0, center.z - feet.z).length() - radius).max(0.0);
+    (flat * flat + dy * dy).sqrt()
+}
+
+/// Whether a blast is close enough to a body to be unsurvivable — see
+/// [`LETHAL_CORE_FRAC`]. `dist` must come from [`blast_distance_to_body`]; measured to a
+/// centre point instead, the core would be a metre smaller than it reads on screen.
+pub fn in_lethal_core(explosion: &Explosion, dist: f32) -> bool {
+    LETHAL_CORE_FRAC > 0.0 && dist <= explosion.radius * LETHAL_CORE_FRAC
+}
+
 /// The original: linear falloff from `max_damage` at the centre to 0 at (and beyond)
 /// `radius`. Authored fresh for the GoldenEye feel, with no oracle behind it.
 pub fn linear_falloff_damage(explosion: &Explosion, dist: f32) -> f32 {
@@ -598,6 +638,48 @@ mod tests {
             crate::combat::config::FireKind::Projectile(p) => p,
             _ => unreachable!("rocket launcher is a projectile"),
         }
+    }
+
+    /// **A grenade at your feet is not a metre away.**
+    ///
+    /// The measurement bug that made point-blank survivable: damage was sampled at one
+    /// centre-mass point 0.9 m above the player's feet, so a grenade resting against their
+    /// boots scored as 0.9 m out — 60% of peak under the squared falloff, which on a 150
+    /// damage grenade left a 100 HP player standing with 10.
+    #[test]
+    fn a_blast_at_the_feet_is_measured_as_touching_the_body() {
+        let feet = Vec3::new(3.0, 0.0, 3.0);
+        let (h, r) = (1.5, 0.25);
+
+        // At the boots, at the chest, and at head height: all touching.
+        for y in [0.0, 0.75, 1.5] {
+            let d = blast_distance_to_body(Vec3::new(3.0, y, 3.0), feet, h, r);
+            assert!(d < 1e-6, "a blast at y={y} on the body reads {d:.3} m away");
+        }
+        // Below the feet and above the head fall off vertically again.
+        let below = blast_distance_to_body(Vec3::new(3.0, -1.0, 3.0), feet, h, r);
+        assert!((below - 1.0).abs() < 1e-6, "1 m under the floor: {below:.3}");
+        // Horizontally it is to the capsule surface, so 2 m from the axis is 1.75 m out.
+        let beside = blast_distance_to_body(Vec3::new(5.0, 0.8, 3.0), feet, h, r);
+        assert!((beside - 1.75).abs() < 1e-6, "2 m from the axis: {beside:.3}");
+    }
+
+    /// The lethal core is a real cliff, and it sits inside the blast rather than at its
+    /// rim: a hand grenade (4 m) kills out to 1.4 m from the body and merely hurts beyond.
+    #[test]
+    fn the_lethal_core_covers_close_range_and_nothing_further() {
+        let ex = Explosion { radius: 4.0, max_damage: 150.0 };
+        assert!(in_lethal_core(&ex, 0.0), "at the body");
+        assert!(in_lethal_core(&ex, 1.39), "just inside the core");
+        assert!(!in_lethal_core(&ex, 1.41), "just outside it");
+        assert!(!in_lethal_core(&ex, 3.9), "at the rim");
+        // And the ordinary falloff outside the core is survivable for a 100 HP actor,
+        // which is what makes the core the thing that decides point-blank.
+        let just_outside = falloff_damage(&ex, ex.radius * LETHAL_CORE_FRAC + 0.01);
+        assert!(
+            just_outside < 100.0,
+            "outside the core a grenade should not kill outright, got {just_outside:.0}"
+        );
     }
 
     /// A rocket (no gravity) flies dead straight: after 1 s at 40 m/s it's 40 m out

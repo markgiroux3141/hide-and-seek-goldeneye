@@ -189,6 +189,30 @@ pub(crate) fn push_colored_box(verts: &mut Vec<ColorVertex>, idx: &mut Vec<u32>,
     idx.extend(i.iter().map(|k| k + base));
 }
 
+/// Append one flat, upward-facing colored square (centre + half-extent, metres) to a
+/// colored-overlay buffer — 4 vertices where [`push_colored_box`] costs 24.
+///
+/// That matters exactly once: the nav overlay draws a square per walkable cell, which
+/// on the shipping level is twenty thousand of them. As boxes it is half a million
+/// vertices; as quads it is ninety thousand. Winding is irrelevant — the overlay
+/// pipeline does not cull.
+pub(crate) fn push_colored_quad_y(
+    verts: &mut Vec<ColorVertex>,
+    idx: &mut Vec<u32>,
+    center: Vec3,
+    half: f32,
+    rgb: [f32; 3],
+) {
+    let base = verts.len() as u32;
+    for (dx, dz) in [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)] {
+        verts.push(ColorVertex {
+            pos: [center.x + dx * half, center.y, center.z + dz * half],
+            color: rgb,
+        });
+    }
+    idx.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
 /// Build a stair void `subtract` brush (JS `csgActions.makeBrush`): `lo`/`hi` are
 /// the span along the wall-normal `axis`, `y_min`/`y_max` the vertical extent, and
 /// `(u0, u1)` the horizontal span along the in-plane `u_axis`. The vertical axis

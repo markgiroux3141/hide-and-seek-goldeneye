@@ -121,11 +121,18 @@ pub fn ammo_quads(magazine: u32, reserve: u32, aspect: f32) -> Vec<HudVertex> {
     out
 }
 
-/// The difficulty-dial readout quads: `DANGER n / max`, centered along the top edge.
-/// A live gauge for the `=` / `-` difficulty keys while tuning enemy hardness.
+/// The dial readouts: `DANGER n / max   WAVE w`, centered along the top edge.
+///
+/// A live gauge for the two tuning dials — `=` / `-` for enemy hardness, `[` / `]` for
+/// how many of them there are. The wave count sits here rather than in the scoreboard on
+/// the right because it is a *setting* you are driving, not a score; and it has to be on
+/// screen at all, because bisecting a defect by dropping to one hunter is worthless if
+/// you cannot see how many you asked for. Plain spaces, no separator glyph — the HUD
+/// atlas silently drops characters it does not carry.
+///
 /// `aspect` = framebuffer w/h (keeps glyphs proportioned).
-pub fn danger_quads(level: u32, max: u32, aspect: f32) -> Vec<HudVertex> {
-    let text = format!("DANGER {level} / {max}");
+pub fn danger_quads(level: u32, max: u32, wave: usize, aspect: f32) -> Vec<HudVertex> {
+    let text = format!("DANGER {level} / {max}   WAVE {wave}");
     let gh = 0.05;
     let gw = gh / aspect.max(1e-6) * (GLYPH_W as f32 / GLYPH_H as f32);
     let gap = gw * 0.4;
@@ -313,7 +320,11 @@ mod tests {
         let drawn = |s: &str| s.chars().filter(|c| *c != ' ').count() * 6;
 
         assert_eq!(ammo_quads(7, 70, 1.6).len(), drawn("7 / 70"), "ammo counter");
-        assert_eq!(danger_quads(4, 10, 1.6).len(), drawn("DANGER 4 / 10"), "danger dial");
+        assert_eq!(
+            danger_quads(4, 10, 3, 1.6).len(),
+            drawn("DANGER 4 / 10   WAVE 3"),
+            "danger + wave dials"
+        );
         assert_eq!(credits_quads(250, 1.6).len(), drawn("$250"), "credit balance");
         assert_eq!(
             score_quads((3, 1), (2, 4), 10, 1.6).len(),

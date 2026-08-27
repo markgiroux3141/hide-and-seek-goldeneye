@@ -3278,7 +3278,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         world.confirm_stairs();
 
         let mut regions = std::mem::take(&mut world.regions);
-        let nav = nav::bake(&mut regions, &[]).expect("bake with stairs");
+        let nav = nav::bake(&mut regions, &[], &[]).expect("bake with stairs");
         world.regions = regions;
 
         // A cell below the room floor exists (the descended corridor), and a path
@@ -3313,7 +3313,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         world.confirm_stairs();
 
         let mut regions = std::mem::take(&mut world.regions);
-        let nav = nav::bake(&mut regions, &[]).expect("bake with up-stairs");
+        let nav = nav::bake(&mut regions, &[], &[]).expect("bake with up-stairs");
         world.regions = regions;
 
         let stand = nav.all_standable();
@@ -3446,7 +3446,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         let solids = world.structure_solid_boxes();
         assert!(!solids.is_empty(), "platform + stair produced solid boxes");
         let mut regions = std::mem::take(&mut world.regions);
-        let nav = nav::bake(&mut regions, &solids).expect("bake with structures");
+        let nav = nav::bake(&mut regions, &solids, &[]).expect("bake with structures");
         world.regions = regions;
 
         // The platform top (y=6 WT = 1.5 m) yields a standable cell up there.

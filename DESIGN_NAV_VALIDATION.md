@@ -1,6 +1,12 @@
 # Nav validation — a BUILD tool that shouts about unwalkable geometry
 
-> Brainstorm, 2026-08-21, off the back of the 10 fps playtest. Nothing here is built.
+> Brainstorm, 2026-08-21, off the back of the 10 fps playtest. **Phase 1 (everything under
+> "What the tool should report" and "Where it lives") shipped 2026-08-22 — see
+> `HANDOFF_NAV_VALIDATION.md` for what was actually built and for the measured answer to
+> the `MAX_STEP` question below: the 0.5 m gaps are stair treads shallower than one nav
+> cell on 2 of the level's 17 stair runs, not steps the author built.** The rest of this
+> document is the original brainstorm, kept for the reasoning.
+>
 > The measurements are real; the design is a menu of options, not a decision.
 >
 > Prompted by the right observation: *"I can reach all the spawn points when I run through

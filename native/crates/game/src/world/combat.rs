@@ -297,7 +297,12 @@ impl World {
                 q.extend(crate::hud::pickup_quads(what, aspect));
             }
             // Live difficulty-dial readout along the top edge (`=` / `-` to change).
-            q.extend(crate::hud::danger_quads(self.difficulty, DIFFICULTY_MAX, aspect));
+            q.extend(crate::hud::danger_quads(
+                self.difficulty,
+                DIFFICULTY_MAX,
+                self.wave_size,
+                aspect,
+            ));
             // Credit balance (top-left) — money earned from kills, spent in the shop.
             q.extend(crate::hud::credits_quads(self.economy.credits(), aspect));
             // Deathmatch scoreboard (top-right): kills−deaths per side, and the target.
@@ -1251,23 +1256,47 @@ impl World {
             explosion.max_damage
         );
 
-        // Hunters in range (centre-mass distance → falloff damage).
+        // ── Hunters in range ──
+        // Distance is measured to the *body*, not to a centre-mass point, and anything
+        // inside the lethal core dies outright — see `blast_distance_to_body` and
+        // `LETHAL_CORE_FRAC`. Both sides of the fight use the same two rules; a blast that
+        // kills a hunter at two paces has to kill the player at two paces.
         for idx in 0..self.enemies.len() {
-            let alive_pos = match self.enemies.get(idx) {
-                Some(inst) if !inst.enemy.is_dead() => inst.enemy.pos,
+            let (alive_pos, hp) = match self.enemies.get(idx) {
+                Some(inst) if !inst.enemy.is_dead() => (inst.enemy.pos, inst.enemy.health()),
                 _ => continue,
             };
-            let center_mass = alive_pos + Vec3::Y * ENEMY_CENTER_Y;
-            let dmg = crate::combat::falloff_damage(&explosion, center_mass.distance(center));
+            let dist = crate::combat::blast_distance_to_body(
+                center,
+                alive_pos,
+                ENEMY_BODY_HEIGHT,
+                ENEMY_RADIUS,
+            );
+            let mut dmg = crate::combat::falloff_damage(&explosion, dist);
+            if crate::combat::in_lethal_core(&explosion, dist) {
+                dmg = dmg.max(hp);
+            }
             if dmg > 0.0 {
-                self.blast_hit_enemy(idx, dmg, center_mass, center);
+                // The impulse still comes off centre-mass — that is where a body is
+                // thrown from, which is a different question from where it was measured.
+                self.blast_hit_enemy(idx, dmg, alive_pos + Vec3::Y * ENEMY_CENTER_Y, center);
             }
         }
 
         // The player, if inside the blast (splash hurts you too — mind your feet).
         if let Some(ppos) = self.player_pos() {
-            let center_mass = ppos + Vec3::Y * PLAYER_CENTER_Y;
-            let dmg = crate::combat::falloff_damage(&explosion, center_mass.distance(center));
+            let dist = crate::combat::blast_distance_to_body(
+                center,
+                ppos,
+                crate::character::PLAYER_HEIGHT,
+                crate::character::PLAYER_RADIUS,
+            );
+            let mut dmg = crate::combat::falloff_damage(&explosion, dist);
+            if crate::combat::in_lethal_core(&explosion, dist) {
+                // Through armour. A vest is no answer to a grenade under your feet, and
+                // "instant kill" that a full vest survives is not an instant kill.
+                dmg = dmg.max(self.player_health + self.player_armor);
+            }
             if dmg > 0.0 {
                 self.take_player_damage(dmg);
             }
@@ -2410,5 +2439,79 @@ impl World {
             m.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
         }
         Some(m)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::world::tools::spawn_point::tests::big_room;
+
+    /// The hand grenade's blast, read off the real weapon table rather than restated —
+    /// these tests are about whether the *shipping* grenade kills at point blank.
+    fn grenade_blast() -> crate::combat::Explosion {
+        match crate::combat::config::GRENADE.fire_kind {
+            crate::combat::config::FireKind::Projectile(p) => p.explosion,
+            _ => unreachable!("the grenade is a projectile"),
+        }
+    }
+
+    /// A hunt in a plain room with the wave suppressed, so a blast has exactly one
+    /// victim to account for.
+    fn arena() -> World {
+        let mut world = big_room(30.0);
+        world.set_spawn_enemies(false);
+        world.camera.pos = Vec3::new(15.0, 2.0, 15.0);
+        world.toggle_mode();
+        world
+    }
+
+    /// **A grenade at your feet kills you.** The whole of the user-facing complaint, and
+    /// the thing the old measurement got wrong: sampled at a centre-mass point 0.9 m up, a
+    /// grenade touching the player's boots scored 60% of peak under the squared falloff
+    /// and left them alive on 10 HP.
+    #[test]
+    fn an_explosion_at_the_players_feet_is_lethal() {
+        let mut world = arena();
+        let feet = world.player_pos().expect("a live player");
+        assert!(!world.is_player_dead());
+        world.detonate(feet, grenade_blast());
+        assert!(
+            world.is_player_dead(),
+            "a grenade at the feet left {:.0} hp",
+            world.player_health()
+        );
+    }
+
+    /// …and a full vest is no answer to it. An "instant kill" that armour survives is not
+    /// one, so the lethal core goes through armour by design.
+    #[test]
+    fn armour_does_not_survive_the_lethal_core() {
+        let mut world = arena();
+        world.player_armor = 100.0;
+        let feet = world.player_pos().expect("a live player");
+        world.detonate(feet, grenade_blast());
+        assert!(world.is_player_dead(), "armour must not survive point-blank");
+    }
+
+    /// The cliff has a far side: outside the lethal core the falloff still applies and the
+    /// player lives. Without this the "fix" could just be a bigger number everywhere.
+    #[test]
+    fn a_blast_outside_the_core_is_survivable() {
+        let mut world = arena();
+        let feet = world.player_pos().expect("a live player");
+        let ex = grenade_blast();
+        // Beyond the core (1.4 m for a 4 m grenade) but well inside the blast.
+        let at = feet + Vec3::new(ex.radius * crate::combat::LETHAL_CORE_FRAC + 0.6, 0.0, 0.0);
+        world.detonate(at, ex);
+        assert!(
+            !world.is_player_dead(),
+            "a grenade 2 m off should hurt, not kill (hp {:.0})",
+            world.player_health()
+        );
+        assert!(
+            world.player_health() < PLAYER_MAX_HEALTH,
+            "…but it should certainly hurt"
+        );
     }
 }
