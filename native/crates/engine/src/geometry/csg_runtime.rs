@@ -143,6 +143,19 @@ pub struct Brush {
     /// distinguishes the two (doorframe floor → 6, hole-frame floor → 5).
     #[serde(default)]
     pub frame: bool,
+    /// Marks a **vent duct** carve — the crawlspace the player enters crouched.
+    ///
+    /// Two jobs, and neither is texturing. The duct's surfaces take their look from this
+    /// brush's own `scheme` like any other carve (`face_owner` hands a triangle to the
+    /// smallest brush whose face it lies on, which for a duct interior is the duct), so
+    /// no zone or classifier change is needed to make a vent look like a vent.
+    ///
+    /// What the flag is for is everything downstream that has to know a hole in the wall
+    /// is a *duct*: the nav bake, which turns its mouths into portals rather than letting
+    /// hunters snap goals into the bore, and the NAV report, which has to tell a
+    /// deliberately hunter-proof duct apart from an accidental island.
+    #[serde(default)]
+    pub vent: bool,
     /// WT-space floor anchor for this brush's wall texture (JS `BrushDef.floorY`,
     /// recovered per-triangle via `uv_zones` face-map). Defaults to `y`; a room's
     /// walls anchor to its floor, a stair pit's walls to the pit floor, so a
@@ -232,6 +245,7 @@ impl Brush {
             id, op, x, y, z, w, h, d,
             door: false,
             frame: false,
+            vent: false,
             floor_y: y,
             scheme: default_scheme(),
             group: 0,

@@ -1,0 +1,498 @@
+//! Vent tool (`U`, "dUct"): carve a crawlspace duct network the player enters crouched.
+//!
+//! # Why this is its own tool rather than a hole preset
+//!
+//! The hole tool cuts a rectangle *through a wall*, one WT deep, and opens it into a
+//! 1 WT protoroom so it doesn't dead-end in solid. A duct is the opposite shape: a fixed,
+//! small cross-section dragged a long way through solid, turning corners. Sizing is not
+//! the author's business here — it is a *constraint* (see [`VENT_BORE`]) — and length is.
+//!
+//! # The segment model
+//!
+//! The first click picks a face with the crosshair, exactly like an opening, and drives
+//! the duct **into** that face. Every click after that continues the network from where
+//! the last segment ended, in whatever axis direction the author is **looking** — snapped
+//! to the nearest of ±X/±Y/±Z. So a duct is driven rather than assembled: look along the
+//! wall and click to run, look down and click to drop a shaft.
+//!
+//! Reversing straight back down the duct you just cut is refused, because it carves
+//! nothing and would silently walk the cursor backwards through the network.
+//!
+//! Each segment is **one `Op::Subtract` brush** wearing the vent theme. That is all the
+//! texturing there is to it: `uv_zones::face_owner` hands each triangle to the smallest
+//! brush whose face plane it lies on, and inside a duct that is the duct — so its
+//! surfaces take the vent scheme without a zone or classifier change. (The design doc
+//! originally routed this through the unused "tunnel" zone 4; owning the scheme is
+//! cheaper, leaves zone 4 free, and lets a duct floor differ from its walls.)
+
+use super::super::*;
+
+/// Duct cross-section, WT. **1.0 m, and the ceiling on it is the whole safety story.**
+///
+/// `nav::AGENT_HEIGHT_CELLS` is 6, so a cell needs 1.5 m of headroom to be *standable*.
+/// A bore under that contains no standable cell, is in no walkable component, and A\*
+/// therefore cannot route a hunter through it — the duct is hunter-proof by construction
+/// rather than by a rule someone has to remember to apply.
+///
+/// At 6 WT that inverts silently: the "vent" becomes a low corridor hunters walk down.
+/// [`VENT_BORE_MAX`] is the guard, and there is a test on it.
+pub(crate) const VENT_BORE: f32 = 4.0;
+
+/// The largest bore that still keeps hunters out (5 WT = 1.25 m, one cell clear of
+/// standable). Nothing may raise [`VENT_BORE`] past this.
+pub(crate) const VENT_BORE_MAX: f32 = 5.0;
+
+/// Rule 1, enforced by the compiler rather than by a test that has to be run.
+///
+/// A bore that reaches `nav::AGENT_HEIGHT_CELLS` stops being a vent — hunters can stand
+/// in it, so A\* routes them down it — and nothing else in the codebase would notice.
+/// This is the cheapest possible place to catch that: raising [`VENT_BORE`] past the
+/// ceiling fails the build.
+const _: () = assert!(VENT_BORE <= VENT_BORE_MAX);
+const _: () = assert!(VENT_BORE_MAX < engine::sim::nav::AGENT_HEIGHT_CELLS as f32);
+
+/// Segment length limits, WT. The minimum is a bore's worth so a segment always clears
+/// the corner it starts from; the maximum is a runaway-scroll guard, not a design limit.
+const VENT_LEN_MIN: f32 = 2.0;
+const VENT_LEN_MAX: f32 = 60.0;
+/// Length a fresh segment starts at.
+const VENT_LEN_DEFAULT: f32 = 8.0;
+
+/// The duct network being carved: where the open end is, and which way it was heading.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct VentRun {
+    /// Centre of the duct's open end, WT — where the next segment starts.
+    pub cursor: Vec3,
+    /// Unit axis direction the last segment travelled, WT.
+    pub dir: Vec3,
+    pub region_id: u32,
+    pub scheme: usize,
+    /// Shared `group` id for every brush in this network, so the whole duct is
+    /// recognisable as one authored thing (same convention as the draw tool).
+    pub group: u32,
+    pub segments: u32,
+}
+
+/// A previewed segment: the WT box it would carve, plus where it would leave the cursor.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct VentSeg {
+    /// WT AABB `[x, y, z, w, h, d]`.
+    pub aabb: [f32; 6],
+    pub region_id: u32,
+    pub scheme: usize,
+    pub end: Vec3,
+    pub dir: Vec3,
+}
+
+/// Snap a look direction to the nearest axis unit vector.
+fn snap_axis(v: Vec3) -> Vec3 {
+    let (ax, ay, az) = (v.x.abs(), v.y.abs(), v.z.abs());
+    if ax >= ay && ax >= az {
+        Vec3::new(v.x.signum(), 0.0, 0.0)
+    } else if ay >= az {
+        Vec3::new(0.0, v.y.signum(), 0.0)
+    } else {
+        Vec3::new(0.0, 0.0, v.z.signum())
+    }
+}
+
+/// The WT box swept by a bore of `VENT_BORE` running `len` from `start` along `dir`.
+fn segment_aabb(start: Vec3, dir: Vec3, len: f32) -> [f32; 6] {
+    let half = VENT_BORE / 2.0;
+    // Extent is the bore on the two axes across the run, and `len` along it.
+    let ext = Vec3::new(
+        if dir.x != 0.0 { len } else { VENT_BORE },
+        if dir.y != 0.0 { len } else { VENT_BORE },
+        if dir.z != 0.0 { len } else { VENT_BORE },
+    );
+    // Min corner: centred across the run, and starting at `start` along it (running
+    // back from it when the direction is negative).
+    let min = Vec3::new(
+        if dir.x != 0.0 {
+            if dir.x > 0.0 { start.x } else { start.x - len }
+        } else {
+            start.x - half
+        },
+        if dir.y != 0.0 {
+            if dir.y > 0.0 { start.y } else { start.y - len }
+        } else {
+            start.y - half
+        },
+        if dir.z != 0.0 {
+            if dir.z > 0.0 { start.z } else { start.z - len }
+        } else {
+            start.z - half
+        },
+    );
+    [min.x, min.y, min.z, ext.x, ext.y, ext.z]
+}
+
+impl World {
+    /// The theme a duct interior wears. Resolved through the texture registry rather
+    /// than stored, so repointing ducts at the real GoldenEye vent texture is a
+    /// `themes.json` edit with no code change.
+    fn vent_scheme(&self) -> usize {
+        engine::render::textures::vent_scheme()
+    }
+
+    /// Whether the vent tool is armed (the app draws the ghost and routes clicks/scroll).
+    pub fn is_vent_tool(&self) -> bool {
+        self.vent_tool
+    }
+
+    /// Whether a duct network is part-carved, so the next click continues it rather than
+    /// picking a fresh face. Also what makes Esc mean "finish this duct" rather than
+    /// "disarm".
+    pub fn is_vent_running(&self) -> bool {
+        self.vent_run.is_some()
+    }
+
+    /// Vent tool key (`U`): arm/toggle. Pressing it again finishes any run in progress
+    /// and disarms.
+    pub fn vent_tool_key(&mut self) -> Option<RegionMesh> {
+        if self.mode != Mode::Build {
+            return None;
+        }
+        if self.vent_tool {
+            self.cancel_vent();
+        } else {
+            self.place_tool = None;
+            self.clear_platform_state();
+            self.clear_draw_state();
+            self.cancel_opening();
+            self.vent_tool = true;
+            self.vent_len = VENT_LEN_DEFAULT;
+            self.vent_run = None;
+            self.selected = None;
+            log::info!(
+                "vent: armed — click a wall/floor/ceiling to start a duct, then look and \
+                 click to run it; scroll sets segment length, U or Esc finishes"
+            );
+        }
+        None
+    }
+
+    /// Finish the duct network and disarm. Reports a duct with no second mouth, which is
+    /// a pocket the player can crawl into and not get out of.
+    pub fn cancel_vent(&mut self) {
+        if let Some(run) = self.vent_run.take() {
+            let open = self.vent_end_is_open(&run);
+            if !open {
+                log::warn!(
+                    "vent: this duct ({} segment(s)) dead-ends in solid — it has one mouth, \
+                     so the player can crawl in and not out. Run a segment out through a wall.",
+                    run.segments,
+                );
+            } else {
+                log::info!("vent: duct finished ({} segments, both ends open)", run.segments);
+            }
+        }
+        self.vent_tool = false;
+        self.vent_preview = None;
+    }
+
+    /// Whether the duct's open end came out somewhere the player can actually get to —
+    /// the "does this duct have a second mouth" test.
+    ///
+    /// **Not solidity.** The obvious check, "is the end cell air", is wrong in a way that
+    /// only shows up on a short stub: the walls are 1 WT thick, so a stub barely longer
+    /// than that punches clean through into the *void outside the level*, which is not
+    /// solid and would report a mouth. A duct venting into nothing is not a second exit.
+    ///
+    /// So the end has to be **inside some region's shell and not solid there**: inside a
+    /// wall reads shut, inside a room reads open, out the back of the level reads shut.
+    ///
+    /// Sampled just past the cursor along the run, because the cursor sits exactly on the
+    /// last carve's end plane, which is air by construction.
+    fn vent_end_is_open(&self, run: &VentRun) -> bool {
+        let p = run.cursor + run.dir * 0.5;
+        self.regions.iter().any(|r| {
+            let s = r.shell();
+            let inside = p.x >= s.x
+                && p.x <= s.x + s.w
+                && p.y >= s.y
+                && p.y <= s.y + s.h
+                && p.z >= s.z
+                && p.z <= s.z + s.d;
+            inside && !r.solid_at(p.x, p.y, p.z)
+        })
+    }
+
+    /// Scroll the next segment's length, in WT.
+    pub fn adjust_vent_len(&mut self, step: f32) {
+        if !self.vent_tool {
+            return;
+        }
+        self.vent_len = (self.vent_len + step).clamp(VENT_LEN_MIN, VENT_LEN_MAX);
+    }
+
+    /// Current segment length (WT), for the HUD/panel readout.
+    pub fn vent_len(&self) -> f32 {
+        self.vent_len
+    }
+
+    /// Recompute the ghost for the next segment and return it as a preview mesh.
+    pub fn update_vent_preview(&mut self) -> Option<CpuMesh> {
+        if !self.vent_tool {
+            return None;
+        }
+        self.vent_preview = self.resolve_vent_segment();
+        self.vent_preview.map(|s| crate::world::geom::boxes_mesh(&[s.aabb]))
+    }
+
+    /// Where the next segment would go: off the crosshair face for the first one, off
+    /// the run's open end (in the snapped look direction) for every one after.
+    pub(crate) fn resolve_vent_segment(&mut self) -> Option<VentSeg> {
+        if self.mode != Mode::Build {
+            return None;
+        }
+        match self.vent_run {
+            None => {
+                let (sel, hit_wt) = self.pick_face_hit()?;
+                let region = self.regions.iter().find(|r| r.id == sel.region_id)?;
+                let brush = *region.brushes.iter().find(|b| b.id == sel.brush_id)?;
+                let position = brush.face_pos(sel.axis, sel.side);
+                // Into the face, i.e. deeper into the solid the crosshair struck — the
+                // same sign convention `cut_opening` uses to place a frame carve, where
+                // Side::Max extends along +axis from the face plane and Side::Min
+                // extends back along -axis. Getting this backwards drives the duct into
+                // the room instead of into the wall, which still carves (the room is
+                // already air) and so fails silently.
+                let mut dir = Vec3::ZERO;
+                let n = if sel.side == Side::Max { 1.0 } else { -1.0 };
+                match sel.axis {
+                    Axis::X => dir.x = n,
+                    Axis::Y => dir.y = n,
+                    Axis::Z => dir.z = n,
+                }
+                // Centre the bore on the hit point in the two in-plane axes, rounded to
+                // the grid so ducts line up with everything else the editor makes.
+                let (u_axis, v_axis) = sel.axis.orthogonals();
+                let mut start = Vec3::ZERO;
+                let set = |p: &mut Vec3, a: Axis, val: f32| match a {
+                    Axis::X => p.x = val,
+                    Axis::Y => p.y = val,
+                    Axis::Z => p.z = val,
+                };
+                set(&mut start, sel.axis, position);
+                set(&mut start, u_axis, u_axis.component(hit_wt).round());
+                set(&mut start, v_axis, v_axis.component(hit_wt).round());
+                let len = self.vent_len;
+                Some(VentSeg {
+                    aabb: segment_aabb(start, dir, len),
+                    region_id: sel.region_id,
+                    scheme: brush.scheme,
+                    end: start + dir * len,
+                    dir,
+                })
+            }
+            Some(run) => {
+                let dir = snap_axis(self.camera.forward());
+                // Straight back up the duct carves nothing and would rewind the cursor
+                // through geometry that is already air — hold the last heading instead.
+                let dir = if dir.dot(run.dir) < -0.5 { run.dir } else { dir };
+                let len = self.vent_len;
+                Some(VentSeg {
+                    aabb: segment_aabb(run.cursor, dir, len),
+                    region_id: run.region_id,
+                    scheme: run.scheme,
+                    end: run.cursor + dir * len,
+                    dir,
+                })
+            }
+        }
+    }
+
+    /// Commit the previewed segment (left-click): carve it and advance the open end.
+    pub(crate) fn vent_click(&mut self) -> Option<RegionMesh> {
+        if !self.vent_tool {
+            return None;
+        }
+        let seg = self.vent_preview.take().or_else(|| self.resolve_vent_segment())?;
+        if !self.regions.iter().any(|r| r.id == seg.region_id) {
+            return None;
+        }
+        let id = self.next_brush_id;
+        self.next_brush_id += 1;
+        // A network's group is its first brush's id — brush ids are unique and monotonic,
+        // so it needs no second allocator (the draw tool's convention).
+        let group = match self.vent_run {
+            Some(run) => run.group,
+            None => id,
+        };
+        let a = seg.aabb;
+        let mut brush = Brush::new(id, Op::Subtract, a[0], a[1], a[2], a[3], a[4], a[5]);
+        brush.vent = true;
+        brush.group = group;
+        brush.scheme = self.vent_scheme();
+        brush.floor_y = a[1];
+
+        let region = self.regions.iter_mut().find(|r| r.id == seg.region_id)?;
+        region.brushes.push(brush);
+
+        self.vent_run = Some(VentRun {
+            cursor: seg.end,
+            dir: seg.dir,
+            region_id: seg.region_id,
+            scheme: seg.scheme,
+            group,
+            segments: self.vent_run.map(|r| r.segments + 1).unwrap_or(1),
+        });
+        log::info!(
+            "vent: segment {} carved in region {} ({:.0} WT along {:?})",
+            self.vent_run.map(|r| r.segments).unwrap_or(1),
+            seg.region_id,
+            self.vent_len,
+            seg.dir,
+        );
+        self.rebuild_affected_regions(&[id]).into_iter().next()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **Rule 1.** The bore must stay under `nav::AGENT_HEIGHT_CELLS`, or a duct becomes
+    /// a corridor hunters walk down and the whole feature inverts. This is the guard on
+    /// the one constant that decides it.
+    #[test]
+    fn the_bore_is_too_short_for_a_hunter_to_stand_in() {
+        assert!(
+            VENT_BORE <= VENT_BORE_MAX,
+            "bore {VENT_BORE} exceeds the {VENT_BORE_MAX} WT ceiling"
+        );
+        assert!(
+            VENT_BORE_MAX < engine::sim::nav::AGENT_HEIGHT_CELLS as f32,
+            "even the maximum bore ({VENT_BORE_MAX}) must leave a cell short of the \
+             {} needed to stand — otherwise hunters path straight through ducts",
+            engine::sim::nav::AGENT_HEIGHT_CELLS,
+        );
+    }
+
+    /// A look direction becomes the nearest axis, and ties do not produce a zero vector.
+    #[test]
+    fn look_direction_snaps_to_an_axis() {
+        assert_eq!(snap_axis(Vec3::new(0.9, 0.1, 0.2)), Vec3::X);
+        assert_eq!(snap_axis(Vec3::new(-0.9, 0.1, 0.2)), Vec3::NEG_X);
+        assert_eq!(snap_axis(Vec3::new(0.1, -0.9, 0.2)), Vec3::NEG_Y);
+        assert_eq!(snap_axis(Vec3::new(0.1, 0.2, 0.9)), Vec3::Z);
+        assert_eq!(
+            snap_axis(Vec3::new(0.0, 0.0, 0.0)).length(),
+            1.0,
+            "a degenerate look still yields a unit axis, never a zero-volume carve"
+        );
+    }
+
+    /// **The acceptance test for the whole feature.**
+    ///
+    /// Carve a real duct into the starting room's wall, bake the nav grid the hunters
+    /// actually use, and assert there is no standable cell anywhere inside the bore. If
+    /// this ever fails, ducts have become corridors and hunters will path down them.
+    ///
+    /// Asserted against the baked grid rather than against `VENT_BORE < AGENT_HEIGHT`,
+    /// because the arithmetic being right is not the same claim as the voxelizer
+    /// agreeing with it.
+    #[test]
+    fn hunters_cannot_stand_anywhere_inside_a_carved_duct() {
+        let mut world = World::new();
+        world.initial_meshes();
+        // Aim the fly camera at the -X wall from inside the starting room and drive one
+        // duct straight into it, through the real tool entry points.
+        world.camera.pos = Vec3::new(3.0, 0.9, 3.0);
+        world.camera.yaw = std::f32::consts::PI;
+        world.camera.pitch = 0.0;
+        world.vent_tool_key();
+        assert!(world.is_vent_tool(), "the tool armed");
+        assert!(world.update_vent_preview().is_some(), "it previews on the -X wall");
+        let seg = world.resolve_vent_segment().expect("a segment resolves");
+        world.vent_click().expect("the carve rebuilds a region");
+        assert!(world.is_vent_running(), "the run is now open at the far end");
+
+        let carved: Vec<_> =
+            world.regions.iter().flat_map(|r| r.brushes.iter()).filter(|b| b.vent).collect();
+        assert_eq!(carved.len(), 1, "exactly one duct brush was carved");
+        assert_eq!(
+            carved[0].scheme,
+            engine::render::textures::vent_scheme(),
+            "the duct wears the vent theme, which is what makes it look like ducting"
+        );
+
+        // Bake the grid the hunters navigate on and probe the bore.
+        let mut regions = std::mem::take(&mut world.regions);
+        let nav = engine::sim::nav::bake(&mut regions, &[], &[])
+            .expect("the level bakes a nav grid");
+        world.regions = regions;
+        let a = seg.aabb;
+        let mut probes = 0;
+        let mut standable = 0;
+        // Sample the bore on a half-cell lattice, in metres.
+        let step = 0.5;
+        let mut x = a[0] + 0.5;
+        while x < a[0] + a[3] {
+            let mut y = a[1] + 0.5;
+            while y < a[1] + a[4] {
+                let mut z = a[2] + 0.5;
+                while z < a[2] + a[5] {
+                    let m = Vec3::new(x, y, z) * WORLD_SCALE;
+                    probes += 1;
+                    if nav.nearest_standable(m.x, m.y, m.z, 0).is_some() {
+                        standable += 1;
+                    }
+                    z += step;
+                }
+                y += step;
+            }
+            x += step;
+        }
+        assert!(probes > 0, "the probe lattice actually sampled the bore");
+        assert_eq!(
+            standable, 0,
+            "{standable} of {probes} cells inside the duct are standable — hunters can              path into this vent, which inverts the entire feature"
+        );
+    }
+
+    /// A duct that dead-ends in solid is reported, because it is a pocket the player can
+    /// crawl into and not out of. The one carved above stops inside the wall.
+    #[test]
+    fn a_duct_that_stops_in_solid_has_only_one_mouth() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.camera.pos = Vec3::new(3.0, 0.9, 3.0);
+        world.camera.yaw = std::f32::consts::PI;
+        world.camera.pitch = 0.0;
+        world.vent_tool_key();
+        // A short run stops inside the wall/void rather than breaking out.
+        world.adjust_vent_len(-100.0); // clamps to VENT_LEN_MIN
+        world.update_vent_preview();
+        world.vent_click().expect("carved");
+        let run = world.vent_run.expect("a run is open");
+        assert_eq!(run.segments, 1);
+        // The open-end test is what `cancel_vent` reports on; assert it directly so the
+        // check is pinned independently of the log line.
+        let open = world.vent_end_is_open(&run);
+        assert!(
+            !open,
+            "a 2 WT stub that only reaches the void outside the level is not a mouth"
+        );
+    }
+
+    /// A segment is bore-sized across the run and `len` along it, whichever way it goes.
+    #[test]
+    fn a_segment_is_bore_sized_across_and_len_along() {
+        let start = Vec3::new(10.0, 4.0, 10.0);
+        let a = segment_aabb(start, Vec3::X, 8.0);
+        assert_eq!([a[3], a[4], a[5]], [8.0, VENT_BORE, VENT_BORE]);
+        assert_eq!(a[0], 10.0, "a +X run starts at the cursor");
+
+        // A negative run puts the box behind the cursor, not in front of it.
+        let b = segment_aabb(start, Vec3::NEG_X, 8.0);
+        assert_eq!([b[3], b[4], b[5]], [8.0, VENT_BORE, VENT_BORE]);
+        assert_eq!(b[0], 2.0, "a -X run ends at the cursor");
+
+        // A vertical shaft is bore-sized in X and Z.
+        let c = segment_aabb(start, Vec3::NEG_Y, 6.0);
+        assert_eq!([c[3], c[4], c[5]], [VENT_BORE, 6.0, VENT_BORE]);
+        assert_eq!(c[1], -2.0, "a downward shaft hangs below the cursor");
+    }
+}

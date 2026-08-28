@@ -96,6 +96,21 @@ const DEFAULT_SCHEME_NAME: &str = "facility_white_tile";
 /// independent of whatever scheme the surrounding room has. Required by name.
 const SIMPLE_SCHEME_NAME: &str = "simple_blue";
 
+/// The theme every vent duct's interior wears (`tools::vent`), so a duct reads as bare
+/// ducting whatever room it passes through.
+///
+/// **The textures on it are placeholders.** The authentic grey GoldenEye vent texture
+/// cannot be found by name: `assets/textures/` is ~1,000 BMPs called `tempImgEd0005.bmp`
+/// and the source level OBJ/MTLs are not in the repo, so nothing maps "duct" to a file.
+/// It has to be picked by eye in the TEXTURES panel and this theme repointed at it —
+/// which is a `themes.json` edit and no code change, the whole point of the runtime
+/// registry.
+///
+/// Unlike the two above, this one is **not required**: a themes.json without it falls
+/// back to the default theme rather than refusing to start, because a missing duct look
+/// is a cosmetic problem and an editor that will not launch is not.
+const VENT_SCHEME_NAME: &str = "vent_metal";
+
 /// Name of the live scratch slot. Underscore-prefixed so it sorts and reads as
 /// internal, and so it cannot collide with a generated `<level>_NN` theme.
 const SCRATCH_SCHEME_NAME: &str = "__scratch";
@@ -188,6 +203,7 @@ struct Registry {
     alpha_key_black: Vec<&'static str>,
     default_index: usize,
     simple_index: usize,
+    vent_index: usize,
     /// Index of the first custom slot; `CUSTOM_SLOTS` of them run consecutively.
     custom_base: usize,
     /// Index of the live scratch slot (immediately after the custom slots).
@@ -301,6 +317,7 @@ fn load_registry() -> Result<Registry, String> {
     };
     let default_index = find(DEFAULT_SCHEME_NAME)?;
     let simple_index = find(SIMPLE_SCHEME_NAME)?;
+    let vent_index = find(VENT_SCHEME_NAME).unwrap_or(default_index);
     let default_zones = schemes[default_index].zones;
 
     // ── The custom slots + the scratch slot, appended after the library.
@@ -363,6 +380,7 @@ fn load_registry() -> Result<Registry, String> {
         alpha_key_black: manifest.alpha_key_black.into_iter().map(leak).collect(),
         default_index,
         simple_index,
+        vent_index,
         custom_base,
         scratch_index,
     })
@@ -412,6 +430,11 @@ pub fn default_scheme() -> usize {
 /// Index of the platform/stair "simple" theme (see [`SIMPLE_SCHEME_NAME`]).
 pub fn simple_scheme() -> usize {
     registry().simple_index
+}
+
+/// Index of the vent-duct theme (see [`VENT_SCHEME_NAME`]).
+pub fn vent_scheme() -> usize {
+    registry().vent_index
 }
 
 /// The live scratch slot the theme editor mutates while you edit.

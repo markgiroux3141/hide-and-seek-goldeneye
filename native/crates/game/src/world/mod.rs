@@ -2370,6 +2370,14 @@ pub struct World {
     /// The placement the ghost currently previews (recomputed each frame while
     /// arming); what a confirm cuts.
     opening_preview: Option<OpeningPlacement>,
+    /// Vent tool state (BUILD, `U`): armed flag, the length the next segment will run,
+    /// the duct network part-carved so far, and the ghost for the next segment. Unlike
+    /// the opening tools the vent tool is *stateful across clicks* — a duct is driven
+    /// segment by segment, so the run outlives each confirm. See `tools::vent`.
+    vent_tool: bool,
+    vent_len: f32,
+    vent_run: Option<tools::vent::VentRun>,
+    vent_preview: Option<tools::vent::VentSeg>,
     /// The current hole size in WT (scroll-adjustable while the hole tool is
     /// armed): width along the face U axis, height along V. Doors are fixed size.
     hole_w: f32,
@@ -2982,6 +2990,10 @@ impl World {
             doors: Vec::new(),
             opening_tool: None,
             opening_preview: None,
+            vent_tool: false,
+            vent_len: 8.0,
+            vent_run: None,
+            vent_preview: None,
             hole_w: HOLE_WIDTH,
             hole_h: HOLE_HEIGHT,
             place_tool: None,

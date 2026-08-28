@@ -1032,6 +1032,9 @@ impl App {
                 Tool::Hole => {
                     world.hole_tool_key();
                 }
+                Tool::Vent => {
+                    world.vent_tool_key();
+                }
                 Tool::Pillar => world.pillar_tool_key(),
                 Tool::Brace => world.brace_tool_key(),
                 Tool::Platform => world.platform_tool_key(),
@@ -1046,6 +1049,7 @@ impl App {
                 .as_ref()
                 .map(|w| !w.is_opening_arming())
                 .unwrap_or(true),
+            Tool::Vent => self.world.as_ref().map(|w| !w.is_vent_tool()).unwrap_or(true),
             Tool::Pillar | Tool::Brace => {
                 self.world.as_ref().map(|w| !w.is_placing()).unwrap_or(true)
             }
@@ -3746,6 +3750,8 @@ struct ThemeRow {
 fn armed_tool(w: &crate::world::World) -> Option<Tool> {
     if w.is_draw_tool() {
         Some(Tool::Draw)
+    } else if w.is_vent_tool() {
+        Some(Tool::Vent)
     } else if w.is_hole_arming() {
         Some(Tool::Hole)
     } else if w.is_opening_arming() {
@@ -4262,6 +4268,16 @@ impl ApplicationHandler for App {
                     self.refresh_highlight();
                     return;
                 }
+                // Grabbed + BUILD, vent tool armed: a click carves the previewed duct
+                // segment and re-anchors the run to its far end.
+                if self.world.as_ref().map(|w| w.is_vent_tool()).unwrap_or(false) {
+                    let rm = self.world.as_mut().and_then(|w| w.with_undo(|w| w.vent_click()));
+                    if let Some(rm) = rm {
+                        self.upload(&rm);
+                    }
+                    self.refresh_highlight();
+                    return;
+                }
                 // Grabbed + BUILD: confirm an armed opening (door/hole) or
                 // placement (pillar/brace), else select the crosshair face.
                 let opening = self.world.as_ref().map(|w| w.is_opening_arming()).unwrap_or(false);
@@ -4379,7 +4395,9 @@ impl ApplicationHandler for App {
                     // placement (pillar/brace) sizing, else opening sizing (hole =
                     // free size, door = single/double width), else the sub-face
                     // selection.
-                    if world.is_draw_sizing() {
+                    if world.is_vent_tool() {
+                        world.adjust_vent_len(step);
+                    } else if world.is_draw_sizing() {
                         world.adjust_draw_depth(step);
                     } else if world.is_draw_choosing_face() {
                         // Before the first corner, scroll disambiguates which surface the
@@ -4588,6 +4606,7 @@ impl ApplicationHandler for App {
                     let placing = self.world.as_ref().map(|w| w.is_placing()).unwrap_or(false);
                     let platform = self.world.as_ref().map(|w| w.is_platform_tool()).unwrap_or(false);
                     let drawing = self.world.as_ref().map(|w| w.is_draw_tool()).unwrap_or(false);
+                    let venting = self.world.as_ref().map(|w| w.is_vent_tool()).unwrap_or(false);
                     let pending_stair =
                         self.world.as_ref().map(|w| w.has_pending_stair()).unwrap_or(false);
                     // A pending stair suppresses the face highlight; its x-ray
@@ -4595,6 +4614,8 @@ impl ApplicationHandler for App {
                     let mesh = self.world.as_mut().and_then(|w| {
                         if pending_stair {
                             None
+                        } else if venting {
+                            w.update_vent_preview()
                         } else if drawing {
                             w.update_draw_preview()
                         } else if opening {
@@ -4880,6 +4901,12 @@ impl App {
                     w.cancel_stairs();
                     log::info!("stair cancelled");
                     handled = true;
+                } else if w.is_vent_tool() {
+                    // Esc *finishes* a duct rather than discarding it — the segments are
+                    // already carved and individually undoable, so there is nothing
+                    // pending to throw away, and this is where the one-mouth check runs.
+                    w.cancel_vent();
+                    handled = true;
                 } else if w.draw_escape() {
                     // Back out one rung of the draw ladder (depth step → outline →
                     // one corner at a time). Idle returns false and falls through to
@@ -5136,6 +5163,12 @@ impl App {
         // B / H toggle the opening tools (door / hole): arm a ghost preview that
         // tracks the crosshair (drawn each frame in RedrawRequested), or turn it
         // back off. Left-click is what cuts (handled in MouseInput).
+        // U ("dUct") toggles the vent tool. Stateful across clicks unlike the opening
+        // tools — see `tools::vent` — so pressing U again *finishes* the duct.
+        if code == KeyCode::KeyU {
+            self.apply(EditorAction::ArmTool(Tool::Vent));
+            return;
+        }
         if code == KeyCode::KeyB || code == KeyCode::KeyH {
             self.apply(EditorAction::ArmTool(if code == KeyCode::KeyB {
                 Tool::Door

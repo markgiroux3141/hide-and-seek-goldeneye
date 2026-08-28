@@ -20,3 +20,5 @@ mod prop_gizmo;
 pub(crate) mod spawn_point;
 mod stairs;
 mod turret;
+/// `pub(crate)` so `World` can name the duct-network state types it stores.
+pub(crate) mod vent;

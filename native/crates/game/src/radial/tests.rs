@@ -351,8 +351,17 @@ fn the_armed_tool_is_accented_on_both_rings() {
     c.armed = Some(Tool::Platform);
     assert!(menu(MenuId::Root, &c)[0].on, "root Tools shows something is armed");
     let tools = menu(MenuId::Tools, &c);
-    assert!(tools[5].on);
-    assert!(!tools[0].on);
+    // Found by target, not by index: the ring's order is a presentation choice and
+    // adding a tool to it should not break this assertion (it did when Vent landed).
+    let slot = |t: Tool| {
+        tools
+            .iter()
+            .find(|s| s.target == Target::Act(EditorAction::ArmTool(t)))
+            .unwrap_or_else(|| panic!("{t:?} is on the Tools ring"))
+    };
+    assert!(slot(Tool::Platform).on, "the armed tool is accented");
+    assert!(!slot(Tool::Draw).on, "and the others are not");
+    assert!(tools.iter().filter(|s| s.on).count() == 1, "exactly one accent");
 }
 
 #[test]
