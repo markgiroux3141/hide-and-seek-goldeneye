@@ -99,24 +99,15 @@ const SIMPLE_SCHEME_NAME: &str = "simple_blue";
 /// The theme every vent duct's interior wears (`tools::vent`), so a duct reads as bare
 /// ducting whatever room it passes through.
 ///
-/// It wears `tempImgEd02C1` — the grey riveted metal plate the **Facility** themes
-/// already use (`facility_03` floor + lower wall, `facility_05` ceiling), so a duct is
-/// authentic GoldenEye rather than an approximation.
+/// It wears `tempImgEd029F` — the authentic GoldenEye duct panel.
 ///
-/// Finding it was not a search. The library is ~1,000 BMPs named `tempImgEd0005.bmp`
-/// and the source level OBJ/MTLs are gone, so nothing maps "duct" to a file: it was
-/// found by filtering the library to near-greyscale mid-brightness images, ranking those
-/// by horizontal banding, and *looking* at the survivors as a contact sheet.
-///
-/// **The repeat is deliberately not the level's.** `facility_03` uses ~0.14, which spans
-/// one tile over ~7 m — right for a wall, and inside a 1 m bore it would show a single
-/// stretched fragment. 0.7 puts a tile every ~1.4 m so the rivets read at crawling
-/// distance. Retune it live in the TEXTURES panel; it is a `themes.json` value with no
-/// code behind it.
-///
-/// Unlike the two above, this one is **not required**: a themes.json without it falls
-/// back to the default theme rather than refusing to start, because a missing duct look
-/// is a cosmetic problem and an editor that will not launch is not.
+/// **The repeat is 0.25, and that is what "one texture per side" costs.** UVs reach the
+/// shader in **WT, not metres** (`uv_zones::vertex_uv` divides by `WORLD_SCALE`, and
+/// `shader_textured.wgsl` multiplies by this scale), so `repeat` counts tiles per WT.
+/// A vent bore is `VENT_BORE` = 4 WT, so one whole texture stretched across a duct face
+/// is 1/4 — a repeat of 1.0 would tile it four times per side. `vent_repeat_fits_the_bore`
+/// pins that relationship, so changing the bore fails a test rather than quietly
+/// re-tiling every duct in every level.
 const VENT_SCHEME_NAME: &str = "vent_metal";
 
 /// Name of the live scratch slot. Underscore-prefixed so it sorts and reads as

@@ -352,24 +352,24 @@
    "group": "Vent",
    "zones": {
     "0": {
-     "texture": "tempImgEd02C1",
-     "repeat": 0.7
+     "texture": "tempImgEd029F",
+     "repeat": 0.25
     },
     "1": {
-     "texture": "tempImgEd02C1",
-     "repeat": 0.7
+     "texture": "tempImgEd029F",
+     "repeat": 0.25
     },
     "2": {
-     "texture": "tempImgEd02C1",
-     "repeat": 0.7
+     "texture": "tempImgEd029F",
+     "repeat": 0.25
     },
     "3": {
-     "texture": "tempImgEd02C1",
-     "repeat": 0.7
+     "texture": "tempImgEd029F",
+     "repeat": 0.25
     },
     "5": {
-     "texture": "tempImgEd02C1",
-     "repeat": 0.7
+     "texture": "tempImgEd029F",
+     "repeat": 0.25
     }
    }
   },

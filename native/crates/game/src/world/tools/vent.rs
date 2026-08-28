@@ -378,6 +378,33 @@ mod tests {
         );
     }
 
+    /// **One whole texture per duct face**, which is a relationship between two numbers
+    /// that live in different files.
+    ///
+    /// UVs reach the shader in WT (`uv_zones::vertex_uv` divides by `WORLD_SCALE`), so a
+    /// theme's `repeat` counts tiles per WT — not per metre. The bore is [`VENT_BORE`]
+    /// WT across, so the repeat that stretches exactly one texture over a face is
+    /// `1 / VENT_BORE`. A repeat of 1.0, which is the intuitive value, tiles it four
+    /// times.
+    ///
+    /// Pinned here because the two halves are a `themes.json` value and a Rust constant:
+    /// widening the bore without touching the theme would silently re-tile every duct in
+    /// every saved level, and nothing else would notice.
+    #[test]
+    fn vent_repeat_fits_the_bore() {
+        let scheme = &engine::render::textures::schemes()[engine::render::textures::vent_scheme()];
+        for zone in [0usize, 1, 2, 3] {
+            let z = scheme.zones[zone]
+                .unwrap_or_else(|| panic!("the vent theme defines zone {zone}"));
+            assert!(
+                (z.repeat * VENT_BORE - 1.0).abs() < 1e-4,
+                "zone {zone}: repeat {} × bore {VENT_BORE} = {} tiles per face; want exactly 1",
+                z.repeat,
+                z.repeat * VENT_BORE,
+            );
+        }
+    }
+
     /// A look direction becomes the nearest axis, and ties do not produce a zero vector.
     #[test]
     fn look_direction_snaps_to_an_axis() {

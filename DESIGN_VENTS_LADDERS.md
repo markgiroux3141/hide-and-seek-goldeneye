@@ -406,9 +406,14 @@ Each stage is independently shippable and independently playtestable.
 - **Vent bore** — 4×4 WT (1.0 m). Rule 1 caps it at 5 cells. Confirm in play.
 - **Segment length** — one push is a **cube** (one bore), settled in playtest 1: the
   original 8 WT default added too much duct per click to steer.
-- ~~The grey texture~~ **RESOLVED**: `tempImgEd02C1`, the riveted grey metal plate the
-  Facility themes already use (`facility_03`, `facility_05`). Found by filtering the
-  library to near-greyscale mid-brightness images, ranking by horizontal banding, and
-  looking at the survivors — §1.9's "not a search" point stands, it just needed eyes on a
-  contact sheet rather than a grep. Also spotted: `tempImgEd0215` is a louvred grille
-  panel, the obvious art for a vent *cover* if one is ever wanted at the mouth.
+- ~~The grey texture~~ **RESOLVED**: `tempImgEd029F`, supplied by the author — a grey
+  riveted panel with an X cross-brace and a border. My contact-sheet search had short-
+  listed it but picked `02C1` instead; §1.9's "not a search, no statistic separates the
+  candidates" point stands, and this is the second time it has held.
+  At **repeat 0.25**, not the intuitive 1.0: UVs reach the shader in **WT**, so `repeat`
+  counts tiles per WT and the 4 WT bore needs 1/4 for one whole texture per face. Because
+  a push is exactly one bore, that puts **one panel per duct segment**, border on the
+  seam — which is what the art wants, since tiling a bordered panel repeats its frame
+  mid-face. `vent_repeat_fits_the_bore` pins the two numbers together.
+  Also spotted: `tempImgEd0215` is a louvred grille panel, the obvious art for a vent
+  *cover* if one is ever wanted at the mouth.
