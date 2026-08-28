@@ -61,6 +61,17 @@ const CLIMB_SPEED: f32 = 2.2;
 /// rather than re-attaching immediately.
 const LADDER_HOP: f32 = 3.0;
 
+/// How close to the top of the climb volume counts as topping out, metres.
+const LADDER_TOP_MARGIN: f32 = 0.2;
+/// Upward velocity given when topping out, m/s — a step over the lip, not a jump.
+const LADDER_TOP_STEP: f32 = 2.0;
+/// How long after stepping off before a ladder may grab you again, seconds. Without it,
+/// gravity pulls you straight back through the volume you just left.
+const LADDER_REATTACH_DELAY: f32 = 0.35;
+/// How long the top-out push off the wall lasts, seconds. Short — it is a step onto the
+/// ledge, and any longer walks the player away from where they meant to arrive.
+const LADDER_EXIT_TIME: f32 = 0.22;
+
 /// The player's standing height and horizontal half-width (m) — the capsule as the rest
 /// of the game needs to measure it.
 ///
@@ -116,12 +127,22 @@ pub struct CharacterController {
     /// [`Self::crouch_t`] because releasing the key does not by itself stand you up:
     /// under a duct there is nowhere to stand, and the blend holds where it is.
     crouch_held: bool,
-    /// Climb volumes (world-space AABBs, metres) for the level's ladders, baked once at
+    /// The level's ladders as `(min, max, outward normal)` — world metres, baked once at
     /// BUILD→HUNT. Held here rather than queried from the ECS each step because the
     /// controller runs on the fixed step and has no world borrow.
-    ladders: Vec<(Vec3, Vec3)>,
+    ///
+    /// The normal is carried because topping out needs to step you *off the wall* onto
+    /// the ledge; an AABB alone cannot say which way that is.
+    ladders: Vec<(Vec3, Vec3, Vec3)>,
     /// Whether the player is attached to a ladder right now.
     on_ladder: bool,
+    /// Counts down after stepping off, so gravity dropping you back through the volume
+    /// you just left cannot immediately re-attach you.
+    ladder_cooldown: f32,
+    /// Counts down while the top-out nudge pushes you clear of the lip, carrying the
+    /// direction to push.
+    ladder_exit: f32,
+    ladder_exit_dir: Vec3,
 }
 
 impl CharacterController {
@@ -139,12 +160,15 @@ impl CharacterController {
             crouch_held: false,
             ladders: Vec::new(),
             on_ladder: false,
+            ladder_cooldown: 0.0,
+            ladder_exit: 0.0,
+            ladder_exit_dir: Vec3::ZERO,
         }
     }
 
-    /// Install the level's ladder climb volumes (world AABBs, metres). Called at
-    /// BUILD→HUNT and on respawn; an empty list disables climbing entirely.
-    pub fn set_ladders(&mut self, volumes: Vec<(Vec3, Vec3)>) {
+    /// Install the level's ladder climb volumes as `(min, max, outward normal)` in world
+    /// metres. Called at BUILD→HUNT and on respawn; an empty list disables climbing.
+    pub fn set_ladders(&mut self, volumes: Vec<(Vec3, Vec3, Vec3)>) {
         self.ladders = volumes;
     }
 
@@ -153,13 +177,16 @@ impl CharacterController {
         self.on_ladder
     }
 
-    /// Whether a point is inside any ladder's climb volume.
-    fn ladder_at(&self, p: Vec3) -> bool {
-        self.ladders.iter().any(|(min, max)| {
-            p.x >= min.x && p.x <= max.x
-                && p.y >= min.y && p.y <= max.y
-                && p.z >= min.z && p.z <= max.z
-        })
+    /// The ladder whose climb volume contains a point, if any.
+    fn ladder_at(&self, p: Vec3) -> Option<(Vec3, Vec3, Vec3)> {
+        self.ladders
+            .iter()
+            .find(|(min, max, _)| {
+                p.x >= min.x && p.x <= max.x
+                    && p.y >= min.y && p.y <= max.y
+                    && p.z >= min.z && p.z <= max.z
+            })
+            .copied()
     }
 
     /// Current capsule height (m), blended between standing and crouched.
@@ -265,28 +292,55 @@ impl CharacterController {
         let height = self.height();
 
         // ── Ladders ──
-        // Attachment is positional: stand in the climb volume and you are on it. There
-        // is no grab key, because a ladder you have to ask to use is a ladder you fall
-        // off while being shot at.
-        let center_now = self.pos + Vec3::new(0.0, center_offset_for(height) , 0.0);
-        let in_volume = self.ladder_at(center_now) || self.ladder_at(self.pos);
+        //
+        // Attaching is positional — no grab key, because a ladder you have to *ask* to
+        // use is a ladder you fumble while being shot at — but it is **not** merely
+        // "inside the volume". That was the first version and it left you stuck twice
+        // over: standing at the foot of a ladder you had no wish to climb, gravity was
+        // off and forward/back were spent on the climb axis, so you could only shuffle
+        // sideways out; and at the top there was no way off at all, because the volume
+        // reaches the ledge and you never leave it.
+        //
+        // So attaching takes *intent* (a climb input) and detaching has three exits:
+        // topping out onto the ledge, reaching the floor, or jumping off.
+        self.ladder_cooldown = (self.ladder_cooldown - dt).max(0.0);
+        self.ladder_exit = (self.ladder_exit - dt).max(0.0);
         let jump = input.pointer_locked && input.key_down(KeyCode::Space);
-        if in_volume && !self.on_ladder && !jump {
-            self.on_ladder = true;
-            self.vel_y = 0.0;
-        } else if !in_volume {
-            self.on_ladder = false;
+        let (ax, ay) = input.analog_move();
+        let keyed = input.key_down(KeyCode::KeyW) as i32 - input.key_down(KeyCode::KeyS) as i32;
+        let climb = if keyed != 0 { keyed as f32 } else if input.pointer_locked { ay } else { 0.0 };
+
+        let center_now = self.pos + Vec3::new(0.0, center_offset_for(height), 0.0);
+        let vol = self.ladder_at(center_now).or_else(|| self.ladder_at(self.pos));
+        let mut engaged = false;
+        if let Some((_, lmax, out)) = vol {
+            if self.ladder_cooldown <= 0.0 && !jump {
+                // Already climbing stays climbing; otherwise it takes a deliberate
+                // up/down input to grab on.
+                engaged = self.on_ladder || climb != 0.0;
+                if engaged && climb > 0.0 && self.pos.y >= lmax.y - LADDER_TOP_MARGIN {
+                    // Topped out: hand the player to the ledge with a step up and a
+                    // push off the wall, and refuse to re-attach for a beat so falling
+                    // back through the volume cannot grab them again mid-step.
+                    engaged = false;
+                    self.vel_y = LADDER_TOP_STEP;
+                    self.ladder_cooldown = LADDER_REATTACH_DELAY;
+                    self.ladder_exit = LADDER_EXIT_TIME;
+                    self.ladder_exit_dir = out;
+                } else if engaged && self.grounded && climb <= 0.0 {
+                    // At the foot with no wish to go up: this is standing next to a
+                    // ladder, not hanging on one.
+                    engaged = false;
+                }
+            }
         }
+        self.on_ladder = engaged;
 
         if self.on_ladder {
             // W climbs, S descends, A/D still strafe so you can step off sideways at a
             // landing. Forward/back are spent on the vertical here rather than projected
             // through the look direction: pitching to climb means you cannot look around
             // while you do it, and a ladder is exactly where you want to be watching.
-            let (ax, ay) = input.analog_move();
-            let keyed =
-                input.key_down(KeyCode::KeyW) as i32 - input.key_down(KeyCode::KeyS) as i32;
-            let climb = if keyed != 0 { keyed as f32 } else { ay };
             self.vel_y = climb * CLIMB_SPEED;
             // Rebuild the horizontal wish from the strafe axes ALONE, rather than
             // subtracting the forward term back out of the one computed above. Same
@@ -302,6 +356,7 @@ impl CharacterController {
                 self.on_ladder = false;
                 self.vel_y = LADDER_HOP;
                 self.grounded = false;
+                self.ladder_cooldown = LADDER_REATTACH_DELAY;
             }
         } else {
             // Gravity + jump (held Space re-jumps on landing, matching player.js).
@@ -312,6 +367,14 @@ impl CharacterController {
             if self.grounded && jump && self.crouch_t <= 0.0 {
                 self.vel_y = JUMP_VELOCITY;
                 self.grounded = false;
+            }
+            // Carry the top-out step forward, away from the wall, so the player ends up
+            // standing on the ledge rather than dropping straight back down the shaft.
+            if self.ladder_exit > 0.0 {
+                wish += self.ladder_exit_dir;
+                if wish.length_squared() > 1.0 {
+                    wish = wish.normalize();
+                }
             }
         }
 

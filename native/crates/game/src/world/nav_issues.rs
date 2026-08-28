@@ -435,7 +435,7 @@ impl World {
         // base and just above the top, which is where a climber actually stands.
         let mut ladders = 0usize;
         let mut severing_ladders = 0usize;
-        for (min, max) in self.ladder_volumes() {
+        for (min, max, _) in self.ladder_volumes() {
             ladders += 1;
             let mid = Vec3::new((min.x + max.x) * 0.5, 0.0, (min.z + max.z) * 0.5);
             let foot = nav.component_at(Vec3::new(mid.x, min.y + 0.1, mid.z));

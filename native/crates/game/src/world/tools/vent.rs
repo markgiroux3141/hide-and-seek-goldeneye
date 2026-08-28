@@ -311,6 +311,41 @@ impl World {
         }
     }
 
+    /// Break the duct out into a **protoroom** at its open end, and finish the run.
+    ///
+    /// This is the vent's answer to "how do I get out of here into a new room", and it is
+    /// deliberately the same move the door tool already makes: `cut_opening` carves a
+    /// 1 WT protoroom just beyond every doorway so the opening leads into navigable space
+    /// rather than dead-ending in solid, and the author then pushes that face out to grow
+    /// the room. A duct wants exactly that, minus the frame — a duct has no doorframe.
+    ///
+    /// Two things it does NOT inherit from the duct: the `vent` flag, because the room
+    /// beyond is a room and hunters must be able to walk in it; and the vent theme, so it
+    /// does not read as more ducting. It takes **the level's first theme** (`scheme_for_key('1')`,
+    /// which prefers this level's own binding and falls back to the manifest's), which is
+    /// the same theme a fresh room here would get.
+    pub fn vent_exit_room(&mut self) -> Option<RegionMesh> {
+        let run = self.vent_run?;
+        // A bore-sized box one WT deep, immediately past the duct's open end.
+        let a = segment_aabb(run.cursor, run.dir, WALL_THICKNESS);
+        let id = self.next_brush_id;
+        self.next_brush_id += 1;
+        let mut brush = Brush::new(id, Op::Subtract, a[0], a[1], a[2], a[3], a[4], a[5]);
+        brush.scheme = self.scheme_for_key('1').unwrap_or_else(default_scheme);
+        brush.floor_y = a[1];
+        let region_id = run.region_id;
+        let region = self.regions.iter_mut().find(|r| r.id == region_id)?;
+        region.brushes.push(brush);
+        log::info!(
+            "vent: opened an exit protoroom at the duct end in region {region_id} - \
+             select its far face and push to grow the room"
+        );
+        // The duct now ends in open space, so finishing it reports two mouths.
+        self.vent_run = Some(VentRun { cursor: run.cursor + run.dir * WALL_THICKNESS, ..run });
+        self.cancel_vent();
+        self.rebuild_affected_regions(&[id]).into_iter().next()
+    }
+
     /// Commit the previewed segment (left-click): carve it and advance the open end.
     pub(crate) fn vent_click(&mut self) -> Option<RegionMesh> {
         if !self.vent_tool {
@@ -463,6 +498,47 @@ mod tests {
             }
             assert!(checked > 0, "offset {off}: the duct produced no textured geometry");
         }
+    }
+
+    /// **Enter breaks a duct out into a room you can then push.**
+    ///
+    /// The protoroom is a room, not more duct, and the test asserts the three ways that
+    /// has to be true: it is not flagged `vent` (so hunters can walk in what grows from
+    /// it), it does not wear the vent theme, and it takes the level's first theme -
+    /// which is what a fresh room here would get.
+    #[test]
+    fn a_duct_can_open_into_a_protoroom() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.camera.pos = Vec3::new(3.0, 0.9, 3.0);
+        world.camera.yaw = std::f32::consts::PI;
+        world.camera.pitch = 0.0;
+        world.vent_tool_key();
+        world.update_vent_preview();
+        world.vent_click().expect("duct carved");
+        assert!(world.is_vent_running(), "a run is open");
+
+        let before = world.regions.iter().flat_map(|r| r.brushes.iter()).count();
+        world.vent_exit_room().expect("the protoroom rebuilds a region");
+        let after: Vec<_> =
+            world.regions.iter().flat_map(|r| r.brushes.iter()).copied().collect();
+        assert_eq!(after.len(), before + 1, "exactly one protoroom brush was added");
+
+        let proto = after.last().copied().expect("the new brush");
+        assert!(!proto.vent, "the room beyond a duct is a ROOM - hunters must walk in it");
+        assert_ne!(
+            proto.scheme,
+            engine::render::textures::vent_scheme(),
+            "and it must not read as more ducting"
+        );
+        assert_eq!(
+            Some(proto.scheme),
+            world.scheme_for_key('1'),
+            "it takes the level's first theme, like any fresh room here"
+        );
+        // Opening out finishes the duct.
+        assert!(!world.is_vent_tool(), "the tool disarms once the duct is out");
+        assert!(!world.is_vent_running(), "and the run is closed");
     }
 
     /// A look direction becomes the nearest axis, and ties do not produce a zero vector.

@@ -5297,6 +5297,17 @@ impl App {
             return;
         }
         if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
+            // While a duct is being run, Enter breaks it out into a protoroom at the
+            // open end and finishes the duct - the vent counterpart of the protoroom
+            // `cut_opening` seeds beyond every doorway. Otherwise Enter confirms stairs.
+            if self.world.as_ref().map(|w| w.is_vent_running()).unwrap_or(false) {
+                let rm = self.world.as_mut().and_then(|w| w.with_undo(|w| w.vent_exit_room()));
+                if let Some(rm) = rm {
+                    self.upload(&rm);
+                }
+                self.refresh_highlight();
+                return;
+            }
             self.apply(EditorAction::Selection(SelectionOp::ConfirmStairs));
             return;
         }

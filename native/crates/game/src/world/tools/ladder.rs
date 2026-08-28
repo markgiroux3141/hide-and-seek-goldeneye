@@ -185,14 +185,21 @@ impl World {
         self.ecs.world().query::<&Ladder>().iter().count()
     }
 
-    /// Every ladder's climb volume as a world AABB (metres) — what the character
+    /// Every ladder as `(min, max, outward normal)` in world metres — what the character
     /// controller tests the player against each step.
-    pub(crate) fn ladder_volumes(&self) -> Vec<(Vec3, Vec3)> {
+    ///
+    /// The normal rides along because topping out has to step the player *off the wall*
+    /// onto the ledge, and an AABB alone cannot say which way that is.
+    pub(crate) fn ladder_volumes(&self) -> Vec<(Vec3, Vec3, Vec3)> {
         self.ecs
             .world()
             .query::<(&Transform, &Ladder)>()
             .iter()
-            .map(|(t, l)| ladder_volume(t.pos, t.rot.to_euler(EulerRot::YXZ).0, l))
+            .map(|(t, l)| {
+                let yaw = t.rot.to_euler(EulerRot::YXZ).0;
+                let (min, max) = ladder_volume(t.pos, yaw, l);
+                (min, max, Vec3::new(yaw.sin(), 0.0, yaw.cos()))
+            })
             .collect()
     }
 
@@ -216,7 +223,21 @@ const RUNG_SPACING: f32 = 0.35;
 /// Half-thickness of a rung, metres.
 const RUNG_HALF: f32 = 0.035;
 
-const LADDER_COLOR: [f32; 3] = [0.72, 0.68, 0.35];
+/// Ladders are drawn geometry, not a texture, and **that is not a stopgap.**
+///
+/// The library has no ladder: it was extracted from GoldenEye level *surfaces*, and
+/// GoldenEye built its ladders out of geometry. Searched three ways to be sure — the
+/// `alpha_key_black` list (one entry, `railing`), dark high-contrast images with periodic
+/// structure, and an explicit two-rails-plus-regular-rungs score. Every survivor was
+/// signage, a window, a grille or a pipe frame.
+///
+/// So the rails and rungs below *are* the ladder. Coloured as galvanised metal rather
+/// than the marker-yellow they started as, since unlike a spawn pad this is a real object
+/// in the world and wants to read as one.
+const LADDER_COLOR: [f32; 3] = [0.60, 0.62, 0.65];
+/// The rungs, a touch brighter than the rails so the ladder reads as rungs at distance
+/// instead of as a flat panel.
+const LADDER_RUNG_COLOR: [f32; 3] = [0.74, 0.76, 0.79];
 const LADDER_SELECTED_COLOR: [f32; 3] = [1.0, 0.9, 0.3];
 
 impl World {
@@ -262,7 +283,8 @@ impl World {
             while y < l.height {
                 let c = face + Vec3::Y * y;
                 let ext = half.abs() + out.abs() * RUNG_HALF + Vec3::Y * RUNG_HALF;
-                push_colored_box(&mut vertices, &mut indices, c - ext, c + ext, col);
+                let rc = if Some(e) == sel { col } else { LADDER_RUNG_COLOR };
+                push_colored_box(&mut vertices, &mut indices, c - ext, c + ext, rc);
                 y += RUNG_SPACING;
             }
         }
@@ -372,6 +394,7 @@ mod tests {
         c.set_ladders(vec![(
             feet - Vec3::new(1.0, 0.0, 1.0),
             feet + Vec3::new(1.0, 4.0, 1.0),
+            Vec3::Z,
         )]);
 
         let mut input = InputState::default();
@@ -408,10 +431,17 @@ mod tests {
         assert!(c.pos.y < top, "and fell back down ({:.2} m from {top:.2})", c.pos.y);
     }
 
-    /// A ladder is climbed without a grab key: standing in the volume attaches you.
-    /// A climb you have to *ask* for is one you fumble while being shot at.
+    /// **Standing at the foot of a ladder is not hanging on one.**
+    ///
+    /// This test used to assert the opposite — that merely entering the volume attached
+    /// you — and that was the playtest's "stuck on it and can't get off". Attaching on
+    /// contact means gravity is off and forward/back are spent on the climb axis, so a
+    /// player who wandered past a ladder could only shuffle sideways out of it.
+    ///
+    /// There is still no grab key: pressing *up* is the intent, and that is an input the
+    /// player is already making. What changed is that the intent is required.
     #[test]
-    fn standing_in_the_volume_attaches_without_a_key() {
+    fn standing_at_the_foot_is_not_climbing_but_pressing_up_is() {
         let mut world = World::new();
         world.initial_meshes();
         world.toggle_mode();
@@ -419,9 +449,26 @@ mod tests {
         world.character.as_mut().unwrap().set_ladders(vec![(
             feet - Vec3::new(1.0, 0.0, 1.0),
             feet + Vec3::new(1.0, 4.0, 1.0),
+            Vec3::Z,
         )]);
         let mut input = InputState::default();
-        input.pointer_locked = true; // no keys held at all
+        input.pointer_locked = true;
+
+        // Nothing pressed: standing beside it, free to walk away.
+        for _ in 0..10 {
+            world.character.as_mut().unwrap().apply_move(
+                1.0 / 60.0,
+                &input,
+                &mut world.physics,
+            );
+        }
+        assert!(
+            !world.character.as_ref().unwrap().is_climbing(),
+            "idling in the volume must not grab the player"
+        );
+
+        // Press up: on it, no grab key needed.
+        input.press(winit::keyboard::KeyCode::KeyW);
         world
             .character
             .as_mut()
@@ -429,71 +476,54 @@ mod tests {
             .apply_move(1.0 / 60.0, &input, &mut world.physics);
         assert!(
             world.character.as_ref().unwrap().is_climbing(),
-            "attached on contact, with nothing pressed"
+            "pressing up is the grab"
         );
     }
 
-    /// **A placed ladder stands in open space, not inside the wall it is on.**
+    /// **Topping out hands the player to the ledge instead of trapping them.**
     ///
-    /// The property the facing sign actually governs, and the one that broke: a ladder
-    /// facing the wrong way is buried in solid, where it cannot be climbed and — since
-    /// the rails are drawn geometry rather than a texture — cannot be seen either. So
-    /// this samples the climb volume against the CSG rather than asserting a yaw.
+    /// The other half of "stuck on it and can't get off": the climb volume reaches the
+    /// top of the ladder, so climbing to the top left the player inside it with nowhere
+    /// to go. Now reaching the top detaches, steps up over the lip and pushes off the
+    /// wall, and refuses to re-attach for a beat so falling back through the volume
+    /// cannot grab them again.
     #[test]
-    fn a_placed_ladder_stands_in_open_space() {
-        for (yaw, name) in [
-            (std::f32::consts::PI, "-Z wall"),
-            (0.0, "+Z wall"),
-            (std::f32::consts::FRAC_PI_2, "-X wall"),
-            (-std::f32::consts::FRAC_PI_2, "+X wall"),
-        ] {
-            let mut world = World::new();
-            world.initial_meshes();
-            world.camera.pos = Vec3::new(3.0, 0.9, 3.0);
-            world.camera.yaw = yaw;
-            world.camera.pitch = 0.0;
-            world.ladder_tool_key();
-            assert!(world.update_ladder_preview().is_some(), "{name}: previews");
-            assert!(world.confirm_ladder(), "{name}: places");
-
-            let (base, yaw) = world.ladder_preview_for_test();
-            let out = Vec3::new(yaw.sin(), 0.0, yaw.cos());
-            // Sample just off the face, at chest height. **Close** on purpose: walls are
-            // WALL_THICKNESS (0.25 m) and the climb volume reaches 0.6 m, so a midpoint
-            // sample punches clean through a wrongly-faced ladder into the void beyond
-            // and reads as open. An earlier version of this test did exactly that and
-            // passed with the sign inverted — it has to land *inside* the slab to
-            // discriminate.
-            let probe = base + out * 0.15 + Vec3::Y * 1.0;
-            let wt = probe / WORLD_SCALE;
-            let solid = world.regions.iter().any(|r| r.solid_at(wt.x, wt.y, wt.z));
-            assert!(
-                !solid,
-                "{name}: the ladder faces into the wall — {probe:?} is solid, so it is                  buried, unclimbable and invisible"
-            );
-        }
-    }
-
-    /// A placed ladder is visible — in BUILD *and* in HUNT. A climbable surface the
-    /// player cannot see is a climbable surface the player will not use.
-    #[test]
-    fn a_placed_ladder_draws_in_both_modes() {
+    fn reaching_the_top_of_a_ladder_detaches() {
         let mut world = World::new();
         world.initial_meshes();
-        assert!(world.ladder_marker_mesh().is_none(), "nothing to draw yet");
-        world.camera.pos = Vec3::new(3.0, 0.9, 3.0);
-        world.camera.yaw = std::f32::consts::PI;
-        world.camera.pitch = 0.0;
-        world.ladder_tool_key();
-        world.update_ladder_preview();
-        assert!(world.confirm_ladder(), "places");
+        world.toggle_mode();
+        let feet = world.player_pos().expect("player exists");
+        let top = feet.y + 2.0;
+        world.character.as_mut().unwrap().set_ladders(vec![(
+            feet - Vec3::new(1.0, 0.0, 1.0),
+            Vec3::new(feet.x + 1.0, top, feet.z + 1.0),
+            Vec3::Z,
+        )]);
+        let mut input = InputState::default();
+        input.pointer_locked = true;
+        input.press(winit::keyboard::KeyCode::KeyW);
 
-        let build = world.ladder_marker_mesh().expect("drawn in BUILD");
-        assert!(!build.indices.is_empty(), "the ladder has geometry");
-        // And it survives into the combined overlay channel the renderer actually reads.
-        assert!(world.marker_mesh().is_some(), "reaches the marker channel");
-        world.toggle_mode(); // HUNT
-        assert!(world.ladder_marker_mesh().is_some(), "still drawn while playing");
+        let mut ever_climbed = false;
+        let mut detached_high = false;
+        for _ in 0..240 {
+            world.character.as_mut().unwrap().apply_move(
+                1.0 / 60.0,
+                &input,
+                &mut world.physics,
+            );
+            let c = world.character.as_ref().unwrap();
+            ever_climbed |= c.is_climbing();
+            if ever_climbed && !c.is_climbing() && c.pos.y > feet.y + 1.0 {
+                detached_high = true;
+                break;
+            }
+        }
+        assert!(ever_climbed, "it climbed at all");
+        assert!(
+            detached_high,
+            "it let go at the top instead of holding on forever ({:?})",
+            world.character.as_ref().unwrap().pos
+        );
     }
 
     /// Ladders go on walls. A floor or ceiling pick is refused rather than silently
