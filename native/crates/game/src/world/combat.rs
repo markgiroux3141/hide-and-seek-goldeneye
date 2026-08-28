@@ -2262,6 +2262,15 @@ impl World {
         self.player_invisible
     }
 
+    /// Whether invincibility / invisibility are on. The radial menu reads these to
+    /// label its toggles with their live state.
+    pub fn is_invulnerable(&self) -> bool {
+        self.player_invulnerable
+    }
+    pub fn is_invisible(&self) -> bool {
+        self.player_invisible
+    }
+
     /// Player health / armor + death, for the HUD and the app's restart routing.
     pub fn player_health(&self) -> f32 {
         self.player_health

@@ -151,6 +151,11 @@ impl ProceduralPreview {
 }
 
 impl World {
+    /// Whether the BUILD-phase procedural-anim preview character is up.
+    pub fn is_procedural_preview(&self) -> bool {
+        self.procedural_preview.is_some()
+    }
+
     /// Toggle the BUILD-phase preview (bound to `Y`). Spawns a character ~2 m in
     /// front of the camera facing it; a second press removes it. No-op outside BUILD
     /// or if the model/anim didn't load.

@@ -4,6 +4,12 @@
 use super::*;
 
 impl World {
+    /// Whether anything is picked right now (a face or a structure). Cheaper than
+    /// asking for `selection_face_mesh`, which builds a quad to answer.
+    pub fn has_selection(&self) -> bool {
+        self.selected.is_some()
+    }
+
     pub fn select_at_crosshair(&mut self) -> bool {
         if self.mode != Mode::Build {
             return false;
