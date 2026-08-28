@@ -1374,6 +1374,16 @@ impl Enemy {
         self.moving = false;
     }
 
+    /// Whether a hit reaction is still playing — the stun window set by
+    /// [`Self::stun`], which every injury site sizes to the reaction clip's own
+    /// duration. The FSM already returns early on it, but the Perfect Dark simulant
+    /// and the fire pump live outside the FSM and have to ask
+    /// (`World::start_enemy_fire`, `World::enemy_combat_step`): a hunter mid-flinch
+    /// does not shoot.
+    pub fn is_stunned(&self) -> bool {
+        self.stun_timer > 0.0
+    }
+
     /// Whether the hunter has clear line-of-sight to what it is engaging.
     ///
     /// The `detectable` invisibility toggle (`N`) applies **only to the player**: it is

@@ -1382,6 +1382,62 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         );
     }
 
+    /// **…and it cannot pull it again until the reaction is over.**
+    ///
+    /// The sibling test above only proves the burst *in flight* when the shot lands is
+    /// dropped. Playtest showed hunters still firing through the hurt animation, because
+    /// nothing stopped the AI opening a **new** burst on the very next step: under `AI=pd`
+    /// (the default) the trigger belongs to the simulant, which reads a target and a
+    /// bearing and has no idea the body it drives is flinching. The FSM path was never
+    /// affected — `Enemy::step` returns early while stunned — which is why this survived
+    /// the first fix.
+    ///
+    /// Two gates, tested separately: [`World::start_enemy_fire`] refuses to arm, and the
+    /// per-shot pump in [`World::enemy_combat_step`] cancels a burst that is stunned
+    /// mid-flight (the blast path only stuns — it has no injury site to hook).
+    #[test]
+    fn a_flinching_hunter_cannot_restart_its_burst() {
+        let mut world = World::new();
+        arm_with(&mut world, "PP7");
+        world.set_wave_size(1);
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT
+        world.advance_animation(1.0 / 60.0);
+        if world.enemies.is_empty() {
+            eprintln!("skipping: no hunters spawned");
+            return;
+        }
+        let torso = {
+            let p = world.enemies[0].enemy.pos;
+            let (head_min, _) = world.body_hit_zones(world.enemies[0].body);
+            Vec3::new(p.x, p.y + head_min * 0.7, p.z)
+        };
+        world.hit_enemy(0, torso);
+        assert!(!world.enemies[0].enemy.is_dead(), "one PP7 round is not lethal");
+        assert!(world.enemies[0].enemy.is_stunned(), "the reaction is playing");
+
+        // Gate 1: the AI asks for the trigger again, the way `lifecycle`'s
+        // `fire_requests` does every step.
+        world.start_enemy_fire(0);
+        assert!(
+            world.enemies[0].fire_elapsed.is_none(),
+            "a hunter mid hit-reaction must not arm a new burst",
+        );
+
+        // Gate 2: a burst already running when the stun is raised — the blast path
+        // (`blast_hit_enemy`) stuns without passing an injury site, so the pump has to
+        // cancel it on its own rather than relying on `stop_enemy_fire`. Armed directly
+        // because `start_enemy_fire` (correctly) refuses while the reaction plays.
+        world.enemies[0].fire_elapsed = Some(0.0);
+        world.enemies[0].burst_shot = 2;
+        world.enemy_combat_step(1.0 / 60.0);
+        assert!(
+            world.enemies[0].fire_elapsed.is_none(),
+            "the pump drops an in-flight burst the moment a reaction starts",
+        );
+        assert_eq!(world.enemies[0].burst_shot, 0, "and resets the burst counter");
+    }
+
     /// **The chest-aim axis is measured, not assumed** — and what it varies with is the
     /// *clip*, not the body.
     ///

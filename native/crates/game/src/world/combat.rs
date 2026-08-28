@@ -1362,6 +1362,7 @@ impl World {
             if let Some(inst) = self.enemies.get_mut(idx) {
                 inst.enemy.stun(REACTION_STUN);
             }
+            self.stop_enemy_fire(idx); // a stagger is a flinch: drop the trigger
             let hp = self.enemies.get(idx).map(|i| i.enemy.health()).unwrap_or(0.0);
             log::info!("hunter staggered by blast — {dmg:.0} dmg, {hp:.0} hp left");
         } else if self.hit_reactions {
@@ -1377,6 +1378,7 @@ impl World {
             inst.anim.play_once(clip, 0.1, Some(band), None);
             inst.enemy.stun(dur);
             let hp = inst.enemy.health();
+            self.stop_enemy_fire(idx); // `chr_stop_firing` before `ACT_ARGH`
             log::info!("hunter caught in blast — {dmg:.0} dmg, {hp:.0} hp left");
         } else {
             // Sim style (default): damage + pain SFX, no flinch/stun.
@@ -1761,6 +1763,16 @@ impl World {
         {
             return;
         }
+        // Neither can a hunter that is mid hit-reaction. `stop_enemy_fire` kills the
+        // burst that was in flight when the shot landed, but nothing stopped the AI
+        // starting a *new* one the very next step — and under `AI=pd` (the default)
+        // the trigger belongs to the simulant, which has no idea the body it drives
+        // is flinching. So a wounded hunter played its injury animation while still
+        // emitting muzzle flashes and damage. PD's own `ACT_ARGH` cannot fire at all:
+        // leaving `actiontype` is what stops `chr_tick_attack`.
+        if self.enemies.get(idx).is_some_and(|inst| inst.enemy.is_stunned()) {
+            return;
+        }
         let row = self.pd_fire_row(idx);
         if let Some(row) = row {
             self.install_fire_row(idx, row);
@@ -1934,6 +1946,18 @@ impl World {
                 inst.burst_shot = 0;
                 continue;
             };
+            // A hit reaction ends the burst on the spot — the second half of the
+            // flinch gate in `start_enemy_fire`. Firing here is a *timer*, so a
+            // hunter staggered mid-burst kept pumping rounds out of it; the bullet
+            // path calls `stop_enemy_fire` at the injury site, but the blast path
+            // (`blast_hit_enemy`) only stuns, and neither covers a stun raised
+            // anywhere else. Cheaper and more honest to ask the body every step.
+            if inst.enemy.is_stunned() {
+                inst.fire_elapsed = None;
+                inst.shot_timer = 0.0;
+                inst.burst_shot = 0;
+                continue;
+            }
             let t = t + dt;
             // Pump shots while inside the authored shoot window. A PD simulant with an
             // automatic runs PD's BURST cadence — three rounds close together, then a
