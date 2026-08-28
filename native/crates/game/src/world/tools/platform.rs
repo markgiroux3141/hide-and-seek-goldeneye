@@ -36,6 +36,7 @@ impl World {
         self.connect_edge = None;
         self.simple_from = None;
         self.simple_ghost = None;
+        self.simple_self_armed = false;
         self.gizmo_drag = None;
     }
 
@@ -87,9 +88,7 @@ impl World {
                 (true, None)
             }
             Some(PlatformPhase::SimpleFrom) | Some(PlatformPhase::SimpleTo) => {
-                self.simple_from = None;
-                self.simple_ghost = None;
-                self.platform_phase = Some(PlatformPhase::Idle);
+                self.cancel_simple_stair();
                 (true, None)
             }
             _ => (false, None),
@@ -275,8 +274,13 @@ impl World {
                 self.connect_from = Some(pid);
                 self.platform_phase = Some(PlatformPhase::ConnectDst);
                 log::info!("connect: click a destination platform or the floor (Esc cancels)");
+                return;
             }
         }
+        // Unlike `K`, this guard is real — connect joins a *selected* platform to
+        // something else, so there is nothing to arm from cold. Say so rather than
+        // returning in silence, which is what made the block-stair defect invisible.
+        log::info!("connect (C): select a platform first — T arms the tool, then click one");
     }
 
     /// Connect step 1 (JS `connecting_dst`): lock the destination the crosshair is
@@ -442,19 +446,52 @@ impl World {
     /// [`StairStyle::Block`](structures::StairStyle::Block) — solid block stairs in
     /// the room's own theme — and `F` afterwards grounds one into a single mass.
     pub fn simple_stair_key(&mut self) {
-        if matches!(
-            self.platform_phase,
-            Some(PlatformPhase::Idle) | Some(PlatformPhase::Selected)
-        ) {
-            self.simple_from = None;
-            self.simple_offset_wt = 0.0;
-            self.simple_width_wt = STAIR_WIDTH;
-            self.selected_platform = None;
-            self.selected_run = None;
-            self.platform_phase = Some(PlatformPhase::SimpleFrom);
-            log::info!(
-                "simple stair: click the bottom endpoint (scroll = slide, Shift+scroll = width)"
-            );
+        if self.mode != Mode::Build {
+            return;
+        }
+        // Already aiming → toggle off, like every other tool key.
+        if self.is_simple_stair() {
+            self.cancel_simple_stair();
+            return;
+        }
+        // Arm from wherever we are. The phase machine belongs to the platform tool,
+        // but block stairs is not a platform sub-verb — it takes two crosshair
+        // points and needs neither a platform nor a selection — so a cold `K` turns
+        // that machine on itself, evicting the mutually-exclusive modal tools
+        // exactly as `platform_tool_key` does. Before this, a cold `K` fell through
+        // an `Idle | Selected` guard and did nothing at all, which is why the tool
+        // appeared to work only after `T`.
+        self.simple_self_armed = self.platform_phase.is_none();
+        if self.simple_self_armed {
+            self.opening_tool = None;
+            self.opening_preview = None;
+            self.place_tool = None;
+            self.clear_draw_state();
+            self.selected = None;
+            self.platform_size_x = PLATFORM_SIZE;
+            self.platform_size_z = PLATFORM_SIZE;
+        }
+        self.simple_from = None;
+        self.simple_ghost = None;
+        self.simple_offset_wt = 0.0;
+        self.simple_width_wt = STAIR_WIDTH;
+        self.selected_platform = None;
+        self.selected_run = None;
+        self.platform_phase = Some(PlatformPhase::SimpleFrom);
+        log::info!("simple stair: click the bottom endpoint (scroll = slide, Shift+scroll = width)");
+    }
+
+    /// Back out of a simple-stair, returning to whatever the tool interrupted: the
+    /// idle platform tool if that was already up, or nothing at all if `K` armed the
+    /// phase machine itself. Shared by the `K` toggle and `Esc`.
+    pub(crate) fn cancel_simple_stair(&mut self) {
+        self.simple_from = None;
+        self.simple_ghost = None;
+        if self.simple_self_armed {
+            self.simple_self_armed = false;
+            self.clear_platform_state();
+        } else {
+            self.platform_phase = Some(PlatformPhase::Idle);
         }
     }
 

@@ -3754,6 +3754,95 @@ fn arm_with(world: &mut World, name: &str) -> usize {
 
     // ─── Simple-stair tool (K): block stairs, ghost, slide + width ──────────
 
+    /// **`K` arms from cold — it is not a platform sub-verb.**
+    ///
+    /// `simple_stair_key` used to open with an `Idle | Selected` guard on
+    /// `platform_phase`, so pressing `K` without first pressing `T` fell straight
+    /// through and did nothing, silently. Playtest found it through the radial menu,
+    /// which offers "Block stairs" as a stand-alone entry — but the keyboard had the
+    /// same defect all along. Every test in this section arms the platform tool
+    /// first (see `simple_stair_pending`), which is exactly why the suite never
+    /// noticed.
+    ///
+    /// Block stairs takes two crosshair points and needs neither a platform nor a
+    /// selection, so it now turns the phase machine on itself. Contrast `C`
+    /// (connect), whose equivalent guard is real: it joins two platforms.
+    #[test]
+    fn k_arms_the_block_stair_tool_without_the_platform_tool() {
+        let mut world = World::new();
+        world.initial_meshes();
+        assert_eq!(world.platform_phase, None, "the platform tool starts down");
+
+        world.simple_stair_key();
+        assert_eq!(
+            world.platform_phase,
+            Some(PlatformPhase::SimpleFrom),
+            "a cold K must arm the tool, not no-op",
+        );
+        assert!(world.is_simple_stair(), "and the scroll wheel routes to it");
+    }
+
+    /// **Backing out returns you where you came from, not somewhere new.**
+    ///
+    /// Arming from cold switches the platform phase machine on as a side effect, so
+    /// cancelling has to switch it back off — leaving the user in a platform tool
+    /// they never asked for would be its own surprise. When `T` *was* already up,
+    /// the same cancel drops back to `Idle` and keeps it. Both routes out (`K`
+    /// again, and `Esc`) share `cancel_simple_stair`, so they agree by construction.
+    #[test]
+    fn cancelling_block_stairs_restores_the_previous_tool_state() {
+        // Cold: K on, K off → all the way down.
+        let mut world = World::new();
+        world.initial_meshes();
+        world.simple_stair_key();
+        world.simple_stair_key();
+        assert_eq!(
+            world.platform_phase, None,
+            "K armed the phase machine, so toggling K off must retire it",
+        );
+
+        // Cold, backed out with Esc instead: same destination.
+        let mut world = World::new();
+        world.initial_meshes();
+        world.simple_stair_key();
+        let (consumed, _) = world.platform_escape();
+        assert!(consumed, "Esc is consumed by the stair tool, not the pointer lock");
+        assert_eq!(world.platform_phase, None, "Esc agrees with the K toggle");
+
+        // Platform tool already up: cancelling hands it back, still armed.
+        let mut world = World::new();
+        world.initial_meshes();
+        world.platform_tool_key();
+        world.simple_stair_key();
+        world.simple_stair_key();
+        assert_eq!(
+            world.platform_phase,
+            Some(PlatformPhase::Idle),
+            "K did not arm the platform tool, so K off must not disarm it",
+        );
+    }
+
+    /// **A cold `K` evicts the other modal tools**, the way `T` does — they are
+    /// mutually exclusive, and arming the phase machine without clearing them would
+    /// leave two tools live at once.
+    #[test]
+    fn a_cold_k_clears_the_conflicting_tools_and_selection() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.selected = Some(Selection {
+            region_id: 0,
+            brush_id: 0,
+            axis: Axis::X,
+            side: Side::Min,
+        });
+        world.opening_tool = Some(OpeningKind::Door);
+
+        world.simple_stair_key();
+        assert_eq!(world.platform_phase, Some(PlatformPhase::SimpleFrom));
+        assert!(world.selected.is_none(), "the face selection is dropped");
+        assert!(world.opening_tool.is_none(), "the door tool is evicted");
+    }
+
     /// A `World` with the platform tool armed and the simple-stair tool waiting for
     /// its second endpoint, with `from` already locked. Bypasses the crosshair picks
     /// so the arithmetic under test isn't hostage to where the camera happens to aim.

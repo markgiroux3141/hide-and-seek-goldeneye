@@ -2519,6 +2519,14 @@ pub struct World {
     connect_slide_wt: f32,
     /// First endpoint (WT) of a simple-stair while in [`PlatformPhase::SimpleTo`].
     simple_from: Option<Vec3>,
+    /// Whether `K` armed the platform phase machine itself, rather than finding the
+    /// platform tool already up. Block stairs is a stand-alone verb — it needs no
+    /// platform and no selection — but its state has nowhere to live except
+    /// [`PlatformPhase`], so arming it from cold turns that machine on as a side
+    /// effect. Backing out (`K` again, or `Esc`) has to undo exactly that much:
+    /// return to `Idle` when the user was in the platform tool to begin with, and
+    /// all the way to `None` when they were not and never asked for it.
+    simple_self_armed: bool,
     /// Sideways slide of the simple-stair being placed, in WT perpendicular to its
     /// run axis (scroll wheel). Lets a flight be nudged off the line through the two
     /// clicked points without re-picking either endpoint.
@@ -3028,6 +3036,7 @@ impl World {
             connect_edge: None,
             connect_slide_wt: 0.0,
             simple_from: None,
+            simple_self_armed: false,
             simple_offset_wt: 0.0,
             simple_width_wt: STAIR_WIDTH,
             simple_ghost: None,

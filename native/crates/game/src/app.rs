@@ -887,10 +887,13 @@ impl App {
             Tool::Pillar | Tool::Brace => {
                 self.world.as_ref().map(|w| !w.is_placing()).unwrap_or(true)
             }
-            // The platform tool owns the selection outright, so it always refreshes.
-            Tool::Platform => true,
-            // Neither of these draws a crosshair ghost.
-            Tool::BlockStairs | Tool::Connect => false,
+            // These own the selection outright, so they always refresh: arming the
+            // platform tool drops any face selection, and so does a cold `K` (block
+            // stairs arms the same phase machine when the platform tool is down).
+            Tool::Platform | Tool::BlockStairs => true,
+            // Connect never draws a crosshair ghost and never clears the selection —
+            // it *needs* the selected platform it starts from.
+            Tool::Connect => false,
         };
         if stale {
             self.refresh_highlight();
