@@ -110,6 +110,20 @@ const SIMPLE_SCHEME_NAME: &str = "simple_blue";
 /// re-tiling every duct in every level.
 const VENT_SCHEME_NAME: &str = "vent_metal";
 
+/// The theme ladders wear (`tools::ladder`). `tempImgEd01B8`, the dark metal from the
+/// **Surface** level's exterior structures.
+///
+/// Ladders have no texture of their own and this is not for want of looking: the library
+/// was extracted from GoldenEye level *surfaces* and GoldenEye built its ladders from
+/// geometry, so what exists is the metalwork those ladders were made of, not a picture of
+/// a ladder. Surface's railing sheets (`tempImgEd0095`, `00EE`, `00EF`) are the nearest
+/// thing and are alpha-keyed fencing, not rungs.
+///
+/// So the rails and rungs stay geometry and simply wear the right metal. Not required by
+/// name — a themes.json without it falls back to the default rather than refusing to
+/// start.
+const LADDER_SCHEME_NAME: &str = "ladder_metal";
+
 /// Name of the live scratch slot. Underscore-prefixed so it sorts and reads as
 /// internal, and so it cannot collide with a generated `<level>_NN` theme.
 const SCRATCH_SCHEME_NAME: &str = "__scratch";
@@ -203,6 +217,7 @@ struct Registry {
     default_index: usize,
     simple_index: usize,
     vent_index: usize,
+    ladder_index: usize,
     /// Index of the first custom slot; `CUSTOM_SLOTS` of them run consecutively.
     custom_base: usize,
     /// Index of the live scratch slot (immediately after the custom slots).
@@ -317,6 +332,7 @@ fn load_registry() -> Result<Registry, String> {
     let default_index = find(DEFAULT_SCHEME_NAME)?;
     let simple_index = find(SIMPLE_SCHEME_NAME)?;
     let vent_index = find(VENT_SCHEME_NAME).unwrap_or(default_index);
+    let ladder_index = find(LADDER_SCHEME_NAME).unwrap_or(simple_index);
     let default_zones = schemes[default_index].zones;
 
     // ── The custom slots + the scratch slot, appended after the library.
@@ -380,6 +396,7 @@ fn load_registry() -> Result<Registry, String> {
         default_index,
         simple_index,
         vent_index,
+        ladder_index,
         custom_base,
         scratch_index,
     })
@@ -434,6 +451,11 @@ pub fn simple_scheme() -> usize {
 /// Index of the vent-duct theme (see [`VENT_SCHEME_NAME`]).
 pub fn vent_scheme() -> usize {
     registry().vent_index
+}
+
+/// Index of the ladder theme (see [`LADDER_SCHEME_NAME`]).
+pub fn ladder_scheme() -> usize {
+    registry().ladder_index
 }
 
 /// The live scratch slot the theme editor mutates while you edit.

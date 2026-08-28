@@ -414,7 +414,7 @@ pub fn menu(id: MenuId, ctx: &RadialCtx) -> Vec<Slot> {
                 } else {
                     "Hunters: off"
                 },
-                "J",
+                "`",
                 EditorAction::ToggleHunters,
             )
             .on(ctx.hunters),

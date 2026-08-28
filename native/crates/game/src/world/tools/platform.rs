@@ -840,6 +840,8 @@ impl World {
             }
         }
         self.append_railings(&brushes, &mut b);
+        // Ladders ride the structures mesh too — see `tools::ladder`.
+        self.append_ladders(&mut b);
 
         // ── Collider = platform slabs as solid boxes, each stair-run as a smooth
         // sloped RAMP (so the player walks the true slope, no per-riser auto-step

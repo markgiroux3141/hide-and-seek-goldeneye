@@ -4276,8 +4276,14 @@ impl ApplicationHandler for App {
                 }
                 // Grabbed + BUILD, ladder tool armed: a click places one.
                 if self.world.as_ref().map(|w| w.is_ladder_tool()).unwrap_or(false) {
-                    if let Some(world) = self.world.as_mut() {
-                        world.confirm_ladder();
+                    // A ladder is structures geometry, not a marker, so placing one has
+                    // to re-bake that mesh for it to appear — the same thing a platform
+                    // or a railing does.
+                    let rm = self.world.as_mut().and_then(|w| {
+                        w.with_undo(|w| w.confirm_ladder().then(|| w.rebuild_structures()))
+                    });
+                    if let Some(rm) = rm {
+                        self.upload(&rm);
                     }
                     self.refresh_highlight();
                     return;
@@ -4721,7 +4727,7 @@ impl ApplicationHandler for App {
                     }
                     // The fixed enemy spawn-point marker (colored floor square) —
                     // drawn in both modes so the builder can author around it.
-                    renderer.set_marker_mesh(world.marker_mesh().as_ref());
+                    renderer.set_marker_mesh(world.spawn_marker_mesh().as_ref());
                     // The nav overlay is the one colored channel NOT rebuilt per frame:
                     // it is ~90k vertices and only changes when the author presses
                     // Calculate or toggles it, so it uploads on a revision change.
@@ -5081,11 +5087,16 @@ impl App {
             self.apply(EditorAction::ToggleInvincible);
             return;
         }
-        // J toggles hunters entirely (dev): no pack spawns, and flipping it off during a
-        // hunt clears the live one. The third of the dev observe toggles beside I
-        // (invincible) and N (invisible) — this one is for authoring and testing the
+        // Backquote toggles hunters entirely (dev): no pack spawns, and flipping it off
+        // during a hunt clears the live one. The third of the dev observe toggles beside
+        // I (invincible) and N (invisible) — this one is for authoring and testing the
         // level itself, where standing still at a door to work it is the whole point.
-        if code == KeyCode::KeyJ {
+        //
+        // **Moved off `J`**, which now places ladders. `J` was the only letter left when
+        // the ladder tool landed and its radial slot already advertised it, so the tool
+        // kept the letter and the dev toggle took the classic dev key. It is still on the
+        // radial's Debug ring either way, which is what made the swap cheap.
+        if code == KeyCode::Backquote {
             self.apply(EditorAction::ToggleHunters);
             return;
         }

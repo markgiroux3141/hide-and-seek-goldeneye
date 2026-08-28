@@ -374,6 +374,37 @@
    }
   },
   {
+   "name": "ladder_metal",
+   "label": "Ladder Metal",
+   "group": "Vent",
+   "zones": {
+    "0": {
+     "texture": "tempImgEd01B8",
+     "repeat": 2.0
+    },
+    "1": {
+     "texture": "tempImgEd01B8",
+     "repeat": 2.0
+    },
+    "2": {
+     "texture": "tempImgEd01B8",
+     "repeat": 2.0
+    },
+    "3": {
+     "texture": "tempImgEd01B8",
+     "repeat": 2.0
+    },
+    "5": {
+     "texture": "tempImgEd01B8",
+     "repeat": 2.0
+    },
+    "7": {
+     "texture": "tempImgEd01B8",
+     "repeat": 2.0
+    }
+   }
+  },
+  {
    "name": "bunker1_01",
    "label": "Bunker1 01",
    "group": "Bunker1",

@@ -28,6 +28,18 @@ use crate::ecs::{ComponentData, EntityData, Transform};
 /// miss by 10 cm is a climb you miss while being shot at.
 const LADDER_DEPTH: f32 = 0.6;
 
+/// How far the **climb** volume reaches above the ladder's drawn top, metres.
+///
+/// The case this exists for is the normal one: a ladder whose top is level with the floor
+/// it serves. Without an overshoot the player tops out with their feet *at* that floor's
+/// height, which is not clear of it — so they detach, immediately fall the fraction back
+/// into the volume, re-attach, climb, detach, and bob at the lip forever.
+///
+/// Half a metre of extra climb puts the feet above the ledge before letting go, so the
+/// step off the wall lands on it. The rails are drawn to the authored height, not to
+/// this — you climb a little past the top of a ladder in life too.
+const LADDER_OVERSHOOT: f32 = 0.5;
+
 impl World {
     /// Whether the ladder tool is armed.
     pub fn is_ladder_tool(&self) -> bool {
@@ -221,7 +233,12 @@ impl World {
 /// Rung spacing up a ladder, metres.
 const RUNG_SPACING: f32 = 0.35;
 /// Half-thickness of a rung, metres.
-const RUNG_HALF: f32 = 0.035;
+const RUNG_HALF: f32 = 0.045;
+/// Half-thickness of a side rail, metres.
+const RAIL_HALF: f32 = 0.04;
+/// How far the rails stand off the wall face, metres — enough that the geometry behind
+/// them never z-fights through.
+const RAIL_STANDOFF: f32 = 0.07;
 
 /// Ladders are drawn geometry, not a texture, and **that is not a stopgap.**
 ///
@@ -241,70 +258,77 @@ const LADDER_RUNG_COLOR: [f32; 3] = [0.74, 0.76, 0.79];
 const LADDER_SELECTED_COLOR: [f32; 3] = [1.0, 0.9, 0.3];
 
 impl World {
-    /// Ladders drawn as rails-and-rungs on the overlay channel, in **both** modes.
+    /// Append every ladder's rails and rungs to the **structures** mesh.
     ///
-    /// Drawn rather than textured because a ladder has no mesh: it is a climb volume
-    /// plus a transform. Overlay geometry is what the spawn pads already use for the
-    /// same reason, and it means a ladder is visible while authoring *and* while
-    /// playing — a climbable surface the player cannot see is a climbable surface the
-    /// player will not use.
-    pub fn ladder_marker_mesh(&self) -> Option<ColoredMesh> {
-        let mut vertices = Vec::new();
-        let mut indices = Vec::new();
-        let mut any = false;
-        let sel = self.selected_prop.filter(|&e| self.entity_is_ladder(e));
-        for (e, t, l) in self
-            .ecs
-            .world()
-            .query::<(hecs::Entity, &Transform, &Ladder)>()
-            .iter()
-        {
-            any = true;
-            let col = if Some(e) == sel { LADDER_SELECTED_COLOR } else { LADDER_COLOR };
+    /// They used to be drawn on the flat-colour marker overlay beside the spawn pads,
+    /// which is why they read as pale cut-outs rather than as objects: that channel is
+    /// unlit and untextured, which is right for an authoring marker and wrong for a thing
+    /// that is really there. The structures mesh is the one procedural geometry already
+    /// goes through — platform slabs, stair treads, railings — and it is lit and
+    /// textured, so a ladder now takes light from the room and wears Surface's metal.
+    ///
+    /// Railings are the precedent to follow here: thin cosmetic planes emitted into
+    /// their own zone, on the same builder.
+    pub(crate) fn append_ladders(&self, b: &mut ZonedBuilder) {
+        let scheme = engine::render::textures::ladder_scheme();
+        for (t, l) in self.ecs.world().query::<(&Transform, &Ladder)>().iter() {
             let yaw = t.rot.to_euler(EulerRot::YXZ).0;
             let (sn, cs) = yaw.sin_cos();
             let out = Vec3::new(sn, 0.0, cs);
             let across = if out.x.abs() > out.z.abs() { Vec3::Z } else { Vec3::X };
             let half = across * (l.width * 0.5);
-            // Stand the rails a little off the wall so they don't z-fight the face.
-            let face = t.pos + out * 0.06;
-            let rail = across.abs() * 0.03 + out.abs() * 0.03 + Vec3::Y * 0.0;
+            // Stand the rails off the wall so they do not z-fight the face behind them.
+            let face = t.pos + out * RAIL_STANDOFF;
+            let thick = across.abs() * RAIL_HALF + out.abs() * RAIL_HALF;
+
+            // Two side rails, running the authored height.
             for side in [-1.0f32, 1.0] {
                 let c = face + half * side;
-                push_colored_box(
-                    &mut vertices,
-                    &mut indices,
-                    c - rail - Vec3::Y * 0.0,
-                    c + rail + Vec3::Y * l.height,
-                    col,
-                );
+                emit_metal_box(b, c - thick, c + thick + Vec3::Y * l.height, scheme);
             }
+            // Rungs between them.
             let mut y = RUNG_SPACING * 0.5;
             while y < l.height {
                 let c = face + Vec3::Y * y;
                 let ext = half.abs() + out.abs() * RUNG_HALF + Vec3::Y * RUNG_HALF;
-                let rc = if Some(e) == sel { col } else { LADDER_RUNG_COLOR };
-                push_colored_box(&mut vertices, &mut indices, c - ext, c + ext, rc);
+                emit_metal_box(b, c - ext, c + ext, scheme);
                 y += RUNG_SPACING;
             }
         }
-        any.then_some(ColoredMesh { vertices, indices })
     }
+}
 
-    /// Every overlay marker in one mesh — spawn pads and ladders.
-    ///
-    /// One channel, so the renderer keeps a single marker draw. Anything else that
-    /// needs a mesh-less authored object drawn belongs here too.
-    pub fn marker_mesh(&self) -> Option<ColoredMesh> {
-        match (self.spawn_marker_mesh(), self.ladder_marker_mesh()) {
-            (Some(mut a), Some(b)) => {
-                let base = a.vertices.len() as u32;
-                a.vertices.extend(b.vertices);
-                a.indices.extend(b.indices.iter().map(|i| i + base));
-                Some(a)
-            }
-            (a, b) => a.or(b),
-        }
+/// One axis-aligned box (world metres) into the zoned builder, planar-UV'd per face.
+///
+/// `emit_quad_uv` wants **WT** corners and explicit UVs, so both conversions happen here.
+/// UVs come from the box's own world extent so the metal grain runs continuously along a
+/// rail instead of restarting per face.
+fn emit_metal_box(b: &mut ZonedBuilder, min: Vec3, max: Vec3, scheme: usize) {
+    let w = |p: Vec3| [p.x / WORLD_SCALE, p.y / WORLD_SCALE, p.z / WORLD_SCALE];
+    let (lo, hi) = (min, max);
+    // (corners, uv-source axes) per face, wound outward.
+    let faces: [([Vec3; 4], usize, usize); 6] = [
+        // +X / -X
+        ([Vec3::new(hi.x, lo.y, lo.z), Vec3::new(hi.x, lo.y, hi.z), Vec3::new(hi.x, hi.y, hi.z), Vec3::new(hi.x, hi.y, lo.z)], 2, 1),
+        ([Vec3::new(lo.x, lo.y, hi.z), Vec3::new(lo.x, lo.y, lo.z), Vec3::new(lo.x, hi.y, lo.z), Vec3::new(lo.x, hi.y, hi.z)], 2, 1),
+        // +Y / -Y
+        ([Vec3::new(lo.x, hi.y, lo.z), Vec3::new(lo.x, hi.y, hi.z), Vec3::new(hi.x, hi.y, hi.z), Vec3::new(hi.x, hi.y, lo.z)], 0, 2),
+        ([Vec3::new(lo.x, lo.y, hi.z), Vec3::new(lo.x, lo.y, lo.z), Vec3::new(hi.x, lo.y, lo.z), Vec3::new(hi.x, lo.y, hi.z)], 0, 2),
+        // +Z / -Z
+        ([Vec3::new(hi.x, lo.y, hi.z), Vec3::new(lo.x, lo.y, hi.z), Vec3::new(lo.x, hi.y, hi.z), Vec3::new(hi.x, hi.y, hi.z)], 0, 1),
+        ([Vec3::new(lo.x, lo.y, lo.z), Vec3::new(hi.x, lo.y, lo.z), Vec3::new(hi.x, hi.y, lo.z), Vec3::new(lo.x, hi.y, lo.z)], 0, 1),
+    ];
+    for (corners, ua, va) in faces {
+        let uv = |p: Vec3| {
+            let a = [p.x, p.y, p.z];
+            [a[ua] / WORLD_SCALE, a[va] / WORLD_SCALE]
+        };
+        b.emit_quad_uv(
+            [w(corners[0]), w(corners[1]), w(corners[2]), w(corners[3])],
+            [uv(corners[0]), uv(corners[1]), uv(corners[2]), uv(corners[3])],
+            scheme,
+            0,
+        );
     }
 }
 
@@ -325,7 +349,7 @@ pub(crate) fn ladder_volume(pos: Vec3, yaw: f32, l: &Ladder) -> (Vec3, Vec3) {
     // Two opposite corners, then min/max — cheaper to read than six signed terms, and
     // correct for all four facings without a case per direction.
     let a = pos - half_w;
-    let b = pos + half_w + out * LADDER_DEPTH + Vec3::Y * l.height;
+    let b = pos + half_w + out * LADDER_DEPTH + Vec3::Y * (l.height + LADDER_OVERSHOOT);
     (a.min(b), a.max(b))
 }
 
@@ -340,7 +364,10 @@ mod tests {
         let l = Ladder { height: 3.0, width: 0.75 };
         // Facing +Z (a ladder on a wall whose outward normal is +Z).
         let (min, max) = ladder_volume(Vec3::new(5.0, 1.0, 2.0), 0.0, &l);
-        assert!((max.y - min.y - 3.0).abs() < 1e-5, "height runs up Y");
+        assert!(
+            (max.y - min.y - (3.0 + LADDER_OVERSHOOT)).abs() < 1e-5,
+            "height runs up Y, plus the top-out overshoot"
+        );
         assert!((min.y - 1.0).abs() < 1e-5, "and starts at the base");
         assert!((max.x - min.x - 0.75).abs() < 1e-5, "width runs across the wall (X)");
         assert!(max.z > 2.0 && min.z <= 2.0, "depth reaches out on the +Z side");
@@ -493,18 +520,20 @@ mod tests {
         world.initial_meshes();
         world.toggle_mode();
         let feet = world.player_pos().expect("player exists");
-        let top = feet.y + 2.0;
-        world.character.as_mut().unwrap().set_ladders(vec![(
-            feet - Vec3::new(1.0, 0.0, 1.0),
-            Vec3::new(feet.x + 1.0, top, feet.z + 1.0),
-            Vec3::Z,
-        )]);
+        // The awkward case, and the one that bobbed: a ladder whose top is level with
+        // the floor it serves. The volume is built through `ladder_volume`, so it carries
+        // the top-out overshoot the same way a placed ladder does.
+        let rungs_top = feet.y + 2.0;
+        let l = Ladder { height: 2.0, width: 0.75 };
+        let (lmin, lmax) = ladder_volume(feet, 0.0, &l);
+        world.character.as_mut().unwrap().set_ladders(vec![(lmin, lmax, Vec3::Z)]);
         let mut input = InputState::default();
         input.pointer_locked = true;
         input.press(winit::keyboard::KeyCode::KeyW);
 
         let mut ever_climbed = false;
         let mut detached_high = false;
+        let mut detach_y = 0.0f32;
         for _ in 0..240 {
             world.character.as_mut().unwrap().apply_move(
                 1.0 / 60.0,
@@ -515,6 +544,7 @@ mod tests {
             ever_climbed |= c.is_climbing();
             if ever_climbed && !c.is_climbing() && c.pos.y > feet.y + 1.0 {
                 detached_high = true;
+                detach_y = c.pos.y;
                 break;
             }
         }
@@ -524,6 +554,91 @@ mod tests {
             "it let go at the top instead of holding on forever ({:?})",
             world.character.as_ref().unwrap().pos
         );
+        // **The overshoot**: the feet clear the ladder's own top before letting go. Level
+        // with it is not clear of it — that is the bob, where the player detaches, drops
+        // straight back into the volume, re-grabs and climbs again forever.
+        assert!(
+            detach_y > rungs_top,
+            "let go at {detach_y:.2} m, at or below the ladder top {rungs_top:.2} m —              the feet have to clear the ledge or the player bobs at the lip"
+        );
+    }
+
+    /// **A placed ladder stands in open space, not inside the wall it is on.**
+    ///
+    /// The property the facing sign governs, and the one that broke: a ladder facing the
+    /// wrong way is buried in solid, where it cannot be climbed and cannot be seen. So
+    /// this samples against the CSG rather than asserting a yaw.
+    ///
+    /// It samples **close to the face** on purpose. The first version measured the middle
+    /// of the climb volume and passed with the sign inverted: walls are 0.25 m and the
+    /// volume reaches 0.6 m, so a wrongly-faced ladder punches clean through into the
+    /// void beyond and reads as open. It has to land inside the slab to discriminate.
+    #[test]
+    fn a_placed_ladder_stands_in_open_space() {
+        for (yaw, name) in [
+            (std::f32::consts::PI, "-Z wall"),
+            (0.0, "+Z wall"),
+            (std::f32::consts::FRAC_PI_2, "-X wall"),
+            (-std::f32::consts::FRAC_PI_2, "+X wall"),
+        ] {
+            let mut world = World::new();
+            world.initial_meshes();
+            world.camera.pos = Vec3::new(3.0, 0.9, 3.0);
+            world.camera.yaw = yaw;
+            world.camera.pitch = 0.0;
+            world.ladder_tool_key();
+            assert!(world.update_ladder_preview().is_some(), "{name}: previews");
+            assert!(world.confirm_ladder(), "{name}: places");
+
+            let (base, placed_yaw) = world.ladder_preview_for_test();
+            let out = Vec3::new(placed_yaw.sin(), 0.0, placed_yaw.cos());
+            let probe = base + out * 0.15 + Vec3::Y * 1.0;
+            let wt = probe / WORLD_SCALE;
+            let solid = world.regions.iter().any(|r| r.solid_at(wt.x, wt.y, wt.z));
+            assert!(
+                !solid,
+                "{name}: the ladder faces into the wall - {probe:?} is solid, so it is \
+                 buried, unclimbable and invisible"
+            );
+        }
+    }
+
+    /// A placed ladder produces real, **lit and textured** geometry in the structures
+    /// mesh, wearing the ladder theme.
+    ///
+    /// It used to go on the flat-colour marker overlay beside the spawn pads, which is
+    /// why it read as a pale cut-out: that channel is unlit and untextured, which is
+    /// right for an authoring marker and wrong for an object that is really there.
+    #[test]
+    fn a_placed_ladder_is_lit_textured_structure_geometry() {
+        let mut world = World::new();
+        world.initial_meshes();
+        let bare = world.rebuild_structures().mesh.groups.len();
+
+        world.camera.pos = Vec3::new(3.0, 0.9, 3.0);
+        world.camera.yaw = std::f32::consts::PI;
+        world.camera.pitch = 0.0;
+        world.ladder_tool_key();
+        world.update_ladder_preview();
+        assert!(world.confirm_ladder(), "places");
+
+        let rm = world.rebuild_structures();
+        let want = engine::render::textures::ladder_scheme() as u16;
+        let tris: u32 = rm
+            .mesh
+            .groups
+            .iter()
+            .filter(|g| g.scheme == want)
+            .map(|g| g.count / 3)
+            .sum();
+        assert!(
+            tris > 0,
+            "the ladder emitted no structure geometry (groups went {bare} -> {})",
+            rm.mesh.groups.len()
+        );
+        // Two rails plus rungs, six quads each: comfortably more than a single quad,
+        // which is what a decal would have been.
+        assert!(tris >= 24, "rails and rungs, not a flat decal - got {tris} triangles");
     }
 
     /// Ladders go on walls. A floor or ceiling pick is refused rather than silently
