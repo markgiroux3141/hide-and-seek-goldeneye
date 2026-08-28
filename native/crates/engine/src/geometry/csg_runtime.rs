@@ -1159,6 +1159,10 @@ impl Region {
                 min: [b.x, b.y, b.z],
                 max: [b.x + b.w, b.y + b.h, b.z + b.d],
                 floor_y: b.floor_y,
+                // A duct anchors its UVs to its own corner; everything else keeps the
+                // world-space grid it has always had. Derived, not persisted — the
+                // `vent` flag already says which brushes want it.
+                origin_xz: if b.vent { [b.x, b.z] } else { [0.0, 0.0] },
                 scheme: b.scheme,
                 frame: b.frame,
                 door: b.door,
@@ -1211,6 +1215,10 @@ impl Region {
                 min: [b.x, b.y, b.z],
                 max: [b.x + b.w, b.y + b.h, b.z + b.d],
                 floor_y: b.floor_y,
+                // A duct anchors its UVs to its own corner; everything else keeps the
+                // world-space grid it has always had. Derived, not persisted — the
+                // `vent` flag already says which brushes want it.
+                origin_xz: if b.vent { [b.x, b.z] } else { [0.0, 0.0] },
                 scheme: b.scheme,
                 frame: b.frame,
                 door: b.door,

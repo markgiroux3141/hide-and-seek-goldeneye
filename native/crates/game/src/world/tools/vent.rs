@@ -405,6 +405,66 @@ mod tests {
         }
     }
 
+    /// **A duct's panels line up wherever it is cut**, on the floor and ceiling as much
+    /// as on the walls.
+    ///
+    /// The bug this pins: floor/ceiling UVs were raw world `[wx, wz]` with no anchor at
+    /// all (only the *vertical* axis had one, `floor_y`). So the panel grid was pinned to
+    /// world zero and a duct lined up only when it happened to land on a multiple of the
+    /// panel size — every other placement put the panel border across the middle of the
+    /// duct floor. Invisible on a room floor, glaring in a 1 m duct whose texture is a
+    /// single bordered panel.
+    ///
+    /// Asserted by carving the *same* duct at several deliberately un-aligned offsets and
+    /// requiring every face's UVs to span exactly one whole texture, which is what
+    /// "aligned" means for this art.
+    #[test]
+    fn duct_panels_align_wherever_the_duct_is_cut() {
+        use engine::render::textures::{schemes, vent_scheme};
+        let repeat = schemes()[vent_scheme()].zones[0].expect("vent zone 0").repeat;
+
+        // Offsets chosen to be non-multiples of the bore, which is exactly the case that
+        // used to drift.
+        for off in [0.0f32, 1.0, 2.0, 3.0, 5.0, 7.0] {
+            // A solid block with the duct bored **through** it, so all six duct faces
+            // are real surfaces. (Subtracting a duct from a room's air produces no
+            // geometry at all — the first version of this test did that and measured
+            // nothing.)
+            let mut region = Region::new(0);
+            region
+                .brushes
+                .push(Brush::new(1, Op::Add, 0.0, 0.0, 0.0, 40.0, 24.0, 40.0));
+            let mut duct = Brush::new(2, Op::Subtract, 8.0 + off, 4.0 + off, 8.0 + off,
+                                      VENT_BORE, VENT_BORE, VENT_BORE);
+            duct.vent = true;
+            duct.floor_y = 4.0 + off;
+            duct.scheme = vent_scheme();
+            region.brushes.push(duct);
+
+            let tex = region.evaluate_textured();
+            // Every triangle the duct owns must have UVs that, once scaled by `repeat`,
+            // land inside a single 0..1 tile — i.e. one whole panel per face.
+            let mut checked = 0;
+            for g in &tex.groups {
+                if g.scheme as usize != vent_scheme() {
+                    continue;
+                }
+                for i in g.start..g.start + g.count {
+                    let uv = tex.vertices[i as usize].uv;
+                    for c in 0..2 {
+                        let t = uv[c] * repeat;
+                        assert!(
+                            t >= -1e-3 && t <= 1.0 + 1e-3,
+                            "offset {off}: a duct vertex sits at {t:.3} tiles on axis {c}                              — the panel border is running across the face"
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+            assert!(checked > 0, "offset {off}: the duct produced no textured geometry");
+        }
+    }
+
     /// A look direction becomes the nearest axis, and ties do not produce a zero vector.
     #[test]
     fn look_direction_snaps_to_an_axis() {
