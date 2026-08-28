@@ -121,6 +121,9 @@ impl World {
     }
 
     /// Recompute the ghost and return it as a preview mesh.
+    ///
+    /// Drawn from [`ladder_boxes`] — the same rails and rungs the level will actually
+    /// get — rather than from the climb volume, so what you line up is what you place.
     pub fn update_ladder_preview(&mut self) -> Option<CpuMesh> {
         if !self.ladder_tool {
             return None;
@@ -128,15 +131,21 @@ impl World {
         self.ladder_preview = self.resolve_ladder_placement();
         let (pos, yaw) = self.ladder_preview?;
         let l = Ladder { height: self.ladder_height, ..Ladder::default() };
-        let (min, max) = ladder_volume(pos, yaw, &l);
-        Some(crate::world::geom::boxes_mesh(&[[
-            min.x / WORLD_SCALE,
-            min.y / WORLD_SCALE,
-            min.z / WORLD_SCALE,
-            (max.x - min.x) / WORLD_SCALE,
-            (max.y - min.y) / WORLD_SCALE,
-            (max.z - min.z) / WORLD_SCALE,
-        ]]))
+        let s = WORLD_SCALE;
+        let boxes: Vec<[f32; 6]> = ladder_boxes(pos, yaw, &l)
+            .into_iter()
+            .map(|(min, max)| {
+                [
+                    min.x / s,
+                    min.y / s,
+                    min.z / s,
+                    (max.x - min.x) / s,
+                    (max.y - min.y) / s,
+                    (max.z - min.z) / s,
+                ]
+            })
+            .collect();
+        Some(crate::world::geom::boxes_mesh(&boxes))
     }
 
     /// Place the previewed ladder (left-click).
@@ -273,26 +282,8 @@ impl World {
         let scheme = engine::render::textures::ladder_scheme();
         for (t, l) in self.ecs.world().query::<(&Transform, &Ladder)>().iter() {
             let yaw = t.rot.to_euler(EulerRot::YXZ).0;
-            let (sn, cs) = yaw.sin_cos();
-            let out = Vec3::new(sn, 0.0, cs);
-            let across = if out.x.abs() > out.z.abs() { Vec3::Z } else { Vec3::X };
-            let half = across * (l.width * 0.5);
-            // Stand the rails off the wall so they do not z-fight the face behind them.
-            let face = t.pos + out * RAIL_STANDOFF;
-            let thick = across.abs() * RAIL_HALF + out.abs() * RAIL_HALF;
-
-            // Two side rails, running the authored height.
-            for side in [-1.0f32, 1.0] {
-                let c = face + half * side;
-                emit_metal_box(b, c - thick, c + thick + Vec3::Y * l.height, scheme);
-            }
-            // Rungs between them.
-            let mut y = RUNG_SPACING * 0.5;
-            while y < l.height {
-                let c = face + Vec3::Y * y;
-                let ext = half.abs() + out.abs() * RUNG_HALF + Vec3::Y * RUNG_HALF;
-                emit_metal_box(b, c - ext, c + ext, scheme);
-                y += RUNG_SPACING;
+            for (min, max) in ladder_boxes(t.pos, yaw, l) {
+                emit_metal_box(b, min, max, scheme);
             }
         }
     }
@@ -330,6 +321,39 @@ fn emit_metal_box(b: &mut ZonedBuilder, min: Vec3, max: Vec3, scheme: usize) {
             0,
         );
     }
+}
+
+/// The ladder's actual **drawn** parts — two side rails and the rungs between them — as
+/// world-metre AABBs.
+///
+/// One function, used by three callers that must agree: the textured structure geometry,
+/// the BUILD ghost, and the tests. They were two copies before, which is why the ghost
+/// showed something the ladder was not: it drew the *climb volume*, which is deliberately
+/// half a metre taller than the rails (the top-out overshoot) and 0.6 m deep (the grab
+/// margin). Both of those are correct for a trigger volume and wrong as a picture of the
+/// object, and nothing was keeping them in step.
+pub(crate) fn ladder_boxes(pos: Vec3, yaw: f32, l: &Ladder) -> Vec<(Vec3, Vec3)> {
+    let (sn, cs) = yaw.sin_cos();
+    let out = Vec3::new(sn, 0.0, cs);
+    let across = if out.x.abs() > out.z.abs() { Vec3::Z } else { Vec3::X };
+    let half = across * (l.width * 0.5);
+    let face = pos + out * RAIL_STANDOFF;
+    let thick = across.abs() * RAIL_HALF + out.abs() * RAIL_HALF;
+
+    let mut boxes = Vec::new();
+    for side in [-1.0f32, 1.0] {
+        let c = face + half * side;
+        let (a, b) = (c - thick, c + thick + Vec3::Y * l.height);
+        boxes.push((a.min(b), a.max(b)));
+    }
+    let mut y = RUNG_SPACING * 0.5;
+    while y < l.height {
+        let c = face + Vec3::Y * y;
+        let ext = half.abs() + out.abs() * RUNG_HALF + Vec3::Y * RUNG_HALF;
+        boxes.push((c - ext, c + ext));
+        y += RUNG_SPACING;
+    }
+    boxes
 }
 
 /// The climb volume for a ladder at `pos` facing `yaw`: a box spanning the ladder's
@@ -639,6 +663,62 @@ mod tests {
         // Two rails plus rungs, six quads each: comfortably more than a single quad,
         // which is what a decal would have been.
         assert!(tris >= 24, "rails and rungs, not a flat decal - got {tris} triangles");
+    }
+
+    /// **The ghost is the ladder**, not the trigger volume around it.
+    ///
+    /// The climb volume is deliberately bigger than the object: half a metre taller for
+    /// the top-out overshoot, and 0.6 m deep so you can grab it slightly off the face.
+    /// Both are right for a volume and wrong as a preview, and previewing the volume is
+    /// what made the placed ladder come out shorter than the ghost promised.
+    ///
+    /// Asserted against the geometry the level actually gets, not against numbers
+    /// restated here, so the two cannot drift apart again.
+    #[test]
+    fn the_ghost_matches_the_geometry_it_places() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.camera.pos = Vec3::new(3.0, 0.9, 3.0);
+        world.camera.yaw = std::f32::consts::PI;
+        world.camera.pitch = 0.0;
+        world.ladder_tool_key();
+        world.adjust_ladder_height(4.0); // 3.0 -> 5.0 m, so height is not the default
+
+        let ghost = world.update_ladder_preview().expect("previews on the wall");
+        let (pos, yaw) = world.ladder_preview.expect("a placement resolved");
+        let h = world.ladder_height();
+
+        // The parts the ghost should be drawing.
+        let parts = ladder_boxes(pos, yaw, &Ladder { height: h, ..Ladder::default() });
+        let lo = parts.iter().fold(Vec3::splat(f32::INFINITY), |a, (m, _)| a.min(*m));
+        let hi = parts.iter().fold(Vec3::splat(f32::NEG_INFINITY), |a, (_, m)| a.max(*m));
+
+        // The ghost's own bounds, read back off the mesh it produced.
+        assert!(!ghost.vertices.is_empty(), "the ghost has geometry");
+        let mut gl = Vec3::splat(f32::INFINITY);
+        let mut gh = Vec3::splat(f32::NEG_INFINITY);
+        for v in &ghost.vertices {
+            let p = Vec3::from(v.pos);
+            gl = gl.min(p);
+            gh = gh.max(p);
+        }
+        assert!(
+            (gl - lo).abs().max_element() < 1e-3 && (gh - hi).abs().max_element() < 1e-3,
+            "ghost spans {gl:?}..{gh:?} but the ladder is {lo:?}..{hi:?}"
+        );
+
+        // And specifically: it is the ladder's height, NOT the climb volume's.
+        let (vmin, vmax) = ladder_volume(pos, yaw, &Ladder { height: h, ..Ladder::default() });
+        assert!(
+            (gh.y - gl.y - h).abs() < 1e-3,
+            "the ghost is {:.2} m tall; the ladder is {h:.2} m",
+            gh.y - gl.y
+        );
+        assert!(
+            vmax.y - vmin.y > gh.y - gl.y + 0.4,
+            "sanity: the climb volume really is the taller of the two, so this test \
+             would have caught the old ghost"
+        );
     }
 
     /// Ladders go on walls. A floor or ceiling pick is refused rather than silently
