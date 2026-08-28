@@ -167,10 +167,14 @@ impl World {
                 if self.round_over.is_some() {
                     return;
                 }
+                // The authored round clock. Before the death-beat return, so a
+                // deathmatch timer keeps running while you wait to come back — which is
+                // what a round timer means. No-op when no limit is authored.
+                self.round_clock_step(dt);
                 // Player dead → the world freezes for the death beat, but the respawn
                 // clocks keep running so the player (and any dead hunter) still comes
                 // back. This *is* the beat the auto-respawn was chosen for: it lasts
-                // exactly [`RESPAWN_DELAY`], not until a keypress.
+                // exactly the authored respawn delay, not until a keypress.
                 if self.player_dead {
                     self.respawn_step(dt);
                     return;
@@ -713,6 +717,11 @@ impl World {
                 self.selected = None; // clear any authoring selection
                 self.caught = false;
                 self.reset_scores();
+                // **What kind of hunt this is** — the level's own authored setup (the
+                // PLAY tab), applied before anything reads it: the wave size and body
+                // set have to be right before `spawn_wave`, and the starting health
+                // before the player enters. See `world::play_config`.
+                self.apply_play_config();
 
                 // Bake the nav grid from the frozen geometry (once), build the spawn
                 // pool from it, then enter the player and flood the wave in.
@@ -773,10 +782,11 @@ impl World {
                 // runtime countdown cleared. Cheap, and it means a hunt never starts
                 // with a pickup that a previous hunt already took.
                 self.spawn_pickups();
-                // A level with no guns on the floor can't be played empty-handed, so
-                // the player gets the old starting sidearm instead. No-op on a level
-                // that authors pickups. See `grant_fallback_sidearm`.
-                self.grant_fallback_sidearm();
+                // The player's starting guns: the authored loadout, or the level's own
+                // armoury (a fallback sidearm when it puts no guns on the floor), or
+                // deliberately nothing. After `spawn_pickups`, because "what did the
+                // level author?" is a question about what is now on the floor.
+                self.apply_start_loadout();
                 // Attach the doors to the nav overlay. After the grid bake on purpose:
                 // the overlay rides the *frozen* grid and is read live, which is what
                 // lets a door open mid-hunt and reroute hunters with no re-bake.
@@ -840,7 +850,11 @@ impl World {
     ///
     /// Also records `hunt_spawn`, the pose a difficulty-change reset returns to.
     fn enter_player(&mut self, cam_feet: Vec3) {
-        let (feet, yaw, pitch) = match (self.spawn_pad_count() > 0)
+        // `entry_uses_pads` folds PD's own guard together with the authored entry
+        // mode: pads if the level has any AND the author did not ask to enter under the
+        // camera instead (`EntryMode::Camera`, the debug entry).
+        let (feet, yaw, pitch) = match self
+            .entry_uses_pads()
             .then(|| self.choose_spawn_pad(Spawning::Player))
             .flatten()
         {
@@ -1086,7 +1100,23 @@ impl World {
         // Drawn from the LIVE arsenal: the GoldenEye roster's weapons do not exist
         // under `ARSENAL=pd`, and a name that does not resolve means a hunter with
         // no gun mesh at all.
-        let roster = crate::world::enemy_roster_for(self.arsenal);
+        let mut roster = crate::world::enemy_roster_for(self.arsenal);
+        // `HunterWeapon::Fixed` collapses the roster to one gun, single-wielded — the way
+        // to judge one weapon without the roster's variety in the way. A name the live
+        // arsenal does not carry leaves the roster alone and says so, rather than
+        // silently arming the pack with something else.
+        if let crate::world::HunterWeapon::Fixed(name) = self.hunter_weapon_policy().clone() {
+            match self.arsenal.weapons().iter().find(|w| w.name == name) {
+                Some(w) => {
+                    log::info!("every hunter carries the {name}");
+                    roster = vec![(*w, false)];
+                }
+                None => log::warn!(
+                    "the level asks every hunter to carry {name:?}, which this arsenal \
+                     does not have — keeping the roster mix"
+                ),
+            }
+        }
         // Empty-handed only where there is something to find — see
         // `hunters_start_unarmed`. Resolved once for the wave rather than per hunter.
         let unarmed_hunters = self.hunters_start_unarmed();

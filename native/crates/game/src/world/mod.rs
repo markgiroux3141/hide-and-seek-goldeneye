@@ -61,6 +61,9 @@ pub mod pd_lab;
 /// `pub(crate)` so the app can ask whether a quick-slot has a file — the radial's
 /// Level ring says "Load 3" vs "Slot 3", which needs the path.
 pub(crate) mod persist;
+/// The authored per-level match setup the `G` transition reads (the PLAY panel tab).
+pub mod play_config;
+pub use play_config::{EntryMode, HunterWeapon, LoadoutMode, LoadoutSlot, PlayConfig};
 mod pick;
 mod regions;
 mod respawn;
@@ -741,7 +744,9 @@ pub(crate) const PD_BODY_CATALOG: &[(&str, &str)] = &[
 /// Perfect Dark's animations. The narrower sets exist because the two families still look
 /// completely different, and because a checkout without the PD export has to degrade to
 /// GoldenEye rather than to an empty hunt.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(
+    Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize,
+)]
 pub enum BodySet {
     #[default]
     All,
@@ -2325,6 +2330,19 @@ pub struct World {
     /// Latched once a side reaches [`Self::score_limit`]; `None` while the round is live.
     /// Freezes the sim behind the round-over screen (`R` starts the next round).
     round_over: Option<RoundOutcome>,
+    /// Seconds elapsed in the live round, for the authored time limit
+    /// ([`PlayConfig::time_limit_min`]). Reset at `G` and by a round restart; only
+    /// advanced while the round is live, so the death beat and the result screen do not
+    /// burn clock. Ignored entirely when no limit is authored.
+    round_clock: f32,
+    /// **The authored match setup this level ships with** — what `G` reads instead of
+    /// whatever the session was carrying. Saved in the level file; edited in the PLAY
+    /// tab of the `O` panel. See [`play_config`].
+    play: PlayConfig,
+    /// Which of [`Self::play`]'s fields an explicit override has claimed, so applying the
+    /// config cannot silently undo a `set_wave_size` call, an `AI=pd` launch, or a live
+    /// press of `I`. See [`play_config::PlayPins`].
+    pins: play_config::PlayPins,
     /// Counts down from [`RESPAWN_DELAY`] while the player is dead; at 0 the player
     /// respawns from the pool. The death beat, not a game-over.
     player_respawn: f32,
@@ -2982,6 +3000,9 @@ impl World {
             hunter_scores: Vec::new(),
             score_limit: SCORE_LIMIT,
             round_over: None,
+            round_clock: 0.0,
+            play: PlayConfig::default(),
+            pins: play_config::PlayPins::default(),
             player_respawn: 0.0,
             spawn_pads: Vec::new(),
             spawn_point: SPAWN_MARKER_POS,
@@ -3091,6 +3112,8 @@ impl World {
     /// restarting the duel if mid-HUNT. Used to pin a fixed level at startup so the dial
     /// doesn't have to be managed by hand; the `=`/`-` keys still nudge it after.
     pub fn set_difficulty(&mut self, level: u32) {
+        // An explicit override outranks the level's authored config (see `PlayPins`).
+        self.pins.difficulty = true;
         let new = level.min(DIFFICULTY_MAX);
         if new == self.difficulty {
             return;
@@ -3103,6 +3126,8 @@ impl World {
     /// Set how many hunters the next HUNT spawns (default 1 — "duel mode"). Dev/test
     /// knob; tests bump it to exercise multi-hunter separation/squad behaviour.
     pub fn set_wave_size(&mut self, n: usize) {
+        // An explicit override outranks the level's authored config (see `PlayPins`).
+        self.pins.wave = true;
         self.wave_size = n.clamp(1, WAVE_SIZE_MAX);
     }
 
@@ -3121,6 +3146,8 @@ impl World {
     /// in seconds and in minutes. Mirrors [`Self::change_difficulty`], which restarts the
     /// duel for the same reason.
     pub fn change_wave_size(&mut self, delta: i32) {
+        // An explicit override outranks the level's authored config (see `PlayPins`).
+        self.pins.wave = true;
         let new = (self.wave_size as i32 + delta).clamp(1, WAVE_SIZE_MAX as i32) as usize;
         if new == self.wave_size {
             return; // already at the floor/ceiling
@@ -3239,6 +3266,12 @@ impl World {
     /// Dark body**, animated by [`PD_TEMPLATE_CLIPS`]. Also sets the wave size, since
     /// the lab is about watching one bot at a time.
     pub fn enable_pd_lab(&mut self, cfg: pd_lab::PdLabConfig) {
+        // Turning the lab on is an explicit instruction about the wave and the bodies, so
+        // it claims both fields: the open level's authored PLAY config must not quietly
+        // put GoldenEye bodies back at `G`. (`BODIES=`/`--wave` still win — the app and
+        // the tests apply those *after* this, and the setters re-claim the field.)
+        self.pins.wave = true;
+        self.pins.bodies = true;
         self.wave_size = cfg.count.max(1);
         self.pd = cfg.into();
         self.pd_lab = true;
@@ -3291,6 +3324,8 @@ impl World {
     /// Narrow which bodies a wave draws from (default [`BodySet::All`]). Takes effect on
     /// the next wave, so call it before `toggle_mode`. Set from `BODIES=ge|pd` at boot.
     pub fn set_body_set(&mut self, s: BodySet) {
+        // An explicit override outranks the level's authored config (see `PlayPins`).
+        self.pins.bodies = true;
         self.body_set = s;
     }
 
@@ -3556,6 +3591,17 @@ impl World {
         self.ai_mode = mode;
     }
 
+    /// Set the engagement model **and claim the field** — for an explicit `AI=pd|ours`
+    /// at launch, which outranks whatever the open level authored.
+    ///
+    /// Deliberately separate from [`Self::set_ai_mode`]: the app calls that one
+    /// unconditionally at boot (to log the resolved model), so pinning inside it would
+    /// mean a level's authored AI choice could never take effect at all.
+    pub fn pin_ai_mode(&mut self, mode: crate::enemy::AiMode) {
+        self.pins.ai = true;
+        self.set_ai_mode(mode);
+    }
+
     /// Which engagement model the hunters are running.
     pub fn ai_mode(&self) -> crate::enemy::AiMode {
         self.ai_mode
@@ -3567,6 +3613,8 @@ impl World {
     /// enemy respawned with the new lethality/health/evasion. In BUILD there's no live
     /// sim, so it just updates the dial for the next hunt. Logged for the console too.
     pub fn change_difficulty(&mut self, delta: i32) {
+        // An explicit override outranks the level's authored config (see `PlayPins`).
+        self.pins.difficulty = true;
         let new = (self.difficulty as i32 + delta).clamp(0, DIFFICULTY_MAX as i32) as u32;
         if new == self.difficulty {
             return; // already at the floor/ceiling — nothing to change or reset
@@ -3580,6 +3628,8 @@ impl World {
     /// = hunts start with no hunters, so you can test explosives without being shot.
     /// On by default; the app turns it off while iterating on explosives.
     pub fn set_spawn_enemies(&mut self, on: bool) {
+        // An explicit override outranks the level's authored config (see `PlayPins`).
+        self.pins.wave = true;
         self.spawn_enemies = on;
     }
 

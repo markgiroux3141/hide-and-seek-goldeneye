@@ -101,6 +101,8 @@ impl World {
     /// Override the score limit (0 = endless). Used by the launcher env override and by
     /// tests that want a round to end in a couple of kills.
     pub fn set_score_limit(&mut self, limit: u32) {
+        // An explicit override outranks the level's authored config (see `PlayPins`).
+        self.pins.score_limit = true;
         self.score_limit = limit;
     }
 

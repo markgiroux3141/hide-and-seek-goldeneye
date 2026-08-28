@@ -105,6 +105,17 @@ struct LevelFile {
     /// files load with none bound and fall through to the manifest's own keys.
     #[serde(default)]
     theme_hotkeys: std::collections::BTreeMap<char, String>,
+    /// **How a hunt on this level starts** — the PLAY tab's authored match setup
+    /// (`world::play_config`).
+    ///
+    /// `Option`, not a plain `#[serde(default)]` [`crate::world::PlayConfig`], and the
+    /// distinction is load-bearing: `None` means the file predates the PLAY tab and has
+    /// *said nothing*, so the load leaves the session's current config alone (which for
+    /// the app is the boot default it installed). Defaulting the field instead would have
+    /// every pre-existing level silently reset the wave to the headless default of one
+    /// hunter the moment it was opened.
+    #[serde(default)]
+    play: Option<crate::world::PlayConfig>,
     next_brush_id: u32,
     next_platform_id: u32,
     next_run_id: u32,
@@ -461,6 +472,7 @@ impl World {
             entities: self.ecs.save_authored(),
             ambient: self.ambient,
             theme_hotkeys: self.theme_hotkeys.clone(),
+            play: Some(self.play.clone()),
             next_brush_id: self.next_brush_id,
             next_platform_id: self.next_platform_id,
             next_run_id: self.next_run_id,
@@ -550,6 +562,9 @@ impl World {
             // A generated level starts with no quick keys bound; the digits fall
             // through to the manifest's own defaults until an author binds them.
             theme_hotkeys: std::collections::BTreeMap::new(),
+            // …and says nothing about the match setup, so whatever the caller has
+            // configured (the app's boot default, a test's explicit setup) stands.
+            play: None,
             next_brush_id: built.next_brush_id,
             next_platform_id: built.next_platform_id,
             next_run_id: built.next_run_id,
@@ -591,6 +606,11 @@ impl World {
         self.ambient = file.ambient;
         self.theme_hotkeys = file.theme_hotkeys.clone();
         self.level_name = file.name.clone();
+        // Only when the file actually carries one — see the field's docs for why the
+        // absent case must not fall through to `PlayConfig::default`.
+        if let Some(play) = file.play.clone() {
+            self.set_play_config_default(play);
+        }
 
         // Restore allocators, but never below one-past the max id actually
         // present — a hand-edited file with a stale counter can't then hand out

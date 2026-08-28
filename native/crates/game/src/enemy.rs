@@ -65,7 +65,7 @@ use crate::pdsim::distmode::{DistBand, DistMode, DistModeState};
 /// deliberate choice and not an oversight: it always knows where you are and walks the
 /// shortest path to your live position. That is what Perfect Dark's bots do, and
 /// seeing how it feels against ours is the entire reason the switch exists.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AiMode {
     /// Our handcrafted hunter (the default, and the shipping behaviour).
     Ours,

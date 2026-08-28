@@ -56,6 +56,9 @@ enum ShopAction {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PanelTab {
     Objects,
+    /// The match setup a hunt starts from — what `G` reads. See
+    /// [`crate::world::play_config`].
+    Play,
     Lighting,
     Spawns,
     Textures,
@@ -65,8 +68,9 @@ pub(crate) enum PanelTab {
 
 impl PanelTab {
     /// Every tab, in display order (also the cycle order).
-    pub(crate) const ALL: [PanelTab; 6] = [
+    pub(crate) const ALL: [PanelTab; 7] = [
         PanelTab::Objects,
+        PanelTab::Play,
         PanelTab::Lighting,
         PanelTab::Spawns,
         PanelTab::Textures,
@@ -78,6 +82,7 @@ impl PanelTab {
     pub(crate) fn title(self) -> &'static str {
         match self {
             PanelTab::Objects => "OBJECTS",
+            PanelTab::Play => "PLAY",
             PanelTab::Lighting => "LIGHTING",
             PanelTab::Spawns => "SPAWNS",
             PanelTab::Textures => "TEXTURES",
@@ -1436,6 +1441,21 @@ impl App {
         let level_confirm = self.level_confirm_delete.clone();
         let mut level_name_ui = self.level_name_draft.clone();
 
+        // PLAY tab snapshot + edit buffer. Cloned only while the tab is showing (it
+        // holds a `Vec<LoadoutSlot>`), edited by value, written back after the `state`
+        // borrow ends — the same discipline as the light and door editors.
+        let play_showing = self.props_open && self.panel_tab == PanelTab::Play;
+        let mut play_ui = self
+            .world
+            .as_ref()
+            .filter(|_| play_showing)
+            .map(|w| w.play_config().clone())
+            .unwrap_or_default();
+        let play_ctx_pins = self.world.as_ref().map(|w| w.play_pins()).unwrap_or_default();
+        let play_in_hunt = self.world.as_ref().is_some_and(|w| !w.is_build());
+        let mut play_changed = false;
+        let mut play_start = false;
+
         let mut nav_overlay_ui = self.world.as_ref().is_some_and(|w| w.nav_overlay_on());
         let mut nav_calculate = false;
         let mut nav_toggle_overlay = false;
@@ -1876,6 +1896,20 @@ impl App {
 
                         // ── Per-tab content.
                         match panel_tab {
+                            PanelTab::Play if play_showing => {
+                                // The loadout combo lists the same guns a pickup can
+                                // name: the live arsenal minus the empty-handed slot.
+                                let ctx = PlayTabCtx {
+                                    pins: play_ctx_pins,
+                                    pads: spawn_pad_count,
+                                    weapons: &pickup_weapons,
+                                    in_hunt: play_in_hunt,
+                                };
+                                let (ch, st) = play_tab_ui(ui, &mut play_ui, &ctx);
+                                play_changed |= ch;
+                                play_start |= st;
+                            }
+                            PanelTab::Play => {}
                             PanelTab::Lighting => {
                                 if ui
                                     .selectable_label(placing_light, "+ Place Point Light")
@@ -3292,11 +3326,423 @@ impl App {
                 world.set_selected_light(light_color, light_intensity, light_range);
             }
         }
+        // PLAY tab. The config write comes first on purpose: clicking START in the
+        // same frame as an edit must enter the hunt with the edit, not without it.
+        if play_changed {
+            if let Some(world) = self.world.as_mut() {
+                world.set_play_config(play_ui);
+            }
+        }
+        if play_start {
+            // The panel is an authoring surface and the pointer is unlocked behind it, so
+            // it comes down on the way into the hunt — pressing G with it open does the
+            // same via `toggle_props`.
+            if self.props_open {
+                self.toggle_props();
+            }
+            self.apply(EditorAction::EnterHunt);
+        }
         if close_props {
             self.toggle_props();
         }
         Some(frame)
     }
+}
+
+/// **The PLAY tab** — the authored match setup a hunt starts from.
+///
+/// Edits `cfg` in place and returns `(changed, start_hunt)`. Split out of the panel's
+/// per-tab `match` for the same reason [`pickup_settings_ui`] is: the arm would
+/// otherwise be four hundred lines inside an already-large closure.
+///
+/// A control whose field an explicit override has claimed ([`PlayPins`]) is drawn
+/// **disabled with the reason on hover**, rather than live-but-ignored. A checkbox that
+/// silently does nothing is the worst of the three options.
+fn play_tab_ui(
+    ui: &mut egui::Ui,
+    cfg: &mut crate::world::PlayConfig,
+    ctx: &PlayTabCtx,
+) -> (bool, bool) {
+    use crate::world::play_config::{EntryMode, HunterWeapon, LoadoutMode, LoadoutSlot};
+
+    let mut changed = false;
+    let mut start = false;
+
+    // ── The button this tab exists for. `G` still does exactly this.
+    let label = if ctx.in_hunt { "\u{25a0} RETURN TO BUILD" } else { "\u{25b6} START HUNT" };
+    if ui
+        .add_sized(
+            [200.0, 32.0],
+            egui::Button::new(
+                egui::RichText::new(label).color(egui::Color32::BLACK).strong(),
+            )
+            .fill(SHOP_GOLD),
+        )
+        .on_hover_text("G \u{2014} the key still works, and reads everything below")
+        .clicked()
+    {
+        start = true;
+    }
+    ui.label(egui::RichText::new(cfg.summary()).small().color(SHOP_GOLD_DIM));
+    ui.label(
+        egui::RichText::new(
+            "Saved with the level, so a level opens with the fight it was designed for.",
+        )
+        .small()
+        .color(SHOP_DIM),
+    );
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.set_width(206.0);
+
+        // ── ENTRY ────────────────────────────────────────────────────────────
+        play_section(ui, "WHERE YOU COME IN");
+        for mode in [EntryMode::Pads, EntryMode::Camera] {
+            if ui
+                .selectable_label(cfg.entry == mode, mode.label())
+                .on_hover_text(match mode {
+                    EntryMode::Pads => {
+                        "The pads placed in the SPAWNS tab, chosen by Perfect Dark's own \
+                         rule. Falls back to the camera when the level has none."
+                    }
+                    EntryMode::Camera => {
+                        "Drop in under the fly-cam, wherever you are looking. For testing \
+                         one corner of a big level, or a level with no pads yet."
+                    }
+                })
+                .clicked()
+                && cfg.entry != mode
+            {
+                cfg.entry = mode;
+                changed = true;
+            }
+        }
+        if cfg.entry == EntryMode::Pads {
+            let (text, col) = match ctx.pads {
+                0 => (
+                    "no pads authored \u{2014} you will enter under the camera".to_string(),
+                    SHOP_GOLD,
+                ),
+                n => (format!("{n} pad(s) authored"), NAV_OK),
+            };
+            ui.label(egui::RichText::new(text).small().color(col));
+        }
+
+        // ── PLAYER LOADOUT ───────────────────────────────────────────────────
+        play_section(ui, "WHAT YOU CARRY");
+        for mode in [LoadoutMode::Level, LoadoutMode::Custom, LoadoutMode::Empty] {
+            if ui
+                .selectable_label(cfg.loadout == mode, mode.label())
+                .on_hover_text(match mode {
+                    LoadoutMode::Level => {
+                        "The guns on the floor are the armoury. A level that places none \
+                         hands you the starting sidearm instead."
+                    }
+                    LoadoutMode::Custom => {
+                        "Start with exactly the guns listed below \u{2014} the inventory is \
+                         stripped first, so shop purchases do not add themselves."
+                    }
+                    LoadoutMode::Empty => {
+                        "Empty-handed, with no safety-net sidearm \u{2014} even on a level \
+                         with no guns to find."
+                    }
+                })
+                .clicked()
+                && cfg.loadout != mode
+            {
+                cfg.loadout = mode;
+                changed = true;
+            }
+        }
+        if cfg.loadout == LoadoutMode::Custom {
+            ui.add_space(2.0);
+            let mut remove: Option<usize> = None;
+            let mut equip: Option<usize> = None;
+            for (i, slot) in cfg.weapons.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    // The radio is which gun is in hand at G.
+                    if ui
+                        .radio(slot.equipped, "")
+                        .on_hover_text("in your hands when the hunt starts")
+                        .clicked()
+                    {
+                        equip = Some(i);
+                    }
+                    ui.label(
+                        egui::RichText::new(&slot.weapon)
+                            .color(if slot.equipped { SHOP_GOLD } else { egui::Color32::GRAY }),
+                    );
+                    if ui
+                        .small_button("\u{2715}")
+                        .on_hover_text("drop from the loadout")
+                        .clicked()
+                    {
+                        remove = Some(i);
+                    }
+                });
+                if ui
+                    .add(egui::Slider::new(&mut slot.spare_mags, 0..=20).text("spare mags"))
+                    .on_hover_text(
+                        "Magazines in reserve on top of the full one in the gun. 0 means \
+                         one magazine and no refills.",
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+            }
+            if let Some(i) = equip {
+                for (k, s) in cfg.weapons.iter_mut().enumerate() {
+                    s.equipped = k == i;
+                }
+                changed = true;
+            }
+            if let Some(i) = remove {
+                cfg.weapons.remove(i);
+                changed = true;
+            }
+            // Add a gun. Only ones not already listed — a duplicate slot would just
+            // stock the same weapon twice, which is what the spare-mags slider is for.
+            let addable: Vec<&'static str> = ctx
+                .weapons
+                .iter()
+                .copied()
+                .filter(|n| !cfg.weapons.iter().any(|s| s.weapon == *n))
+                .collect();
+            egui::ComboBox::from_id_salt("play_add_gun")
+                .selected_text("+ add a gun")
+                .width(190.0)
+                .show_ui(ui, |ui| {
+                    for name in addable {
+                        if ui.selectable_label(false, name).clicked() {
+                            cfg.weapons.push(LoadoutSlot::new(name));
+                            changed = true;
+                        }
+                    }
+                });
+            if cfg.weapons.is_empty() {
+                ui.label(
+                    egui::RichText::new(
+                        "nothing listed \u{2014} the level's own armoury will be used instead",
+                    )
+                    .small()
+                    .color(SHOP_GOLD),
+                );
+            }
+        }
+        ui.add_space(2.0);
+        if ui
+            .add(egui::Slider::new(&mut cfg.health, 1.0..=100.0).text("start health"))
+            .changed()
+        {
+            changed = true;
+        }
+        if ui
+            .add(egui::Slider::new(&mut cfg.armor, 0.0..=100.0).text("start armour"))
+            .changed()
+        {
+            changed = true;
+        }
+
+        // ── OPPOSITION ───────────────────────────────────────────────────────
+        play_section(ui, "WHO IS HUNTING YOU");
+        ui.add_enabled_ui(!ctx.pins.wave, |ui| {
+            let r = ui
+                .add(
+                    egui::Slider::new(&mut cfg.enemy_count, 0..=crate::world::WAVE_SIZE_MAX)
+                        .text("hunters"),
+                )
+                .on_hover_text("0 spawns none \u{2014} an empty level to walk and light");
+            if r.changed() {
+                changed = true;
+            }
+        });
+        play_pin_note(ui, ctx.pins.wave, "hunter count");
+        ui.add_enabled_ui(!ctx.pins.difficulty, |ui| {
+            let r = ui
+                .add(
+                    egui::Slider::new(&mut cfg.difficulty, 0..=crate::world::DIFFICULTY_MAX)
+                        .text("difficulty"),
+                )
+                .on_hover_text(
+                    "The same dial the = / - keys sweep. 0 is the original baseline; the \
+                     top is Perfect Dark's DarkSim \u{2014} no reaction delay, no aim error.",
+                );
+            if r.changed() {
+                changed = true;
+            }
+        });
+        play_pin_note(ui, ctx.pins.difficulty, "difficulty");
+
+        // ── AI + BODIES ──────────────────────────────────────────────────────
+        play_section(ui, "HOW THEY THINK");
+        ui.add_enabled_ui(!ctx.pins.ai, |ui| {
+            ui.horizontal(|ui| {
+                for m in [crate::enemy::AiMode::Ours, crate::enemy::AiMode::Pd] {
+                    let label = if m == crate::enemy::AiMode::Ours { "Ours" } else { "Perfect Dark" };
+                    if ui
+                        .selectable_label(cfg.ai == m, label)
+                        .on_hover_text(m.summary())
+                        .clicked()
+                        && cfg.ai != m
+                    {
+                        cfg.ai = m;
+                        changed = true;
+                    }
+                }
+            });
+        });
+        play_pin_note(ui, ctx.pins.ai, "AI model");
+        ui.add_enabled_ui(!ctx.pins.bodies, |ui| {
+            ui.horizontal(|ui| {
+                for (b, label) in [
+                    (crate::world::BodySet::All, "Both"),
+                    (crate::world::BodySet::GoldenEye, "GoldenEye"),
+                    (crate::world::BodySet::PerfectDark, "PD"),
+                ] {
+                    if ui
+                        .selectable_label(cfg.bodies == b, label)
+                        .on_hover_text("which character models the wave draws from")
+                        .clicked()
+                        && cfg.bodies != b
+                    {
+                        cfg.bodies = b;
+                        changed = true;
+                    }
+                }
+            });
+        });
+        play_pin_note(ui, ctx.pins.bodies, "bodies");
+        // What they carry: the two policies, then the whole arsenal as "this one gun".
+        let current = cfg.hunter_weapon.label().to_string();
+        egui::ComboBox::from_id_salt("play_hunter_weapon")
+            .selected_text(current)
+            .width(190.0)
+            .show_ui(ui, |ui| {
+                for policy in [HunterWeapon::Loot, HunterWeapon::Roster] {
+                    if ui
+                        .selectable_label(cfg.hunter_weapon == policy, policy.label())
+                        .clicked()
+                        && cfg.hunter_weapon != policy
+                    {
+                        cfg.hunter_weapon = policy;
+                        changed = true;
+                    }
+                }
+                ui.separator();
+                for name in ctx.weapons.iter().copied() {
+                    let sel =
+                        matches!(&cfg.hunter_weapon, HunterWeapon::Fixed(n) if n.as_str() == name);
+                    if ui.selectable_label(sel, format!("all carry the {name}")).clicked() && !sel {
+                        cfg.hunter_weapon = HunterWeapon::Fixed(name.to_string());
+                        changed = true;
+                    }
+                }
+            });
+        ui.label(
+            egui::RichText::new(
+                "Loot = they start empty-handed and race you to the guns on the floor \
+                 (needs pickups placed).",
+            )
+            .small()
+            .color(SHOP_DIM),
+        );
+
+        // ── RULES ────────────────────────────────────────────────────────────
+        play_section(ui, "MATCH RULES");
+        if ui
+            .checkbox(&mut cfg.respawn, "Respawn after dying")
+            .on_hover_text(
+                "Off is one life each: you dying ends it, and so does the last hunter \
+                 falling. That is hide-and-seek rather than deathmatch.",
+            )
+            .changed()
+        {
+            changed = true;
+        }
+        ui.add_enabled_ui(cfg.respawn, |ui| {
+            if ui
+                .add(egui::Slider::new(&mut cfg.respawn_delay, 0.0..=10.0).text("delay s"))
+                .changed()
+            {
+                changed = true;
+            }
+        });
+        ui.add_enabled_ui(!ctx.pins.score_limit, |ui| {
+            let r = ui
+                .add(egui::Slider::new(&mut cfg.score_limit, 0..=50).text("kills to win"))
+                .on_hover_text("0 = endless, for an open-ended observation run");
+            if r.changed() {
+                changed = true;
+            }
+        });
+        play_pin_note(ui, ctx.pins.score_limit, "score limit");
+        if ui
+            .add(egui::Slider::new(&mut cfg.time_limit_min, 0.0..=30.0).text("minutes"))
+            .on_hover_text(
+                "0 = no limit. When time is up the side ahead on kills wins; a tie goes \
+                 to you, for having lasted the round.",
+            )
+            .changed()
+        {
+            changed = true;
+        }
+
+        // ── DEBUG ────────────────────────────────────────────────────────────
+        play_section(ui, "DEBUG");
+        ui.add_enabled_ui(!ctx.pins.cheats, |ui| {
+            if ui
+                .checkbox(&mut cfg.invincible, "Start invincible (I)")
+                .on_hover_text("Hunters still aim and fire; you just stop taking damage.")
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .checkbox(&mut cfg.invisible, "Start unseen (N)")
+                .on_hover_text(
+                    "No hunter can perceive you, so the pack drops to searching \u{2014} \
+                     the way to watch the AI work.",
+                )
+                .changed()
+            {
+                changed = true;
+            }
+        });
+        play_pin_note(ui, ctx.pins.cheats, "cheats");
+    });
+
+    (changed, start)
+}
+
+/// A small gold section heading inside the panel.
+fn play_section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new(title).small().strong().color(SHOP_GOLD_DIM));
+}
+
+/// The line under a control an explicit override has claimed, naming what is actually
+/// in force. Nothing at all when the field is free.
+fn play_pin_note(ui: &mut egui::Ui, pinned: bool, what: &str) {
+    if pinned {
+        ui.label(
+            egui::RichText::new(format!(
+                "{what} is set for this session (a launch flag or a key) \u{2014} that wins"
+            ))
+            .small()
+            .color(SHOP_GOLD),
+        );
+    }
+}
+
+/// What the PLAY tab needs to know about the world that is not in the config itself.
+struct PlayTabCtx<'a> {
+    pins: crate::world::play_config::PlayPins,
+    /// Authored spawn pads, so the entry section can warn about a pad-entry level with none.
+    pads: usize,
+    /// The live arsenal's gun names (no empty-handed slot).
+    weapons: &'a [&'static str],
+    in_hunt: bool,
 }
 
 /// The pickup settings block: which weapon, how much ammo, how long until it comes
@@ -3852,19 +4298,30 @@ impl ApplicationHandler for App {
 
         // Build the world, upload its initial region meshes.
         let mut world = World::new();
-        // Pin the difficulty dial at boot so it doesn't have to be managed by hand (the
-        // `=`/`-` keys still sweep it). **Not max any more:** the dial now selects a
-        // Perfect Dark zeroing tier rather than multiplying a hit probability, and max is
-        // DarkSim — no reaction delay, no aim error, kills on sight from across the room.
-        // `HUNT_TIER` is the position where the model is visible as behaviour.
-        world.set_difficulty(crate::world::pd_lab::dial_for_tier(
-            crate::world::pd_lab::HUNT_TIER,
-            crate::world::DIFFICULTY_MAX,
-        ));
-        // Restore a small pack at boot (the code default stays at duel = 1 so the
-        // duel-mode tests are unaffected) — the coordinated AI (flanking, squad
-        // suppression, cover) only reads with more than one hunter on the field.
-        world.set_wave_size(crate::world::PLAYTEST_WAVE_SIZE);
+        // ── The starting match setup (the PLAY tab's config) ──────────────────
+        //
+        // These two used to be `set_difficulty` / `set_wave_size` calls right here — a
+        // pair of invisible boot pins that no level could state and no player could see.
+        // They are the same two values, installed as the *default* PLAY config instead,
+        // so the panel shows them, a level can save its own, and `G` reads whatever the
+        // open level says. `set_play_config_default` rather than `set_play_config`: this
+        // is what a level starts as, not an edit, so it must not raise the unsaved marker.
+        //
+        // The difficulty is `HUNT_TIER`, not max: the dial selects a Perfect Dark zeroing
+        // tier rather than multiplying a hit probability, and max is DarkSim — no reaction
+        // delay, no aim error, kills on sight from across the room. The wave is a small
+        // pack, because the coordinated AI (flanking, squad suppression, cover) only reads
+        // with more than one hunter on the field; the code default stays at duel = 1 so
+        // the headless duel-mode tests are unaffected.
+        {
+            let mut play = world.play_config().clone();
+            play.difficulty = crate::world::pd_lab::dial_for_tier(
+                crate::world::pd_lab::HUNT_TIER,
+                crate::world::DIFFICULTY_MAX,
+            );
+            play.enemy_count = crate::world::PLAYTEST_WAVE_SIZE;
+            world.set_play_config_default(play);
+        }
         // `SCORE_LIMIT=n` — kills to win the round; `0` = endless, for an open-ended
         // observation run where you don't want the result screen interrupting.
         if let Ok(v) = std::env::var("SCORE_LIMIT") {
@@ -3955,7 +4412,14 @@ impl ApplicationHandler for App {
         // re-applying it here is the belt to that braces — nothing between the two
         // points may pin an AI mode without an explicit `AI=` losing, which is exactly
         // how `PD_LAB` once ate `BODIES=ge` for a whole playtest.
-        world.set_ai_mode(crate::enemy::AiMode::from_env());
+        // `pin_ai_mode` only when `AI=` is actually set: pinning unconditionally would
+        // mean the PLAY tab's AI choice could never take effect, which is the same class
+        // of silent-override bug this line's own comment is about — in the other
+        // direction. With no `AI=`, the level's config decides at `G`.
+        match std::env::var("AI") {
+            Ok(v) if !v.trim().is_empty() => world.pin_ai_mode(crate::enemy::AiMode::from_env()),
+            _ => world.set_ai_mode(crate::enemy::AiMode::from_env()),
+        }
         // Say what was actually resolved, unconditionally. The wave itself logs its body
         // spread at spawn, but that is not until G — and "which hunters am I about to get"
         // is exactly the question a boot flag silently losing a fight makes unanswerable.
