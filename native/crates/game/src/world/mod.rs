@@ -41,7 +41,7 @@ use engine::skeletal::layers::{
     LocomotionBlendLayer, Pose, PoseLayer, RootTranslateLayer, TwoBoneIkLayer,
 };
 use engine::skeletal::gltf_skin::{self, SkinnedModel};
-use engine::geometry::structures::{self, Anchor, Edge, Platform, StairRun};
+use engine::geometry::structures::{self, Anchor, Edge, Platform, StairRun, StairStyle};
 use engine::render::textures::default_scheme;
 use engine::render::uv_zones::ZonedBuilder;
 
@@ -1211,6 +1211,12 @@ const PLATFORM_SIZE_MAX: f32 = 20.0;
 const STAIR_WIDTH: f32 = 4.0;
 const STAIR_STEP_HEIGHT: f32 = 1.0;
 const STAIR_RISE_OVER_RUN: f32 = 1.0;
+/// Width range (WT) the simple-stair tool's Shift+scroll spans. The lower bound is
+/// 3 WT because the player capsule's radius is 1 WT (`character::RADIUS`): a 2 WT
+/// flight is exactly capsule-width, and the block's own side walls are solid, so
+/// anything narrower is a staircase nobody can walk up.
+const SIMPLE_STAIR_WIDTH_MIN: f32 = 3.0;
+const SIMPLE_STAIR_WIDTH_MAX: f32 = 12.0;
 
 /// Platform gizmo dimensions in WT (JS `GIZMO_*`). Arrows are drawn as thin
 /// elongated boxes (no cone tip); scale handles are cubes at the edge midpoints.
@@ -2511,6 +2517,18 @@ pub struct World {
     connect_slide_wt: f32,
     /// First endpoint (WT) of a simple-stair while in [`PlatformPhase::SimpleTo`].
     simple_from: Option<Vec3>,
+    /// Sideways slide of the simple-stair being placed, in WT perpendicular to its
+    /// run axis (scroll wheel). Lets a flight be nudged off the line through the two
+    /// clicked points without re-picking either endpoint.
+    simple_offset_wt: f32,
+    /// Width in WT of the simple-stair being placed (Shift+scroll).
+    simple_width_wt: f32,
+    /// The simple-stair tool's yellow x-ray preview — endpoint marker cubes plus a
+    /// ghost of the flight itself — rebuilt each frame by
+    /// [`World::update_platform_preview`] and drawn through the stair-ghost channel
+    /// (see [`World::stair_preview_mesh`]). Cached on `World` because the render pass
+    /// only holds `&World`, while picking the crosshair surface needs `&mut`.
+    simple_ghost: Option<CpuMesh>,
     /// Footprint of the next placed platform in WT (scroll = X, Shift+scroll = Z).
     platform_size_x: f32,
     platform_size_z: f32,
@@ -3008,6 +3026,9 @@ impl World {
             connect_edge: None,
             connect_slide_wt: 0.0,
             simple_from: None,
+            simple_offset_wt: 0.0,
+            simple_width_wt: STAIR_WIDTH,
+            simple_ghost: None,
             platform_size_x: PLATFORM_SIZE,
             platform_size_z: PLATFORM_SIZE,
             next_platform_id: 1,

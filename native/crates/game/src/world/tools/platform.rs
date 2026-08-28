@@ -35,6 +35,7 @@ impl World {
         self.connect_to = None;
         self.connect_edge = None;
         self.simple_from = None;
+        self.simple_ghost = None;
         self.gizmo_drag = None;
     }
 
@@ -87,6 +88,7 @@ impl World {
             }
             Some(PlatformPhase::SimpleFrom) | Some(PlatformPhase::SimpleTo) => {
                 self.simple_from = None;
+                self.simple_ghost = None;
                 self.platform_phase = Some(PlatformPhase::Idle);
                 (true, None)
             }
@@ -206,6 +208,15 @@ impl World {
     /// - `ConnectSrc` — the stable stair-run ghost; only the attach offset slides
     ///   along the frozen source edge as you aim (JS connect-preview).
     pub fn update_platform_preview(&mut self) -> Option<CpuMesh> {
+        // The simple-stair tool draws through the yellow x-ray stair-ghost channel
+        // instead (see `simple_stair_ghost_mesh`), so it owns no face highlight.
+        // Refreshed here because building it needs `&mut self` (the crosshair pick
+        // raycasts) while the render pass only holds `&World`.
+        if self.is_simple_stair() {
+            self.simple_ghost = self.simple_stair_ghost_mesh();
+            return None;
+        }
+        self.simple_ghost = None;
         match self.platform_phase? {
             PlatformPhase::Idle => {
                 let hit = self.pick_structure_hit()?;
@@ -396,6 +407,7 @@ impl World {
             rise_over_run: STAIR_RISE_OVER_RUN,
             grounded: false,
             railings: false,
+            style: StairStyle::Platform,
         })
     }
 
@@ -422,17 +434,145 @@ impl World {
 
     /// Simple-stair key (`K`): arm a two-click free stair-run between any two
     /// surface points (JS `simple_stairs`). Available from Idle or Selected.
+    ///
+    /// Both endpoints are aimed with the crosshair; while aiming, the scroll wheel
+    /// slides the flight sideways and Shift+scroll sets its width, and a yellow
+    /// x-ray ghost (marker cubes + the flight itself) shows exactly what a second
+    /// click will build. Runs from this tool are
+    /// [`StairStyle::Block`](structures::StairStyle::Block) — solid block stairs in
+    /// the room's own theme — and `F` afterwards grounds one into a single mass.
     pub fn simple_stair_key(&mut self) {
         if matches!(
             self.platform_phase,
             Some(PlatformPhase::Idle) | Some(PlatformPhase::Selected)
         ) {
             self.simple_from = None;
+            self.simple_offset_wt = 0.0;
+            self.simple_width_wt = STAIR_WIDTH;
             self.selected_platform = None;
             self.selected_run = None;
             self.platform_phase = Some(PlatformPhase::SimpleFrom);
-            log::info!("simple stair: click the first endpoint");
+            log::info!(
+                "simple stair: click the bottom endpoint (scroll = slide, Shift+scroll = width)"
+            );
         }
+    }
+
+    /// Whether the simple-stair tool is aiming an endpoint, so the app routes the
+    /// scroll wheel to its slide/width instead of platform footprint sizing.
+    pub fn is_simple_stair(&self) -> bool {
+        matches!(
+            self.platform_phase,
+            Some(PlatformPhase::SimpleFrom) | Some(PlatformPhase::SimpleTo)
+        )
+    }
+
+    /// Scroll during a simple-stair: `du` (plain wheel) slides the flight sideways
+    /// in 1-WT steps perpendicular to its run; `dv` (Shift+wheel) sets its width.
+    ///
+    /// The slide is what lets a flight be nudged off the exact line through the two
+    /// clicked points — clicking a tread-accurate start and end is fiddly, and
+    /// re-picking both endpoints to move a flight one tile sideways is worse.
+    pub fn adjust_simple_stair(&mut self, du: f32, dv: f32) {
+        if !self.is_simple_stair() {
+            return;
+        }
+        if du != 0.0 {
+            self.simple_offset_wt = (self.simple_offset_wt + du).clamp(-64.0, 64.0);
+        }
+        if dv != 0.0 {
+            self.simple_width_wt = (self.simple_width_wt + dv)
+                .clamp(SIMPLE_STAIR_WIDTH_MIN, SIMPLE_STAIR_WIDTH_MAX);
+        }
+        log::info!(
+            "simple stair: width {} WT, slide {:+} WT",
+            self.simple_width_wt,
+            self.simple_offset_wt
+        );
+    }
+
+    /// The stair-run a pair of endpoints would build — the single source of truth
+    /// for both the ghost and the committed run, so the preview cannot disagree with
+    /// the result.
+    ///
+    /// `None` for a degenerate flight: no rise (nothing to climb) or no horizontal
+    /// distance (a vertical shaft, not stairs). The scroll-wheel slide is folded into
+    /// the anchors here rather than carried on the run, so what lands in
+    /// `stair_runs` is an ordinary flight between two ground points.
+    pub(crate) fn resolve_simple_run(&self, from: Vec3, to: Vec3) -> Option<StairRun> {
+        if (to.y - from.y).abs() == 0.0 {
+            return None;
+        }
+        if (to.x - from.x).abs() < 1.0 && (to.z - from.z).abs() < 1.0 {
+            return None;
+        }
+        let along_x = structures::free_run_is_x([from.x, from.y, from.z], [to.x, to.y, to.z]);
+        let off = self.simple_offset_wt;
+        let (ox, oz) = if along_x { (0.0, off) } else { (off, 0.0) };
+        Some(StairRun {
+            id: 0,
+            from_platform: None,
+            to_platform: None,
+            anchor_from: Anchor::Ground {
+                x: from.x + ox,
+                y: from.y,
+                z: from.z + oz,
+            },
+            anchor_to: Anchor::Ground {
+                x: to.x + ox,
+                y: to.y,
+                z: to.z + oz,
+            },
+            width: self.simple_width_wt,
+            step_height: STAIR_STEP_HEIGHT,
+            rise_over_run: STAIR_RISE_OVER_RUN,
+            grounded: false,
+            railings: false,
+            style: StairStyle::Block,
+        })
+    }
+
+    /// The simple-stair tool's yellow x-ray preview: a floating marker cube at each
+    /// endpoint, plus a ghost of the flight itself once both are known.
+    ///
+    /// Drawn through the stair-ghost channel (yellow, depth-test off) rather than the
+    /// face-highlight channel, so the markers and the flight read as hovering in the
+    /// room instead of being clipped by the geometry they sit against.
+    pub(crate) fn simple_stair_ghost_mesh(&mut self) -> Option<CpuMesh> {
+        let phase = self.platform_phase?;
+        if !matches!(phase, PlatformPhase::SimpleFrom | PlatformPhase::SimpleTo) {
+            return None;
+        }
+        let cursor = self
+            .pick_structure_hit()
+            .map(|h| Vec3::new(h.hit_wt.x.round(), h.hit_wt.y.round(), h.hit_wt.z.round()));
+        let mut boxes: Vec<[f32; 6]> = Vec::new();
+        if phase == PlatformPhase::SimpleFrom {
+            boxes.push(endpoint_marker_box(cursor?));
+        } else {
+            let from = self.simple_from?;
+            match cursor.and_then(|to| self.resolve_simple_run(from, to)) {
+                // A valid flight: mark the run's *resolved* ends, so the markers stay
+                // on the ghost as the wheel slides it, and show the steps themselves.
+                Some(run) => {
+                    let brushes = self.all_region_brushes();
+                    for a in [&run.anchor_from, &run.anchor_to] {
+                        let p = structures::resolve_run_anchor(None, a);
+                        boxes.push(endpoint_marker_box(Vec3::new(p[0], p[1], p[2])));
+                    }
+                    boxes.extend(structures::stair_run_boxes(&run, None, None, &brushes));
+                }
+                // Degenerate (or nothing under the crosshair): the locked first
+                // endpoint still shows, so the tool never looks dead.
+                None => {
+                    boxes.push(endpoint_marker_box(from));
+                    if let Some(to) = cursor {
+                        boxes.push(endpoint_marker_box(to));
+                    }
+                }
+            }
+        }
+        Some(boxes_mesh(&boxes))
     }
 
     pub(crate) fn simple_stair_first_click(&mut self) {
@@ -443,7 +583,7 @@ impl World {
                 hit.hit_wt.z.round(),
             ));
             self.platform_phase = Some(PlatformPhase::SimpleTo);
-            log::info!("simple stair: click the second endpoint (Esc cancels)");
+            log::info!("simple stair: click the other endpoint (Esc cancels)");
         }
     }
 
@@ -452,39 +592,31 @@ impl World {
         let hit = self.pick_structure_hit()?;
         let to = Vec3::new(hit.hit_wt.x.round(), hit.hit_wt.y.round(), hit.hit_wt.z.round());
         self.simple_from = None;
+        self.simple_ghost = None;
         self.platform_phase = Some(PlatformPhase::Idle);
 
-        if (to.y - from.y).abs() == 0.0 {
-            log::info!("simple stair: endpoints at the same height");
+        let Some(mut run) = self.resolve_simple_run(from, to) else {
+            if (to.y - from.y).abs() == 0.0 {
+                log::info!("simple stair: endpoints at the same height");
+            } else {
+                log::info!("simple stair: need horizontal distance");
+            }
             return None;
-        }
-        if (to.x - from.x).abs() < 1.0 && (to.z - from.z).abs() < 1.0 {
-            log::info!("simple stair: need horizontal distance");
-            return None;
-        }
-        let id = self.next_run_id;
+        };
+        run.id = self.next_run_id;
         self.next_run_id += 1;
-        self.stair_runs.push(StairRun {
-            id,
-            from_platform: None,
-            to_platform: None,
-            anchor_from: Anchor::Ground {
-                x: from.x,
-                y: from.y,
-                z: from.z,
-            },
-            anchor_to: Anchor::Ground {
-                x: to.x,
-                y: to.y,
-                z: to.z,
-            },
-            width: STAIR_WIDTH,
-            step_height: STAIR_STEP_HEIGHT,
-            rise_over_run: STAIR_RISE_OVER_RUN,
-            grounded: false,
-            railings: false,
-        });
-        log::info!("simple stair-run {id} created");
+        let id = run.id;
+        self.stair_runs.push(run);
+        // Leave the new flight *selected*, the way placing a platform does — so `F`
+        // (ground it into one block), `V` and `X` act on what was just built instead
+        // of needing it clicked again first.
+        self.selected_run = Some(id);
+        self.selected_platform = None;
+        self.platform_phase = Some(PlatformPhase::Selected);
+        log::info!(
+            "simple stair-run {id} created — block style, {} WT wide, selected (F grounds it)",
+            run.width
+        );
         Some(self.rebuild_structures())
     }
 
@@ -635,14 +767,51 @@ impl World {
     pub(crate) fn rebuild_structures(&mut self) -> RegionMesh {
         let brushes = self.all_region_brushes();
 
-        // Collider = platform slabs as solid boxes, each stair-run as a smooth
+        // ── Render mesh.
+        // Platform-style structures always wear the "simple" (blue) scheme regardless
+        // of the room's scheme — matching JS `PLATFORM_STYLES.simple.schemeName`. The
+        // slabs/treads emit with the JS per-face zones + UVs (top → floor, verticals →
+        // wall); railings carry their own railing zone. **Block-style** stair-runs are
+        // the exception: they wear the scheme of the room they stand in.
+        let mut b = ZonedBuilder::new();
+        for p in &self.platforms {
+            structures::append_platform_mesh(p, &brushes, &mut b, simple_scheme());
+        }
+        // A block-style run also hands back its lateral walls, which go into the
+        // collider below so the block is solid to walk into from the side.
+        let mut block_solid = ZonedBuilder::new();
+        for r in &self.stair_runs {
+            let (fp, tp) = self.run_platforms(r);
+            match r.style {
+                StairStyle::Platform => structures::append_stair_mesh(
+                    r,
+                    fp.as_ref(),
+                    tp.as_ref(),
+                    &brushes,
+                    &mut b,
+                    simple_scheme(),
+                ),
+                StairStyle::Block => structures::append_stair_block_mesh(
+                    r,
+                    fp.as_ref(),
+                    tp.as_ref(),
+                    &brushes,
+                    &mut b,
+                    &mut block_solid,
+                    self.run_room_scheme(r, &brushes),
+                ),
+            }
+        }
+        self.append_railings(&brushes, &mut b);
+
+        // ── Collider = platform slabs as solid boxes, each stair-run as a smooth
         // sloped RAMP (so the player walks the true slope, no per-riser auto-step
-        // pop), PLUS the railings. Railings are thin cosmetic planes (never solid
-        // boxes), so they'd otherwise let the player walk straight off a
-        // platform/stair edge; folding the exact same railing geometry into the
-        // collision trimesh gives them real collision. Nav still uses the stepped
-        // boxes from `structure_solid_boxes` (enemies don't touch this collider —
-        // they're kept on-surface by the grid-nav edge check in `move_toward`).
+        // pop), PLUS the railings and the block-stair side walls. Railings are thin
+        // cosmetic planes (never solid boxes), so they'd otherwise let the player walk
+        // straight off a platform/stair edge; folding the exact same railing geometry
+        // into the collision trimesh gives them real collision. Nav still uses the
+        // stepped boxes from `structure_solid_boxes` (enemies don't touch this collider
+        // — they're kept on-surface by the grid-nav edge check in `move_toward`).
         let mut platform_boxes = Vec::new();
         for p in &self.platforms {
             if let Some(bx) = p.solid_box(&brushes) {
@@ -660,25 +829,25 @@ impl World {
         let mut rail = ZonedBuilder::new();
         self.append_railings(&brushes, &mut rail);
         append_textured_collision(&mut collider, &rail.finish());
+        append_textured_collision(&mut collider, &block_solid.finish());
         self.physics.set_region_collider(STRUCT_ID, &collider);
 
-        // Structures always wear the "simple" (blue) scheme regardless of the
-        // room's scheme — matching JS `PLATFORM_STYLES.simple.schemeName`. The
-        // slabs/treads emit with the JS per-face zones + UVs (top → floor,
-        // verticals → wall); railings carry their own railing zone.
-        let mut b = ZonedBuilder::new();
-        for p in &self.platforms {
-            structures::append_platform_mesh(p, &brushes, &mut b, simple_scheme());
-        }
-        for r in &self.stair_runs {
-            let (fp, tp) = self.run_platforms(r);
-            structures::append_stair_mesh(r, fp.as_ref(), tp.as_ref(), &brushes, &mut b, simple_scheme());
-        }
-        self.append_railings(&brushes, &mut b);
         RegionMesh {
             id: STRUCT_ID,
             mesh: b.finish(),
         }
+    }
+
+    /// The texture scheme a block-style stair-run wears: the theme of the room its
+    /// **bottom** end stands in, so the flight continues that room's floor and wall
+    /// textures. Falls back to the level default when the flight's foot is not inside
+    /// any room (a run out over open ground).
+    fn run_room_scheme(&self, run: &StairRun, brushes: &[Brush]) -> usize {
+        let (fp, tp) = self.run_platforms(run);
+        let a = structures::resolve_run_anchor(fp.as_ref(), &run.anchor_from);
+        let c = structures::resolve_run_anchor(tp.as_ref(), &run.anchor_to);
+        let low = if a[1] <= c[1] { a } else { c };
+        structures::scheme_at(low[0], low[2], low[1], brushes).unwrap_or_else(default_scheme)
     }
 
     /// Emit every enabled railing (platforms + connected stair-runs) into `b`,
@@ -756,4 +925,14 @@ impl World {
             run,
         })
     }
+}
+
+/// A floating 1-WT marker cube for a simple-stair endpoint (WT `[x,y,z,w,h,d]`).
+///
+/// Lifted half a tile clear of the point it marks: a cube *centred* on a floor point
+/// half-sinks into the floor, and one resting exactly on it shares a plane with the
+/// floor — either way the marker stops reading as a marker. Drawn through the yellow
+/// x-ray channel, so it stays visible even where the room geometry is in front of it.
+fn endpoint_marker_box(p: Vec3) -> [f32; 6] {
+    [p.x - 0.5, p.y + 0.5, p.z - 0.5, 1.0, 1.0, 1.0]
 }

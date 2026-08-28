@@ -14,7 +14,7 @@
 //! interior height (so the ceiling is at `floor + height`).
 
 use engine::geometry::csg_runtime::{Axis, Brush, Op, Side, StairDesc, StairDir};
-use engine::geometry::structures::{Anchor, Edge, Platform, StairRun};
+use engine::geometry::structures::{Anchor, Edge, Platform, StairRun, StairStyle};
 use glam::Vec3;
 
 /// The horizontal in-plane axis for a wall whose normal is `axis` (Z for an
@@ -420,6 +420,7 @@ impl LevelBuilder {
             rise_over_run: 1.0,
             grounded: true,
             railings,
+            style: StairStyle::Platform,
         });
     }
 
@@ -451,6 +452,7 @@ impl LevelBuilder {
             rise_over_run: 1.0,
             grounded: true,
             railings,
+            style: StairStyle::Platform,
         });
     }
 
@@ -485,6 +487,7 @@ impl LevelBuilder {
             rise_over_run: 1.0,
             grounded: false,
             railings,
+            style: StairStyle::Platform,
         });
     }
 

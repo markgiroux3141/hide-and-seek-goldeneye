@@ -4,6 +4,7 @@
 
 use super::*;
 use super::editing::find_room_brushes;
+use engine::render::textures::simple_scheme;
 
 /// Put weapon `name` in the player's hands, owned and loaded.
 ///
@@ -3566,6 +3567,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
             rise_over_run: 1.0,
             grounded: false,
             railings: false,
+            style: StairStyle::Platform,
         });
         world.next_run_id = 2;
         world.rebuild_structures();
@@ -3692,6 +3694,294 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         assert!(world.delete_selected().is_some());
         assert!(world.platforms.is_empty(), "platform deleted");
         assert_eq!(world.platform_phase, Some(PlatformPhase::Idle));
+    }
+
+    // ─── Simple-stair tool (K): block stairs, ghost, slide + width ──────────
+
+    /// A `World` with the platform tool armed and the simple-stair tool waiting for
+    /// its second endpoint, with `from` already locked. Bypasses the crosshair picks
+    /// so the arithmetic under test isn't hostage to where the camera happens to aim.
+    fn simple_stair_pending(from: Vec3) -> World {
+        let mut world = World::new(); // 24×16×24 cavity, floor at y=0
+        world.initial_meshes();
+        world.platform_tool_key();
+        world.simple_stair_key();
+        assert_eq!(world.platform_phase, Some(PlatformPhase::SimpleFrom));
+        world.simple_from = Some(from);
+        world.platform_phase = Some(PlatformPhase::SimpleTo);
+        world
+    }
+
+    /// The wheel slides a pending flight **perpendicular** to its run and Shift+wheel
+    /// sets its width, both clamped; and the run that comes out carries exactly what
+    /// the ghost was showing.
+    #[test]
+    fn simple_stair_slide_is_perpendicular_and_width_clamps() {
+        let mut world = simple_stair_pending(Vec3::new(4.0, 0.0, 10.0));
+        let to = Vec3::new(12.0, 8.0, 10.0); // 8 WT along +X, 8 WT up → run axis X
+
+        assert!(world.is_simple_stair(), "scroll routes to the simple stair");
+        let base = world.resolve_simple_run(Vec3::new(4.0, 0.0, 10.0), to).unwrap();
+        assert_eq!(base.width, STAIR_WIDTH, "starts at the default width");
+        assert_eq!(base.style, StairStyle::Block, "K builds block stairs");
+
+        // Plain wheel = slide. The run advances along X, so the flight must move on Z.
+        world.adjust_simple_stair(3.0, 0.0);
+        let slid = world.resolve_simple_run(Vec3::new(4.0, 0.0, 10.0), to).unwrap();
+        let (a0, a1) = (
+            structures::resolve_run_anchor(None, &base.anchor_from),
+            structures::resolve_run_anchor(None, &slid.anchor_from),
+        );
+        assert_eq!(a1[0], a0[0], "slide left the run axis (X) alone");
+        assert_eq!(a1[2], a0[2] + 3.0, "slide moved the flight +3 WT on Z");
+        let (b0, b1) = (
+            structures::resolve_run_anchor(None, &base.anchor_to),
+            structures::resolve_run_anchor(None, &slid.anchor_to),
+        );
+        assert_eq!(b1[2], b0[2] + 3.0, "both ends slid together — same flight, moved");
+
+        // Shift+wheel = width, clamped at both ends of the range.
+        world.adjust_simple_stair(0.0, 2.0);
+        assert_eq!(
+            world.resolve_simple_run(Vec3::new(4.0, 0.0, 10.0), to).unwrap().width,
+            STAIR_WIDTH + 2.0
+        );
+        world.adjust_simple_stair(0.0, -100.0);
+        assert_eq!(world.simple_width_wt, SIMPLE_STAIR_WIDTH_MIN, "clamped narrow");
+        world.adjust_simple_stair(0.0, 100.0);
+        assert_eq!(world.simple_width_wt, SIMPLE_STAIR_WIDTH_MAX, "clamped wide");
+    }
+
+    /// A flight whose run axis is Z slides on X — the mirror of the case above, and
+    /// the one that would break if the perpendicular axis were hard-coded.
+    #[test]
+    fn simple_stair_slide_follows_the_run_axis() {
+        let mut world = simple_stair_pending(Vec3::new(10.0, 0.0, 4.0));
+        world.adjust_simple_stair(2.0, 0.0);
+        let run = world
+            .resolve_simple_run(Vec3::new(10.0, 0.0, 4.0), Vec3::new(10.0, 8.0, 12.0))
+            .expect("8 WT along +Z, 8 WT up");
+        let a = structures::resolve_run_anchor(None, &run.anchor_from);
+        assert_eq!(a[0], 12.0, "run advances on Z, so the slide moved it on X");
+        assert_eq!(a[2], 4.0, "the run axis is untouched");
+    }
+
+    /// Degenerate endpoint pairs build nothing: same height (a flat run isn't stairs)
+    /// and no horizontal distance (a vertical shaft isn't stairs).
+    #[test]
+    fn simple_stair_rejects_degenerate_endpoints() {
+        let world = simple_stair_pending(Vec3::new(4.0, 0.0, 10.0));
+        assert!(
+            world
+                .resolve_simple_run(Vec3::new(4.0, 0.0, 10.0), Vec3::new(12.0, 0.0, 10.0))
+                .is_none(),
+            "endpoints at the same height"
+        );
+        assert!(
+            world
+                .resolve_simple_run(Vec3::new(4.0, 0.0, 10.0), Vec3::new(4.0, 8.0, 10.0))
+                .is_none(),
+            "no horizontal distance"
+        );
+    }
+
+    /// The tool's feedback: while aiming, the yellow x-ray channel carries the ghost —
+    /// one marker cube with only the first endpoint known, and markers plus the flight
+    /// once both are. Esc clears it.
+    #[test]
+    fn simple_stair_ghost_shows_markers_then_the_flight() {
+        let mut world = World::new(); // camera looks −Z at the z=0 wall
+        world.initial_meshes();
+        world.platform_tool_key();
+        world.simple_stair_key();
+
+        // SimpleFrom: the ghost is a single marker cube (12 tris) at the aim point.
+        world.update_platform_preview();
+        let one = world.stair_preview_mesh().expect("ghost while aiming the first end");
+        assert_eq!(one.indices.len(), 36, "one 1-WT marker cube");
+
+        // SimpleTo with a real flight: two markers + the flight's step boxes.
+        world.simple_from = Some(Vec3::new(4.0, 0.0, 10.0));
+        world.platform_phase = Some(PlatformPhase::SimpleTo);
+        world.simple_ghost = world.simple_stair_ghost_mesh();
+        let both = world.stair_preview_mesh().expect("ghost while aiming the second end");
+        assert!(
+            both.indices.len() > one.indices.len(),
+            "second endpoint adds a marker and the flight: {} → {}",
+            one.indices.len(),
+            both.indices.len()
+        );
+
+        // Esc backs out of the tool and takes the ghost with it.
+        assert!(world.platform_escape().0, "esc consumed");
+        assert!(world.stair_preview_mesh().is_none(), "ghost cleared on cancel");
+    }
+
+    /// A committed simple stair is a block-style run, and `F` grounds it into one
+    /// solid mass: every step box reaches down to the room floor rather than stopping
+    /// at the flight's own base.
+    #[test]
+    fn simple_stair_commits_as_block_and_f_grounds_it() {
+        let mut world = simple_stair_pending(Vec3::new(4.0, 4.0, 10.0));
+        // Commit without a crosshair pick by resolving + pushing the run the same way
+        // `simple_stair_second_click` does (the click itself is covered by the ghost
+        // test above; what matters here is what lands in `stair_runs`).
+        let mut run = world
+            .resolve_simple_run(Vec3::new(4.0, 4.0, 10.0), Vec3::new(12.0, 12.0, 10.0))
+            .expect("a real flight");
+        run.id = 1;
+        world.stair_runs.push(run);
+        world.next_run_id = 2;
+        world.platform_phase = Some(PlatformPhase::Selected);
+        world.selected_run = Some(1);
+        world.rebuild_structures();
+
+        assert_eq!(world.stair_runs[0].style, StairStyle::Block);
+        assert!(!world.stair_runs[0].grounded, "not grounded until F");
+        let floating = world.stair_run_solid_boxes();
+        let base_y = floating.iter().map(|b| b[1]).fold(f32::MAX, f32::min);
+        assert_eq!(base_y, 4.0, "ungrounded: boxes stop at the flight's own base");
+
+        assert!(world.toggle_grounded_key().is_some(), "F rebuilds");
+        assert!(world.stair_runs[0].grounded, "F grounded the run");
+        let grounded = world.stair_run_solid_boxes();
+        assert!(
+            grounded.iter().all(|b| b[1] == 0.0),
+            "grounded: every step reaches the room floor — one solid block"
+        );
+    }
+
+    /// What the player actually walks on is a **smooth ramp**, not the block's steps:
+    /// raycasting down onto the flight lands on the straight line from its foot to its
+    /// head, with no per-riser stepping. Asserted through the live physics collider,
+    /// which is the surface the character controller really queries.
+    #[test]
+    fn a_block_stair_is_walked_as_a_smooth_ramp() {
+        let mut world = World::new();
+        world.initial_meshes();
+        // A flight from (8,0,10) up to (16,8,10): 8 WT of run, 8 WT of rise, on X.
+        let mut run = World::new()
+            .resolve_simple_run(Vec3::new(8.0, 0.0, 10.0), Vec3::new(16.0, 8.0, 10.0))
+            .expect("a real flight");
+        run.id = 1;
+        world.stair_runs.push(run);
+        world.rebuild_structures();
+
+        // Sample along the run and check each hit sits on the straight slope. A tread
+        // would round each of these up to a whole WT; the ramp does not.
+        for t in [0.25_f32, 0.5, 0.75] {
+            let x = 8.0 + 8.0 * t;
+            let expect_y = 8.0 * t;
+            // Origin inside the room cavity (floor 0, ceiling 16) and above the flight.
+            let origin = Vec3::new(x * WORLD_SCALE, 12.0 * WORLD_SCALE, 10.0 * WORLD_SCALE);
+            let hit = world
+                .physics
+                .raycast(origin, Vec3::new(0.0, -1.0, 0.0), 100.0)
+                .unwrap_or_else(|| panic!("nothing under the flight at t={t}"));
+            let hit_wt = hit.point.y / WORLD_SCALE;
+            assert!(
+                (hit_wt - expect_y).abs() < 0.1,
+                "t={t}: walked surface at {hit_wt} WT, ramp says {expect_y} — stepped, not sloped"
+            );
+        }
+    }
+
+    /// Regression: `F` on a flight standing **below y=0** used to erase it.
+    ///
+    /// `find_floor_y_at` answers 0.0 when nothing covers the flight's XZ — a
+    /// world-ground default that is *above* anything built in a basement, which culled
+    /// every step. Block stairs use `floor_y_under` instead, which never raises a
+    /// flight's base above the flight. Levels like slot1 run from y=−47 to y=96, so this
+    /// was the common case, not the corner one.
+    #[test]
+    fn grounding_a_block_stair_below_world_zero_keeps_it() {
+        let mut world = World::new();
+        world.initial_meshes();
+        // A basement room: floor at y=−20, well below the world-ground default.
+        let cellar = Brush::new(90, Op::Subtract, 0.0, -20.0, 0.0, 24.0, 12.0, 24.0);
+        world.regions[0].brushes.push(cellar);
+        world.regions[0].refresh_shell();
+
+        let mut run = World::new()
+            .resolve_simple_run(Vec3::new(4.0, -20.0, 10.0), Vec3::new(12.0, -12.0, 10.0))
+            .expect("a flight in the cellar");
+        run.id = 1;
+        world.stair_runs.push(run);
+
+        let brushes = world.all_region_brushes();
+        let shell_verts = |grounded: bool| {
+            let mut r = world.stair_runs[0];
+            r.grounded = grounded;
+            let mut b = ZonedBuilder::new();
+            let mut s = ZonedBuilder::new();
+            structures::append_stair_block_mesh(&r, None, None, &brushes, &mut b, &mut s, 0);
+            b.finish().vertices.len()
+        };
+        let floating = shell_verts(false);
+        assert!(floating > 0, "the flight draws before grounding");
+        assert_eq!(
+            shell_verts(true),
+            floating,
+            "grounding a flight below y=0 must not erase it"
+        );
+
+        // And its base stays on the cellar floor rather than being dragged to y=0.
+        assert_eq!(
+            structures::floor_y_under(4.0, 10.0, -20.0, &brushes),
+            -20.0,
+            "the foot rests on the floor it stands on"
+        );
+    }
+
+    /// The point of block style: the flight wears the **room's** theme, not the blue
+    /// `simple_blue` scheme every other structure is locked to. Asserted on the built
+    /// mesh's zone groups, which is what the renderer actually binds textures from.
+    #[test]
+    fn block_stair_wears_the_room_scheme_and_platform_style_does_not() {
+        let mut world = World::new();
+        world.initial_meshes();
+        let room = default_scheme();
+        assert_ne!(room, simple_scheme(), "the fixture room isn't already blue");
+
+        let mut run = World::new()
+            .resolve_simple_run(Vec3::new(4.0, 0.0, 10.0), Vec3::new(12.0, 8.0, 10.0))
+            .expect("a real flight");
+        run.id = 1;
+        world.stair_runs.push(run);
+        let rm = world.rebuild_structures();
+        let schemes: Vec<u16> = rm.mesh.groups.iter().map(|g| g.scheme).collect();
+        assert!(
+            schemes.iter().all(|&s| s as usize == room),
+            "block stair emitted in the room scheme, got {schemes:?}"
+        );
+        // Both zones are represented: floor texture on the treads, upper wall on the
+        // verticals — the split the request turns on.
+        let zones: Vec<u8> = rm.mesh.groups.iter().map(|g| g.zone).collect();
+        assert!(zones.contains(&0), "treads in the floor zone, got {zones:?}");
+        assert!(zones.contains(&3), "verticals in the upper-wall zone, got {zones:?}");
+
+        // Flip the same run to platform style: it goes back to blue.
+        world.stair_runs[0].style = StairStyle::Platform;
+        let rm = world.rebuild_structures();
+        assert!(
+            rm.mesh.groups.iter().all(|g| g.scheme as usize == simple_scheme()),
+            "platform style is still locked to simple_blue"
+        );
+    }
+
+    /// A stair-run authored before styles existed loads as platform style, so no saved
+    /// level is silently re-skinned by this feature.
+    #[test]
+    fn stair_runs_without_a_style_field_load_as_platform_style() {
+        let json = r#"{
+            "id": 3, "from_platform": null, "to_platform": null,
+            "anchor_from": { "Ground": { "x": 4.0, "y": 0.0, "z": 10.0 } },
+            "anchor_to": { "Ground": { "x": 12.0, "y": 8.0, "z": 10.0 } },
+            "width": 4.0, "step_height": 1.0, "rise_over_run": 1.0,
+            "grounded": false, "railings": false
+        }"#;
+        let run: StairRun = serde_json::from_str(json).expect("a pre-style run still loads");
+        assert_eq!(run.style, StairStyle::Platform);
     }
 
     /// Arming another modal tool (door) disarms the platform tool, and vice

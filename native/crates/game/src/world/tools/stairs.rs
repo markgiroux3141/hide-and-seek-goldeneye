@@ -154,11 +154,20 @@ impl World {
         })
     }
 
-    /// A translucent ghost of the pending stair's steps (meters), for the highlight
-    /// pipeline — immediate feedback as the arrow keys grow the op. `None` when no
-    /// stair is pending.
+    /// The yellow x-ray ghost channel (meters): the pending CSG stair's steps as the
+    /// arrow keys grow the op, or — when no CSG stair is pending — the simple-stair
+    /// tool's endpoint markers and flight preview.
+    ///
+    /// One channel serves both because only one can be in progress: `push_stairs`
+    /// needs a selected wall face, and arming the platform tool drops the selection.
+    /// The simple-stair mesh is read from the cache
+    /// [`update_platform_preview`](Self::update_platform_preview) fills, since the
+    /// render pass holds only `&World` while picking the crosshair needs `&mut`.
     pub fn stair_preview_mesh(&self) -> Option<CpuMesh> {
-        self.pending_desc().map(|d| d.mesh())
+        if let Some(d) = self.pending_desc() {
+            return Some(d.mesh());
+        }
+        self.simple_ghost.clone()
     }
 
     /// Confirm the pending stair (Enter, JS `confirmStairOp`): create the two

@@ -148,6 +148,22 @@ impl Platform {
     }
 }
 
+/// How a stair-run is *rendered*. Its solid boxes, ramp, nav and collision are
+/// the same either way — this picks the shell drawn over them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StairStyle {
+    /// The JS `PLATFORM_STYLES.simple` look: floating treads, short risers and two
+    /// sloped stringer boards, always in the blue `simple_blue` scheme. The default,
+    /// so every stair-run authored before styles existed keeps the look it had.
+    #[default]
+    Platform,
+    /// A solid block staircase wearing the scheme of the room it stands in — floor
+    /// texture on the treads, upper-wall texture on every vertical face. See
+    /// [`append_stair_block_mesh`].
+    Block,
+}
+
 /// A flight of stairs connecting two platforms, or a platform to the ground, or
 /// two ground points (JS `StairRun`). Anchors are auto-centered on platform
 /// edges (offset 0.5) when placed via the connect tool.
@@ -163,6 +179,10 @@ pub struct StairRun {
     pub rise_over_run: f32,
     pub grounded: bool,
     pub railings: bool,
+    /// Render style. `#[serde(default)]` = [`StairStyle::Platform`], so a level
+    /// saved before this field existed loads with every run looking as it did.
+    #[serde(default)]
+    pub style: StairStyle,
 }
 
 /// A resolved run axis: which horizontal axis (`x`|`z`) the flight advances along.
@@ -231,6 +251,24 @@ fn compute_run_axis(
     }
 }
 
+/// A stair-run anchor as a WT `[x, y, z]` point. The editor needs a run's actual
+/// endpoints — to mark them, and to look up which room the flight stands in — and
+/// an [`Anchor::Edge`] only resolves against its platform.
+pub fn resolve_run_anchor(platform: Option<&Platform>, anchor: &Anchor) -> [f32; 3] {
+    let p = resolve_anchor(platform, anchor);
+    [p.x, p.y, p.z]
+}
+
+/// Whether a **free** (ground-to-ground) flight advances along X rather than Z —
+/// and hence which horizontal axis a sideways slide of that flight moves it on.
+///
+/// Mirrors the ground-to-ground branch of `compute_run_axis`, which is the only
+/// branch a simple stair (both anchors [`Anchor::Ground`]) can take. Kept next to
+/// it so the two cannot drift.
+pub fn free_run_is_x(from: [f32; 3], to: [f32; 3]) -> bool {
+    (to[0] - from[0]).abs() >= (to[2] - from[2]).abs()
+}
+
 /// Resolved run parameters shared by the box and railing builders.
 struct RunGeom {
     run_axis: RunAxis,
@@ -293,8 +331,20 @@ fn resolve_run(
     };
     let half_width = run.width / 2.0;
     let steps = (rise / run.step_height).round().max(1.0) as u32;
+    // Grounded = fill the underside down to the floor beneath the flight's foot.
+    //
+    // Block style uses `floor_y_under`, which is the stair-correct probe (see its
+    // docs). Platform style is deliberately left on `find_floor_y_at`: its renderer
+    // ignores `floor_y` entirely, so the only thing the difference would move is the
+    // **nav** boxes of every already-authored grounded run — and level nav is not
+    // something to perturb as a side effect of a render change.
     let floor_y = if run.grounded {
-        find_floor_y_at(bottom_pt.x, bottom_pt.z, bottom_pt.y, brushes)
+        match run.style {
+            StairStyle::Block => floor_y_under(bottom_pt.x, bottom_pt.z, bottom_pt.y, brushes),
+            StairStyle::Platform => {
+                find_floor_y_at(bottom_pt.x, bottom_pt.z, bottom_pt.y, brushes)
+            }
+        }
     } else {
         bottom_pt.y
     };
@@ -421,6 +471,64 @@ pub fn find_floor_y_at(x: f32, z: f32, above_y: f32, brushes: &[Brush]) -> f32 {
     } else {
         0.0
     }
+}
+
+/// The texture scheme of the room a point stands in: the scheme of the highest
+/// subtract brush covering `(x, z)` whose floor is at or below `above_y` (all WT).
+/// `None` when no room covers that XZ.
+///
+/// This is the room-lookup counterpart of [`find_floor_y_at`] — same probe, but it
+/// answers "whose theme?" instead of "how far down?". Block-style stair-runs use it
+/// so a flight wears the floor and wall textures of the room it is built in.
+pub fn scheme_at(x: f32, z: f32, above_y: f32, brushes: &[Brush]) -> Option<usize> {
+    let mut best: Option<(f32, usize)> = None;
+    for b in brushes.iter().filter(|b| b.op == Op::Subtract) {
+        if x < b.x || x > b.x + b.w || z < b.z || z > b.z + b.d {
+            continue;
+        }
+        // `above_y + eps`: a stair's bottom anchor sits *on* its room's floor, so
+        // the room that owns it has `b.y == above_y`. `find_floor_y_at` wants the
+        // floor strictly below (it is looking for something to stand on); here the
+        // floor underfoot is exactly the room we want.
+        if b.y > above_y + 0.001 {
+            continue;
+        }
+        if best.map(|(y, _)| b.y > y).unwrap_or(true) {
+            best = Some((b.y, b.scheme));
+        }
+    }
+    best.map(|(_, s)| s)
+}
+
+/// The surface a stair flight's **foot rests on**: the highest subtract-brush floor
+/// at `(x, z)` that is at or below `y` (all WT), defaulting to `y` itself when no
+/// room covers that XZ.
+///
+/// Two deliberate differences from [`find_floor_y_at`], both of which that function
+/// gets right for a floating *platform* and wrong for a flight of stairs:
+///
+/// * **At-or-below, not strictly below.** A flight's foot sits *on* its room's floor,
+///   so the floor it should fill down to is that one — the one `find_floor_y_at`
+///   skips over on its way to the next storey down.
+/// * **Falls back to `y`, not to 0.** `find_floor_y_at`'s world-ground default is
+///   above anything standing below y=0, which culls the whole flight; a flight over
+///   open nothing should simply stop at its own base.
+pub fn floor_y_under(x: f32, z: f32, y: f32, brushes: &[Brush]) -> f32 {
+    let mut best: Option<f32> = None;
+    for b in brushes.iter().filter(|b| b.op == Op::Subtract) {
+        if x < b.x || x > b.x + b.w || z < b.z || z > b.z + b.d {
+            continue;
+        }
+        if b.y > y + 0.001 {
+            continue; // above the foot — never raise a flight above itself
+        }
+        // The *closest* surface underfoot, not the deepest: a flight standing on the
+        // ground floor of a building with a cellar fills to the ground floor.
+        if best.map(|f| b.y > f).unwrap_or(true) {
+            best = Some(b.y);
+        }
+    }
+    best.unwrap_or(y).min(y)
 }
 
 // ─── Connect-flow edge helpers ───────────────────────────────────────
@@ -792,6 +900,139 @@ pub fn append_stair_mesh(
     }
 }
 
+/// Append a stair-run's **block-style** shell: the flight rendered as the solid
+/// mass its step boxes already describe ([`stair_run_boxes`]), rather than the
+/// floating tread-and-stringer shell of [`append_stair_mesh`].
+///
+/// Faces are emitted with **world-planar** UVs anchored at the flight's own floor
+/// (`emit_quad_wt`, the same treatment room walls get in `uv_zones`), so a block
+/// stair carrying its room's scheme continues that room's floor and wall texture
+/// grids instead of carrying its own private tiling.
+///
+/// Only the *exposed* faces are emitted — a step's uphill face is buried inside
+/// the taller step above it, and the underside is flush with whatever surface the
+/// flight stands on — so no two quads are coplanar and nothing z-fights.
+///
+/// `solid` receives the two **lateral** walls only, for the player collider: it is
+/// what makes the block solid to walk into from the side. Treads and risers are
+/// deliberately excluded — the run's smooth ramp quad (see [`stair_run_ramp`]) is
+/// the walking surface, and a riser poking up through it would block the climb.
+pub fn append_stair_block_mesh(
+    run: &StairRun,
+    from_platform: Option<&Platform>,
+    to_platform: Option<&Platform>,
+    brushes: &[Brush],
+    b: &mut ZonedBuilder,
+    solid: &mut ZonedBuilder,
+    scheme: usize,
+) {
+    let Some(g) = resolve_run(run, from_platform, to_platform, brushes) else {
+        return;
+    };
+    if g.steps == 0 {
+        return;
+    }
+    let tw = |r: f32, y: f32, perp: f32| -> [f32; 3] {
+        match g.run_axis {
+            RunAxis::X => [r, y, perp],
+            RunAxis::Z => [perp, y, r],
+        }
+    };
+    // Wall UVs anchor at the surface the block stands on, so its sides line up
+    // with the room walls around it.
+    let anchor = g.floor_y;
+    let y_bot = g.floor_y;
+    // Which end of a step's run extent faces *downhill*. `step_run` walks from the
+    // top of the flight toward its bottom, so its sign is the answer.
+    let downhill_at_hi = g.step_run > 0.0;
+
+    // A side flush against a CSG wall drops its wall quad (it would z-fight the
+    // wall face) — the same test the platform-style stringers run.
+    let left_walled = stair_side_against_wall(&g, g.perp_min, -1.0, brushes);
+    let right_walled = stair_side_against_wall(&g, g.perp_max, 1.0, brushes);
+
+    for i in 0..g.steps {
+        let fi = i as f32;
+        let r_a = g.top_run + (g.steps as f32 - fi) * g.step_run;
+        let r_b = g.top_run + (g.steps as f32 - fi - 1.0) * g.step_run;
+        let run_lo = r_a.min(r_b);
+        let run_hi = r_a.max(r_b);
+        let y_top = g.stair_base_y + (fi + 1.0) * g.step_rise;
+        if y_top <= y_bot || run_hi - run_lo <= 0.0 {
+            continue;
+        }
+
+        // Tread (+Y) — the floor zone, so it wears the room's floor texture.
+        b.emit_quad_wt(
+            [
+                tw(run_lo, y_top, g.perp_min),
+                tw(run_lo, y_top, g.perp_max),
+                tw(run_hi, y_top, g.perp_max),
+                tw(run_hi, y_top, g.perp_min),
+            ],
+            TOP_ZONE,
+            anchor,
+            scheme,
+        );
+
+        // Riser — the downhill face, exposed only above the step below it (the
+        // lowest step's whole front face is exposed).
+        let riser_bot = if i == 0 { y_bot } else { y_top - g.step_rise };
+        if y_top > riser_bot {
+            let r = if downhill_at_hi { run_hi } else { run_lo };
+            let mut c = [
+                tw(r, riser_bot, g.perp_min),
+                tw(r, riser_bot, g.perp_max),
+                tw(r, y_top, g.perp_max),
+                tw(r, y_top, g.perp_min),
+            ];
+            if downhill_at_hi {
+                c.reverse(); // keep the normal pointing downhill, out of the block
+            }
+            b.emit_quad_wt(c, SIDE_ZONE, anchor, scheme);
+        }
+
+        // Lateral walls — one quad per step, so the flight's staircase profile is
+        // closed without any two quads overlapping. Render + collider.
+        if !left_walled {
+            let c = [
+                tw(run_lo, y_bot, g.perp_min),
+                tw(run_hi, y_bot, g.perp_min),
+                tw(run_hi, y_top, g.perp_min),
+                tw(run_lo, y_top, g.perp_min),
+            ];
+            b.emit_quad_wt(c, SIDE_ZONE, anchor, scheme);
+            solid.emit_quad_wt(c, SIDE_ZONE, anchor, scheme);
+        }
+        if !right_walled {
+            let c = [
+                tw(run_hi, y_bot, g.perp_max),
+                tw(run_lo, y_bot, g.perp_max),
+                tw(run_lo, y_top, g.perp_max),
+                tw(run_hi, y_top, g.perp_max),
+            ];
+            b.emit_quad_wt(c, SIDE_ZONE, anchor, scheme);
+            solid.emit_quad_wt(c, SIDE_ZONE, anchor, scheme);
+        }
+
+        // Back face — the uphill side of the topmost step, where the flight meets
+        // its landing. Render only: at the top exit, collision here would be a lip.
+        if i + 1 == g.steps {
+            let r = if downhill_at_hi { run_lo } else { run_hi };
+            let mut c = [
+                tw(r, y_bot, g.perp_max),
+                tw(r, y_bot, g.perp_min),
+                tw(r, y_top, g.perp_min),
+                tw(r, y_top, g.perp_max),
+            ];
+            if downhill_at_hi {
+                c.reverse();
+            }
+            b.emit_quad_wt(c, SIDE_ZONE, anchor, scheme);
+        }
+    }
+}
+
 // ─── Railings (render-only) ──────────────────────────────────────────
 
 /// Whether a WT point lies inside any subtract brush's interior (open bounds, to
@@ -1135,6 +1376,195 @@ mod tests {
         }
     }
 
+    /// A free block-style flight: 8 WT of run, 8 WT of rise, 4 WT wide, on X.
+    fn block_run(grounded: bool) -> StairRun {
+        StairRun {
+            id: 1,
+            from_platform: None,
+            to_platform: None,
+            anchor_from: Anchor::Ground { x: 4.0, y: 0.0, z: 10.0 },
+            anchor_to: Anchor::Ground { x: 12.0, y: 8.0, z: 10.0 },
+            width: 4.0,
+            step_height: 1.0,
+            rise_over_run: 1.0,
+            grounded,
+            railings: false,
+            style: StairStyle::Block,
+        }
+    }
+
+    /// The block shell is a *solid* staircase: treads in the floor zone, every
+    /// vertical face in the upper-wall zone, and no two quads sharing a plane (the
+    /// uphill face of each step is buried in the taller step above it, and the
+    /// underside is flush with whatever the flight stands on, so neither is emitted).
+    #[test]
+    fn block_stair_shell_is_solid_and_has_no_coplanar_faces() {
+        let run = block_run(false);
+        let mut b = ZonedBuilder::new();
+        let mut solid = ZonedBuilder::new();
+        append_stair_block_mesh(&run, None, None, &[], &mut b, &mut solid, 0);
+        let mesh = b.finish();
+        assert!(!mesh.vertices.is_empty(), "the shell emitted geometry");
+
+        let zones: Vec<u8> = mesh.groups.iter().map(|g| g.zone).collect();
+        assert!(zones.contains(&TOP_ZONE), "treads carry the floor zone");
+        assert!(zones.contains(&SIDE_ZONE), "verticals carry the upper-wall zone");
+
+        // Exactly one horizontal quad per step (its tread) — 8 steps, 2 tris each.
+        // A second horizontal face anywhere would mean an underside or a buried
+        // tread got emitted, which is what z-fights.
+        let horizontal = mesh
+            .vertices
+            .iter()
+            .filter(|v| v.normal[1].abs() > 0.9)
+            .count();
+        assert_eq!(horizontal, 8 * 6, "one tread per step and nothing else flat");
+    }
+
+    /// The collider half of the block shell is the two lateral walls and nothing
+    /// else. Treads and risers must stay out of it: the run's smooth ramp quad is the
+    /// walking surface, and a riser poking up through the ramp would block the climb.
+    #[test]
+    fn block_stair_hands_only_its_side_walls_to_the_collider() {
+        let run = block_run(false);
+        let mut b = ZonedBuilder::new();
+        let mut solid = ZonedBuilder::new();
+        append_stair_block_mesh(&run, None, None, &[], &mut b, &mut solid, 0);
+        let coll = solid.finish();
+        assert!(!coll.vertices.is_empty(), "the sides are solid");
+        assert!(
+            coll.vertices.iter().all(|v| v.normal[1].abs() < 0.001),
+            "every collider face is vertical — no tread or riser leaked in"
+        );
+        // The flight runs along X, so its walls face ±Z.
+        assert!(
+            coll.vertices.iter().all(|v| v.normal[2].abs() > 0.9),
+            "the walls are the lateral pair, not the front or back"
+        );
+        assert!(
+            coll.vertices.len() < b.finish().vertices.len(),
+            "the collider is a subset of what is drawn"
+        );
+    }
+
+    /// Grounding a block flight is what makes it read as one mass: every face drops to
+    /// the room floor beneath it instead of stopping at the flight's own base.
+    #[test]
+    fn grounding_a_block_stair_drops_its_shell_to_the_floor() {
+        // A room whose floor is at y=2, with the flight starting on it at y=4.
+        let room = Brush::new(1, Op::Subtract, 0.0, 2.0, 0.0, 24.0, 16.0, 24.0);
+        let mut run = block_run(false);
+        run.anchor_from = Anchor::Ground { x: 4.0, y: 4.0, z: 10.0 };
+        run.anchor_to = Anchor::Ground { x: 12.0, y: 12.0, z: 10.0 };
+
+        let low_y = |r: &StairRun| {
+            let mut b = ZonedBuilder::new();
+            let mut s = ZonedBuilder::new();
+            append_stair_block_mesh(r, None, None, &[room], &mut b, &mut s, 0);
+            b.finish()
+                .vertices
+                .iter()
+                .map(|v| v.pos[1] / 0.25) // meters → WT
+                .fold(f32::MAX, f32::min)
+        };
+        assert!(
+            (low_y(&run) - 4.0).abs() < 1e-3,
+            "ungrounded: the shell stops at the flight's own base, got {}",
+            low_y(&run)
+        );
+        run.grounded = true;
+        assert!(
+            (low_y(&run) - 2.0).abs() < 1e-3,
+            "grounded: the shell reaches the room floor, got {}",
+            low_y(&run)
+        );
+    }
+
+    /// `floor_y_under` differs from `find_floor_y_at` in exactly the two ways a stair
+    /// flight needs, and both of them are what made grounding erase block stairs.
+    #[test]
+    fn floor_y_under_never_raises_a_flight_above_itself() {
+        let cellar = Brush::new(1, Op::Subtract, 0.0, -20.0, 0.0, 24.0, 12.0, 24.0);
+        let ground = Brush::new(2, Op::Subtract, 0.0, 0.0, 0.0, 24.0, 16.0, 24.0);
+        let brushes = [cellar, ground];
+
+        // 1. At-or-below: a foot resting on a floor fills to *that* floor, where
+        //    `find_floor_y_at` skips past it to the storey below.
+        assert_eq!(floor_y_under(4.0, 10.0, 0.0, &brushes), 0.0, "rests on the floor it is on");
+        assert_eq!(
+            find_floor_y_at(4.0, 10.0, 0.0, &brushes),
+            -20.0,
+            "the platform probe reaches the cellar — correct for a floating slab, not for stairs"
+        );
+
+        // 2. No world-ground fallback: a flight in the cellar stays in the cellar
+        //    instead of being dragged up to y=0, which culled every one of its steps.
+        assert_eq!(floor_y_under(4.0, 10.0, -20.0, &brushes), -20.0);
+        assert_eq!(
+            find_floor_y_at(4.0, 10.0, -20.0, &brushes),
+            0.0,
+            "the platform probe answers y=0 — ABOVE a flight built below world zero"
+        );
+
+        // A foot in mid-air still drops to the floor beneath it — grounding stays useful.
+        assert_eq!(floor_y_under(4.0, 10.0, 6.0, &brushes), 0.0, "mid-air foot drops to the floor");
+        // A foot over nothing stops at itself rather than snapping to zero.
+        assert_eq!(floor_y_under(100.0, 10.0, 6.0, &brushes), 6.0, "no room below: stay put");
+    }
+
+    /// `scheme_at` answers with the room a flight's foot stands *in* — including the
+    /// room whose floor it rests exactly on, which is the case `find_floor_y_at`
+    /// deliberately excludes (it wants the surface strictly below).
+    #[test]
+    fn scheme_at_finds_the_room_underfoot() {
+        let mut lower = Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 24.0, 8.0, 24.0);
+        lower.scheme = 1;
+        let mut upper = Brush::new(2, Op::Subtract, 0.0, 8.0, 0.0, 24.0, 8.0, 24.0);
+        upper.scheme = 2;
+        let brushes = [lower, upper];
+
+        assert_eq!(
+            scheme_at(4.0, 10.0, 0.0, &brushes),
+            Some(1),
+            "standing on the lower room's floor picks the lower room"
+        );
+        assert_eq!(
+            scheme_at(4.0, 10.0, 8.0, &brushes),
+            Some(2),
+            "standing on the upper room's floor picks the upper room"
+        );
+        assert_eq!(
+            scheme_at(100.0, 10.0, 0.0, &brushes),
+            None,
+            "no room covers that XZ"
+        );
+    }
+
+    /// The sideways-slide axis follows the run, and matches `compute_run_axis`'s own
+    /// ground-to-ground answer for the same pair of points.
+    #[test]
+    fn free_run_axis_matches_the_resolver() {
+        for (from, to) in [
+            ([0.0, 0.0, 0.0], [8.0, 4.0, 2.0]), // mostly X
+            ([0.0, 0.0, 0.0], [2.0, 4.0, 8.0]), // mostly Z
+            ([0.0, 0.0, 0.0], [5.0, 4.0, 5.0]), // tie → X, as the resolver does
+        ] {
+            let expect_x = compute_run_axis(
+                None,
+                &Anchor::Ground { x: to[0], y: to[1], z: to[2] },
+                None,
+                &Anchor::Ground { x: from[0], y: from[1], z: from[2] },
+                AnchorPt { x: to[0], y: to[1], z: to[2] },
+                AnchorPt { x: from[0], y: from[1], z: from[2] },
+            ) == RunAxis::X;
+            assert_eq!(
+                free_run_is_x(from, to),
+                expect_x,
+                "slide axis disagrees with the run resolver for {from:?} → {to:?}"
+            );
+        }
+    }
+
     #[test]
     fn platform_solid_box_is_the_slab() {
         let p = plat(1, 2.0, 8.0, 3.0);
@@ -1174,6 +1604,7 @@ mod tests {
             rise_over_run: 1.0,
             grounded: false,
             railings: false,
+            style: StairStyle::Platform,
         };
         let boxes = stair_run_boxes(&run, Some(&p), None, &[]);
         assert_eq!(boxes.len(), 8, "8 steps for a rise of 8");
