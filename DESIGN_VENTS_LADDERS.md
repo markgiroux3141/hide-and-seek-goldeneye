@@ -1,6 +1,18 @@
 # Vents & Ladders — design
 
-Status: **plan only, nothing built.** Written 2026-08-28 against `feat/named-levels`.
+Status: **stages 1–5 BUILT + green, awaiting playtest.** Branch `feat/vents-ladders`.
+Written 2026-08-28; implementation notes folded back in as each stage landed — where the
+code contradicted the plan, the plan is corrected in place and says so.
+
+| # | Stage | State |
+|---|---|---|
+| 1 | Crouch | **done** — `Ctrl` (keyboard), hold `L/R`+`C-Down` (pad) |
+| 2 | Vent geometry | **done** — `U` arms the duct tool |
+| 3 | Vent nav portals | **done** — mouths indexed at bake, `find_path` guard, NAV tab |
+| 4 | Hunters stake out mouths | **done** — in `move_toward`, so all three AI brains get it |
+| 5 | Ladders (player-only) | **done** — `J`, drawn on the marker overlay, NAV tab reports severing |
+| 6 | Ladders (hunter-climbable) | not started, and deliberately so — see §4 |
+| 7 | Pad binding confirmation | needs the hardware in hand |
 
 Two new traversal verbs for the level builder:
 

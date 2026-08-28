@@ -4721,7 +4721,7 @@ impl ApplicationHandler for App {
                     }
                     // The fixed enemy spawn-point marker (colored floor square) —
                     // drawn in both modes so the builder can author around it.
-                    renderer.set_marker_mesh(world.spawn_marker_mesh().as_ref());
+                    renderer.set_marker_mesh(world.marker_mesh().as_ref());
                     // The nav overlay is the one colored channel NOT rebuilt per frame:
                     // it is ~90k vertices and only changes when the author presses
                     // Calculate or toggles it, so it uploads on a revision change.

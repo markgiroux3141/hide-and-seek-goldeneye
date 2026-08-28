@@ -189,6 +189,81 @@ impl World {
     }
 }
 
+/// Rung spacing up a ladder, metres.
+const RUNG_SPACING: f32 = 0.35;
+/// Half-thickness of a rung, metres.
+const RUNG_HALF: f32 = 0.035;
+
+const LADDER_COLOR: [f32; 3] = [0.72, 0.68, 0.35];
+const LADDER_SELECTED_COLOR: [f32; 3] = [1.0, 0.9, 0.3];
+
+impl World {
+    /// Ladders drawn as rails-and-rungs on the overlay channel, in **both** modes.
+    ///
+    /// Drawn rather than textured because a ladder has no mesh: it is a climb volume
+    /// plus a transform. Overlay geometry is what the spawn pads already use for the
+    /// same reason, and it means a ladder is visible while authoring *and* while
+    /// playing — a climbable surface the player cannot see is a climbable surface the
+    /// player will not use.
+    pub fn ladder_marker_mesh(&self) -> Option<ColoredMesh> {
+        let mut vertices = Vec::new();
+        let mut indices = Vec::new();
+        let mut any = false;
+        let sel = self.selected_prop.filter(|&e| self.entity_is_ladder(e));
+        for (e, t, l) in self
+            .ecs
+            .world()
+            .query::<(hecs::Entity, &Transform, &Ladder)>()
+            .iter()
+        {
+            any = true;
+            let col = if Some(e) == sel { LADDER_SELECTED_COLOR } else { LADDER_COLOR };
+            let yaw = t.rot.to_euler(EulerRot::YXZ).0;
+            let (sn, cs) = yaw.sin_cos();
+            let out = Vec3::new(sn, 0.0, cs);
+            let across = if out.x.abs() > out.z.abs() { Vec3::Z } else { Vec3::X };
+            let half = across * (l.width * 0.5);
+            // Stand the rails a little off the wall so they don't z-fight the face.
+            let face = t.pos + out * 0.06;
+            let rail = across.abs() * 0.03 + out.abs() * 0.03 + Vec3::Y * 0.0;
+            for side in [-1.0f32, 1.0] {
+                let c = face + half * side;
+                push_colored_box(
+                    &mut vertices,
+                    &mut indices,
+                    c - rail - Vec3::Y * 0.0,
+                    c + rail + Vec3::Y * l.height,
+                    col,
+                );
+            }
+            let mut y = RUNG_SPACING * 0.5;
+            while y < l.height {
+                let c = face + Vec3::Y * y;
+                let ext = half.abs() + out.abs() * RUNG_HALF + Vec3::Y * RUNG_HALF;
+                push_colored_box(&mut vertices, &mut indices, c - ext, c + ext, col);
+                y += RUNG_SPACING;
+            }
+        }
+        any.then_some(ColoredMesh { vertices, indices })
+    }
+
+    /// Every overlay marker in one mesh — spawn pads and ladders.
+    ///
+    /// One channel, so the renderer keeps a single marker draw. Anything else that
+    /// needs a mesh-less authored object drawn belongs here too.
+    pub fn marker_mesh(&self) -> Option<ColoredMesh> {
+        match (self.spawn_marker_mesh(), self.ladder_marker_mesh()) {
+            (Some(mut a), Some(b)) => {
+                let base = a.vertices.len() as u32;
+                a.vertices.extend(b.vertices);
+                a.indices.extend(b.indices.iter().map(|i| i + base));
+                Some(a)
+            }
+            (a, b) => a.or(b),
+        }
+    }
+}
+
 /// The climb volume for a ladder at `pos` facing `yaw`: a box spanning the ladder's
 /// width across the wall, its height up it, and [`LADDER_DEPTH`] out from it.
 ///
@@ -334,6 +409,28 @@ mod tests {
             world.character.as_ref().unwrap().is_climbing(),
             "attached on contact, with nothing pressed"
         );
+    }
+
+    /// A placed ladder is visible — in BUILD *and* in HUNT. A climbable surface the
+    /// player cannot see is a climbable surface the player will not use.
+    #[test]
+    fn a_placed_ladder_draws_in_both_modes() {
+        let mut world = World::new();
+        world.initial_meshes();
+        assert!(world.ladder_marker_mesh().is_none(), "nothing to draw yet");
+        world.camera.pos = Vec3::new(3.0, 0.9, 3.0);
+        world.camera.yaw = std::f32::consts::PI;
+        world.camera.pitch = 0.0;
+        world.ladder_tool_key();
+        world.update_ladder_preview();
+        assert!(world.confirm_ladder(), "places");
+
+        let build = world.ladder_marker_mesh().expect("drawn in BUILD");
+        assert!(!build.indices.is_empty(), "the ladder has geometry");
+        // And it survives into the combined overlay channel the renderer actually reads.
+        assert!(world.marker_mesh().is_some(), "reaches the marker channel");
+        world.toggle_mode(); // HUNT
+        assert!(world.ladder_marker_mesh().is_some(), "still drawn while playing");
     }
 
     /// Ladders go on walls. A floor or ceiling pick is refused rather than silently
