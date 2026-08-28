@@ -24,7 +24,8 @@
   "`facility_white_tile` and `simple_blue` are required by name (see textures.rs)."
  ],
  "alpha_key_black": [
-  "railing"
+  "railing",
+  "tempImgEd034C"
  ],
  "schemes": [
   {
@@ -375,32 +376,32 @@
   },
   {
    "name": "ladder_metal",
-   "label": "Ladder Metal",
+   "label": "Ladder (Surface)",
    "group": "Vent",
    "zones": {
     "0": {
-     "texture": "tempImgEd01B8",
-     "repeat": 2.0
+     "texture": "tempImgEd034C",
+     "repeat": 1.0
     },
     "1": {
-     "texture": "tempImgEd01B8",
-     "repeat": 2.0
+     "texture": "tempImgEd034C",
+     "repeat": 1.0
     },
     "2": {
-     "texture": "tempImgEd01B8",
-     "repeat": 2.0
+     "texture": "tempImgEd034C",
+     "repeat": 1.0
     },
     "3": {
-     "texture": "tempImgEd01B8",
-     "repeat": 2.0
+     "texture": "tempImgEd034C",
+     "repeat": 1.0
     },
     "5": {
-     "texture": "tempImgEd01B8",
-     "repeat": 2.0
+     "texture": "tempImgEd034C",
+     "repeat": 1.0
     },
     "7": {
-     "texture": "tempImgEd01B8",
-     "repeat": 2.0
+     "texture": "tempImgEd034C",
+     "repeat": 1.0
     }
    }
   },

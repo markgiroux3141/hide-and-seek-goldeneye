@@ -132,20 +132,15 @@ impl World {
         let (pos, yaw) = self.ladder_preview?;
         let l = Ladder { height: self.ladder_height, ..Ladder::default() };
         let s = WORLD_SCALE;
-        let boxes: Vec<[f32; 6]> = ladder_boxes(pos, yaw, &l)
-            .into_iter()
-            .map(|(min, max)| {
-                [
-                    min.x / s,
-                    min.y / s,
-                    min.z / s,
-                    (max.x - min.x) / s,
-                    (max.y - min.y) / s,
-                    (max.z - min.z) / s,
-                ]
-            })
-            .collect();
-        Some(crate::world::geom::boxes_mesh(&boxes))
+        let (min, max) = ladder_plate(pos, yaw, &l);
+        Some(crate::world::geom::boxes_mesh(&[[
+            min.x / s,
+            min.y / s,
+            min.z / s,
+            (max.x - min.x) / s,
+            (max.y - min.y) / s,
+            (max.z - min.z) / s,
+        ]]))
     }
 
     /// Place the previewed ladder (left-click).
@@ -241,11 +236,10 @@ impl World {
 
 /// Rung spacing up a ladder, metres.
 const RUNG_SPACING: f32 = 0.35;
-/// Half-thickness of a rung, metres.
-const RUNG_HALF: f32 = 0.045;
-/// Half-thickness of a side rail, metres.
-const RAIL_HALF: f32 = 0.04;
-/// How far the rails stand off the wall face, metres — enough that the geometry behind
+/// Half-thickness of the ladder plate, metres — it is artwork on a plane, so this only
+/// has to be enough to give the ghost and the pick box something to be.
+const PLATE_HALF: f32 = 0.03;
+/// How far the plate stands off the wall face, metres — enough that the geometry behind
 /// them never z-fights through.
 const RAIL_STANDOFF: f32 = 0.07;
 
@@ -280,80 +274,65 @@ impl World {
     /// their own zone, on the same builder.
     pub(crate) fn append_ladders(&self, b: &mut ZonedBuilder) {
         let scheme = engine::render::textures::ladder_scheme();
+        let w = |p: Vec3| [p.x / WORLD_SCALE, p.y / WORLD_SCALE, p.z / WORLD_SCALE];
         for (t, l) in self.ecs.world().query::<(&Transform, &Ladder)>().iter() {
             let yaw = t.rot.to_euler(EulerRot::YXZ).0;
-            for (min, max) in ladder_boxes(t.pos, yaw, l) {
-                emit_metal_box(b, min, max, scheme);
+            for (c, uv) in ladder_quads(t.pos, yaw, l) {
+                b.emit_quad_uv([w(c[0]), w(c[1]), w(c[2]), w(c[3])], uv, scheme, 0);
             }
         }
     }
 }
 
-/// One axis-aligned box (world metres) into the zoned builder, planar-UV'd per face.
+/// The ladder as GoldenEye built it: **a flat plate wearing an alpha-keyed texture**,
+/// not modelled rails and rungs.
 ///
-/// `emit_quad_uv` wants **WT** corners and explicit UVs, so both conversions happen here.
-/// UVs come from the box's own world extent so the metal grain runs continuously along a
-/// rail instead of restarting per face.
-fn emit_metal_box(b: &mut ZonedBuilder, min: Vec3, max: Vec3, scheme: usize) {
-    let w = |p: Vec3| [p.x / WORLD_SCALE, p.y / WORLD_SCALE, p.z / WORLD_SCALE];
-    let (lo, hi) = (min, max);
-    // (corners, uv-source axes) per face, wound outward.
-    let faces: [([Vec3; 4], usize, usize); 6] = [
-        // +X / -X
-        ([Vec3::new(hi.x, lo.y, lo.z), Vec3::new(hi.x, lo.y, hi.z), Vec3::new(hi.x, hi.y, hi.z), Vec3::new(hi.x, hi.y, lo.z)], 2, 1),
-        ([Vec3::new(lo.x, lo.y, hi.z), Vec3::new(lo.x, lo.y, lo.z), Vec3::new(lo.x, hi.y, lo.z), Vec3::new(lo.x, hi.y, hi.z)], 2, 1),
-        // +Y / -Y
-        ([Vec3::new(lo.x, hi.y, lo.z), Vec3::new(lo.x, hi.y, hi.z), Vec3::new(hi.x, hi.y, hi.z), Vec3::new(hi.x, hi.y, lo.z)], 0, 2),
-        ([Vec3::new(lo.x, lo.y, hi.z), Vec3::new(lo.x, lo.y, lo.z), Vec3::new(hi.x, lo.y, lo.z), Vec3::new(hi.x, lo.y, hi.z)], 0, 2),
-        // +Z / -Z
-        ([Vec3::new(hi.x, lo.y, hi.z), Vec3::new(lo.x, lo.y, hi.z), Vec3::new(lo.x, hi.y, hi.z), Vec3::new(hi.x, hi.y, hi.z)], 0, 1),
-        ([Vec3::new(lo.x, lo.y, lo.z), Vec3::new(hi.x, lo.y, lo.z), Vec3::new(hi.x, hi.y, lo.z), Vec3::new(lo.x, hi.y, lo.z)], 0, 1),
-    ];
-    for (corners, ua, va) in faces {
-        let uv = |p: Vec3| {
-            let a = [p.x, p.y, p.z];
-            [a[ua] / WORLD_SCALE, a[va] / WORLD_SCALE]
-        };
-        b.emit_quad_uv(
-            [w(corners[0]), w(corners[1]), w(corners[2]), w(corners[3])],
-            [uv(corners[0]), uv(corners[1]), uv(corners[2]), uv(corners[3])],
-            scheme,
-            0,
-        );
-    }
-}
-
-/// The ladder's actual **drawn** parts — two side rails and the rungs between them — as
-/// world-metre AABBs.
+/// `tempImgEd034C` is the real thing — Surface's `m35Transparent`, resolved out of
+/// `public/existing goldeneye levels/04 - Surface1/LevelIndices.mtl`. It is 32x32 and
+/// holds exactly **one rung** between two rails on a black field, so tiling it vertically
+/// at [`RUNG_SPACING`] builds a ladder of any height with the rungs evenly spaced. Black
+/// is keyed to transparent (`alpha_key_black` in `themes.json`), which is what makes the
+/// gaps between rungs actually gaps.
 ///
-/// One function, used by three callers that must agree: the textured structure geometry,
-/// the BUILD ghost, and the tests. They were two copies before, which is why the ghost
-/// showed something the ladder was not: it drew the *climb volume*, which is deliberately
-/// half a metre taller than the rails (the top-out overshoot) and 0.6 m deep (the grab
-/// margin). Both of those are correct for a trigger volume and wrong as a picture of the
-/// object, and nothing was keeping them in step.
-pub(crate) fn ladder_boxes(pos: Vec3, yaw: f32, l: &Ladder) -> Vec<(Vec3, Vec3)> {
+/// This replaced two rails and N rungs of box geometry. The boxes were a stand-in for a
+/// texture nobody had found yet; with the texture in hand they are strictly worse — six
+/// quads per rung against one for the whole ladder, and still only an approximation of
+/// the artwork.
+///
+/// Returned as `(corners, uvs)` in **world metres**; the caller converts to WT.
+pub(crate) fn ladder_quads(pos: Vec3, yaw: f32, l: &Ladder) -> Vec<([Vec3; 4], [[f32; 2]; 4])> {
     let (sn, cs) = yaw.sin_cos();
     let out = Vec3::new(sn, 0.0, cs);
     let across = if out.x.abs() > out.z.abs() { Vec3::Z } else { Vec3::X };
     let half = across * (l.width * 0.5);
     let face = pos + out * RAIL_STANDOFF;
-    let thick = across.abs() * RAIL_HALF + out.abs() * RAIL_HALF;
+    let up = Vec3::Y * l.height;
+    // One texture per rung, so a taller ladder gets more rungs rather than longer ones.
+    let v = (l.height / RUNG_SPACING).max(1.0);
 
-    let mut boxes = Vec::new();
-    for side in [-1.0f32, 1.0] {
-        let c = face + half * side;
-        let (a, b) = (c - thick, c + thick + Vec3::Y * l.height);
-        boxes.push((a.min(b), a.max(b)));
-    }
-    let mut y = RUNG_SPACING * 0.5;
-    while y < l.height {
-        let c = face + Vec3::Y * y;
-        let ext = half.abs() + out.abs() * RUNG_HALF + Vec3::Y * RUNG_HALF;
-        boxes.push((c - ext, c + ext));
-        y += RUNG_SPACING;
-    }
-    boxes
+    let bl = face - half;
+    let br = face + half;
+    let front = [bl, br, br + up, bl + up];
+    let uv = [[0.0, v], [1.0, v], [1.0, 0.0], [0.0, 0.0]];
+    // Back face too, wound the other way: a ladder in a shaft gets looked at from both
+    // sides, and a single quad would vanish from one of them.
+    let back = [br, bl, bl + up, br + up];
+    let uv_back = [[0.0, v], [1.0, v], [1.0, 0.0], [0.0, 0.0]];
+    vec![(front, uv), (back, uv_back)]
+}
+
+/// The thin slab a ladder occupies, for the BUILD ghost and the click-pick box — the
+/// plate's own extent, so the preview is the object and not the volume around it.
+pub(crate) fn ladder_plate(pos: Vec3, yaw: f32, l: &Ladder) -> (Vec3, Vec3) {
+    let (sn, cs) = yaw.sin_cos();
+    let out = Vec3::new(sn, 0.0, cs);
+    let across = if out.x.abs() > out.z.abs() { Vec3::Z } else { Vec3::X };
+    let half = across * (l.width * 0.5);
+    let face = pos + out * RAIL_STANDOFF;
+    let thick = out.abs() * PLATE_HALF;
+    let a = face - half - thick;
+    let b = face + half + thick + Vec3::Y * l.height;
+    (a.min(b), a.max(b))
 }
 
 /// The climb volume for a ladder at `pos` facing `yaw`: a box spanning the ladder's
@@ -628,13 +607,13 @@ mod tests {
     }
 
     /// A placed ladder produces real, **lit and textured** geometry in the structures
-    /// mesh, wearing the ladder theme.
+    /// mesh, wearing the ladder theme — and it is a *plate*, not modelled rails.
     ///
     /// It used to go on the flat-colour marker overlay beside the spawn pads, which is
     /// why it read as a pale cut-out: that channel is unlit and untextured, which is
     /// right for an authoring marker and wrong for an object that is really there.
     #[test]
-    fn a_placed_ladder_is_lit_textured_structure_geometry() {
+    fn a_placed_ladder_is_a_lit_textured_alpha_keyed_plate() {
         let mut world = World::new();
         world.initial_meshes();
         let bare = world.rebuild_structures().mesh.groups.len();
@@ -660,9 +639,12 @@ mod tests {
             "the ladder emitted no structure geometry (groups went {bare} -> {})",
             rm.mesh.groups.len()
         );
-        // Two rails plus rungs, six quads each: comfortably more than a single quad,
-        // which is what a decal would have been.
-        assert!(tris >= 24, "rails and rungs, not a flat decal - got {tris} triangles");
+        // A flat plate, front and back: two quads, four triangles. This assertion used to
+        // demand >= 24 — two rails and N rungs of box geometry — and that expectation
+        // died the moment the real texture turned up. The boxes were standing in for
+        // artwork nobody had found; `tempImgEd034C` holds the rails and the rung, so
+        // modelling them again would be six quads per rung to say what one quad says.
+        assert_eq!(tris, 4, "a double-sided plate, not modelled rails and rungs");
     }
 
     /// **The ghost is the ladder**, not the trigger volume around it.
@@ -688,10 +670,8 @@ mod tests {
         let (pos, yaw) = world.ladder_preview.expect("a placement resolved");
         let h = world.ladder_height();
 
-        // The parts the ghost should be drawing.
-        let parts = ladder_boxes(pos, yaw, &Ladder { height: h, ..Ladder::default() });
-        let lo = parts.iter().fold(Vec3::splat(f32::INFINITY), |a, (m, _)| a.min(*m));
-        let hi = parts.iter().fold(Vec3::splat(f32::NEG_INFINITY), |a, (_, m)| a.max(*m));
+        // The plate the ghost should be drawing.
+        let (lo, hi) = ladder_plate(pos, yaw, &Ladder { height: h, ..Ladder::default() });
 
         // The ghost's own bounds, read back off the mesh it produced.
         assert!(!ghost.vertices.is_empty(), "the ghost has geometry");
@@ -718,6 +698,34 @@ mod tests {
             vmax.y - vmin.y > gh.y - gl.y + 0.4,
             "sanity: the climb volume really is the taller of the two, so this test \
              would have caught the old ghost"
+        );
+    }
+
+    /// **A taller ladder gets more rungs, not longer ones.**
+    ///
+    /// The texture holds exactly one rung, so the vertical UV has to scale with height.
+    /// Get that wrong and a 6 m ladder is one enormous stretched rung — which is the
+    /// failure mode a single hard-coded UV would have.
+    #[test]
+    fn rung_spacing_stays_constant_as_a_ladder_gets_taller() {
+        let at = |h: f32| {
+            let l = Ladder { height: h, ..Ladder::default() };
+            let q = ladder_quads(Vec3::ZERO, 0.0, &l);
+            // The V span of the front quad is how many rungs it tiles.
+            let vs: Vec<f32> = q[0].1.iter().map(|uv| uv[1]).collect();
+            vs.iter().cloned().fold(f32::MIN, f32::max)
+        };
+        let short = at(2.0);
+        let tall = at(6.0);
+        assert!(
+            (tall / short - 3.0).abs() < 1e-3,
+            "three times the height should tile three times the rungs ({short} -> {tall})"
+        );
+        // And the spacing itself is the constant the geometry used to model.
+        assert!(
+            (2.0 / short - RUNG_SPACING).abs() < 1e-3,
+            "a rung every {RUNG_SPACING} m, got every {} m",
+            2.0 / short
         );
     }
 
