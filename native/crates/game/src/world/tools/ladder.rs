@@ -71,12 +71,20 @@ impl World {
         self.ladder_preview = None;
     }
 
-    /// Scroll the height of the ladder about to be placed, in metres.
+    /// Scroll the height of the ladder about to be placed, one [`LADDER_HEIGHT_STEP`]
+    /// per click.
+    ///
+    /// The result is **snapped** to the step rather than merely offset by it, so a height
+    /// always lands on the grid however it got there — a value carried over from a
+    /// previous placement, or a default that was not a multiple, cannot leave every
+    /// subsequent scroll half a cell off.
     pub fn adjust_ladder_height(&mut self, step: f32) {
         if !self.ladder_tool {
             return;
         }
-        self.ladder_height = (self.ladder_height + step * 0.5).clamp(1.0, 20.0);
+        let h = self.ladder_height + step * LADDER_HEIGHT_STEP;
+        let snapped = (h / LADDER_HEIGHT_STEP).round() * LADDER_HEIGHT_STEP;
+        self.ladder_height = snapped.clamp(LADDER_HEIGHT_MIN, LADDER_HEIGHT_MAX);
     }
 
     /// Height (m) the next ladder will be placed at.
@@ -239,6 +247,18 @@ const RUNG_SPACING: f32 = 0.35;
 /// Half-thickness of the ladder plate, metres — it is artwork on a plane, so this only
 /// has to be enough to give the ghost and the pick box something to be.
 const PLATE_HALF: f32 = 0.03;
+/// Scroll granularity for ladder height: **one wall thickness** (1 WT = 0.25 m).
+///
+/// Expressed as `WALL_THICKNESS` rather than as 0.25 because that is the reason for the
+/// number — it is the editor's base unit, the depth of every wall the ladder is fixed to,
+/// and the step every other tool moves in. It was 0.5 m, which is two cells, and made it
+/// impossible to land a ladder exactly on a ledge that sat on an odd cell.
+const LADDER_HEIGHT_STEP: f32 = WALL_THICKNESS * WORLD_SCALE;
+/// A ladder shorter than this is a step; taller than this is a runaway-scroll guard.
+/// Both are whole multiples of the step, so the clamp cannot knock a height off-grid.
+const LADDER_HEIGHT_MIN: f32 = 4.0 * WALL_THICKNESS * WORLD_SCALE;
+const LADDER_HEIGHT_MAX: f32 = 80.0 * WALL_THICKNESS * WORLD_SCALE;
+
 /// How far the plate stands off the wall face, metres — enough that the geometry behind
 /// them never z-fights through.
 const RAIL_STANDOFF: f32 = 0.07;
@@ -386,7 +406,13 @@ mod tests {
         world.camera.yaw = std::f32::consts::PI;
         world.camera.pitch = 0.0;
         world.ladder_tool_key();
-        world.adjust_ladder_height(4.0); // 3.0 → 5.0 m
+        // Scroll off the default so the test proves the *authored* height survives, not
+        // just that a default is reapplied. Derived from the step rather than written as
+        // a literal — hard-coding it is what broke this test when the scroll granularity
+        // changed, and the number was never the point.
+        let want = world.ladder_height() + 4.0 * LADDER_HEIGHT_STEP;
+        world.adjust_ladder_height(4.0);
+        assert!((world.ladder_height() - want).abs() < 1e-5, "scrolled off the default");
         assert!(world.update_ladder_preview().is_some(), "previews on the wall");
         assert!(world.confirm_ladder(), "places");
         assert_eq!(world.ladder_count(), 1);
@@ -404,7 +430,7 @@ mod tests {
             .next()
             .map(|l| l.height)
             .unwrap();
-        assert!((h - 5.0).abs() < 1e-4, "and keeps its authored height, got {h}");
+        assert!((h - want).abs() < 1e-4, "and keeps its authored height {want}, got {h}");
     }
 
     /// **The acceptance test: a ladder actually lifts the player.**
@@ -726,6 +752,49 @@ mod tests {
             (2.0 / short - RUNG_SPACING).abs() < 1e-3,
             "a rung every {RUNG_SPACING} m, got every {} m",
             2.0 / short
+        );
+    }
+
+    /// **Height scrolls one wall thickness at a time**, and stays on that grid.
+    ///
+    /// It moved in 0.5 m — two cells — which made it impossible to land a ladder exactly
+    /// on a ledge sitting at an odd cell height. Snapping matters as much as the step
+    /// size: offsetting alone would preserve any off-grid value forever.
+    #[test]
+    fn ladder_height_scrolls_by_one_wall_thickness_and_stays_on_grid() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.ladder_tool_key();
+        let start = world.ladder_height();
+        world.adjust_ladder_height(1.0);
+        assert!(
+            (world.ladder_height() - start - LADDER_HEIGHT_STEP).abs() < 1e-5,
+            "one click is one wall thickness ({LADDER_HEIGHT_STEP} m), got {}",
+            world.ladder_height() - start
+        );
+        world.adjust_ladder_height(-1.0);
+        assert!((world.ladder_height() - start).abs() < 1e-5, "and back down again");
+
+        // An off-grid height is pulled onto the grid by the next scroll, rather than
+        // carrying its offset forever.
+        world.ladder_height = start + 0.07;
+        world.adjust_ladder_height(1.0);
+        let h = world.ladder_height();
+        let cells = h / LADDER_HEIGHT_STEP;
+        assert!(
+            (cells - cells.round()).abs() < 1e-4,
+            "{h} m is {cells} cells — heights must land on whole wall thicknesses"
+        );
+
+        // The clamps are themselves on the grid, so hitting one cannot knock it off.
+        for _ in 0..500 {
+            world.adjust_ladder_height(-1.0);
+        }
+        let lo = world.ladder_height();
+        assert!((lo - LADDER_HEIGHT_MIN).abs() < 1e-5, "clamps at the minimum");
+        assert!(
+            ((lo / LADDER_HEIGHT_STEP) - (lo / LADDER_HEIGHT_STEP).round()).abs() < 1e-4,
+            "and the minimum is itself a whole number of cells"
         );
     }
 
