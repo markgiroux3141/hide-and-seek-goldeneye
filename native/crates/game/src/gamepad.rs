@@ -103,6 +103,8 @@ pub struct N64Pad {
     /// Whether this B hold already fired the function toggle, so it happens once
     /// per press rather than every frame past the threshold.
     b_toggled: bool,
+    /// Hold state for the L/R + C-Down crouch combo (see [`crouch_combo`]).
+    crouch: CrouchState,
     /// Keys the pad is currently synthesizing (from the stick / C-buttons). Tracked
     /// so the pad only ever RELEASES a key it pressed itself — a centered stick
     /// never clobbers a key the player is holding on the keyboard.
@@ -124,6 +126,7 @@ impl N64Pad {
             prev_both: false,
             b_held_secs: 0.0,
             b_toggled: false,
+            crouch: CrouchState::default(),
             held_keys: Vec::new(),
             held_fire: false,
         })
@@ -263,7 +266,14 @@ impl N64Pad {
             self.drive_key(input, KeyCode::KeyA, c_left);
             self.drive_key(input, KeyCode::KeyD, c_right);
             if pad_active {
-                let pitch_axis = (c_down as i32 - c_up as i32) as f32;
+                // L/R + C-Down held long enough is a crouch, not a look-down. Driven
+                // through `drive_key` so it reaches the character on the same pad-owned
+                // channel as W/A/S/D — the keyboard's own Ctrl is never clobbered.
+                let (crouching, suppress_pitch) =
+                    crouch_combo(&mut self.crouch, dt, aim_mode && c_down);
+                self.drive_key(input, KeyCode::ControlLeft, crouching);
+                let pitch_down = c_down && !suppress_pitch;
+                let pitch_axis = (pitch_down as i32 - c_up as i32) as f32;
                 world.gamepad_look(dt, sx, sy, aim_mode, pitch_axis, input);
             } else {
                 // Idle pad → no analog move; the app runs mouse-look instead.
@@ -345,9 +355,82 @@ pub(crate) fn b_button_edges(
     (toggle, reload)
 }
 
+/// The crouch-combo hold state, split out of [`N64Pad`] so the decision below is
+/// testable without a controller plugged in.
+#[derive(Default, Clone, Copy, Debug)]
+pub(crate) struct CrouchState {
+    pub held_secs: f32,
+    pub latched: bool,
+}
+
+/// How long L/R + C-Down must be held before it crouches instead of pitching.
+///
+/// Deliberately shorter than [`B_HOLD_TOGGLE_SECS`]: B's hold competes with a tap, which
+/// is instantaneous, so it can afford to wait. This one competes with *aiming downward*,
+/// which the player is doing continuously while the clock runs — so every extra frame
+/// here is a frame of unwanted pitch.
+const CROUCH_HOLD_SECS: f32 = 0.22;
+
+/// The crouch half of the L/R + C-Down combo, as `(crouch, suppress_pitch)`.
+///
+/// **This binding is a genuine collision and the split is a compromise, not a fix.**
+/// `aim_mode` is exactly `L || R` and C-Down is the pitch-down axis, so the combo the
+/// player asked for *is* the combo for aiming downward. The two are told apart by
+/// duration: a hold past [`CROUCH_HOLD_SECS`] latches a crouch and stops feeding the
+/// pitch axis, anything shorter pitches as it always did.
+///
+/// The residue worth naming: looking down is itself a hold, so a deliberate pitch-down
+/// while aiming spends its first [`CROUCH_HOLD_SECS`] pitching and then stops. C-Down
+/// **without** L/R still pitches without limit, which is the escape hatch — but if this
+/// fights the hand in play, the fallback is Z + C-Down (Z is fire; that pair is unused).
+///
+/// The latch holds until the combo is fully released, so a crouched player who keeps
+/// holding does not oscillate between crouching and pitching.
+pub(crate) fn crouch_combo(state: &mut CrouchState, dt: f32, combo_down: bool) -> (bool, bool) {
+    if !combo_down {
+        state.held_secs = 0.0;
+        state.latched = false;
+        return (false, false);
+    }
+    state.held_secs += dt;
+    if state.held_secs >= CROUCH_HOLD_SECS {
+        state.latched = true;
+    }
+    (state.latched, state.latched)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A short L+C-Down still pitches and never crouches; holding past the threshold
+    /// latches the crouch and takes the pitch axis away.
+    #[test]
+    fn a_short_aim_down_pitches_but_a_held_one_crouches() {
+        let mut st = CrouchState::default();
+        let dt = 1.0 / 60.0;
+        // 0.1 s — comfortably under the threshold.
+        for _ in 0..6 {
+            let (crouch, suppress) = crouch_combo(&mut st, dt, true);
+            assert!(!crouch, "a short hold must not crouch");
+            assert!(!suppress, "…and must not steal the pitch axis");
+        }
+        // Keep holding past 0.22 s.
+        let mut crouched = false;
+        for _ in 0..10 {
+            let (crouch, suppress) = crouch_combo(&mut st, dt, true);
+            crouched |= crouch;
+            assert_eq!(crouch, suppress, "crouching and pitch-suppression move together");
+        }
+        assert!(crouched, "holding the combo latches a crouch");
+        // It stays latched while held — no oscillation back into pitching.
+        for _ in 0..60 {
+            assert!(crouch_combo(&mut st, dt, true).0, "the latch holds while held");
+        }
+        // Releasing clears it completely.
+        assert!(!crouch_combo(&mut st, dt, false).0, "release un-crouches");
+        assert!(!st.latched && st.held_secs == 0.0, "and resets the clock");
+    }
 
     /// A short tap reloads on release and never switches function.
     #[test]

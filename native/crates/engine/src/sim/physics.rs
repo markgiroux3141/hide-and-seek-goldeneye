@@ -532,6 +532,32 @@ impl PhysicsWorld {
         (Vec3::new(t.x, t.y, t.z), movement.grounded)
     }
 
+    /// Whether a capsule at `capsule_center` would sit clear of the static world.
+    ///
+    /// This is the **stand-up test**, and it is a shape query rather than a ray on
+    /// purpose. Growing the player's capsule is not a *movement*, so
+    /// [`Self::move_character`] cannot answer it — move-and-slide resolves a
+    /// translation of a fixed shape, and a capsule that gets taller in place would
+    /// simply end up interpenetrating the ceiling with nothing to push it out. An
+    /// up-ray would be cheaper but wrong at the edges: it samples the axis and misses
+    /// the shoulders, so a player crouched at the lip of a duct would find half their
+    /// body inside the slab.
+    ///
+    /// Hunter capsules are excluded for the same reason [`Self::move_character`]
+    /// excludes them — they do not physically block the player, so a packmate standing
+    /// over you is not the world telling you there is no headroom.
+    pub fn capsule_free(&mut self, radius: f32, half_height: f32, capsule_center: Vec3) -> bool {
+        self.ensure_current();
+        let shape = Capsule::new_y(half_height, radius);
+        let pos = Isometry::translation(capsule_center.x, capsule_center.y, capsule_center.z);
+        let enemy_colliders = &self.enemy_colliders;
+        let predicate = |handle: ColliderHandle, _: &Collider| !enemy_colliders.contains(&handle);
+        let filter = QueryFilter::default().predicate(&predicate);
+        self.query_pipeline
+            .intersection_with_shape(&self.bodies, &self.colliders, &pos, &shape, filter)
+            .is_none()
+    }
+
     // ── Dynamics substrate (ragdoll) ──────────────────────────────────────────
 
     /// Advance the rigid-body solver one step (`dt` seconds). A **no-op** while no
@@ -780,6 +806,46 @@ fn door_iso(center: Vec3, rot: Quat) -> Isometry<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The stand-up gate: under a low ceiling a crouched capsule fits and a standing one
+    /// does not, so [`PhysicsWorld::capsule_free`] can refuse the un-crouch.
+    ///
+    /// Sized as the vent case: a 1.0 m bore, a 0.75 m crouched body, a 1.5 m standing
+    /// one. Also pins that the query is a *shape* test rather than an up-ray — the
+    /// off-axis case, a body at the lip of the duct whose axis is clear but whose
+    /// shoulders are not, is the third assertion.
+    #[test]
+    fn capsule_free_refuses_a_standing_capsule_under_a_low_ceiling() {
+        let mut p = PhysicsWorld::new();
+        // A slab from y = 1.0 upward, spanning x ≥ 0 — the duct roof, with its edge at
+        // x = 0 so the last assertion has an off-axis case to catch.
+        p.add_prop_collider(Vec3::new(0.0, 1.0, -5.0), Vec3::new(5.0, 1.5, 5.0));
+
+        let radius = 0.25;
+        let crouch_half = (0.75 - 2.0 * radius) * 0.5; // 0.125
+        let stand_half = (1.5 - 2.0 * radius) * 0.5; // 0.5
+        let feet = Vec3::new(2.0, 0.0, 0.0);
+
+        assert!(
+            p.capsule_free(radius, crouch_half, feet + Vec3::new(0.0, 0.75 * 0.5, 0.0)),
+            "a 0.75 m crouched body fits under a 1.0 m roof"
+        );
+        assert!(
+            !p.capsule_free(radius, stand_half, feet + Vec3::new(0.0, 1.5 * 0.5, 0.0)),
+            "a 1.5 m standing body does not — this is what refuses the un-crouch"
+        );
+        // Off-axis: feet at x = -0.1 put the capsule *axis* clear of the slab (which
+        // starts at x = 0) while the 0.25 m radius still overlaps it. An up-ray would
+        // report this clear and stand the player into the ceiling.
+        assert!(
+            !p.capsule_free(
+                radius,
+                stand_half,
+                Vec3::new(-0.1, 1.5 * 0.5, 0.0)
+            ),
+            "the shoulders count, not just the axis — a ray query would miss this"
+        );
+    }
 
     /// Track A: the hunter's capsule is hittable, reports its own handle (so
     /// hitscan can tell it from a wall), follows [`PhysicsWorld::update_enemy_collider`]

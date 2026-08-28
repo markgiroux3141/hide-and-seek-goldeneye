@@ -24,6 +24,33 @@ const WALK_SPEED: f32 = 6.4; // m/s
 const GRAVITY: f32 = 20.0; // m/s²
 const JUMP_VELOCITY: f32 = 5.5; // m/s
 
+// ─── Crouch ──────────────────────────────────────────────────────────────────
+
+/// Crouched height (0.75 m), sized to fit a vent bore with headroom to spare.
+///
+/// The bore is 4 WT (1.0 m) and [`DESIGN_VENTS_LADDERS.md`'s Rule 1] caps it at 5 WT, so
+/// this leaves 0.25 m of clearance at the design size. It cannot usefully go much lower:
+/// a capsule's total height is `2·(half_height + radius)`, so with [`RADIUS`] fixed at
+/// 0.25 m the floor on this constant is 0.5 m — a zero-length cylinder between two
+/// hemispheres.
+const CROUCH_HEIGHT: f32 = 3.0 * WT;
+
+/// Crouched eye height (0.675 m) — the standing 0.9 × height ratio, held.
+const CROUCH_EYE: f32 = 2.7 * WT;
+
+/// Speed multiplier while fully crouched (2.24 m/s from [`WALK_SPEED`]).
+///
+/// **This number is doing a second job**, and it is worth stating so nobody "tidies" it.
+/// The hunters' footstep sense ignores the player below `MOVE_NOISE_MIN_SPEED` = 2.5 m/s
+/// (`world::alert_enemies_to_movement`), so a crouched player at 2.24 m/s is *silent* —
+/// crouch is a sneak, and it costs no new mechanism to be one. Raising this above 0.39
+/// would silently make crouching audible again.
+const CROUCH_SPEED_SCALE: f32 = 0.35;
+
+/// Seconds for a full stand↔crouch transition. Fast enough to duck into a duct under
+/// fire, slow enough that the camera drop reads as a movement rather than a teleport.
+const CROUCH_TIME: f32 = 0.18;
+
 /// The player's standing height and horizontal half-width (m) — the capsule as the rest
 /// of the game needs to measure it.
 ///
@@ -41,10 +68,19 @@ pub(crate) const PLAYER_RADIUS: f32 = RADIUS;
 /// jump does rather than restate it (see `world::nav_issues`).
 pub(crate) const JUMP_APEX: f32 = JUMP_VELOCITY * JUMP_VELOCITY / (2.0 * GRAVITY);
 
-/// Capsule cylinder half-height: total = 2·(half + radius) = HEIGHT.
-const HALF_HEIGHT: f32 = (HEIGHT - 2.0 * RADIUS) * 0.5; // 0.5 m
-/// Capsule midpoint sits this far above the feet.
-const CENTER_OFFSET: f32 = HEIGHT * 0.5; // 0.75 m
+/// Capsule cylinder half-height for a given total height: total = 2·(half + radius).
+/// Clamped at 0 so a height at or below `2·RADIUS` degenerates to a sphere rather than
+/// asking Rapier for a negative-length capsule.
+#[inline]
+fn half_height_for(height: f32) -> f32 {
+    ((height - 2.0 * RADIUS) * 0.5).max(0.0)
+}
+
+/// Capsule midpoint above the feet for a given total height.
+#[inline]
+fn center_offset_for(height: f32) -> f32 {
+    height * 0.5
+}
 
 pub struct CharacterController {
     /// Feet position, meters.
@@ -62,6 +98,14 @@ pub struct CharacterController {
     /// [`Self::apply_move`]. The hunters' local-avoidance (ORCA) reads this so they
     /// steer around where the player is *heading*, not just its current cell.
     vel_xz: Vec3,
+    /// Crouch blend, 0 = fully standing, 1 = fully crouched. Everything the crouch
+    /// affects — capsule height, eye height, speed — is a lerp on this one scalar, so
+    /// the transition can never desync between the camera and the collider.
+    crouch_t: f32,
+    /// Whether the player is *asking* to be crouched this step. Kept apart from
+    /// [`Self::crouch_t`] because releasing the key does not by itself stand you up:
+    /// under a duct there is nowhere to stand, and the blend holds where it is.
+    crouch_held: bool,
 }
 
 impl CharacterController {
@@ -75,7 +119,36 @@ impl CharacterController {
             grounded: false,
             speed_xz: 0.0,
             vel_xz: Vec3::ZERO,
+            crouch_t: 0.0,
+            crouch_held: false,
         }
+    }
+
+    /// Current capsule height (m), blended between standing and crouched.
+    #[inline]
+    pub fn height(&self) -> f32 {
+        HEIGHT + (CROUCH_HEIGHT - HEIGHT) * self.crouch_t
+    }
+
+    /// How crouched the player is: 0 standing, 1 fully crouched.
+    #[inline]
+    pub fn crouch_amount(&self) -> f32 {
+        self.crouch_t
+    }
+
+    /// Whether the player is crouched far enough to fit somewhere a standing body
+    /// cannot — the test any vent-entry rule should ask, rather than reading
+    /// [`Self::crouch_amount`] against a magic number of its own.
+    #[inline]
+    pub fn is_crouched(&self) -> bool {
+        self.crouch_t > 0.99
+    }
+
+    /// Request the crouch state for this step (held = down). Driven from the keyboard
+    /// bind and the pad's hold-split; the controller decides what it can actually do
+    /// about it in [`Self::apply_move`].
+    pub fn set_crouch(&mut self, held: bool) {
+        self.crouch_held = held;
     }
 
     /// Mouse-look, once per rendered frame (crisp aim, independent of sim rate).
@@ -124,17 +197,55 @@ impl CharacterController {
             wish = wish.normalize();
         }
 
+        // Crouch is read as a key like the others, so the pad drives it through the same
+        // `drive_key` channel W/A/S/D already use rather than needing its own seam. A
+        // caller may also set it directly via [`Self::set_crouch`].
+        if input.pointer_locked {
+            self.crouch_held = input.key_down(KeyCode::ControlLeft);
+        }
+
+        // ── Crouch blend ──
+        // Ducking is always allowed; standing up is not. Releasing crouch inside a duct
+        // has to be refused, or the player grows through the slab and Rapier ejects them
+        // somewhere unpredictable — so the stand-up is *gated on a shape query at the
+        // height it would reach*, not merely started and hoped for.
+        //
+        // The query runs against the height one step of blend away rather than full
+        // standing height, so clearing a low ceiling raises you as far as it allows
+        // instead of holding you flat until the whole 0.75 m is free.
+        let target = if self.crouch_held { 1.0 } else { 0.0 };
+        if target > self.crouch_t {
+            self.crouch_t = (self.crouch_t + dt / CROUCH_TIME).min(1.0);
+        } else if target < self.crouch_t {
+            let next = (self.crouch_t - dt / CROUCH_TIME).max(0.0);
+            let next_h = HEIGHT + (CROUCH_HEIGHT - HEIGHT) * next;
+            let probe = self.pos + Vec3::new(0.0, center_offset_for(next_h), 0.0);
+            if physics.capsule_free(RADIUS, half_height_for(next_h), probe) {
+                self.crouch_t = next;
+            }
+        }
+        let height = self.height();
+
         // Gravity + jump (held Space re-jumps on landing, matching player.js).
+        // Crouched, there is no jump: a duck that can launch you is a way to skip
+        // geometry, and the nav report's player-only-climb accounting is calibrated
+        // against a *standing* JUMP_APEX.
         self.vel_y -= GRAVITY * dt;
-        if self.grounded && input.pointer_locked && input.key_down(KeyCode::Space) {
+        if self.grounded
+            && input.pointer_locked
+            && input.key_down(KeyCode::Space)
+            && self.crouch_t <= 0.0
+        {
             self.vel_y = JUMP_VELOCITY;
             self.grounded = false;
         }
 
-        let desired = wish * WALK_SPEED * dt + Vec3::new(0.0, self.vel_y * dt, 0.0);
-        let center = self.pos + Vec3::new(0.0, CENTER_OFFSET, 0.0);
+        // Crouched movement is slowed — and thereby silenced, see CROUCH_SPEED_SCALE.
+        let speed = WALK_SPEED * (1.0 + (CROUCH_SPEED_SCALE - 1.0) * self.crouch_t);
+        let desired = wish * speed * dt + Vec3::new(0.0, self.vel_y * dt, 0.0);
+        let center = self.pos + Vec3::new(0.0, center_offset_for(height), 0.0);
         let (corrected, grounded) =
-            physics.move_character(dt, RADIUS, HALF_HEIGHT, center, desired);
+            physics.move_character(dt, RADIUS, half_height_for(height), center, desired);
 
         self.pos += corrected;
         self.grounded = grounded;
@@ -167,10 +278,11 @@ impl CharacterController {
         view_proj_from(self.eye(), self.forward(), aspect)
     }
 
-    /// Eye (camera) position in world space — feet + eye height. The fire ray
-    /// originates here (the crosshair is at the eye centre).
+    /// Eye (camera) position in world space — feet + eye height, lowered as the player
+    /// crouches. The fire ray originates here (the crosshair is at the eye centre), so
+    /// a crouched player genuinely shoots from a crouched eyeline.
     pub fn eye(&self) -> Vec3 {
-        self.pos + Vec3::new(0.0, EYE, 0.0)
+        self.pos + Vec3::new(0.0, EYE + (CROUCH_EYE - EYE) * self.crouch_t, 0.0)
     }
 
     /// Unit look direction (yaw + pitch). The fire ray travels along this, and the

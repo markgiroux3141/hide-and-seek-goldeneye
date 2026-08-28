@@ -3072,6 +3072,34 @@ pub(crate) fn perception_los(physics: &mut PhysicsWorld, from_feet: Vec3, to_fee
 mod tests {
     use super::*;
 
+    /// **Crouch may shrink the player's height; it must never shrink their radius.**
+    ///
+    /// [`Enemy::catches`] is pure proximity — no line-of-sight test, no solidity test —
+    /// so the only thing stopping a hunter catching the player through a
+    /// `WALL_THICKNESS` (0.25 m) wall is that two capsule radii hold their centres
+    /// further apart than [`CATCH_DIST`]. That margin is 0.2 m and nothing else defends
+    /// it.
+    ///
+    /// It matters now because a vent bore invites exactly the wrong fix: narrowing the
+    /// player's capsule "so it fits". It does not need to — a 1.0 m bore clears a 0.25 m
+    /// radius standing — and narrowing it would let a player crouched in a duct be
+    /// caught through the duct wall by a hunter walking past outside.
+    #[test]
+    fn two_capsule_radii_keep_a_hunter_from_catching_through_a_wall() {
+        let player_r = crate::character::PLAYER_RADIUS;
+        // The *smallest* hunter, not the reference one: `World::body_capsule` scales
+        // ENEMY_RADIUS by `body_height / CAPSULE_REF_HEIGHT`, so a short body is
+        // narrower and is the case that would fail first.
+        let shortest = 1.2f32; // comfortably below any body in the catalog
+        let enemy_r =
+            crate::world::ENEMY_RADIUS * (shortest / crate::world::CAPSULE_REF_HEIGHT);
+        assert!(
+            player_r + enemy_r > CATCH_DIST,
+            "radii ({player_r} + {enemy_r}) must exceed the catch distance ({CATCH_DIST}); \
+             shrinking either lets a hunter catch the player through a thin wall",
+        );
+    }
+
     /// Damage is subtractive off the starting health.
     #[test]
     fn damage_is_subtractive() {

@@ -4653,6 +4653,138 @@ fn arm_with(world: &mut World, name: &str) -> usize {
 
 
 
+// ─── Crouch (stage 1 of vents/ladders) ─────────────────────────────
+
+/// Settle the crouch blend with no movement input, then take one measured step.
+///
+/// Two phases on purpose: the default test room is small, so walking for the ~0.2 s
+/// the blend needs puts the player into a wall and the measured speed is the
+/// wall-slide, not the gait.
+fn crouch_then_step(crouch: bool, walk: bool) -> (f32, f32, f32) {
+    let mut world = World::new();
+    world.initial_meshes();
+    world.toggle_mode(); // HUNT
+    let mut input = InputState::default();
+    input.pointer_locked = true;
+    if crouch {
+        input.press(winit::keyboard::KeyCode::ControlLeft);
+    }
+    for _ in 0..30 {
+        world.character.as_mut().unwrap().apply_move(
+            1.0 / 60.0,
+            &input,
+            &mut world.physics,
+        );
+    }
+    if walk {
+        input.press(winit::keyboard::KeyCode::KeyW);
+    }
+    world
+        .character
+        .as_mut()
+        .unwrap()
+        .apply_move(1.0 / 60.0, &input, &mut world.physics);
+    let c = world.character.as_ref().unwrap();
+    (c.speed(), c.height(), c.eye().y - c.pos.y)
+}
+
+/// Crouching drops the capsule and the eyeline together, and releasing raises them
+/// back. One scalar drives both, so the camera can never sit at a height the
+/// collider does not have.
+#[test]
+fn crouch_lowers_the_body_and_the_eyeline_together() {
+    let (_, stand_h, stand_eye) = crouch_then_step(false, false);
+    let (_, crouch_h, crouch_eye) = crouch_then_step(true, false);
+    assert!(crouch_h < stand_h, "body shrank: {crouch_h} < {stand_h}");
+    assert!(crouch_eye < stand_eye, "eye dropped: {crouch_eye} < {stand_eye}");
+    assert!(
+        crouch_eye < crouch_h,
+        "the crouched eye ({crouch_eye}) stays inside the crouched body ({crouch_h})"
+    );
+
+    // And it comes back up: releasing in an open room restores full height.
+    let mut world = World::new();
+    world.initial_meshes();
+    world.toggle_mode();
+    let mut input = InputState::default();
+    input.pointer_locked = true;
+    input.press(winit::keyboard::KeyCode::ControlLeft);
+    for _ in 0..30 {
+        world.character.as_mut().unwrap().apply_move(
+            1.0 / 60.0,
+            &input,
+            &mut world.physics,
+        );
+    }
+    assert!(world.character.as_ref().unwrap().is_crouched(), "reached full crouch");
+    input.release(winit::keyboard::KeyCode::ControlLeft);
+    for _ in 0..30 {
+        world.character.as_mut().unwrap().apply_move(
+            1.0 / 60.0,
+            &input,
+            &mut world.physics,
+        );
+    }
+    let c = world.character.as_ref().unwrap();
+    assert!(!c.is_crouched(), "released crouch stands back up in an open room");
+    assert!((c.height() - stand_h).abs() < 1e-3, "back to full height");
+}
+
+/// **Crouching is sneaking, and that is not a separate mechanism.**
+///
+/// [`alert_enemies_to_movement`](World::alert_enemies_to_movement) ignores the
+/// player below [`MOVE_NOISE_MIN_SPEED`], and the crouch speed scale is chosen to
+/// land under it. A running player is audible; the same player crouched is silent.
+/// If anyone retunes `CROUCH_SPEED_SCALE` upward, this is what notices.
+#[test]
+fn a_crouched_player_moves_below_the_footstep_noise_threshold() {
+    let (running, _, _) = crouch_then_step(false, true);
+    let (crouched, _, _) = crouch_then_step(true, true);
+    assert!(
+        running > MOVE_NOISE_MIN_SPEED,
+        "a standing player is audible ({running:.2} m/s)"
+    );
+    assert!(
+        crouched < MOVE_NOISE_MIN_SPEED,
+        "a crouched player is NOT ({crouched:.2} m/s vs {MOVE_NOISE_MIN_SPEED}) —              crouch stops being a sneak if this regresses"
+    );
+}
+
+/// Crouched, there is no jump. A duck that can launch you is a way over geometry,
+/// and the NAV tab's player-only-climb accounting is calibrated against a standing
+/// [`crate::character::JUMP_APEX`].
+#[test]
+fn a_crouched_player_cannot_jump() {
+    let mut world = World::new();
+    world.initial_meshes();
+    world.toggle_mode();
+    let mut input = InputState::default();
+    input.pointer_locked = true;
+    input.press(winit::keyboard::KeyCode::ControlLeft);
+    for _ in 0..30 {
+        world.character.as_mut().unwrap().apply_move(
+            1.0 / 60.0,
+            &input,
+            &mut world.physics,
+        );
+    }
+    let floor = world.character.as_ref().unwrap().pos.y;
+    input.press(winit::keyboard::KeyCode::Space);
+    for _ in 0..20 {
+        world.character.as_mut().unwrap().apply_move(
+            1.0 / 60.0,
+            &input,
+            &mut world.physics,
+        );
+    }
+    let y = world.character.as_ref().unwrap().pos.y;
+    assert!(
+        (y - floor).abs() < 0.05,
+        "crouched + Space stays on the floor (moved {:.3} m)",
+        y - floor
+    );
+}
+
 #[cfg(test)]
 mod tmp_chain {
     use super::super::*;
