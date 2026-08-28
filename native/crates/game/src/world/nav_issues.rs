@@ -100,6 +100,19 @@ pub struct NavIssues {
     pub joining_climbs: usize,
     /// Representative climbs, the reconnecting ones first.
     pub climbs: Vec<NavClimb>,
+    /// Vent ducts on the grid, and how many have no standable cell at any opening.
+    ///
+    /// **A third class of finding, and it needs its own vocabulary.** The report's two
+    /// existing classes are "nobody can get there" (an error) and "they can path it but
+    /// not walk it" (a warning). A duct is neither: it is *deliberately* unreachable to
+    /// hunters, and if that is not taught here then every vent an author cuts lights the
+    /// panel up as a fault and the tab stops being worth reading.
+    ///
+    /// What *is* a fault is a duct with no mouth — nobody can stand where they can watch
+    /// it, which also means the grid and the geometry disagree about how the player got
+    /// in.
+    pub vents: usize,
+    pub mouthless_vents: Vec<usize>,
 }
 
 /// A corridor narrower than this cannot hold a hunter's body at all, however well
@@ -407,6 +420,10 @@ impl World {
         climbs.sort_by_key(|c| c.joins.is_none());
         let climbs = cluster(&climbs, |c| c.from, REPRESENTATIVES);
 
+        let vents = nav.vent_count();
+        let mouthless_vents: Vec<usize> =
+            (0..vents).filter(|&i| nav.vent_mouth_count(i) == 0).collect();
+
         NavIssues {
             calc_ms: 0.0,
             total_cells: total,
@@ -417,6 +434,8 @@ impl World {
             orphans,
             excluded_pads,
             blind_doors,
+            vents,
+            mouthless_vents,
             door_count: nav.door_count(),
             thinnest_door: (0..nav.door_count()).map(|i| nav.door_cells(i)).min().unwrap_or(0),
             pinch_cells,
@@ -516,6 +535,8 @@ impl NavIssues {
             orphans: Vec::new(),
             excluded_pads: Vec::new(),
             blind_doors: Vec::new(),
+            vents: 0,
+            mouthless_vents: Vec::new(),
             door_count: 0,
             thinnest_door: 0,
             pinch_cells: 0,
@@ -666,6 +687,27 @@ impl NavIssues {
                     pos.x, pos.y, pos.z
                 ),
             );
+        }
+
+        // ── Vents: deliberate asymmetry, stated as such ──
+        if self.vents > 0 {
+            let good = self.vents - self.mouthless_vents.len();
+            if good > 0 {
+                line(
+                    Info,
+                    format!(
+                        "{good} vent duct(s) — hunters cannot enter these (by design);                          they path to the mouth instead",
+                    ),
+                );
+            }
+            for i in &self.mouthless_vents {
+                line(
+                    Error,
+                    format!(
+                        "vent {i} has no standable cell at any opening — nobody can watch                          it, and nothing can reach where the player gets in"
+                    ),
+                );
+            }
         }
 
         if self.door_count > 0 && self.blind_doors.is_empty() {
