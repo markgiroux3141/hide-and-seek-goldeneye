@@ -93,10 +93,17 @@ Three consequences, in severity order:
    or reachability weighting. The nearest standable cell to a player in a wall duct is
    frequently *on the other side of that wall*, or on the floor below. Hunters would
    converge on a point with no relationship to the vent mouth.
-3. **No exit condition.** Under `AI=pd` — the **shipped default** — hunters are omniscient:
-   `known_target_pos` returns the player's live position unconditionally and
-   `lose_contact` is suppressed (`enemy.rs:1557`). They never search, never give up, and
-   will hold `Chase` on an unreachable target forever.
+3. **No exit condition.** Hunters are **omniscient by default**: `known_target_pos`
+   returns the player's live position unconditionally and `lose_contact` is suppressed
+   (`enemy.rs:1557`). They never give up, and will hold `Chase` on an unreachable target
+   forever.
+
+   *(Corrected during implementation: this doc first attributed that to `AI=pd` being the
+   shipped default. It is not — `AiMode::from_env` defaults to `ours`. Omniscience is a
+   **separate** flag, `pd_omniscience`, which is on by default and applies in both modes
+   via `lifecycle.rs:338`. The consequence is the same, but it is not mode-gated, and
+   there turn out to be **three** movement brains to keep in step — `pd_step`, the
+   utility scorer, and the FSM kill-switch — not one. See §3.)
 
    There *is* a partial guard: `move_toward` treats a `None` path and a degenerate
    1-waypoint path as "arrived **or** unreachable" so the caller re-targets
