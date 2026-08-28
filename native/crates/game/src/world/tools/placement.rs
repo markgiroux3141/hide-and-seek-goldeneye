@@ -12,6 +12,12 @@ impl World {
         self.place_tool.is_some()
     }
 
+    /// Whether the *pillar* specifically is armed, so the radial can accent the one
+    /// of the two placement tools that is actually up.
+    pub fn is_pillar_arming(&self) -> bool {
+        self.place_tool == Some(PlaceKind::Pillar)
+    }
+
     /// Arm/toggle a placement tool, BUILD only. Same key again disarms; a
     /// different tool switches. Cancels any armed opening tool.
     pub(crate) fn arm_place(&mut self, kind: PlaceKind) {

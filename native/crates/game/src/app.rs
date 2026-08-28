@@ -22,6 +22,7 @@ use engine::platform::frame::FrameClock;
 use engine::platform::input::InputState;
 use engine::render::renderer::{EguiFrame, Renderer};
 use crate::gamepad::N64Pad;
+use crate::radial::{EditorAction, LockRequest, Radial, RadialCtx, SelectionOp, Tool};
 use crate::world::{World, PUSH_PULL_STEP};
 
 /// A frame this slow (ms) is worth a line of its own. Two and a half times the 60 Hz
@@ -52,8 +53,8 @@ enum ShopAction {
 /// A section of the left authoring panel (the OBJECTS/LIGHTING menu), cycled with
 /// the `◄ ►` arrows around the title. Circular — advancing past the last wraps to
 /// the first. Add a variant + an `ALL` entry to grow the menu.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PanelTab {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PanelTab {
     Objects,
     Lighting,
     Spawns,
@@ -63,7 +64,7 @@ enum PanelTab {
 
 impl PanelTab {
     /// Every tab, in display order (also the cycle order).
-    const ALL: [PanelTab; 5] = [
+    pub(crate) const ALL: [PanelTab; 5] = [
         PanelTab::Objects,
         PanelTab::Lighting,
         PanelTab::Spawns,
@@ -72,7 +73,7 @@ impl PanelTab {
     ];
 
     /// The header title for this tab.
-    fn title(self) -> &'static str {
+    pub(crate) fn title(self) -> &'static str {
         match self {
             PanelTab::Objects => "OBJECTS",
             PanelTab::Lighting => "LIGHTING",
@@ -97,13 +98,13 @@ impl PanelTab {
 
 // ─── Shop palette (GoldenEye gold-on-black spy-terminal look) ──────────────────
 /// Signature gold accent — headings, borders, buy buttons, selection.
-const SHOP_GOLD: egui::Color32 = egui::Color32::from_rgb(224, 184, 74);
+pub(crate) const SHOP_GOLD: egui::Color32 = egui::Color32::from_rgb(224, 184, 74);
 /// A muted gold for section headers / secondary accents.
-const SHOP_GOLD_DIM: egui::Color32 = egui::Color32::from_rgb(150, 122, 60);
+pub(crate) const SHOP_GOLD_DIM: egui::Color32 = egui::Color32::from_rgb(150, 122, 60);
 /// Primary readable body text.
-const SHOP_TEXT: egui::Color32 = egui::Color32::from_rgb(222, 222, 228);
+pub(crate) const SHOP_TEXT: egui::Color32 = egui::Color32::from_rgb(222, 222, 228);
 /// Dimmed text — unaffordable prices / disabled hints.
-const SHOP_DIM: egui::Color32 = egui::Color32::from_rgb(110, 110, 118);
+pub(crate) const SHOP_DIM: egui::Color32 = egui::Color32::from_rgb(110, 110, 118);
 /// NAV tab verdicts: a clean finding, and one that means something in the level is
 /// unreachable. Green/red rather than gold because these are pass/fail, not emphasis —
 /// and the same two colours the 3D overlay uses for reachable / cut-off floor.
@@ -251,6 +252,18 @@ struct App {
     /// Which revision of the NAV overlay is on the GPU (`None` = nothing uploaded).
     /// The mesh is far too big to re-upload per frame — see `World::nav_overlay_rev`.
     nav_overlay_uploaded: Option<u32>,
+
+    // ── Middle-mouse radial menu (BUILD only) ───────────────────────────────
+    /// The ring: hold MMB, flick, release. See [`crate::radial`].
+    radial: Radial,
+    /// Pointer-lock state captured when the ring opened, restored when it closes
+    /// (mirrors [`Self::lock_before_shop`]) — so picking a tool from the menu hands
+    /// control back exactly as it was.
+    lock_before_radial: bool,
+    /// Which quick-slots have a file, sampled when the ring opens rather than per
+    /// frame: the Level ring wants to say "Load 3" vs "Slot 3", and that is eight
+    /// filesystem stats we are not doing 240 times a second.
+    radial_slots_used: [bool; 8],
 }
 
 impl App {
@@ -294,6 +307,9 @@ impl App {
             theme_slot_labels: std::collections::HashMap::new(),
             theme_preview_uploaded: false,
             nav_overlay_uploaded: None,
+            radial: Radial::default(),
+            lock_before_radial: false,
+            radial_slots_used: [false; 8],
         }
     }
 }
@@ -519,6 +535,20 @@ impl App {
     }
 
     fn set_pointer_lock(&mut self, locked: bool) {
+        self.set_pointer_lock_inner(locked, true);
+    }
+
+    /// Free / re-grab the cursor **without** disarming the armed tool.
+    ///
+    /// Releasing the cursor normally cancels every modal tool, which is right for
+    /// Esc and for the panels — they take the screen over. It is wrong for the
+    /// radial: opening a menu to flip the grid view must not throw away the door
+    /// tool you had armed. Same window calls, no cancellation.
+    fn set_pointer_lock_keep_tools(&mut self, locked: bool) {
+        self.set_pointer_lock_inner(locked, false);
+    }
+
+    fn set_pointer_lock_inner(&mut self, locked: bool, cancel_tools: bool) {
         let Some(window) = self.window.as_ref() else {
             return;
         };
@@ -535,6 +565,9 @@ impl App {
             window.set_cursor_visible(true);
             self.input.pointer_locked = false;
             // Releasing the cursor cancels any armed tool and clears its ghost.
+            if !cancel_tools {
+                return;
+            }
             if let Some(world) = self.world.as_mut() {
                 world.cancel_opening();
                 world.cancel_place();
@@ -600,6 +633,336 @@ impl App {
             // A theme armed for click-application only makes sense with the panel
             // open and the cursor free; closing must not leave clicks retexturing.
             self.theme_armed = None;
+        }
+    }
+
+    // ─── Radial menu (BUILD only) ──────────────────────────────────────────
+
+    /// Whether the ring is allowed to open right now.
+    ///
+    /// BUILD only, and not while a panel owns the screen. The object panel is
+    /// excluded on purpose: it already *is* the menu for its own contents, so the
+    /// radial's only business with it is the entry that opens it.
+    fn radial_allowed(&self) -> bool {
+        !self.shop_open
+            && !self.props_open
+            && self.world.as_ref().map(|w| w.is_build()).unwrap_or(false)
+    }
+
+    /// Open the ring, centred on the crosshair when the cursor is grabbed or on the
+    /// cursor itself when it is free.
+    fn open_radial(&mut self) {
+        if !self.radial_allowed() {
+            return;
+        }
+        for n in 1..=8u8 {
+            self.radial_slots_used[(n - 1) as usize] = crate::world::persist::slot_path(n).exists();
+        }
+        self.lock_before_radial = self.input.pointer_locked;
+        let ppp = self.egui_ctx.pixels_per_point().max(0.01);
+        let origin = if self.input.pointer_locked {
+            match self.window.as_ref() {
+                Some(w) => {
+                    let size = w.inner_size();
+                    (
+                        size.width as f32 * 0.5 / ppp,
+                        size.height as f32 * 0.5 / ppp,
+                    )
+                }
+                None => return,
+            }
+        } else {
+            (self.cursor_pos.0 / ppp, self.cursor_pos.1 / ppp)
+        };
+        let locked = self.input.pointer_locked;
+        let req = self.radial.press(origin, locked);
+        self.apply_lock_request(req);
+        // Opening with a free cursor starts sticky, and sticky drives off the real
+        // pointer — seed it so the ring isn't blind until the mouse first moves.
+        if self.radial.is_sticky() {
+            self.radial.cursor(self.cursor_pos.0 / ppp, self.cursor_pos.1 / ppp);
+        }
+    }
+
+    /// Close the ring and hand the pointer lock back as it was.
+    fn close_radial(&mut self) {
+        if !self.radial.is_open() {
+            return;
+        }
+        self.radial.close();
+        self.set_pointer_lock_keep_tools(self.lock_before_radial);
+    }
+
+    /// Perform what the state machine asked for after an event. It owns no window,
+    /// so it names the lock change and this does it.
+    fn apply_lock_request(&mut self, req: LockRequest) {
+        match req {
+            LockRequest::None => {}
+            // Sticky wants a real pointer. Keep the armed tool: the menu is a lens
+            // over the editor, not a mode change.
+            LockRequest::Free => {
+                self.set_pointer_lock_keep_tools(false);
+                self.warp_cursor_to_radial();
+            }
+            LockRequest::Restore => self.set_pointer_lock_keep_tools(self.lock_before_radial),
+        }
+    }
+
+    /// Put the OS cursor on the ring's hub when it goes sticky.
+    ///
+    /// The grab hides the cursor wherever it last was, so simply un-grabbing hands it
+    /// back at a position that has nothing to do with the menu — on a wide screen it
+    /// can be most of a monitor away from a ring drawn at the crosshair, and the first
+    /// thing you'd have to do is go and find it. Warping it to the hub means the first
+    /// movement is already a selection, and the hub is the neutral square: it hovers
+    /// nothing.
+    fn warp_cursor_to_radial(&mut self) {
+        let ppp = self.egui_ctx.pixels_per_point().max(0.01);
+        let (ox, oy) = self.radial.origin();
+        let (px, py) = (ox * ppp, oy * ppp);
+        if let Some(w) = self.window.as_ref() {
+            // Best-effort: some platforms refuse to move the pointer, and a menu that
+            // still works with a cursor in the wrong place beats no menu.
+            let _ = w.set_cursor_position(winit::dpi::PhysicalPosition::new(
+                px as f64, py as f64,
+            ));
+        }
+        self.cursor_pos = (px, py);
+        self.radial.cursor(ox, oy);
+    }
+
+    /// Hand an action back from the ring: the lock is restored *first*, so the action
+    /// then runs against exactly the input state its hotkey would have seen. That is
+    /// what lets `SetScheme` use the camera crosshair rather than trying to shoot a
+    /// ray through wherever the menu left the cursor.
+    fn commit_radial(&mut self, action: Option<EditorAction>, req: LockRequest) {
+        self.apply_lock_request(req);
+        if let Some(action) = action {
+            self.apply(action);
+        }
+    }
+
+    /// The snapshot the menu tables are built from.
+    fn radial_ctx(&self) -> RadialCtx {
+        let mut c = RadialCtx {
+            ctrl: self.input.key_down(KeyCode::ControlLeft)
+                || self.input.key_down(KeyCode::ControlRight),
+            grid: self.renderer.as_ref().map(|r| r.is_grid_mode()).unwrap_or(false),
+            real_lighting: self.build_real_lighting,
+            slots: self.radial_slots_used,
+            ..RadialCtx::default()
+        };
+        if let Some(w) = self.world.as_ref() {
+            c.nav_overlay = w.nav_overlay_on();
+            c.proc_preview = w.is_procedural_preview();
+            c.invincible = w.is_invulnerable();
+            c.invisible = w.is_invisible();
+            c.hunters = w.hunters_enabled();
+            c.wave = w.wave_size();
+            c.has_selection = w.has_selection();
+            c.pending_stair = w.has_pending_stair();
+            c.armed = armed_tool(w);
+            c.schemes = "123456789"
+                .chars()
+                .filter_map(|d| {
+                    let idx = w.scheme_for_key(d)?;
+                    Some((d, self.theme_label(idx), idx))
+                })
+                .collect();
+        }
+        c
+    }
+
+    // ─── One implementation, two front-ends ────────────────────────────────
+
+    /// Do one editor action, whatever asked for it.
+    ///
+    /// Both `on_key_pressed` and the radial dispatch here. Before this existed, what
+    /// a key *did* lived only in the key handler's body — with two front-ends that
+    /// body would have been copied, and the copies would have drifted.
+    fn apply(&mut self, action: EditorAction) {
+        match action {
+            EditorAction::ArmTool(tool) => self.arm_tool(tool),
+            EditorAction::Selection(op) => self.selection_op(op),
+            EditorAction::OpenPanel(tab) => {
+                self.panel_tab = tab;
+                if !self.props_open {
+                    self.toggle_props();
+                }
+            }
+            EditorAction::SetScheme(scheme) => {
+                if let Some(rm) = self
+                    .world
+                    .as_mut()
+                    .and_then(|w| w.with_undo(|w| w.set_scheme_at_crosshair(scheme)))
+                {
+                    self.upload(&rm);
+                }
+            }
+            EditorAction::EnterHunt => {
+                if let Some(world) = self.world.as_mut() {
+                    world.toggle_mode();
+                }
+                self.refresh_highlight(); // cleared when entering HUNT
+            }
+            EditorAction::LoadSlot(n) => self.load_slot(n),
+            EditorAction::SaveSlot(n) => self.save_slot(n),
+            EditorAction::ToggleGrid => {
+                if let Some(r) = self.renderer.as_mut() {
+                    let grid = !r.is_grid_mode();
+                    r.set_grid_mode(grid);
+                    log::info!("view: {}", if grid { "grid" } else { "textured" });
+                }
+            }
+            EditorAction::ToggleLighting => {
+                self.build_real_lighting = !self.build_real_lighting;
+                log::info!(
+                    "lighting: {}",
+                    if self.build_real_lighting { "real" } else { "flat" }
+                );
+            }
+            EditorAction::ToggleNavOverlay => {
+                if let Some(world) = self.world.as_mut() {
+                    world.toggle_nav_overlay();
+                }
+            }
+            EditorAction::ToggleProcPreview => {
+                if let Some(world) = self.world.as_mut() {
+                    world.toggle_procedural_preview();
+                }
+            }
+            EditorAction::ToggleInvincible => {
+                if let Some(world) = self.world.as_mut() {
+                    world.toggle_invulnerable();
+                }
+            }
+            EditorAction::ToggleInvisible => {
+                if let Some(world) = self.world.as_mut() {
+                    world.toggle_invisible();
+                }
+            }
+            EditorAction::ToggleHunters => {
+                if let Some(world) = self.world.as_mut() {
+                    world.toggle_hunters();
+                }
+            }
+            EditorAction::WaveSize(d) => {
+                if let Some(world) = self.world.as_mut() {
+                    world.change_wave_size(d);
+                }
+            }
+            EditorAction::DumpTelemetry => self.dump_telemetry(),
+        }
+    }
+
+    /// Arm / toggle a modal tool, then deal with the ghost.
+    ///
+    /// Disarming leaves a stale preview behind, so the highlight has to be cleared;
+    /// *arming* must leave it alone, because the next frame's preview repopulates it.
+    /// Which of the two happened is only knowable by asking the tool afterwards.
+    fn arm_tool(&mut self, tool: Tool) {
+        if let Some(world) = self.world.as_mut() {
+            match tool {
+                Tool::Draw => world.draw_tool_key(),
+                Tool::Door => {
+                    world.door_tool_key();
+                }
+                Tool::Hole => {
+                    world.hole_tool_key();
+                }
+                Tool::Pillar => world.pillar_tool_key(),
+                Tool::Brace => world.brace_tool_key(),
+                Tool::Platform => world.platform_tool_key(),
+                Tool::BlockStairs => world.simple_stair_key(),
+                Tool::Connect => world.connect_key(),
+            }
+        }
+        let stale = match tool {
+            Tool::Draw => self.world.as_ref().map(|w| !w.is_draw_tool()).unwrap_or(true),
+            Tool::Door | Tool::Hole => self
+                .world
+                .as_ref()
+                .map(|w| !w.is_opening_arming())
+                .unwrap_or(true),
+            Tool::Pillar | Tool::Brace => {
+                self.world.as_ref().map(|w| !w.is_placing()).unwrap_or(true)
+            }
+            // The platform tool owns the selection outright, so it always refreshes.
+            Tool::Platform => true,
+            // Neither of these draws a crosshair ghost.
+            Tool::BlockStairs | Tool::Connect => false,
+        };
+        if stale {
+            self.refresh_highlight();
+        }
+    }
+
+    /// Act on the current selection. Everything that changes geometry goes through
+    /// `with_undo` and uploads the rebuilt region, exactly as the keys always did.
+    fn selection_op(&mut self, op: SelectionOp) {
+        // Stairs grow a *pending* op rather than editing, so they take their own path.
+        if matches!(op, SelectionOp::StairUp | SelectionOp::StairDown) {
+            let dir = if op == SelectionOp::StairUp {
+                engine::geometry::csg_runtime::StairDir::Up
+            } else {
+                engine::geometry::csg_runtime::StairDir::Down
+            };
+            if let Some(world) = self.world.as_mut() {
+                if world.push_stairs(dir) {
+                    if let Some((n, d)) = world.pending_stair() {
+                        log::info!("stairs: {n} step(s) {d:?} — Enter to confirm, Esc to cancel");
+                    }
+                } else {
+                    log::info!("stairs need a wall face whose selection touches the floor");
+                }
+            }
+            return;
+        }
+        let fine =
+            self.input.key_down(KeyCode::ShiftLeft) || self.input.key_down(KeyCode::ShiftRight);
+        let step = if fine { 1.0 } else { PUSH_PULL_STEP };
+        let rm = self.world.as_mut().and_then(|w| {
+            w.with_undo(|w| match op {
+                SelectionOp::Push => w.push(step),
+                SelectionOp::Pull => w.pull(step),
+                SelectionOp::Delete => w.delete_selected(),
+                SelectionOp::Grounded => w.toggle_grounded_key(),
+                SelectionOp::Railings => w.toggle_railings_key(),
+                SelectionOp::ConfirmStairs => w.confirm_stairs(),
+                SelectionOp::StairUp | SelectionOp::StairDown => None,
+            })
+        });
+        if let Some(rm) = rm {
+            self.upload(&rm);
+            // The selected face moved with the edit — redraw its highlight.
+            self.refresh_highlight();
+        }
+    }
+
+    /// Capture hunter telemetry to a file — the "it is happening RIGHT NOW" button.
+    ///
+    /// A frozen hunter tells you nothing from the outside: this writes what each one
+    /// thinks it is doing, what it is walking to, which gate refused its last step and
+    /// for how long, plus whether A* can even route it to you. Appends, so a session
+    /// of presses is one timeline rather than a file you have to catch.
+    fn dump_telemetry(&mut self) {
+        let Some(world) = self.world.as_ref() else {
+            return;
+        };
+        let dump = world.hunter_telemetry();
+        print!("{dump}");
+        let path = "hunter_telemetry.log";
+        let wrote = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut f| {
+                use std::io::Write as _;
+                writeln!(f, "{dump}")
+            });
+        match wrote {
+            Ok(()) => log::info!("hunter telemetry appended to {path}"),
+            Err(e) => log::warn!("could not write {path}: {e}"),
         }
     }
 
@@ -728,6 +1091,10 @@ impl App {
         };
         let picker_swatches: Vec<Option<egui::TextureHandle>> =
             picker_textures.iter().map(|n| self.theme_swatch(n)).collect();
+
+        // The radial menu, snapshotted like every other panel here: the egui closure
+        // below runs under a live `&mut self.egui_state` borrow and cannot read `self`.
+        let radial_view = self.radial.view(&self.radial_ctx());
 
         let window = self.window.as_ref()?;
         let state = self.egui_state.as_mut()?;
@@ -2041,6 +2408,11 @@ impl App {
             if let Some(r) = radar.as_ref() {
                 draw_pd_radar(ctx, r);
             }
+            // The ring goes on top of every panel — it is the thing being aimed at.
+            if let Some(view) = radial_view.as_ref() {
+                crate::radial::paint::draw(ctx, view);
+            }
+
             // ── Who owns the mouse cursor ──
             //
             // Last thing in the pass, so it beats any widget that set a hover cursor.
@@ -2757,6 +3129,32 @@ struct ThemeRow {
     repeats: [Option<f32>; 4],
 }
 
+/// Which modal tool is armed, for the radial's "this one is up" accent.
+///
+/// Order matters: the opening tools share `is_opening_arming` and the placement
+/// tools share `is_placing`, so the specific query has to come first in each pair.
+fn armed_tool(w: &crate::world::World) -> Option<Tool> {
+    if w.is_draw_tool() {
+        Some(Tool::Draw)
+    } else if w.is_hole_arming() {
+        Some(Tool::Hole)
+    } else if w.is_opening_arming() {
+        Some(Tool::Door)
+    } else if w.is_pillar_arming() {
+        Some(Tool::Pillar)
+    } else if w.is_placing() {
+        Some(Tool::Brace)
+    } else if w.is_simple_stair() {
+        Some(Tool::BlockStairs)
+    } else if w.is_connect_sliding() {
+        Some(Tool::Connect)
+    } else if w.is_platform_tool() {
+        Some(Tool::Platform)
+    } else {
+        None
+    }
+}
+
 /// Map a number-row / numpad digit key to its '1'..'9' char (for scheme keys).
 fn digit_char(code: KeyCode) -> Option<char> {
     Some(match code {
@@ -3057,6 +3455,13 @@ impl ApplicationHandler for App {
     fn device_event(&mut self, _el: &ActiveEventLoop, _id: DeviceId, event: DeviceEvent) {
         // Raw mouse motion → look. Only meaningful while grabbed.
         if let DeviceEvent::MouseMotion { delta } = event {
+            // While the ring is held it owns the mouse: motion steers the virtual
+            // pointer instead of the camera, so the view doesn't swing behind the
+            // menu and the world is exactly where you left it on release.
+            if self.radial.is_held() {
+                self.radial.motion(delta.0 as f32, delta.1 as f32);
+                return;
+            }
             if self.input.pointer_locked {
                 self.input.add_mouse(delta.0 as f32, delta.1 as f32);
             }
@@ -3089,6 +3494,13 @@ impl ApplicationHandler for App {
             // saw this event above; we just record the latest position.
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_pos = (position.x as f32, position.y as f32);
+                // A sticky ring is driven by the real pointer. `cursor_pos` is
+                // physical pixels and the ring lives in egui points.
+                if self.radial.is_sticky() {
+                    let ppp = self.egui_ctx.pixels_per_point().max(0.01);
+                    self.radial
+                        .cursor(self.cursor_pos.0 / ppp, self.cursor_pos.1 / ppp);
+                }
             }
 
             WindowEvent::MouseInput {
@@ -3098,6 +3510,17 @@ impl ApplicationHandler for App {
             } => {
                 // A click egui handled (on a panel) never reaches the world.
                 if egui_consumed {
+                    return;
+                }
+                // The ring is drawn on top and hit-tested by us, so while it is up
+                // nothing underneath may act on a click — no face select, no fire, no
+                // prop drop.
+                if self.radial.is_open() {
+                    if state == ElementState::Pressed {
+                        let ctx = self.radial_ctx();
+                        let (action, req) = self.radial.click(&ctx);
+                        self.commit_radial(action, req);
+                    }
                     return;
                 }
                 // Record the held state (combat reads it each frame for firing).
@@ -3238,6 +3661,14 @@ impl ApplicationHandler for App {
                 button: MouseButton::Right,
                 ..
             } => {
+                // Right-click is the universal "no": it dismisses the ring without
+                // acting, and never reaches free-aim / the panel underneath.
+                if self.radial.is_open() {
+                    if state == ElementState::Pressed {
+                        self.close_radial();
+                    }
+                    return;
+                }
                 let pressed = state == ElementState::Pressed;
                 self.input.set_mouse_right(pressed);
                 // Object mode (BUILD, panel open): hold RMB to mouse-look. Grabbing
@@ -3249,10 +3680,46 @@ impl ApplicationHandler for App {
                 }
             }
 
+            // Middle mouse = the radial menu (`crate::radial`). Hold to flick, tap
+            // for a sticky ring you can read. It was the one mouse button bound to
+            // nothing, in either mode.
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Middle,
+                ..
+            } => {
+                if egui_consumed {
+                    return;
+                }
+                match state {
+                    ElementState::Pressed => {
+                        if self.radial.is_open() {
+                            // Middle-click on a sticky ring picks, same as a left one.
+                            let ctx = self.radial_ctx();
+                            let (action, req) = self.radial.click(&ctx);
+                            self.commit_radial(action, req);
+                        } else {
+                            self.open_radial();
+                        }
+                    }
+                    ElementState::Released => {
+                        if self.radial.is_held() {
+                            let ctx = self.radial_ctx();
+                            let (action, req) = self.radial.release(&ctx);
+                            self.commit_radial(action, req);
+                        }
+                    }
+                }
+            }
+
             WindowEvent::MouseWheel { delta, .. } => {
                 // egui ate the scroll (e.g. a scrollable shop list) → don't also size
                 // the editor selection.
                 if egui_consumed {
+                    return;
+                }
+                // Don't let a scroll resize the armed tool from behind the ring.
+                if self.radial.is_open() {
                     return;
                 }
                 // Scroll sizes the selection sub-rect: plain = U (width),
@@ -3327,6 +3794,13 @@ impl ApplicationHandler for App {
                 let dt = self.clock.begin_frame(Instant::now());
                 let fixed_dt = self.clock.fixed_dt();
                 let steps = self.clock.take_fixed_steps();
+
+                // The ring: age the hold clock and run the radius-driven descend /
+                // back-out. Costs nothing while it is closed.
+                if self.radial.is_open() {
+                    let ctx = self.radial_ctx();
+                    self.radial.update(dt, &ctx);
+                }
 
                 // Spin the shop's 3D weapon preview while the menu is open (~1 turn / 9s).
                 if self.shop_open {
@@ -3750,6 +4224,15 @@ impl App {
     /// One-shot key actions (edits + cursor release). Held-key movement is read
     /// each frame from `InputState`, not here.
     fn on_key_pressed(&mut self, code: KeyCode) {
+        // The ring owns the keyboard while it is up: Esc dismisses it, and nothing
+        // else fires underneath. Above Esc's own four-deep ladder on purpose — with a
+        // menu on screen, Esc means "close the menu" and nothing else.
+        if self.radial.is_open() {
+            if code == KeyCode::Escape {
+                self.close_radial();
+            }
+            return;
+        }
         // Esc cancels a pending stair op first (JS ordering); otherwise it
         // releases the cursor.
         if code == KeyCode::Escape {
@@ -3839,21 +4322,13 @@ impl App {
         // Backslash toggles the checkerboard "grid" view vs the textured view
         // (JS `toggle_view`). Works whether or not the cursor is grabbed.
         if code == KeyCode::Backslash {
-            if let Some(r) = self.renderer.as_mut() {
-                let grid = !r.is_grid_mode();
-                r.set_grid_mode(grid);
-                log::info!("view: {}", if grid { "grid" } else { "textured" });
-            }
+            self.apply(EditorAction::ToggleGrid);
             return;
         }
         // L toggles real point lighting vs the flat legacy look. This is a BUILD
         // preference — HUNT always shows real lighting when the level has any light.
         if code == KeyCode::KeyL {
-            self.build_real_lighting = !self.build_real_lighting;
-            log::info!(
-                "lighting: {}",
-                if self.build_real_lighting { "real" } else { "flat" }
-            );
+            self.apply(EditorAction::ToggleLighting);
             return;
         }
         // Level save/load quick-slots (works grabbed or not, like the grid
@@ -3862,11 +4337,11 @@ impl App {
         if let Some(slot) = slot_for_fkey(code) {
             let ctrl = self.input.key_down(KeyCode::ControlLeft)
                 || self.input.key_down(KeyCode::ControlRight);
-            if ctrl {
-                self.save_slot(slot);
+            self.apply(if ctrl {
+                EditorAction::SaveSlot(slot)
             } else {
-                self.load_slot(slot);
-            }
+                EditorAction::LoadSlot(slot)
+            });
             return;
         }
         // Undo / redo (BUILD only — geometry is frozen in HUNT). Ctrl+Z steps back
@@ -3901,31 +4376,13 @@ impl App {
         // step and for how long, plus whether A* can even route it to you. Appends, so a
         // session of presses is one timeline rather than a file you have to catch.
         if code == KeyCode::F10 {
-            if let Some(world) = self.world.as_ref() {
-                let dump = world.hunter_telemetry();
-                print!("{dump}");
-                let path = "hunter_telemetry.log";
-                let wrote = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(path)
-                    .and_then(|mut f| {
-                        use std::io::Write as _;
-                        writeln!(f, "{dump}")
-                    });
-                match wrote {
-                    Ok(()) => log::info!("hunter telemetry appended to {path}"),
-                    Err(e) => log::warn!("could not write {path}: {e}"),
-                }
-            }
+            self.apply(EditorAction::DumpTelemetry);
             return;
         }
         // I toggles player invincibility (dev/observe): enemies keep aiming + firing
         // but you take no damage, so you can watch them chase + shoot. Works anytime.
         if code == KeyCode::KeyI {
-            if let Some(world) = self.world.as_mut() {
-                world.toggle_invulnerable();
-            }
+            self.apply(EditorAction::ToggleInvincible);
             return;
         }
         // J toggles hunters entirely (dev): no pack spawns, and flipping it off during a
@@ -3933,17 +4390,13 @@ impl App {
         // (invincible) and N (invisible) — this one is for authoring and testing the
         // level itself, where standing still at a door to work it is the whole point.
         if code == KeyCode::KeyJ {
-            if let Some(world) = self.world.as_mut() {
-                world.toggle_hunters();
-            }
+            self.apply(EditorAction::ToggleHunters);
             return;
         }
         // N toggles player invisibility (dev/observe): no hunter can perceive you, so
         // the pack drops to searching — walk around and watch them scan for you.
         if code == KeyCode::KeyN {
-            if let Some(world) = self.world.as_mut() {
-                world.toggle_invisible();
-            }
+            self.apply(EditorAction::ToggleInvisible);
             return;
         }
         // `=` crank difficulty up, `-` down (each is a single key — no Shift needed;
@@ -3971,9 +4424,9 @@ impl App {
         // stall. One hunter that walks a corridor cleanly where four jam is a crowding
         // bug; one that jams either way is not, and that is two keypresses to find out.
         if matches!(code, KeyCode::BracketLeft | KeyCode::BracketRight) {
-            if let Some(world) = self.world.as_mut() {
-                world.change_wave_size(if code == KeyCode::BracketRight { 1 } else { -1 });
-            }
+            self.apply(EditorAction::WaveSize(
+                if code == KeyCode::BracketRight { 1 } else { -1 },
+            ));
             return;
         }
         // Authoring only while grabbed (crosshair is meaningful).
@@ -3986,31 +4439,20 @@ impl App {
             // This level's own binding wins over the manifest's default key.
             let scheme = self.world.as_ref().and_then(|w| w.scheme_for_key(key));
             if let Some(scheme) = scheme {
-                if let Some(rm) = self
-                    .world
-                    .as_mut()
-                    .and_then(|w| w.with_undo(|w| w.set_scheme_at_crosshair(scheme)))
-                {
-                    self.upload(&rm);
-                }
+                self.apply(EditorAction::SetScheme(scheme));
             }
             return;
         }
         // G toggles BUILD ↔ HUNT (freeze + drop in as the player, or back).
         if code == KeyCode::KeyG {
-            if let Some(world) = self.world.as_mut() {
-                world.toggle_mode();
-            }
-            self.refresh_highlight(); // cleared when entering HUNT
+            self.apply(EditorAction::EnterHunt);
             return;
         }
         // Spike: procedural-anim preview (BUILD only). Y toggles a preview character
         // in front of the camera; Z fires a manual recoil kick. See
         // `world::spike_preview`.
         if code == KeyCode::KeyY {
-            if let Some(world) = self.world.as_mut() {
-                world.toggle_procedural_preview();
-            }
+            self.apply(EditorAction::ToggleProcPreview);
             return;
         }
         if code == KeyCode::KeyZ {
@@ -4029,14 +4471,7 @@ impl App {
                 self.begin_weapon_switch();
                 return;
             }
-            if let Some(world) = self.world.as_mut() {
-                world.draw_tool_key();
-            }
-            // Disarming leaves a stale outline ghost; arming lets the next frame's
-            // preview repopulate it (same shape as the B/H opening handler).
-            if self.world.as_ref().map(|w| !w.is_draw_tool()).unwrap_or(true) {
-                self.refresh_highlight();
-            }
+            self.apply(EditorAction::ArmTool(Tool::Draw));
             return;
         }
         // B in HUNT: the **use** button. GoldenEye and Perfect Dark open a door by
@@ -4056,18 +4491,11 @@ impl App {
         // tracks the crosshair (drawn each frame in RedrawRequested), or turn it
         // back off. Left-click is what cuts (handled in MouseInput).
         if code == KeyCode::KeyB || code == KeyCode::KeyH {
-            if let Some(world) = self.world.as_mut() {
-                if code == KeyCode::KeyB {
-                    world.door_tool_key();
-                } else {
-                    world.hole_tool_key();
-                }
-            }
-            // Deselecting disarms → clear the ghost; arming leaves the next
-            // frame's preview to repopulate the highlight.
-            if self.world.as_ref().map(|w| !w.is_opening_arming()).unwrap_or(true) {
-                self.refresh_highlight();
-            }
+            self.apply(EditorAction::ArmTool(if code == KeyCode::KeyB {
+                Tool::Door
+            } else {
+                Tool::Hole
+            }));
             return;
         }
         // F in HUNT: detonate all live remote mines (the keyboard counterpart of the
@@ -4119,100 +4547,62 @@ impl App {
         // P / R toggle the placement tools (pillar / brace): aim + scroll to size,
         // left-click to place. The ghost is drawn each frame in RedrawRequested.
         if code == KeyCode::KeyP || code == KeyCode::KeyR {
-            if let Some(world) = self.world.as_mut() {
-                if code == KeyCode::KeyP {
-                    world.pillar_tool_key();
-                } else {
-                    world.brace_tool_key();
-                }
-            }
-            if self.world.as_ref().map(|w| !w.is_placing()).unwrap_or(true) {
-                self.refresh_highlight();
-            }
+            self.apply(EditorAction::ArmTool(if code == KeyCode::KeyP {
+                Tool::Pillar
+            } else {
+                Tool::Brace
+            }));
             return;
         }
         // Platform + stair-run tool. T toggles the tool; the rest act on the
         // current selection / phase. Grounded/railings/delete change geometry, so
         // they return the rebuilt structures mesh to upload.
         if code == KeyCode::KeyT {
-            if let Some(world) = self.world.as_mut() {
-                world.platform_tool_key();
-            }
-            self.refresh_highlight();
+            self.apply(EditorAction::ArmTool(Tool::Platform));
             return;
         }
         if code == KeyCode::KeyC {
-            if let Some(world) = self.world.as_mut() {
-                world.connect_key();
-            }
+            self.apply(EditorAction::ArmTool(Tool::Connect));
             return;
         }
         if code == KeyCode::KeyK {
-            if let Some(world) = self.world.as_mut() {
-                world.simple_stair_key();
-            }
+            self.apply(EditorAction::ArmTool(Tool::BlockStairs));
             return;
         }
         if matches!(code, KeyCode::KeyF | KeyCode::KeyV | KeyCode::KeyX | KeyCode::Delete) {
-            let rm = self.world.as_mut().and_then(|w| {
-                w.with_undo(|w| match code {
-                    KeyCode::KeyF => w.toggle_grounded_key(),
-                    KeyCode::KeyV => w.toggle_railings_key(),
-                    _ => w.delete_selected(),
-                })
-            });
-            if let Some(rm) = rm {
-                self.upload(&rm);
-                self.refresh_highlight();
-            }
+            self.apply(EditorAction::Selection(match code {
+                KeyCode::KeyF => SelectionOp::Grounded,
+                KeyCode::KeyV => SelectionOp::Railings,
+                _ => SelectionOp::Delete,
+            }));
             return;
         }
         // Stair tool (JS-faithful): Arrow Up/Down grow a pending up/down-stair
         // op on the selected floor-touching wall face; Enter confirms. No mode.
         if matches!(code, KeyCode::ArrowUp | KeyCode::ArrowDown) {
-            let dir = if code == KeyCode::ArrowUp {
-                engine::geometry::csg_runtime::StairDir::Up
+            self.apply(EditorAction::Selection(if code == KeyCode::ArrowUp {
+                SelectionOp::StairUp
             } else {
-                engine::geometry::csg_runtime::StairDir::Down
-            };
-            if let Some(world) = self.world.as_mut() {
-                if world.push_stairs(dir) {
-                    if let Some((n, d)) = world.pending_stair() {
-                        log::info!("stairs: {n} step(s) {d:?} — Enter to confirm, Esc to cancel");
-                    }
-                } else {
-                    log::info!("stairs need a wall face whose selection touches the floor");
-                }
-            }
+                SelectionOp::StairDown
+            }));
             return;
         }
         if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
-            if let Some(rm) = self.world.as_mut().and_then(|w| w.with_undo(|w| w.confirm_stairs())) {
-                self.upload(&rm);
-                self.refresh_highlight();
-            }
+            self.apply(EditorAction::Selection(SelectionOp::ConfirmStairs));
             return;
         }
 
-        let fine = self.input.key_down(KeyCode::ShiftLeft) || self.input.key_down(KeyCode::ShiftRight);
-        let step = if fine { 1.0 } else { PUSH_PULL_STEP };
-
-        let result = match code {
-            // `+` and `=` share a key; NumpadAdd for good measure. Each press is
-            // one undo step (a no-op push/pull returns `None`, so `with_undo`
-            // records nothing).
+        // `+` and `=` share a key; NumpadAdd for good measure. Each press is one
+        // undo step (a no-op push/pull returns `None`, so `with_undo` records
+        // nothing), and Shift makes it the fine 1-WT step — read in `selection_op`.
+        match code {
             KeyCode::Equal | KeyCode::NumpadAdd => {
-                self.world.as_mut().and_then(|w| w.with_undo(|w| w.push(step)))
+                self.apply(EditorAction::Selection(SelectionOp::Push))
             }
             KeyCode::Minus | KeyCode::NumpadSubtract => {
-                self.world.as_mut().and_then(|w| w.with_undo(|w| w.pull(step)))
+                self.apply(EditorAction::Selection(SelectionOp::Pull))
             }
-            _ => None,
-        };
-        if let Some(rm) = result {
-            self.upload(&rm);
-            // The selected face moved with the edit — redraw its highlight.
-            self.refresh_highlight();
+            _ => {}
         }
     }
 }

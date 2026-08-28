@@ -58,7 +58,9 @@ pub use nav_probe::{ProbeResult, ProbeSample};
 mod nav_issues;
 pub use nav_issues::{NavIssues, NavLine, NavSeverity};
 pub mod pd_lab;
-mod persist;
+/// `pub(crate)` so the app can ask whether a quick-slot has a file — the radial's
+/// Level ring says "Load 3" vs "Slot 3", which needs the path.
+pub(crate) mod persist;
 mod pick;
 mod regions;
 mod respawn;
