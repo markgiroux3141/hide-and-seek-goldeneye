@@ -219,6 +219,14 @@ impl World {
     /// Spawn a sub-face brush over the current sub-rect (JS `createSubFaceBrush`):
     /// `depth` deep along the face normal, anchored at the face plane. A subtract
     /// carves inward from the face; an add protrudes outward. Returns its id.
+    ///
+    /// **It wears the theme of the face it grew out of** (JS `createSubFaceBrush`
+    /// does the same). This is the whole "carve a new room off this one" path, so
+    /// without it every alcove, side room and protrusion the author pushes out of a
+    /// themed room came back wearing the default theme, and had to be repainted by
+    /// hand. The retexture flood-fill can't rescue it either: it stops at frames, so
+    /// space carved beyond a doorway is a *different* room to the one it came from
+    /// and never inherits after the fact.
     pub(crate) fn create_sub_face_brush(&mut self, op: Op, depth: f32) -> Option<u32> {
         let bounds = self.ensure_selection_bounds()?;
         let sel = self.selected?;
@@ -234,6 +242,7 @@ impl World {
             id, sel.axis, a, depth, info.u_axis, u0, u1 - u0, info.v_axis, v0, v1 - v0,
         );
         brush.op = op;
+        brush.scheme = info.scheme;
         let region = self.regions.iter_mut().find(|r| r.id == sel.region_id)?;
         region.brushes.push(brush);
         self.next_brush_id += 1;

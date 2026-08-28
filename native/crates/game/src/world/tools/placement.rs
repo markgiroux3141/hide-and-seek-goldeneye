@@ -89,18 +89,18 @@ impl World {
     pub fn confirm_place(&mut self) -> Option<RegionMesh> {
         match self.place_tool? {
             PlaceKind::Pillar => {
-                let (region_id, b) = self.resolve_pillar_placed()?;
+                let (region_id, look, b) = self.resolve_pillar_placed()?;
                 self.place_tool = None;
-                let brush = self.push_add_brush(region_id, b)?;
+                let brush = self.push_add_brush(region_id, look, b)?;
                 log::info!("pillar placed in region {region_id} (brush {brush})");
                 self.rebuild_affected_regions(&[brush]).into_iter().next()
             }
             PlaceKind::Brace => {
-                let (region_id, boxes) = self.resolve_brace_placed()?;
+                let (region_id, look, boxes) = self.resolve_brace_placed()?;
                 self.place_tool = None;
                 let mut ids = Vec::new();
                 for b in boxes {
-                    if let Some(id) = self.push_add_brush(region_id, b) {
+                    if let Some(id) = self.push_add_brush(region_id, look, b) {
                         ids.push(id);
                     }
                 }
@@ -111,9 +111,22 @@ impl World {
     }
 
     /// Push an `Op::Add` brush (WT AABB `[x,y,z,w,h,d]`) into a region; returns its id.
-    pub(crate) fn push_add_brush(&mut self, region_id: u32, b: [f32; 6]) -> Option<u32> {
+    ///
+    /// `look` is the `(scheme, floor_y)` of the room brush the placement was resolved
+    /// against, and the new brush wears both — as the JS `confirmPillarPlacement` /
+    /// `confirmBracePlacement` did. Left at `Brush::new`'s defaults a pillar dropped
+    /// into a themed room came out in the default theme, and with its wall UVs
+    /// anchored to its own base rather than the room's floor, so its texture split sat
+    /// at a different height to the walls around it.
+    pub(crate) fn push_add_brush(
+        &mut self,
+        region_id: u32,
+        look: (usize, f32),
+        b: [f32; 6],
+    ) -> Option<u32> {
         let id = self.next_brush_id;
-        let brush = Brush::new(id, Op::Add, b[0], b[1], b[2], b[3], b[4], b[5]);
+        let mut brush = Brush::new(id, Op::Add, b[0], b[1], b[2], b[3], b[4], b[5]);
+        (brush.scheme, brush.floor_y) = look;
         let region = self.regions.iter_mut().find(|r| r.id == region_id)?;
         region.brushes.push(brush);
         self.next_brush_id += 1;
@@ -123,11 +136,12 @@ impl World {
     /// Resolve the pillar box (WT `[x,y,z,w,h,d]`) under the crosshair, or `None`
     /// if not aimed at a floor (JS `computePillarPreview`: axis Y, side Min).
     pub(crate) fn resolve_pillar(&mut self) -> Option<[f32; 6]> {
-        self.resolve_pillar_placed().map(|(_, b)| b)
+        self.resolve_pillar_placed().map(|(_, _, b)| b)
     }
 
-    /// Like [`resolve_pillar`](Self::resolve_pillar) but also returns the region id.
-    pub(crate) fn resolve_pillar_placed(&mut self) -> Option<(u32, [f32; 6])> {
+    /// Like [`resolve_pillar`](Self::resolve_pillar) but also returns the region id and
+    /// the room brush's `(scheme, floor_y)` for the placed brush to inherit.
+    pub(crate) fn resolve_pillar_placed(&mut self) -> Option<(u32, (usize, f32), [f32; 6])> {
         if self.mode != Mode::Build {
             return None;
         }
@@ -158,6 +172,7 @@ impl World {
         let z0 = (hit_wt.z.round() - (ps / 2.0).floor()).clamp(min_z, max_z - ps);
         Some((
             sel.region_id,
+            (brush.scheme, brush.floor_y),
             [x0, min_y - e, z0, ps, (max_y - min_y) + 2.0 * e, ps],
         ))
     }
@@ -165,11 +180,12 @@ impl World {
     /// Resolve the three brace boxes under the crosshair, or `None` if not aimed
     /// at a wall (JS `computeBracePreview`: axis X or Z, on a subtract brush).
     pub(crate) fn resolve_brace(&mut self) -> Option<[[f32; 6]; 3]> {
-        self.resolve_brace_placed().map(|(_, boxes)| boxes)
+        self.resolve_brace_placed().map(|(_, _, boxes)| boxes)
     }
 
-    /// Like [`resolve_brace`](Self::resolve_brace) but also returns the region id.
-    pub(crate) fn resolve_brace_placed(&mut self) -> Option<(u32, [[f32; 6]; 3])> {
+    /// Like [`resolve_brace`](Self::resolve_brace) but also returns the region id and
+    /// the room brush's `(scheme, floor_y)` for the placed brushes to inherit.
+    pub(crate) fn resolve_brace_placed(&mut self) -> Option<(u32, (usize, f32), [[f32; 6]; 3])> {
         if self.mode != Mode::Build {
             return None;
         }
@@ -218,7 +234,7 @@ impl World {
                 [x0, iy0 - e, iz1 - bd, bw, ih + 2.0 * e, bd + e], // wall on max-Z
             ]
         };
-        Some((sel.region_id, boxes))
+        Some((sel.region_id, (brush.scheme, brush.floor_y), boxes))
     }
 }
 

@@ -1585,6 +1585,9 @@ pub(crate) struct OpeningPlacement {
     w: f32,
     h: f32,
     kind: OpeningKind,
+    /// The pierced wall brush's texture theme, worn by both the frame and the
+    /// protoroom beyond it (see [`World::cut_opening`]).
+    scheme: usize,
 }
 
 /// A pending (unconfirmed) stair op (JS `state.csg.pendingStairOp`): the arrow
@@ -1627,7 +1630,7 @@ pub(crate) enum SubOp {
 }
 
 /// The selected face's in-plane U/V extent in WT (JS `getFaceUVInfo`), plus the
-/// face-plane coord on the normal axis.
+/// face-plane coord on the normal axis, plus the owning brush's texture theme.
 pub(crate) struct FaceInfo {
     u_axis: Axis,
     v_axis: Axis,
@@ -1638,6 +1641,9 @@ pub(crate) struct FaceInfo {
     u_size: f32,
     v_size: f32,
     position: f32,
+    /// The owning brush's texture theme, so anything spawned off this face can
+    /// inherit it (see [`World::create_sub_face_brush`]).
+    scheme: usize,
 }
 
 /// One live hunter during the HUNT: its AI/movement [`Enemy`], its own animation

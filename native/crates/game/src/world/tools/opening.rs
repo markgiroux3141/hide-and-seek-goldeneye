@@ -152,6 +152,7 @@ impl World {
             w,
             h,
             kind,
+            scheme: brush.scheme,
         })
     }
 
@@ -159,6 +160,14 @@ impl World {
     /// subtract through the face + a 1-WT protoroom subtract just beyond, so it
     /// opens into navigable space, not solid. A door's frame is `door`-marked
     /// (breakable at HUNT); a hole's isn't.
+    ///
+    /// Both carves inherit the pierced wall's theme, which the JS did *not* do — it
+    /// left them on the default. That default is what the author then sees, because
+    /// the reveal surfaces lie on the frame's own faces (so `uv_zones` reads the
+    /// frame's scheme for the per-theme doorframe zones 5/6), and because the
+    /// protoroom is the seed the next push grows the room beyond into. Cutting a
+    /// doorway out of a themed room and pushing it out therefore produced a
+    /// default-themed room every time.
     pub(crate) fn cut_opening(&mut self, p: OpeningPlacement) -> Option<RegionMesh> {
         let t = WALL_THICKNESS;
         // Frame carve: 1 WT deep along the face normal, at the face plane.
@@ -168,13 +177,15 @@ impl World {
         );
         frame.door = p.kind == OpeningKind::Door;
         frame.frame = true; // opening reveal → tunnel zones (5/6) in uv_zones
+        frame.scheme = p.scheme;
         self.next_brush_id += 1;
 
         // Protoroom carve: 1 WT deep just beyond the frame.
         let proto_a = if p.side == Side::Max { p.position + t } else { p.position - 2.0 * t };
-        let proto = make_wall_brush(
+        let mut proto = make_wall_brush(
             self.next_brush_id, p.axis, proto_a, t, p.u_axis, p.u0, p.w, p.v_axis, p.v0, p.h,
         );
+        proto.scheme = p.scheme;
         self.next_brush_id += 1;
 
         let frame_id = frame.id;

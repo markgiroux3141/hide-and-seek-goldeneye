@@ -3046,6 +3046,143 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         assert!(d2 > d1, "the carve deepened: {d1} → {d2}");
     }
 
+    // --- Theme inheritance -------------------------------------------------
+    //
+    // Every tool that spawns geometry off an existing surface has to spawn it in
+    // that surface's theme. `Brush::new` defaults to `default_scheme()`, so any
+    // tool that forgets leaves the author looking at default-themed geometry in
+    // the middle of a themed room, and the room retexture can't fix it after the
+    // fact once a frame separates the two (see `room_floodfill_stops_at_frames`).
+
+    /// A theme that is definitely not the one a fresh brush would default to.
+    fn a_non_default_theme() -> usize {
+        let theme = engine::render::textures::scheme_index("archives_1")
+            .expect("archives_1 is in themes.json");
+        assert_ne!(
+            theme,
+            engine::render::textures::default_scheme(),
+            "the test needs a theme distinguishable from the default"
+        );
+        theme
+    }
+
+    /// The default room, retextured to a non-default theme, camera still on the
+    /// -Z wall.
+    fn themed_room() -> (World, usize) {
+        let theme = a_non_default_theme();
+        let mut world = World::new();
+        world.initial_meshes();
+        world.set_scheme_at_crosshair(theme).expect("the crosshair is on a room face");
+        assert_eq!(world.regions[0].brushes[0].scheme, theme, "the room took the theme");
+        (world, theme)
+    }
+
+    /// A sub-face push — the “carve a niche / side room out of this wall” path -
+    /// carves in the room's theme.
+    #[test]
+    fn a_sub_face_push_carves_in_the_rooms_theme() {
+        let (mut world, theme) = themed_room();
+        world.select_at_crosshair();
+        world.adjust_selection_size(-20.0, 0.0);
+        world.adjust_selection_size(0.0, -10.0);
+        world.push(4.0).expect("sub-face push");
+
+        let carve = world.regions[0].brushes.last().unwrap();
+        assert_eq!(carve.op, Op::Subtract, "a push carves");
+        assert_eq!(carve.scheme, theme, "the carve wears the room it was cut from");
+    }
+
+    /// And a sub-face pull — the protrusion into the room — likewise.
+    #[test]
+    fn a_sub_face_pull_protrudes_in_the_rooms_theme() {
+        let (mut world, theme) = themed_room();
+        world.select_at_crosshair();
+        world.adjust_selection_size(-20.0, 0.0);
+        world.adjust_selection_size(0.0, -10.0);
+        world.pull(4.0).expect("sub-face pull");
+
+        let bump = world.regions[0].brushes.last().unwrap();
+        assert_eq!(bump.op, Op::Add, "a pull protrudes");
+        assert_eq!(bump.scheme, theme, "the protrusion wears the room it grew out of");
+    }
+
+    /// Cutting a doorway carries the theme through **both** new brushes: the frame
+    /// (whose reveal is drawn from its own scheme's zones 5/6) and the protoroom
+    /// beyond it, which is the seed the author pushes the next room out of. The
+    /// protoroom is the one that mattered in practice — it sits past the frame, so
+    /// the room flood-fill will never reach back to it.
+    #[test]
+    fn a_doorway_cut_carries_the_theme_into_the_room_beyond() {
+        let (mut world, theme) = themed_room();
+        let before = world.regions[0].brushes.len();
+        world.door_tool_key();
+        world.update_door_preview();
+        world.confirm_door().expect("door cut");
+
+        let new: Vec<&Brush> = world.regions[0].brushes[before..].iter().collect();
+        assert_eq!(new.len(), 2, "a doorway is a frame + a protoroom");
+        for b in new {
+            assert_eq!(b.scheme, theme, "brush {} kept the default theme", b.id);
+        }
+    }
+
+    /// The same cut, then pushed out into an actual room: the room beyond a doorway
+    /// comes out in the theme of the room it was cut from. This is the reported
+    /// symptom end-to-end — it used to arrive in the default theme.
+    #[test]
+    fn the_room_pushed_out_beyond_a_doorway_keeps_the_theme() {
+        let (mut world, theme) = themed_room();
+        world.door_tool_key();
+        world.update_door_preview();
+        world.confirm_door().expect("door cut");
+
+        // Aim through the doorway at the protoroom's far face and push it out.
+        let proto = *world.regions[0].brushes.last().unwrap();
+        world.camera.pos = Vec3::new(12.0, 8.0, proto.z + proto.d + 4.0) * WORLD_SCALE;
+        world.camera.yaw = 0.0;
+        world.camera.pitch = 0.0;
+        world.select_at_crosshair();
+        world.push(8.0).expect("push the protoroom out into a room");
+
+        for b in &world.regions[0].brushes {
+            assert_eq!(b.scheme, theme, "brush {} came out in the default theme", b.id);
+        }
+    }
+
+    /// A pillar inherits the room's theme *and* its wall-UV floor anchor, so its
+    /// texture split lines up with the walls around it (JS `confirmPillarPlacement`
+    /// set both).
+    #[test]
+    fn a_pillar_wears_the_room_it_stands_in() {
+        let (mut world, theme) = themed_room();
+        let floor_y = world.regions[0].brushes[0].floor_y;
+        world.camera.pitch = -1.4; // look at the floor
+        world.pillar_tool_key();
+        world.confirm_place().expect("pillar placed");
+
+        let pillar = world.regions[0].brushes.last().unwrap();
+        assert_eq!(pillar.op, Op::Add);
+        assert_eq!(pillar.scheme, theme, "pillar wears the room's theme");
+        assert_eq!(pillar.floor_y, floor_y, "and the room's wall-UV anchor");
+    }
+
+    /// Same for the three brushes of a brace arch.
+    #[test]
+    fn a_brace_wears_the_room_it_spans() {
+        let (mut world, theme) = themed_room();
+        let floor_y = world.regions[0].brushes[0].floor_y;
+        let before = world.regions[0].brushes.len();
+        world.brace_tool_key();
+        world.confirm_place().expect("brace placed");
+
+        let new: Vec<&Brush> = world.regions[0].brushes[before..].iter().collect();
+        assert_eq!(new.len(), 3, "an arch is wall + ceiling + wall");
+        for b in new {
+            assert_eq!(b.scheme, theme, "brace brush {} wears the room's theme", b.id);
+            assert_eq!(b.floor_y, floor_y, "and the room's wall-UV anchor");
+        }
+    }
+
     // NB: the door-breach tests (panel-blocks-player, hunter-breaches-to-catch)
     // and their `two_rooms_joined_by_a_door` fixture were removed when door
     // breach/blocking was disabled (2026-07-16, see `World::build_doors`). Restore

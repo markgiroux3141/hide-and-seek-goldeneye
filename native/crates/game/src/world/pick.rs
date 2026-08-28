@@ -50,6 +50,7 @@ impl World {
             u_size: u_max - u_min,
             v_size: v_max - v_min,
             position: brush.face_pos(sel.axis, sel.side),
+            scheme: brush.scheme,
         })
     }
 
