@@ -403,6 +403,12 @@ Each stage is independently shippable and independently playtestable.
 
 ### Still open
 
-- **Vent bore** — proposal 4×4 WT (1.0 m). Rule 1 caps it at 5 cells. Confirm in play.
-- **The grey texture** — needs picking by eye in the TEXTURES panel (§1.9). Blocks the
-  visual half of stage 2, nothing else.
+- **Vent bore** — 4×4 WT (1.0 m). Rule 1 caps it at 5 cells. Confirm in play.
+- **Segment length** — one push is a **cube** (one bore), settled in playtest 1: the
+  original 8 WT default added too much duct per click to steer.
+- ~~The grey texture~~ **RESOLVED**: `tempImgEd02C1`, the riveted grey metal plate the
+  Facility themes already use (`facility_03`, `facility_05`). Found by filtering the
+  library to near-greyscale mid-brightness images, ranking by horizontal banding, and
+  looking at the survivors — §1.9's "not a search" point stands, it just needed eyes on a
+  contact sheet rather than a grep. Also spotted: `tempImgEd0215` is a louvred grille
+  panel, the obvious art for a vent *cover* if one is ever wanted at the mouth.

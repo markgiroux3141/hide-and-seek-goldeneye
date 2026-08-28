@@ -2999,7 +2999,7 @@ impl World {
             ladder_height: 3.0,
             ladder_preview: None,
             vent_tool: false,
-            vent_len: 8.0,
+            vent_len: tools::vent::VENT_LEN_DEFAULT,
             vent_run: None,
             vent_preview: None,
             hole_w: HOLE_WIDTH,

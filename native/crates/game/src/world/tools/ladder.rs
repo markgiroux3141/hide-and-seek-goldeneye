@@ -91,12 +91,19 @@ impl World {
         let region = self.regions.iter().find(|r| r.id == sel.region_id)?;
         let brush = *region.brushes.iter().find(|b| b.id == sel.brush_id)?;
         let base_y = brush.floor_y * WORLD_SCALE;
-        // Face out of the wall: the outward normal of the picked face.
+        // Face out of the wall — **away** from the solid, into the room the player
+        // stands in.
+        //
+        // The sign is the same trap the vent tool hit. `Side::Max` means a carve at this
+        // face extends along **+axis** (see `cut_opening`), i.e. +axis is *into* the
+        // solid; so the direction out of it is −axis. Getting this backwards buries the
+        // ladder inside the wall, where it is both unclimbable and — since the rails are
+        // drawn geometry, not a texture — completely invisible.
         let yaw = match (sel.axis, sel.side) {
-            (Axis::X, Side::Max) => std::f32::consts::FRAC_PI_2,
-            (Axis::X, Side::Min) => -std::f32::consts::FRAC_PI_2,
-            (Axis::Z, Side::Max) => 0.0,
-            _ => std::f32::consts::PI,
+            (Axis::X, Side::Max) => -std::f32::consts::FRAC_PI_2, // out = −X
+            (Axis::X, Side::Min) => std::f32::consts::FRAC_PI_2,  // out = +X
+            (Axis::Z, Side::Max) => std::f32::consts::PI,         // out = −Z
+            _ => 0.0,                                             // out = +Z
         };
         Some((Vec3::new(hit.x, base_y, hit.z), yaw))
     }
@@ -156,6 +163,21 @@ impl World {
             self.ladder_count(),
         );
         true
+    }
+
+    /// The most recently placed ladder's `(base, yaw)` — test hook, so the facing test
+    /// can assert against the pose that was actually stored rather than re-deriving it.
+    #[cfg(test)]
+    pub(crate) fn ladder_preview_for_test(&self) -> (Vec3, f32) {
+        let (t, _) = self
+            .ecs
+            .world()
+            .query::<(&Transform, &Ladder)>()
+            .iter()
+            .next()
+            .map(|(t, l)| (*t, *l))
+            .expect("a ladder is placed");
+        (t.pos, t.rot.to_euler(EulerRot::YXZ).0)
     }
 
     /// How many ladders the level has.
@@ -409,6 +431,47 @@ mod tests {
             world.character.as_ref().unwrap().is_climbing(),
             "attached on contact, with nothing pressed"
         );
+    }
+
+    /// **A placed ladder stands in open space, not inside the wall it is on.**
+    ///
+    /// The property the facing sign actually governs, and the one that broke: a ladder
+    /// facing the wrong way is buried in solid, where it cannot be climbed and — since
+    /// the rails are drawn geometry rather than a texture — cannot be seen either. So
+    /// this samples the climb volume against the CSG rather than asserting a yaw.
+    #[test]
+    fn a_placed_ladder_stands_in_open_space() {
+        for (yaw, name) in [
+            (std::f32::consts::PI, "-Z wall"),
+            (0.0, "+Z wall"),
+            (std::f32::consts::FRAC_PI_2, "-X wall"),
+            (-std::f32::consts::FRAC_PI_2, "+X wall"),
+        ] {
+            let mut world = World::new();
+            world.initial_meshes();
+            world.camera.pos = Vec3::new(3.0, 0.9, 3.0);
+            world.camera.yaw = yaw;
+            world.camera.pitch = 0.0;
+            world.ladder_tool_key();
+            assert!(world.update_ladder_preview().is_some(), "{name}: previews");
+            assert!(world.confirm_ladder(), "{name}: places");
+
+            let (base, yaw) = world.ladder_preview_for_test();
+            let out = Vec3::new(yaw.sin(), 0.0, yaw.cos());
+            // Sample just off the face, at chest height. **Close** on purpose: walls are
+            // WALL_THICKNESS (0.25 m) and the climb volume reaches 0.6 m, so a midpoint
+            // sample punches clean through a wrongly-faced ladder into the void beyond
+            // and reads as open. An earlier version of this test did exactly that and
+            // passed with the sign inverted — it has to land *inside* the slab to
+            // discriminate.
+            let probe = base + out * 0.15 + Vec3::Y * 1.0;
+            let wt = probe / WORLD_SCALE;
+            let solid = world.regions.iter().any(|r| r.solid_at(wt.x, wt.y, wt.z));
+            assert!(
+                !solid,
+                "{name}: the ladder faces into the wall — {probe:?} is solid, so it is                  buried, unclimbable and invisible"
+            );
+        }
     }
 
     /// A placed ladder is visible — in BUILD *and* in HUNT. A climbable surface the

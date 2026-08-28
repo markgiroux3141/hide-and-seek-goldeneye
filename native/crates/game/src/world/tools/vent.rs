@@ -51,12 +51,20 @@ pub(crate) const VENT_BORE_MAX: f32 = 5.0;
 const _: () = assert!(VENT_BORE <= VENT_BORE_MAX);
 const _: () = assert!(VENT_BORE_MAX < engine::sim::nav::AGENT_HEIGHT_CELLS as f32);
 
-/// Segment length limits, WT. The minimum is a bore's worth so a segment always clears
-/// the corner it starts from; the maximum is a runaway-scroll guard, not a design limit.
-const VENT_LEN_MIN: f32 = 2.0;
+/// Segment length limits, WT.
+///
+/// The minimum is **one bore**, which is also the default: a push adds a cube, so the
+/// duct grows by exactly the section you are looking at rather than by an arbitrary run.
+/// That makes the tool predictable — one click is one unit of duct — and it is the right
+/// granularity for turning a corner, since a segment shorter than the bore cannot clear
+/// the corner it starts from anyway.
+///
+/// The maximum is a runaway-scroll guard, not a design limit: scroll up for a long
+/// straight run when you want one.
+const VENT_LEN_MIN: f32 = VENT_BORE;
 const VENT_LEN_MAX: f32 = 60.0;
-/// Length a fresh segment starts at.
-const VENT_LEN_DEFAULT: f32 = 8.0;
+/// Length a fresh segment starts at — one bore, i.e. a cube.
+pub(crate) const VENT_LEN_DEFAULT: f32 = VENT_BORE;
 
 /// The duct network being carved: where the open end is, and which way it was heading.
 #[derive(Clone, Copy, Debug)]
@@ -450,6 +458,36 @@ mod tests {
             standable, 0,
             "{standable} of {probes} cells inside the duct are standable — hunters can              path into this vent, which inverts the entire feature"
         );
+    }
+
+    /// A push adds a **cube**: the default segment is exactly the bore in every axis, so
+    /// one click is one predictable unit of duct rather than an arbitrary run.
+    #[test]
+    fn one_push_adds_a_cube_of_bore() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.camera.pos = Vec3::new(3.0, 0.9, 3.0);
+        world.camera.yaw = std::f32::consts::PI;
+        world.camera.pitch = 0.0;
+        world.vent_tool_key();
+        assert_eq!(world.vent_len(), VENT_BORE, "a fresh segment is one bore long");
+        world.update_vent_preview();
+        world.vent_click().expect("carved");
+        let b = world
+            .regions
+            .iter()
+            .flat_map(|r| r.brushes.iter())
+            .find(|b| b.vent)
+            .expect("the duct brush exists");
+        assert_eq!(
+            [b.w, b.h, b.d],
+            [VENT_BORE, VENT_BORE, VENT_BORE],
+            "one push is a cube of the bore"
+        );
+        // Scrolling below one bore is refused — a shorter segment could not clear the
+        // corner it starts from.
+        world.adjust_vent_len(-10.0);
+        assert_eq!(world.vent_len(), VENT_BORE, "the bore is the floor on segment length");
     }
 
     /// A duct that dead-ends in solid is reported, because it is a pocket the player can

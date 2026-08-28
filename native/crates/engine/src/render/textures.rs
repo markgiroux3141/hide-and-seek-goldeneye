@@ -99,12 +99,20 @@ const SIMPLE_SCHEME_NAME: &str = "simple_blue";
 /// The theme every vent duct's interior wears (`tools::vent`), so a duct reads as bare
 /// ducting whatever room it passes through.
 ///
-/// **The textures on it are placeholders.** The authentic grey GoldenEye vent texture
-/// cannot be found by name: `assets/textures/` is ~1,000 BMPs called `tempImgEd0005.bmp`
-/// and the source level OBJ/MTLs are not in the repo, so nothing maps "duct" to a file.
-/// It has to be picked by eye in the TEXTURES panel and this theme repointed at it —
-/// which is a `themes.json` edit and no code change, the whole point of the runtime
-/// registry.
+/// It wears `tempImgEd02C1` — the grey riveted metal plate the **Facility** themes
+/// already use (`facility_03` floor + lower wall, `facility_05` ceiling), so a duct is
+/// authentic GoldenEye rather than an approximation.
+///
+/// Finding it was not a search. The library is ~1,000 BMPs named `tempImgEd0005.bmp`
+/// and the source level OBJ/MTLs are gone, so nothing maps "duct" to a file: it was
+/// found by filtering the library to near-greyscale mid-brightness images, ranking those
+/// by horizontal banding, and *looking* at the survivors as a contact sheet.
+///
+/// **The repeat is deliberately not the level's.** `facility_03` uses ~0.14, which spans
+/// one tile over ~7 m — right for a wall, and inside a 1 m bore it would show a single
+/// stretched fragment. 0.7 puts a tile every ~1.4 m so the rivets read at crawling
+/// distance. Retune it live in the TEXTURES panel; it is a `themes.json` value with no
+/// code behind it.
 ///
 /// Unlike the two above, this one is **not required**: a themes.json without it falls
 /// back to the default theme rather than refusing to start, because a missing duct look

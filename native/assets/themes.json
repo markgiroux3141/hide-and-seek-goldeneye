@@ -348,28 +348,28 @@
   },
   {
    "name": "vent_metal",
-   "label": "Vent Duct (placeholder)",
+   "label": "Vent Duct",
    "group": "Vent",
    "zones": {
     "0": {
-     "texture": "grey_tile_floor",
-     "repeat": 1.0
+     "texture": "tempImgEd02C1",
+     "repeat": 0.7
     },
     "1": {
-     "texture": "grey_line_wall",
-     "repeat": 1.0
+     "texture": "tempImgEd02C1",
+     "repeat": 0.7
     },
     "2": {
-     "texture": "grey_line_wall",
-     "repeat": 1.0
+     "texture": "tempImgEd02C1",
+     "repeat": 0.7
     },
     "3": {
-     "texture": "grey_line_wall",
-     "repeat": 1.0
+     "texture": "tempImgEd02C1",
+     "repeat": 0.7
     },
     "5": {
-     "texture": "grey_line_wall",
-     "repeat": 1.0
+     "texture": "tempImgEd02C1",
+     "repeat": 0.7
     }
    }
   },
