@@ -6,6 +6,7 @@ mod draw;
 /// the draw list, the collider pose and the tick all go through the same matrix.
 pub(crate) mod door;
 mod gizmo;
+mod ladder;
 mod light;
 mod opening;
 /// `pub(crate)` so the prop draw list + the panel can reach the pickup helpers, and

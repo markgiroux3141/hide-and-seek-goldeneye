@@ -856,6 +856,14 @@ impl World {
             None => (cam_feet, self.camera.yaw, self.camera.pitch),
         };
         self.character = Some(CharacterController::new(feet, yaw, pitch));
+        // Ladders are the player's alone, so their climb volumes live on the controller
+        // rather than in the nav grid. Re-installed on every (re)spawn because a fresh
+        // controller starts with none — a respawn that silently lost every ladder in the
+        // level would be a very quiet bug.
+        let ladders = self.ladder_volumes();
+        if let Some(c) = self.character.as_mut() {
+            c.set_ladders(ladders);
+        }
         self.hunt_spawn = Some((feet, yaw, pitch));
     }
 
@@ -883,6 +891,14 @@ impl World {
         self.reset_scores();
         if let Some((feet, yaw, pitch)) = self.hunt_spawn {
             self.character = Some(CharacterController::new(feet, yaw, pitch));
+        // Ladders are the player's alone, so their climb volumes live on the controller
+        // rather than in the nav grid. Re-installed on every (re)spawn because a fresh
+        // controller starts with none — a respawn that silently lost every ladder in the
+        // level would be a very quiet bug.
+        let ladders = self.ladder_volumes();
+        if let Some(c) = self.character.as_mut() {
+            c.set_ladders(ladders);
+        }
         }
         // Clear transient combat VFX so nothing leaks across the reset.
         self.sparks.clear();

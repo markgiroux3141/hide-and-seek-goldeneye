@@ -63,6 +63,15 @@ pub enum ComponentData {
     /// A spawn pad. No payload — its position *and facing* are the entity's
     /// [`Transform`] (see [`SpawnPoint`]), so the marker component is a bare tag.
     SpawnPoint,
+    /// A climbable ladder. Both fields carry a `#[serde(default)]` for the same reason
+    /// the door's authoring options do — a level written before ladders gained a setting
+    /// still loads, falling back to the freshly-placed default. No format bump.
+    Ladder {
+        #[serde(default = "default_ladder_height")]
+        height: f32,
+        #[serde(default = "default_ladder_width")]
+        width: f32,
+    },
     /// A weapon / ammo pickup. `weapon` is an owned `String` here (and a
     /// `&'static str` on the live [`Pickup`]) because the file has to record what
     /// the author chose even if that weapon isn't in the arsenal this session —
@@ -99,6 +108,13 @@ fn default_hinge() -> HingeSide {
 fn default_open_angle() -> f32 {
     DOOR_OPEN_ANGLE
 }
+fn default_ladder_height() -> f32 {
+    Ladder::default().height
+}
+fn default_ladder_width() -> f32 {
+    Ladder::default().width
+}
+
 fn default_speed() -> f32 {
     1.0
 }
@@ -173,6 +189,9 @@ fn fold_one(b: &mut EntityBuilder, c: &ComponentData) {
         }
         ComponentData::SpawnPoint => {
             b.add(SpawnPoint);
+        }
+        ComponentData::Ladder { height, width } => {
+            b.add(Ladder { height: *height, width: *width });
         }
         ComponentData::Pickup { kind, weapon, mags, respawn } => {
             // A name no weapon family knows means the file was written by a build
@@ -260,6 +279,9 @@ pub(crate) fn extract(eref: &EntityRef<'_>) -> Vec<ComponentData> {
     }
     if eref.has::<SpawnPoint>() {
         cs.push(ComponentData::SpawnPoint);
+    }
+    if let Some(l) = eref.get::<&Ladder>() {
+        cs.push(ComponentData::Ladder { height: l.height, width: l.width });
     }
     if let Some(p) = eref.get::<&Pickup>() {
         // Authored settings only — `cooldown` is HUNT-transient, so a pickup taken

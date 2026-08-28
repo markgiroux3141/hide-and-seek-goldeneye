@@ -224,6 +224,10 @@ impl World {
         };
         if let Some((feet, yaw, pitch)) = entry {
             self.character = Some(CharacterController::new(feet, yaw, pitch));
+            let ladders = self.ladder_volumes();
+            if let Some(c) = self.character.as_mut() {
+                c.set_ladders(ladders);
+            }
             log::info!("respawned at {feet:?}");
         }
     }

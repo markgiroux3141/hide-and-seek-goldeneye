@@ -2374,6 +2374,11 @@ pub struct World {
     /// the duct network part-carved so far, and the ghost for the next segment. Unlike
     /// the opening tools the vent tool is *stateful across clicks* — a duct is driven
     /// segment by segment, so the run outlives each confirm. See `tools::vent`.
+    /// Ladder tool state (BUILD, `J`): armed flag, the height the next ladder gets, and
+    /// the previewed `(base, yaw)`. See `tools::ladder`.
+    ladder_tool: bool,
+    ladder_height: f32,
+    ladder_preview: Option<(Vec3, f32)>,
     vent_tool: bool,
     vent_len: f32,
     vent_run: Option<tools::vent::VentRun>,
@@ -2990,6 +2995,9 @@ impl World {
             doors: Vec::new(),
             opening_tool: None,
             opening_preview: None,
+            ladder_tool: false,
+            ladder_height: 3.0,
+            ladder_preview: None,
             vent_tool: false,
             vent_len: 8.0,
             vent_run: None,

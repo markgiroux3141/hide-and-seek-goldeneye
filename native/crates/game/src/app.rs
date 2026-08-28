@@ -1035,6 +1035,9 @@ impl App {
                 Tool::Vent => {
                     world.vent_tool_key();
                 }
+                Tool::Ladder => {
+                    world.ladder_tool_key();
+                }
                 Tool::Pillar => world.pillar_tool_key(),
                 Tool::Brace => world.brace_tool_key(),
                 Tool::Platform => world.platform_tool_key(),
@@ -1050,6 +1053,7 @@ impl App {
                 .map(|w| !w.is_opening_arming())
                 .unwrap_or(true),
             Tool::Vent => self.world.as_ref().map(|w| !w.is_vent_tool()).unwrap_or(true),
+            Tool::Ladder => self.world.as_ref().map(|w| !w.is_ladder_tool()).unwrap_or(true),
             Tool::Pillar | Tool::Brace => {
                 self.world.as_ref().map(|w| !w.is_placing()).unwrap_or(true)
             }
@@ -3752,6 +3756,8 @@ fn armed_tool(w: &crate::world::World) -> Option<Tool> {
         Some(Tool::Draw)
     } else if w.is_vent_tool() {
         Some(Tool::Vent)
+    } else if w.is_ladder_tool() {
+        Some(Tool::Ladder)
     } else if w.is_hole_arming() {
         Some(Tool::Hole)
     } else if w.is_opening_arming() {
@@ -4268,6 +4274,14 @@ impl ApplicationHandler for App {
                     self.refresh_highlight();
                     return;
                 }
+                // Grabbed + BUILD, ladder tool armed: a click places one.
+                if self.world.as_ref().map(|w| w.is_ladder_tool()).unwrap_or(false) {
+                    if let Some(world) = self.world.as_mut() {
+                        world.confirm_ladder();
+                    }
+                    self.refresh_highlight();
+                    return;
+                }
                 // Grabbed + BUILD, vent tool armed: a click carves the previewed duct
                 // segment and re-anchors the run to its far end.
                 if self.world.as_ref().map(|w| w.is_vent_tool()).unwrap_or(false) {
@@ -4395,7 +4409,9 @@ impl ApplicationHandler for App {
                     // placement (pillar/brace) sizing, else opening sizing (hole =
                     // free size, door = single/double width), else the sub-face
                     // selection.
-                    if world.is_vent_tool() {
+                    if world.is_ladder_tool() {
+                        world.adjust_ladder_height(step);
+                    } else if world.is_vent_tool() {
                         world.adjust_vent_len(step);
                     } else if world.is_draw_sizing() {
                         world.adjust_draw_depth(step);
@@ -4607,6 +4623,8 @@ impl ApplicationHandler for App {
                     let platform = self.world.as_ref().map(|w| w.is_platform_tool()).unwrap_or(false);
                     let drawing = self.world.as_ref().map(|w| w.is_draw_tool()).unwrap_or(false);
                     let venting = self.world.as_ref().map(|w| w.is_vent_tool()).unwrap_or(false);
+                    let laddering =
+                        self.world.as_ref().map(|w| w.is_ladder_tool()).unwrap_or(false);
                     let pending_stair =
                         self.world.as_ref().map(|w| w.has_pending_stair()).unwrap_or(false);
                     // A pending stair suppresses the face highlight; its x-ray
@@ -4614,6 +4632,8 @@ impl ApplicationHandler for App {
                     let mesh = self.world.as_mut().and_then(|w| {
                         if pending_stair {
                             None
+                        } else if laddering {
+                            w.update_ladder_preview()
                         } else if venting {
                             w.update_vent_preview()
                         } else if drawing {
@@ -4901,6 +4921,9 @@ impl App {
                     w.cancel_stairs();
                     log::info!("stair cancelled");
                     handled = true;
+                } else if w.is_ladder_tool() {
+                    w.cancel_ladder();
+                    handled = true;
                 } else if w.is_vent_tool() {
                     // Esc *finishes* a duct rather than discarding it — the segments are
                     // already carved and individually undoable, so there is nothing
@@ -5167,6 +5190,13 @@ impl App {
         // tools — see `tools::vent` — so pressing U again *finishes* the duct.
         if code == KeyCode::KeyU {
             self.apply(EditorAction::ArmTool(Tool::Vent));
+            return;
+        }
+        // J places a climbable ladder on a wall (player-only — see `tools::ladder`).
+        if code == KeyCode::KeyJ
+            && self.world.as_ref().map(|w| w.is_build()).unwrap_or(false)
+        {
+            self.apply(EditorAction::ArmTool(Tool::Ladder));
             return;
         }
         if code == KeyCode::KeyB || code == KeyCode::KeyH {

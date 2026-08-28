@@ -51,6 +51,16 @@ const CROUCH_SPEED_SCALE: f32 = 0.35;
 /// fire, slow enough that the camera drop reads as a movement rather than a teleport.
 const CROUCH_TIME: f32 = 0.18;
 
+// ─── Ladders ─────────────────────────────────────────────────────────────────
+
+/// Climb rate, m/s. Well under [`WALK_SPEED`]: a ladder is a commitment, and being slow
+/// and exposed on one is the cost that balances reaching somewhere hunters cannot follow.
+const CLIMB_SPEED: f32 = 2.2;
+
+/// Upward kick when jumping off a ladder, m/s — enough to clear the lip at the top
+/// rather than re-attaching immediately.
+const LADDER_HOP: f32 = 3.0;
+
 /// The player's standing height and horizontal half-width (m) — the capsule as the rest
 /// of the game needs to measure it.
 ///
@@ -106,6 +116,12 @@ pub struct CharacterController {
     /// [`Self::crouch_t`] because releasing the key does not by itself stand you up:
     /// under a duct there is nowhere to stand, and the blend holds where it is.
     crouch_held: bool,
+    /// Climb volumes (world-space AABBs, metres) for the level's ladders, baked once at
+    /// BUILD→HUNT. Held here rather than queried from the ECS each step because the
+    /// controller runs on the fixed step and has no world borrow.
+    ladders: Vec<(Vec3, Vec3)>,
+    /// Whether the player is attached to a ladder right now.
+    on_ladder: bool,
 }
 
 impl CharacterController {
@@ -121,7 +137,29 @@ impl CharacterController {
             vel_xz: Vec3::ZERO,
             crouch_t: 0.0,
             crouch_held: false,
+            ladders: Vec::new(),
+            on_ladder: false,
         }
+    }
+
+    /// Install the level's ladder climb volumes (world AABBs, metres). Called at
+    /// BUILD→HUNT and on respawn; an empty list disables climbing entirely.
+    pub fn set_ladders(&mut self, volumes: Vec<(Vec3, Vec3)>) {
+        self.ladders = volumes;
+    }
+
+    /// Whether the player is on a ladder — for the HUD and for the animation state.
+    pub fn is_climbing(&self) -> bool {
+        self.on_ladder
+    }
+
+    /// Whether a point is inside any ladder's climb volume.
+    fn ladder_at(&self, p: Vec3) -> bool {
+        self.ladders.iter().any(|(min, max)| {
+            p.x >= min.x && p.x <= max.x
+                && p.y >= min.y && p.y <= max.y
+                && p.z >= min.z && p.z <= max.z
+        })
     }
 
     /// Current capsule height (m), blended between standing and crouched.
@@ -226,18 +264,55 @@ impl CharacterController {
         }
         let height = self.height();
 
-        // Gravity + jump (held Space re-jumps on landing, matching player.js).
-        // Crouched, there is no jump: a duck that can launch you is a way to skip
-        // geometry, and the nav report's player-only-climb accounting is calibrated
-        // against a *standing* JUMP_APEX.
-        self.vel_y -= GRAVITY * dt;
-        if self.grounded
-            && input.pointer_locked
-            && input.key_down(KeyCode::Space)
-            && self.crouch_t <= 0.0
-        {
-            self.vel_y = JUMP_VELOCITY;
-            self.grounded = false;
+        // ── Ladders ──
+        // Attachment is positional: stand in the climb volume and you are on it. There
+        // is no grab key, because a ladder you have to ask to use is a ladder you fall
+        // off while being shot at.
+        let center_now = self.pos + Vec3::new(0.0, center_offset_for(height) , 0.0);
+        let in_volume = self.ladder_at(center_now) || self.ladder_at(self.pos);
+        let jump = input.pointer_locked && input.key_down(KeyCode::Space);
+        if in_volume && !self.on_ladder && !jump {
+            self.on_ladder = true;
+            self.vel_y = 0.0;
+        } else if !in_volume {
+            self.on_ladder = false;
+        }
+
+        if self.on_ladder {
+            // W climbs, S descends, A/D still strafe so you can step off sideways at a
+            // landing. Forward/back are spent on the vertical here rather than projected
+            // through the look direction: pitching to climb means you cannot look around
+            // while you do it, and a ladder is exactly where you want to be watching.
+            let (ax, ay) = input.analog_move();
+            let keyed =
+                input.key_down(KeyCode::KeyW) as i32 - input.key_down(KeyCode::KeyS) as i32;
+            let climb = if keyed != 0 { keyed as f32 } else { ay };
+            self.vel_y = climb * CLIMB_SPEED;
+            // Rebuild the horizontal wish from the strafe axes ALONE, rather than
+            // subtracting the forward term back out of the one computed above. Same
+            // result for the keyboard, but the analog stick also feeds `fwd`, and
+            // cancelling it by hand would have quietly left half a stick's worth of
+            // forward drive on while climbing.
+            let strafe = (input.key_down(KeyCode::KeyD) as i32
+                - input.key_down(KeyCode::KeyA) as i32) as f32;
+            wish = right * if strafe != 0.0 { strafe } else { ax };
+            if jump {
+                // Push off: hop up and away so you clear the lip instead of instantly
+                // re-attaching to the volume you are still standing in.
+                self.on_ladder = false;
+                self.vel_y = LADDER_HOP;
+                self.grounded = false;
+            }
+        } else {
+            // Gravity + jump (held Space re-jumps on landing, matching player.js).
+            // Crouched, there is no jump: a duck that can launch you is a way to skip
+            // geometry, and the nav report's player-only-climb accounting is calibrated
+            // against a *standing* JUMP_APEX.
+            self.vel_y -= GRAVITY * dt;
+            if self.grounded && jump && self.crouch_t <= 0.0 {
+                self.vel_y = JUMP_VELOCITY;
+                self.grounded = false;
+            }
         }
 
         // Crouched movement is slowed — and thereby silenced, see CROUCH_SPEED_SCALE.
@@ -256,8 +331,11 @@ impl CharacterController {
         let horiz = horiz_v.length();
         self.speed_xz = if dt > 1e-6 { horiz / dt } else { 0.0 };
         self.vel_xz = if dt > 1e-6 { horiz_v / dt } else { Vec3::ZERO };
-        // Stop accumulating fall speed once the floor is under us.
-        if grounded && self.vel_y < 0.0 {
+        // Stop accumulating fall speed once the floor is under us — but never while
+        // climbing, where `vel_y` is a *commanded* rate rather than accumulated gravity.
+        // A ladder that starts at floor level is grounded on its first rungs, and
+        // zeroing there would pin the player to the bottom of it.
+        if grounded && self.vel_y < 0.0 && !self.on_ladder {
             self.vel_y = 0.0;
         }
     }
