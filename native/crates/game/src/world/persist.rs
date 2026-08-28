@@ -11,8 +11,10 @@
 //!
 //! Format: pretty-printed JSON via serde. A [`LevelFile::version`] tag plus
 //! `#[serde(default)]` on later-added fields (see [`Brush`]) means old files
-//! keep loading as the schema grows. Files live under `native/levels/` as
-//! numbered slots (`slotN.json`); rename/commit them to build a test catalog.
+//! keep loading as the schema grows. Files live under `native/levels/`, named by
+//! [`slug_for_name`] and browsed in the LEVELS panel; `slotN.json` are simply the
+//! eight the `F`-keys still reach. The whole directory is git-ignored — a level is
+//! local authoring output, so anything worth keeping gets copied out by hand.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -108,8 +110,8 @@ struct LevelFile {
     next_run_id: u32,
 }
 
-/// The directory levels live in: `native/levels/` (a sibling of `assets/`).
-/// Committed files here form the hand-named test-base catalog.
+/// The directory levels live in: `native/levels/` (a sibling of `assets/`), and the
+/// catalog the LEVELS panel lists. Git-ignored: the panel writes here on every Save.
 pub fn levels_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../levels")
 }
