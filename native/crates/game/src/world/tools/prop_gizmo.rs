@@ -170,7 +170,7 @@ impl World {
     /// sit around the object rather than at the floor. `None` without bounds. A
     /// light has no mesh bounds: its gizmo sits at the light position itself.
     fn prop_gizmo_origin(&self, e: hecs::Entity) -> Option<Vec3> {
-        if self.entity_is_light(e) || self.entity_is_spawn_point(e) {
+        if self.entity_is_light(e) || self.entity_is_spawn_point(e) || self.entity_is_ladder(e) {
             return self.prop_transform(e).map(|t| t.pos);
         }
         let t = self.prop_transform(e)?;
@@ -203,6 +203,11 @@ impl World {
                 Vec3::new(p.x - h, p.y - 0.05, p.z - h),
                 Vec3::new(p.x + h, p.y + 0.6, p.z + h),
             ));
+        }
+        if self.entity_is_ladder(e) {
+            // A ladder has no mesh, so its pick box IS its climb volume — click what you
+            // can actually climb, rather than a marker floating near it.
+            return self.ladder_aabb(e);
         }
         self.prop_world_aabb(e)
     }

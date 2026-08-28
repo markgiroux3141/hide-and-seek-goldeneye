@@ -65,7 +65,7 @@ use crate::pdsim::distmode::{DistBand, DistMode, DistModeState};
 /// deliberate choice and not an oversight: it always knows where you are and walks the
 /// shortest path to your live position. That is what Perfect Dark's bots do, and
 /// seeing how it feels against ours is the entire reason the switch exists.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AiMode {
     /// Our handcrafted hunter (the default, and the shipping behaviour).
     Ours,
@@ -305,6 +305,12 @@ const SPEED_ADVANCE: f32 = 3.2; // ~jog gait — closing on the player while fir
 /// Chase speed (JS `chaseSpeed`) — the urgent run.
 pub(crate) const SPEED_CHASE: f32 = 4.6; // m/s (~run gait)
 const REPATH_INTERVAL: f32 = 0.4; // s between path recomputes (CHASE_UPDATE_INTERVAL)
+/// How close to a vent mouth counts as *holding* it rather than still walking to it.
+///
+/// A little over the arrival radius, so the hold latches before `move_toward` starts
+/// reporting "arrived" and re-targeting — the oscillation that would otherwise read as a
+/// hunter twitching at the grille.
+const VENT_WATCH_DIST: f32 = 1.2;
 
 // ─── Anti-grind (crowd / separation-fight) ───────────────────────────────────
 // When several hunters converge on the same spot, the per-step separation nudge
@@ -705,6 +711,10 @@ pub struct Enemy {
     /// Perception is deliberately untouched: it still only *sees* what the raycast +
     /// cone allow. See [`Self::known_target_pos`]. Defaults `false`.
     omniscient: bool,
+    /// Set while this hunter is holding a vent mouth (see [`Self::is_watching_vent`]).
+    /// Recomputed every Chase step, so it clears itself the moment the player leaves
+    /// the duct.
+    vent_watch: bool,
 
     // ─── Perfect Dark combat movement (`AI=pd` only) ──
     /// `botcmd_tick_dist_mode`'s per-bot state — the current distance mode, the
@@ -790,6 +800,7 @@ impl Enemy {
             alert_served: false,
             post_burst: false,
             omniscient: false,
+            vent_watch: false,
             dist: DistModeState::default(),
             // Seeded from the spawn position so each hunter draws its own sequence and
             // a replayed run reproduces exactly (spawns are deterministic); never zero,
@@ -1591,6 +1602,19 @@ impl Enemy {
             self.fetch_reject = None; // worth another try — it may have been contested
         }
 
+        // Is the target somewhere inside a vent duct? Computed **once here**, ahead of
+        // the dispatch below, because there are three movement brains — `pd_step`, the
+        // utility scorer and the FSM — and this is a fact about the world, not about any
+        // one of them.
+        //
+        // It describes the *situation*, not a manoeuvre: each brain responds in its own
+        // idiom. `move_toward` plants on the mouth rather than walking into the wall
+        // behind it; Perfect Dark's distance bands hold their preferred range from the
+        // duct and cover it from there. Both are stakeouts.
+        self.vent_watch = nav
+            .vent_at(self.known_target_pos(target_pos).unwrap_or(target_pos))
+            .is_some();
+
         let mut step = EnemyStep::default();
         // ── `AI=pd`: Perfect Dark's action ladder, ahead of both of ours ──
         // Neither the utility scorer nor the FSM runs; see `pd_step` for the ladder and
@@ -1737,10 +1761,21 @@ impl Enemy {
                     let base = self.known_target_pos(target_pos).unwrap_or(target_pos);
                     let flank_angle = FLANK_MAX_ANGLE * tuning.flank * self.flank_dir;
                     let target = self.chase_aim_point(base, flank_angle, nav);
+                    // ── Staking out a duct ──
+                    // The target is somewhere in a vent and `chase_aim_point` has turned
+                    // that into the mouth. Once we are AT the mouth there is nothing
+                    // further to close: the standoff band is measured to the player, who
+                    // is through a wall, so the ordinary chase would keep walking into
+                    // geometry and re-pathing forever. Plant instead, and face the
+                    // opening — perception is a physics raycast, not a nav query, so a
+                    // hunter watching a grille can see and shoot straight down the bore
+                    // the moment the player is in line.
                     // Arriving at the believed spot without eyes on = they got away →
                     // go poke at it. `lose_contact` keeps an omniscient hunter chasing
                     // (its "believed spot" is the live one, so there is nothing to poke).
-                    if self.move_toward(dt, target, nav, chase_speed * tuning.speed_mult) && !perceived {
+                    if self.move_toward(dt, target, nav, chase_speed * tuning.speed_mult)
+                        && !perceived
+                    {
                         self.lose_contact();
                     }
                 }
@@ -2762,6 +2797,20 @@ impl Enemy {
     /// floor. The believed position is the safe fallback — by construction it is
     /// somewhere a body was standing.
     fn chase_aim_point(&self, base: Vec3, flank_angle: f32, nav: &NavWorld) -> Vec3 {
+        // A target inside a vent duct is a special case that must not be flanked.
+        //
+        // Flanking swings the approach off to one side to surround an opponent in the
+        // open. Against a duct there is nothing to surround — there is exactly one way
+        // in — and swinging off it would send the hunter to a cell beside the wall
+        // instead of to the opening. So the mouth is the aim point, unmodified.
+        //
+        // This is also what turns the stage-3 pathing fix into a *behaviour*: the grid
+        // was already routing the hunter to the mouth, but the hunter did not know why
+        // it was going there, and would then try to close the remaining distance to its
+        // standoff band through solid wall.
+        if let Some(mouth) = nav.nearest_vent_mouth(base) {
+            return mouth;
+        }
         let flanked = flank_point(base, self.pos, flank_angle);
         match nav.nearest_standable(flanked.x, flanked.y + 0.1, flanked.z, 4) {
             Some(p) if self.dist_to(p) > FLANK_MIN_OFFSET => p,
@@ -2769,7 +2818,51 @@ impl Enemy {
         }
     }
 
+    /// Whether this hunter's target is inside a vent duct this step — so what looks like
+    /// loitering is a stakeout.
+    ///
+    /// A statement about the *situation*, recomputed every step, not about a particular
+    /// manoeuvre: how a hunter covers a duct differs by AI mode (see the note in
+    /// `update`). It exists so the HUD, the telemetry dump and the AI lab can tell a
+    /// hunter watching an opening apart from one that has genuinely stalled.
+    pub fn is_watching_vent(&self) -> bool {
+        self.vent_watch
+    }
+
     pub(crate) fn move_toward(&mut self, dt: f32, target: Vec3, nav: &NavWorld, speed: f32) -> bool {
+        // ── Staking out a vent duct ──
+        //
+        // Placed here, at the one function every AI path funnels through, rather than in
+        // a state arm. There are **three** movement brains — `pd_step` (the shipped
+        // default, `AI=pd`), the utility scorer, and the FSM kill-switch — and a fix in
+        // any one of them would leave the other two walking into a wall. This is their
+        // only shared chokepoint.
+        //
+        // A target inside a duct becomes that duct's mouth, and once we are standing on
+        // the mouth we are *arrived*: there is nothing further to close, because the
+        // remaining distance to the player is through geometry. Reporting `true` is what
+        // stops the caller re-pathing at it forever — and stops the legs walk-cycling in
+        // place, which is what "arrived" already means everywhere else.
+        //
+        // Perception is a physics raycast rather than a nav query, so a hunter planted on
+        // a grille can see and shoot straight down the bore. Holding the mouth is a real
+        // threat, not a shrug.
+        if let Some(mouth) = nav.nearest_vent_mouth(target) {
+            if self.dist_to(mouth) < VENT_WATCH_DIST {
+                self.path.clear();
+                self.moving = false;
+                self.move_speed = 0.0;
+                // Face the target itself, not the mouth we are stood on.
+                self.face(target);
+                self.last_target = Some(mouth);
+                self.last_target_done = true;
+                return true;
+            }
+            self.last_target = Some(mouth);
+            let done = self.move_toward_inner(dt, mouth, nav, speed);
+            self.last_target_done = done;
+            return done;
+        }
         self.last_target = Some(target);
         let done = self.move_toward_inner(dt, target, nav, speed);
         self.last_target_done = done;
@@ -3072,6 +3165,34 @@ pub(crate) fn perception_los(physics: &mut PhysicsWorld, from_feet: Vec3, to_fee
 mod tests {
     use super::*;
 
+    /// **Crouch may shrink the player's height; it must never shrink their radius.**
+    ///
+    /// [`Enemy::catches`] is pure proximity — no line-of-sight test, no solidity test —
+    /// so the only thing stopping a hunter catching the player through a
+    /// `WALL_THICKNESS` (0.25 m) wall is that two capsule radii hold their centres
+    /// further apart than [`CATCH_DIST`]. That margin is 0.2 m and nothing else defends
+    /// it.
+    ///
+    /// It matters now because a vent bore invites exactly the wrong fix: narrowing the
+    /// player's capsule "so it fits". It does not need to — a 1.0 m bore clears a 0.25 m
+    /// radius standing — and narrowing it would let a player crouched in a duct be
+    /// caught through the duct wall by a hunter walking past outside.
+    #[test]
+    fn two_capsule_radii_keep_a_hunter_from_catching_through_a_wall() {
+        let player_r = crate::character::PLAYER_RADIUS;
+        // The *smallest* hunter, not the reference one: `World::body_capsule` scales
+        // ENEMY_RADIUS by `body_height / CAPSULE_REF_HEIGHT`, so a short body is
+        // narrower and is the case that would fail first.
+        let shortest = 1.2f32; // comfortably below any body in the catalog
+        let enemy_r =
+            crate::world::ENEMY_RADIUS * (shortest / crate::world::CAPSULE_REF_HEIGHT);
+        assert!(
+            player_r + enemy_r > CATCH_DIST,
+            "radii ({player_r} + {enemy_r}) must exceed the catch distance ({CATCH_DIST}); \
+             shrinking either lets a hunter catch the player through a thin wall",
+        );
+    }
+
     /// Damage is subtractive off the starting health.
     #[test]
     fn damage_is_subtractive() {
@@ -3173,6 +3294,136 @@ mod tests {
         assert!((cr - min_r).abs() < 1e-3, "clamped up to the min band, got {cr}");
         // Sitting on the player → unchanged (no bearing).
         assert_eq!(reposition_point(player, player, 1.0, REPOSITION_ARC, min_r, max_r), player);
+    }
+
+    /// A room with a duct bored into its +X wall, plus a point deep inside the duct.
+    fn room_with_a_duct() -> (NavWorld, Vec3) {
+        use engine::geometry::csg_runtime::{Brush, Op, Region};
+        let mut regions = {
+            let mut r = Region::new(0);
+            r.brushes.push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 80.0, 16.0, 80.0));
+            let mut duct = Brush::new(2, Op::Subtract, 80.0, 0.0, 38.0, 16.0, 4.0, 4.0);
+            duct.vent = true;
+            r.brushes.push(duct);
+            vec![r]
+        };
+        let nav = engine::sim::nav::bake(&mut regions, &[], &[]).expect("room bakes");
+        let inside = Vec3::new(88.0, 2.0, 40.0) * WT;
+        (nav, inside)
+    }
+
+    /// **Stage 4: a hunter whose target is in a duct stakes out the mouth.**
+    ///
+    /// It walks to the opening and then *plants* — it does not keep trying to close the
+    /// remaining distance to its standoff band, because that distance is through a wall.
+    /// The chase would otherwise re-path against geometry forever, which is the part that
+    /// reads as a broken AI rather than a hunter-proof vent.
+    #[test]
+    fn a_hunter_stakes_out_the_mouth_of_a_duct() {
+        let (nav, inside) = room_with_a_duct();
+        let mut physics = PhysicsWorld::new();
+        // Start well back in the room, on the far side from the duct.
+        let start = Vec3::new(40.0, 0.2, 40.0) * WT;
+        let collider = physics.add_enemy_collider(start, 0.24, 0.48);
+        let mut e = Enemy::new(start, inside);
+        e.set_omniscient(true); // the shipped default: it always knows where you are
+        e.state = AiState::Chase;
+
+        let dt = 1.0 / 60.0;
+        for _ in 0..1200 {
+            drive(&mut e, dt, inside, 3.0, AiTuning::default(), false, &nav, &mut physics, false, collider);
+        }
+
+        let mouth = nav.nearest_vent_mouth(inside).expect("the duct has a mouth");
+        assert!(
+            e.is_watching_vent(),
+            "the hunter should be holding the mouth; it is {:.2} m from it at {:?}",
+            e.pos.distance(mouth),
+            e.pos,
+        );
+        assert!(
+            e.pos.distance(mouth) < VENT_WATCH_DIST,
+            "and standing on it ({:.2} m away)",
+            e.pos.distance(mouth)
+        );
+        // Planted, not still walking.
+        assert!(!e.moving, "a hunter holding a mouth is stood still, not walk-cycling");
+
+        // It never got into the duct — the whole point.
+        assert!(
+            nav.vent_at(e.pos).is_none(),
+            "the hunter is outside the duct, not in it"
+        );
+    }
+
+    /// **The same hold, under Perfect Dark's engagement model.**
+    ///
+    /// Worth its own test rather than a parameter on the one above, because `AI=pd` does
+    /// not run the FSM or the utility scorer at all — `pd_step` returns before either.
+    /// There are three movement brains, and a vent fix that only works in one of them
+    /// would leave the other two walking into a wall. This is why the hold lives in
+    /// `move_toward` (their only shared chokepoint) and not in a state arm.
+    #[test]
+    fn a_pd_hunter_also_stakes_out_the_mouth() {
+        let (nav, inside) = room_with_a_duct();
+        let mut physics = PhysicsWorld::new();
+        let start = Vec3::new(40.0, 0.2, 40.0) * WT;
+        let collider = physics.add_enemy_collider(start, 0.24, 0.48);
+        let mut e = Enemy::new(start, inside);
+        e.set_omniscient(true);
+        let tuning = AiTuning { mode: AiMode::Pd, ..AiTuning::default() };
+        let dt = 1.0 / 60.0;
+        for _ in 0..1200 {
+            drive(&mut e, dt, inside, 3.0, tuning, false, &nav, &mut physics, false, collider);
+        }
+        let mouth = nav.nearest_vent_mouth(inside).expect("the duct has a mouth");
+        assert!(e.is_watching_vent(), "it knows the target is in a duct");
+        assert!(
+            nav.vent_at(e.pos).is_none(),
+            "and it never got inside the duct — the property the whole feature rests on"
+        );
+        // PD covers the duct from its distance band rather than standing on the opening,
+        // which is the correct idiom for a model whose whole combat logic is "hold the
+        // preferred range and shoot". What matters is that it converged and stopped
+        // somewhere it can see the mouth, not that it stood on it.
+        assert!(
+            e.pos.distance(mouth) < 6.0,
+            "it closed to cover the mouth ({:.2} m away at {:?})",
+            e.pos.distance(mouth),
+            e.pos,
+        );
+        assert!(
+            !e.moving,
+            "and planted rather than grinding against the wall between it and the player"
+        );
+    }
+
+    /// The stakeout clears itself: once the player is back out in the open, the hunter
+    /// stops holding the mouth and chases normally again.
+    #[test]
+    fn leaving_the_duct_releases_the_stakeout() {
+        let (nav, inside) = room_with_a_duct();
+        let mut physics = PhysicsWorld::new();
+        let start = Vec3::new(40.0, 0.2, 40.0) * WT;
+        let collider = physics.add_enemy_collider(start, 0.24, 0.48);
+        let mut e = Enemy::new(start, inside);
+        e.set_omniscient(true);
+        e.state = AiState::Chase;
+        let dt = 1.0 / 60.0;
+        for _ in 0..1200 {
+            drive(&mut e, dt, inside, 3.0, AiTuning::default(), false, &nav, &mut physics, false, collider);
+        }
+        assert!(e.is_watching_vent(), "holding the mouth first");
+
+        // The player climbs out into the room.
+        let out = Vec3::new(20.0, 0.2, 40.0) * WT;
+        for _ in 0..30 {
+            drive(&mut e, dt, out, 3.0, AiTuning::default(), false, &nav, &mut physics, false, collider);
+        }
+        assert!(
+            !e.is_watching_vent(),
+            "the hold is recomputed every step, so it releases when the duct empties"
+        );
     }
 
     /// A gunshot pulls a *searching* hunter to investigate the sound (last-known set

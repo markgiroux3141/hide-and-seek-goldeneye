@@ -336,6 +336,11 @@ impl World {
                 self.score_limit,
                 aspect,
             ));
+            // The round clock, under the scoreboard — only on a level that authors a
+            // time limit (`round_time_left` is `None` otherwise).
+            if let Some(left) = self.round_time_left() {
+                q.extend(crate::hud::time_quads(left, aspect));
+            }
             Some(q)
         }
     }
@@ -2288,6 +2293,8 @@ impl World {
     /// state so the caller can surface it. Enemies keep aiming + firing; the player
     /// just stops taking damage — so you can stand and watch them work.
     pub fn toggle_invulnerable(&mut self) -> bool {
+        // Toggled by hand → the PLAY tab's checkbox stops overriding it at the next G.
+        self.pins.cheats = true;
         self.player_invulnerable = !self.player_invulnerable;
         log::info!(
             "player invincibility: {}",
@@ -2301,6 +2308,8 @@ impl World {
     /// you can watch the head-scan behaviour without being engaged. See
     /// [`crate::enemy::Enemy::set_detectable`]; applied per hunter in `fixed_step`.
     pub fn toggle_invisible(&mut self) -> bool {
+        // Toggled by hand → the PLAY tab's checkbox stops overriding it at the next G.
+        self.pins.cheats = true;
         self.player_invisible = !self.player_invisible;
         log::info!(
             "player invisibility: {}",

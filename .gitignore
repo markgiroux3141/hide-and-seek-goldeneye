@@ -18,9 +18,11 @@ Cargo.lock
 !src/core/csg/wasm/csg_wasm_bg.wasm
 !src/core/cave/wasm/cave_wasm_bg.wasm
 
-# Level editor quick-slots are local scratch; curated test bases get committed
-# later under their own named files (not slotN).
-native/levels/slot*.json
+# Levels are local authoring output, named or not. The in-game LEVELS panel writes
+# here on every Save, so tracking them would put a data blob in `git status` after
+# each edit — and back up whichever levels happened to be saved when someone
+# committed. Copy one out by hand if it is worth keeping.
+native/levels/*.json
 
 # Large regenerable procedural-anim debug dump (not a shared artifact).
 anim_log.txt

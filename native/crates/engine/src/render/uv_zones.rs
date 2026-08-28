@@ -41,6 +41,21 @@ pub struct BrushInfo {
     pub min: [f32; 3],
     pub max: [f32; 3],
     pub floor_y: f32,
+    /// WT-space **horizontal** UV anchor, the XZ counterpart of [`Self::floor_y`].
+    ///
+    /// `floor_y` exists because a wall's texture has to start at *its own* floor rather
+    /// than at world zero, or a stair pit shifts the whole level's wall texture. Floors
+    /// and ceilings had no equivalent — their UVs are raw world `[wx, wz]` — which is
+    /// invisible for a room (a room's floor is a big field of tile, and where the grid
+    /// starts does not read) and glaring for a **vent duct**, whose texture is a single
+    /// bordered panel sized to exactly one face. Placed anywhere that is not a multiple
+    /// of the panel size, the seam lands mid-face and the border runs across the middle
+    /// of the duct floor.
+    ///
+    /// So this is the same idea on the other two axes: anchor the panel grid to the
+    /// brush that owns the surface. `[0.0, 0.0]` keeps the old world-space behaviour and
+    /// is what every brush but a duct uses.
+    pub origin_xz: [f32; 2],
     pub scheme: usize,
     pub frame: bool,
     pub door: bool,
@@ -103,10 +118,10 @@ impl ZonedBuilder {
 
     /// Planar UV from a world-space (meters) vertex, in tile units (JS `vertexUV`).
     #[inline]
-    fn vertex_uv(v: [f32; 3], axis: u8, rotated: bool, origin_y: f32) -> [f32; 2] {
-        let wx = v[0] / WORLD_SCALE;
-        let wy = v[1] / WORLD_SCALE - origin_y;
-        let wz = v[2] / WORLD_SCALE;
+    fn vertex_uv(v: [f32; 3], axis: u8, rotated: bool, origin: [f32; 3]) -> [f32; 2] {
+        let wx = v[0] / WORLD_SCALE - origin[0];
+        let wy = v[1] / WORLD_SCALE - origin[1];
+        let wz = v[2] / WORLD_SCALE - origin[2];
         if rotated {
             match axis {
                 0 => [wy, wz],
@@ -134,7 +149,7 @@ impl ZonedBuilder {
         axis: u8,
         zone: u8,
         rotated: bool,
-        origin_y: f32,
+        origin: [f32; 3],
         scheme: usize,
     ) {
         let cross = cross(sub(p_b, p_a), sub(p_c, p_a));
@@ -144,33 +159,33 @@ impl ZonedBuilder {
             self.verts.push(TexVertex::new(
                 v,
                 n,
-                Self::vertex_uv(v, axis, rotated, origin_y),
+                Self::vertex_uv(v, axis, rotated, origin),
             ));
         }
         self.tri_keys.push((scheme as u16, zone));
     }
 
     /// Emit a hand-tagged quad (four WT corners, CCW from front) with a fixed
-    /// zone and planar (world-position) UVs anchored at `origin_y`. Dominant-axis
+    /// zone and planar (world-position) UVs anchored at `origin`. Dominant-axis
     /// + normal derived from the corners. Single-winding (culling off). Used for
     /// the structures mesh.
-    pub fn emit_quad_wt(&mut self, corners: [[f32; 3]; 4], zone: u8, origin_y: f32, scheme: usize) {
+    pub fn emit_quad_wt(&mut self, corners: [[f32; 3]; 4], zone: u8, origin: [f32; 3], scheme: usize) {
         let m = |p: [f32; 3]| [p[0] * WORLD_SCALE, p[1] * WORLD_SCALE, p[2] * WORLD_SCALE];
         let (q0, q1, q2, q3) = (m(corners[0]), m(corners[1]), m(corners[2]), m(corners[3]));
         let n = normalize(cross(sub(q1, q0), sub(q2, q0)));
         let axis = dominant_axis(n);
         for (t, uv) in [
-            (q0, Self::vertex_uv(q0, axis, false, origin_y)),
-            (q1, Self::vertex_uv(q1, axis, false, origin_y)),
-            (q2, Self::vertex_uv(q2, axis, false, origin_y)),
+            (q0, Self::vertex_uv(q0, axis, false, origin)),
+            (q1, Self::vertex_uv(q1, axis, false, origin)),
+            (q2, Self::vertex_uv(q2, axis, false, origin)),
         ] {
             self.verts.push(TexVertex::new(t, n, uv));
         }
         self.tri_keys.push((scheme as u16, zone));
         for (t, uv) in [
-            (q0, Self::vertex_uv(q0, axis, false, origin_y)),
-            (q2, Self::vertex_uv(q2, axis, false, origin_y)),
-            (q3, Self::vertex_uv(q3, axis, false, origin_y)),
+            (q0, Self::vertex_uv(q0, axis, false, origin)),
+            (q2, Self::vertex_uv(q2, axis, false, origin)),
+            (q3, Self::vertex_uv(q3, axis, false, origin)),
         ] {
             self.verts.push(TexVertex::new(t, n, uv));
         }
@@ -285,11 +300,17 @@ pub fn classify_soup(
         ];
         let dom = dominant_axis(n) as usize;
         let owner = face_owner(brushes, centroid_wt, dom);
-        let (scheme, origin_y) = match owner {
-            Some(i) => (brushes[i].scheme, brushes[i].floor_y),
-            None => (default_scheme, 0.0),
+        // The owner supplies the scheme AND the UV anchor. Anchoring on all three axes
+        // (not just the floor) is what keeps a vent duct's single bordered panel centred
+        // on each face wherever the author cut it — see `BrushInfo::origin_xz`.
+        let (scheme, origin) = match owner {
+            Some(i) => (
+                brushes[i].scheme,
+                [brushes[i].origin_xz[0], brushes[i].floor_y, brushes[i].origin_xz[1]],
+            ),
+            None => (default_scheme, [0.0, 0.0, 0.0]),
         };
-        let split_y = (origin_y + WALL_SPLIT_V) * WORLD_SCALE;
+        let split_y = (origin[1] + WALL_SPLIT_V) * WORLD_SCALE;
 
         let (tmin, tmax) = tri_bbox(va, vb, vc);
         let near = has_frames && tri_overlaps_any_frame(&frames, tmin, tmax);
@@ -298,7 +319,7 @@ pub fn classify_soup(
             // ── Floor / ceiling (Y face) ──
             let plain = if n[1] > 0.0 { 0 } else { 1 };
             if !near {
-                b.emit_tri(va, vb, vc, n, 1, plain, false, origin_y, scheme);
+                b.emit_tri(va, vb, vc, n, 1, plain, false, origin, scheme);
                 continue;
             }
             let mut tris = vec![[va, vb, vc]];
@@ -313,19 +334,19 @@ pub fn classify_soup(
                 match frames.iter().find(|f| f.contains_centroid(c)) {
                     Some(f) if n[1] > 0.0 => {
                         let zone = if f.is_door { 6 } else { 5 };
-                        b.emit_tri(tri[0], tri[1], tri[2], n, 1, zone, f.w_wt == WALL_THICKNESS, origin_y, scheme);
+                        b.emit_tri(tri[0], tri[1], tri[2], n, 1, zone, f.w_wt == WALL_THICKNESS, origin, scheme);
                     }
                     Some(f) => {
-                        b.emit_tri(tri[0], tri[1], tri[2], n, 1, 5, f.w_wt == WALL_THICKNESS, origin_y, scheme);
+                        b.emit_tri(tri[0], tri[1], tri[2], n, 1, 5, f.w_wt == WALL_THICKNESS, origin, scheme);
                     }
-                    None => b.emit_tri(tri[0], tri[1], tri[2], n, 1, plain, false, origin_y, scheme),
+                    None => b.emit_tri(tri[0], tri[1], tri[2], n, 1, plain, false, origin, scheme),
                 }
             }
         } else {
             // ── Wall (X or Z face) ──
             let axis: u8 = if ax >= az { 0 } else { 2 };
             if !near {
-                emit_wall_split(b, [va, vb, vc], n, axis, split_y, origin_y, scheme);
+                emit_wall_split(b, [va, vb, vc], n, axis, split_y, origin, scheme);
                 continue;
             }
             let mut tris = vec![[va, vb, vc]];
@@ -345,9 +366,9 @@ pub fn classify_soup(
                 match frames.iter().find(|f| f.contains_centroid(c)) {
                     Some(f) => {
                         let rotate = f.h_wt != WALL_THICKNESS;
-                        b.emit_tri(tri[0], tri[1], tri[2], n, axis, 5, rotate, origin_y, scheme);
+                        b.emit_tri(tri[0], tri[1], tri[2], n, axis, 5, rotate, origin, scheme);
                     }
-                    None => emit_wall_split(b, tri, n, axis, split_y, origin_y, scheme),
+                    None => emit_wall_split(b, tri, n, axis, split_y, origin, scheme),
                 }
             }
         }
@@ -403,7 +424,7 @@ fn emit_wall_split(
     n: [f32; 3],
     axis: u8,
     split_y: f32,
-    origin_y: f32,
+    origin: [f32; 3],
     scheme: usize,
 ) {
     let (min_y, max_y) = (
@@ -411,11 +432,11 @@ fn emit_wall_split(
         tri[0][1].max(tri[1][1]).max(tri[2][1]),
     );
     if max_y <= split_y {
-        b.emit_tri(tri[0], tri[1], tri[2], n, axis, 2, false, origin_y, scheme);
+        b.emit_tri(tri[0], tri[1], tri[2], n, axis, 2, false, origin, scheme);
         return;
     }
     if min_y >= split_y {
-        b.emit_tri(tri[0], tri[1], tri[2], n, axis, 3, false, origin_y, scheme);
+        b.emit_tri(tri[0], tri[1], tri[2], n, axis, 3, false, origin, scheme);
         return;
     }
     let mut v = tri;
@@ -424,14 +445,14 @@ fn emit_wall_split(
     let p_lo_hi = lerp_at_y(lo, hi, split_y);
     if mid[1] <= split_y {
         let p_mid_hi = lerp_at_y(mid, hi, split_y);
-        b.emit_tri(lo, mid, p_lo_hi, n, axis, 2, false, origin_y, scheme);
-        b.emit_tri(mid, p_mid_hi, p_lo_hi, n, axis, 2, false, origin_y, scheme);
-        b.emit_tri(p_lo_hi, p_mid_hi, hi, n, axis, 3, false, origin_y, scheme);
+        b.emit_tri(lo, mid, p_lo_hi, n, axis, 2, false, origin, scheme);
+        b.emit_tri(mid, p_mid_hi, p_lo_hi, n, axis, 2, false, origin, scheme);
+        b.emit_tri(p_lo_hi, p_mid_hi, hi, n, axis, 3, false, origin, scheme);
     } else {
         let p_lo_mid = lerp_at_y(lo, mid, split_y);
-        b.emit_tri(lo, p_lo_mid, p_lo_hi, n, axis, 2, false, origin_y, scheme);
-        b.emit_tri(p_lo_mid, mid, p_lo_hi, n, axis, 3, false, origin_y, scheme);
-        b.emit_tri(mid, hi, p_lo_hi, n, axis, 3, false, origin_y, scheme);
+        b.emit_tri(lo, p_lo_mid, p_lo_hi, n, axis, 2, false, origin, scheme);
+        b.emit_tri(p_lo_mid, mid, p_lo_hi, n, axis, 3, false, origin, scheme);
+        b.emit_tri(mid, hi, p_lo_hi, n, axis, 3, false, origin, scheme);
     }
 }
 

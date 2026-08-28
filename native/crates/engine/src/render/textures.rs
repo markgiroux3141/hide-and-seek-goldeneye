@@ -96,6 +96,34 @@ const DEFAULT_SCHEME_NAME: &str = "facility_white_tile";
 /// independent of whatever scheme the surrounding room has. Required by name.
 const SIMPLE_SCHEME_NAME: &str = "simple_blue";
 
+/// The theme every vent duct's interior wears (`tools::vent`), so a duct reads as bare
+/// ducting whatever room it passes through.
+///
+/// It wears `tempImgEd029F` — the authentic GoldenEye duct panel.
+///
+/// **The repeat is 0.25, and that is what "one texture per side" costs.** UVs reach the
+/// shader in **WT, not metres** (`uv_zones::vertex_uv` divides by `WORLD_SCALE`, and
+/// `shader_textured.wgsl` multiplies by this scale), so `repeat` counts tiles per WT.
+/// A vent bore is `VENT_BORE` = 4 WT, so one whole texture stretched across a duct face
+/// is 1/4 — a repeat of 1.0 would tile it four times per side. `vent_repeat_fits_the_bore`
+/// pins that relationship, so changing the bore fails a test rather than quietly
+/// re-tiling every duct in every level.
+const VENT_SCHEME_NAME: &str = "vent_metal";
+
+/// The theme ladders wear (`tools::ladder`). `tempImgEd01B8`, the dark metal from the
+/// **Surface** level's exterior structures.
+///
+/// Ladders have no texture of their own and this is not for want of looking: the library
+/// was extracted from GoldenEye level *surfaces* and GoldenEye built its ladders from
+/// geometry, so what exists is the metalwork those ladders were made of, not a picture of
+/// a ladder. Surface's railing sheets (`tempImgEd0095`, `00EE`, `00EF`) are the nearest
+/// thing and are alpha-keyed fencing, not rungs.
+///
+/// So the rails and rungs stay geometry and simply wear the right metal. Not required by
+/// name — a themes.json without it falls back to the default rather than refusing to
+/// start.
+const LADDER_SCHEME_NAME: &str = "ladder_metal";
+
 /// Name of the live scratch slot. Underscore-prefixed so it sorts and reads as
 /// internal, and so it cannot collide with a generated `<level>_NN` theme.
 const SCRATCH_SCHEME_NAME: &str = "__scratch";
@@ -104,6 +132,22 @@ const SCRATCH_SCHEME_NAME: &str = "__scratch";
 /// brown `#8B7355`. Written as the exact hex division rather than the 3dp literal
 /// the old hard-coded registry carried, so this and [`parse_hex_rgb`] agree bit
 /// for bit on the same colour.
+/// Luminance at which a keyed cut-out texture reaches full opacity.
+///
+/// Chosen off the actual histograms rather than by feel: on `tempImgEd034C` (the ladder)
+/// 60% of texels are pure black, 6.5% sit in the antialiased fringe below 0.25 luminance,
+/// and everything above it is rail and rung. `railing` has almost nothing in the fringe
+/// band at all, so the ramp barely changes it. Raising this would start eating real
+/// artwork; lowering it puts the halo back.
+const ALPHA_KEY_RAMP: f32 = 0.25;
+
+/// One keyed texel's alpha: 0 at pure black, rising linearly to fully opaque at
+/// [`ALPHA_KEY_RAMP`] luminance. Split out so the ramp is testable without a file.
+fn alpha_from_luminance(r: u8, g: u8, b: u8) -> u8 {
+    let lum = (r as f32 + g as f32 + b as f32) / (3.0 * 255.0);
+    ((lum / ALPHA_KEY_RAMP).clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
 const LEGACY_TUNNEL_COLOR: [f32; 3] = [139.0 / 255.0, 115.0 / 255.0, 85.0 / 255.0];
 
 // ---------------------------------------------------------------------------
@@ -188,6 +232,8 @@ struct Registry {
     alpha_key_black: Vec<&'static str>,
     default_index: usize,
     simple_index: usize,
+    vent_index: usize,
+    ladder_index: usize,
     /// Index of the first custom slot; `CUSTOM_SLOTS` of them run consecutively.
     custom_base: usize,
     /// Index of the live scratch slot (immediately after the custom slots).
@@ -301,6 +347,8 @@ fn load_registry() -> Result<Registry, String> {
     };
     let default_index = find(DEFAULT_SCHEME_NAME)?;
     let simple_index = find(SIMPLE_SCHEME_NAME)?;
+    let vent_index = find(VENT_SCHEME_NAME).unwrap_or(default_index);
+    let ladder_index = find(LADDER_SCHEME_NAME).unwrap_or(simple_index);
     let default_zones = schemes[default_index].zones;
 
     // ── The custom slots + the scratch slot, appended after the library.
@@ -363,6 +411,8 @@ fn load_registry() -> Result<Registry, String> {
         alpha_key_black: manifest.alpha_key_black.into_iter().map(leak).collect(),
         default_index,
         simple_index,
+        vent_index,
+        ladder_index,
         custom_base,
         scratch_index,
     })
@@ -412,6 +462,16 @@ pub fn default_scheme() -> usize {
 /// Index of the platform/stair "simple" theme (see [`SIMPLE_SCHEME_NAME`]).
 pub fn simple_scheme() -> usize {
     registry().simple_index
+}
+
+/// Index of the vent-duct theme (see [`VENT_SCHEME_NAME`]).
+pub fn vent_scheme() -> usize {
+    registry().vent_index
+}
+
+/// Index of the ladder theme (see [`LADDER_SCHEME_NAME`]).
+pub fn ladder_scheme() -> usize {
+    registry().ladder_index
 }
 
 /// The live scratch slot the theme editor mutates while you edit.
@@ -563,13 +623,24 @@ pub fn try_decode(name: &str) -> Option<DecodedTexture> {
     let img = image::load_from_memory_with_format(&bytes, ImageFormat::Bmp).ok()?;
     let mut rgba = img.to_rgba8();
     let (width, height) = rgba.dimensions();
-    // Key near-black to fully transparent for the railing-style textures (JS
-    // `initMaterials` does the same on the canvas), so alpha-testing cuts them out.
+    // Key black to transparent for the railing/ladder-style cut-out textures (JS
+    // `initMaterials` does the same on the canvas).
+    //
+    // A **ramp**, not a threshold. The original test was `all channels < 10`, which keys
+    // only near-pure black and leaves every fringe texel fully opaque — and these are
+    // 32px N64 textures whose edges are a band of dark antialiasing, 6.5% of the ladder
+    // by pixel count. Cutting outside that band is what put a dark halo around every
+    // rung and made the edges read as jagged: the silhouette was being drawn one texel
+    // wider than the artwork, in near-black.
+    //
+    // So alpha rises linearly from 0 at pure black to 1 at [`ALPHA_KEY_RAMP`] luminance:
+    // black transparent, almost-black almost transparent, and anything with real detail
+    // in it (everything above the ramp — a third of this texture) untouched at full
+    // opacity. The alpha test then bites in the *middle* of the fringe rather than
+    // outside it.
     if registry().alpha_key_black.contains(&name) {
         for px in rgba.pixels_mut() {
-            if px[0] < 10 && px[1] < 10 && px[2] < 10 {
-                px[3] = 0;
-            }
+            px[3] = alpha_from_luminance(px[0], px[1], px[2]);
         }
     }
     Some(DecodedTexture {
@@ -676,6 +747,30 @@ pub fn all_texture_names() -> Vec<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Keying is a ramp, not a threshold**, and the ramp is what stops a cut-out
+    /// texture drawing a dark halo around its own artwork.
+    ///
+    /// The old rule was "all channels < 10 → transparent", which keys pure black and
+    /// leaves every antialiased fringe texel fully opaque. On the ladder that is 6.5% of
+    /// the image, drawn in near-black one texel outside the rails and rungs — a dark
+    /// outline that reads as jagged edges.
+    #[test]
+    fn the_alpha_key_ramps_instead_of_thresholding() {
+        assert_eq!(alpha_from_luminance(0, 0, 0), 0, "pure black is fully transparent");
+        // Almost black is almost transparent — the case a threshold cannot express, and
+        // the one the fringe is made of.
+        let dim = alpha_from_luminance(16, 16, 16);
+        assert!(dim > 0 && dim < 128, "near-black is faint, not opaque or gone: {dim}");
+        // The old rule would have made this fully opaque.
+        assert!(
+            alpha_from_luminance(9, 9, 9) < alpha_from_luminance(20, 20, 20),
+            "alpha rises with luminance through the fringe band"
+        );
+        // Anything with real detail in it is untouched.
+        assert_eq!(alpha_from_luminance(64, 64, 64), 255, "at the ramp top: opaque");
+        assert_eq!(alpha_from_luminance(200, 210, 190), 255, "well above it: opaque");
+    }
 
     #[test]
     fn every_referenced_texture_decodes() {

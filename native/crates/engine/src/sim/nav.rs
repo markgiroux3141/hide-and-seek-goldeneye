@@ -149,6 +149,11 @@ pub struct NavWorld {
     /// The only place [`STAIR_STEP`] applies instead of [`MAX_STEP`]. Empty = no stairs,
     /// which reads as all-zero.
     stair: Vec<u8>,
+    /// Vent ducts and the standable cells at their mouths, from [`Self::index_vents`].
+    ///
+    /// The one thing hunters need to know about a duct they can never enter: where it
+    /// meets the floor they *can* stand on. See [`NavVent`] and [`Self::find_path`].
+    vents: Vec<NavVent>,
     /// cellIdx → connected-component id (0 = not standable), from [`Self::label_components`].
     ///
     /// **This is what makes "you cannot get there" cheap.** A\* answers *reachable* fast
@@ -158,6 +163,36 @@ pub struct NavWorld {
     /// go there — which on a real level is the rest of the round. Labelling once at bake
     /// turns that into an integer comparison.
     comp: Vec<u32>,
+}
+
+/// A vent duct as navigation sees it: a volume nobody can walk in, plus the standable
+/// cells around its openings.
+///
+/// **Why the grid needs to know about a hole it already refuses to enter.**
+///
+/// A duct's bore is under [`AGENT_HEIGHT_CELLS`], so no cell inside it is standable and
+/// A\* cannot route through one. That much is free. What is *not* free is what happens
+/// when the player is standing in there: the goal cell is unstandable, so
+/// [`NavWorld::find_path`] falls through to [`NavWorld::nearest_cell`], which linearly
+/// scans a 48³ box — about 110,000 cells — on **every** hunter's repath, several times a
+/// second, for as long as the player stays in the duct.
+///
+/// It also slips past the O(1) refusal that exists to stop exactly this class of stall:
+/// the snapped goal is a real standable cell in the main component, so the component
+/// check passes and a full A\* runs and *succeeds*. The hunters then walk to a cell
+/// chosen only for being near in 3D — routinely on the far side of the duct wall, or a
+/// floor below.
+///
+/// Indexing the mouths at bake replaces that scan with a lookup over a handful of cells,
+/// and replaces the arbitrary snap with the one answer that means something: the way in.
+pub struct NavVent {
+    /// The duct volume, WT (grid space), as `(min, max)`.
+    min: Vec3,
+    max: Vec3,
+    /// Standable cell floors (metres) adjacent to the duct — where a hunter can stand
+    /// and watch the opening. Empty for a sealed duct, which is an authoring fault the
+    /// NAV tab reports rather than something nav can fix.
+    mouths: Vec<Vec3>,
 }
 
 // ─── Validation findings (the BUILD NAV tab) ─────────────────────────────────
@@ -479,6 +514,113 @@ impl NavWorld {
     /// for a "why can't the hunters get there" report: one big component and a scatter of
     /// tiny ones is a **quantization** story (slivers the bake carved off), while two large
     /// ones is a genuine severed route.
+    /// Index the duct volumes and find the standable cells at their openings.
+    ///
+    /// A mouth cell is any standable cell within one cell of the duct's shell that can
+    /// actually *see into* it — i.e. the cell immediately inside the duct on that side is
+    /// air. Without that second half, a hunter would be sent to stand against the outside
+    /// of a duct wall with a metre of concrete between it and the bore.
+    ///
+    /// Run after [`Self::label_components`], because standability is what it samples.
+    fn index_vents(&mut self, volumes: &[(Vec3, Vec3)]) {
+        self.vents = volumes
+            .iter()
+            .map(|&(min, max)| {
+                let mut mouths = Vec::new();
+                // Walk the shell one cell out on every face.
+                let lo = (
+                    (min.x - self.x0 as f32).floor() as i32 - 1,
+                    (min.y - self.y0 as f32).floor() as i32 - 1,
+                    (min.z - self.z0 as f32).floor() as i32 - 1,
+                );
+                let hi = (
+                    (max.x - self.x0 as f32).ceil() as i32 + 1,
+                    (max.y - self.y0 as f32).ceil() as i32 + 1,
+                    (max.z - self.z0 as f32).ceil() as i32 + 1,
+                );
+                for iy in lo.1.max(0)..=hi.1.min(self.ny - 1) {
+                    for iz in lo.2.max(0)..=hi.2.min(self.nz - 1) {
+                        for ix in lo.0.max(0)..=hi.0.min(self.nx - 1) {
+                            if !self.is_standable(ix, iy, iz) {
+                                continue;
+                            }
+                            // Is the duct interior reachable from here in one cardinal
+                            // step? That is what makes this an opening and not a wall.
+                            let opens = [
+                                (1, 0, 0), (-1, 0, 0), (0, 1, 0),
+                                (0, -1, 0), (0, 0, 1), (0, 0, -1),
+                            ]
+                            .iter()
+                            .any(|&(dx, dy, dz)| {
+                                let (nx, ny, nz) = (ix + dx, iy + dy, iz + dz);
+                                let c = Vec3::new(
+                                    self.x0 as f32 + nx as f32 + 0.5,
+                                    self.y0 as f32 + ny as f32 + 0.5,
+                                    self.z0 as f32 + nz as f32 + 0.5,
+                                );
+                                let inside = c.x >= min.x
+                                    && c.x <= max.x
+                                    && c.y >= min.y
+                                    && c.y <= max.y
+                                    && c.z >= min.z
+                                    && c.z <= max.z;
+                                inside && !self.is_solid_cell(nx, ny, nz)
+                            });
+                            if opens {
+                                mouths.push(self.cell_floor_meters(ix, iy, iz));
+                            }
+                        }
+                    }
+                }
+                NavVent { min, max, mouths }
+            })
+            .collect();
+    }
+
+    /// How many vent ducts the grid knows about.
+    pub fn vent_count(&self) -> usize {
+        self.vents.len()
+    }
+
+    /// How many standable mouth cells a duct has. **Zero is an authoring fault**: a duct
+    /// nobody can stand beside cannot be watched, and (more importantly) the player got
+    /// in somehow, so the grid and the geometry disagree.
+    pub fn vent_mouth_count(&self, i: usize) -> usize {
+        self.vents.get(i).map(|v| v.mouths.len()).unwrap_or(0)
+    }
+
+    /// Which duct contains a metres point, if any.
+    pub fn vent_at(&self, m: Vec3) -> Option<usize> {
+        let p = Vec3::new(m_to_wt(m.x), m_to_wt(m.y), m_to_wt(m.z));
+        self.vents.iter().position(|v| {
+            p.x >= v.min.x
+                && p.x <= v.max.x
+                && p.y >= v.min.y
+                && p.y <= v.max.y
+                && p.z >= v.min.z
+                && p.z <= v.max.z
+        })
+    }
+
+    /// The standable cell at a duct's opening nearest to `m` — where a hunter goes when
+    /// its target is somewhere inside that duct.
+    ///
+    /// This is the *whole* stage-3 fix in one query: it is what [`Self::find_path`]
+    /// substitutes for a 110,000-cell scan, and what the hunter AI steers to instead of
+    /// a meaningless nearby cell.
+    pub fn nearest_vent_mouth(&self, m: Vec3) -> Option<Vec3> {
+        let i = self.vent_at(m)?;
+        self.vents[i]
+            .mouths
+            .iter()
+            .copied()
+            .min_by(|a, b| {
+                a.distance_squared(m)
+                    .partial_cmp(&b.distance_squared(m))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    }
+
     pub fn component_sizes(&self) -> Vec<(u32, usize)> {
         let mut counts: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
         for &c in &self.comp {
@@ -1121,9 +1263,26 @@ impl NavWorld {
         let start = self
             .cell_at(start_m.x, start_m.y, start_m.z)
             .or_else(|| self.nearest_cell(start_m))?;
-        let goal = self
-            .cell_at(goal_m.x, goal_m.y, goal_m.z)
-            .or_else(|| self.nearest_cell(goal_m))?;
+        // A goal inside a vent duct resolves to that duct's nearest **mouth**, before the
+        // generic fallback gets a chance to run.
+        //
+        // Order matters and this has to come first. `nearest_cell` would answer too — by
+        // linearly scanning ~110,000 cells, on every hunter's repath, for as long as the
+        // player stayed in the duct — and it would answer *wrongly*, snapping to whatever
+        // standable cell happens to be nearest in 3D, which for a duct in a wall is
+        // regularly the room on the other side of it. See [`NavVent`].
+        let goal = match self.cell_at(goal_m.x, goal_m.y, goal_m.z) {
+            Some(c) => c,
+            None => {
+                let via = self
+                    .nearest_vent_mouth(goal_m)
+                    .and_then(|mouth| self.cell_at(mouth.x, mouth.y + 0.01, mouth.z));
+                match via {
+                    Some(c) => c,
+                    None => self.nearest_cell(goal_m)?,
+                }
+            }
+        };
 
         // ── The O(1) refusal ──
         // Different walkable components → no route exists, so do not spend a full-region
@@ -1359,6 +1518,21 @@ pub fn bake(
         }
     }
 
+    // Vent ducts, straight off the brushes that carved them — no extra argument to
+    // thread through `bake`'s several call sites, because the flag already rides the
+    // level data.
+    let vent_volumes: Vec<(Vec3, Vec3)> = regions
+        .iter()
+        .flat_map(|r| r.brushes.iter())
+        .filter(|b| b.vent)
+        .map(|b| {
+            (
+                Vec3::new(b.x, b.y, b.z),
+                Vec3::new(b.x + b.w, b.y + b.h, b.z + b.d),
+            )
+        })
+        .collect();
+
     let mut nav = NavWorld {
         x0,
         y0,
@@ -1370,9 +1544,11 @@ pub fn bake(
         stair,
         doors: Vec::new(),
         door_grid: Vec::new(),
+        vents: Vec::new(),
         comp: Vec::new(),
     };
     nav.label_components();
+    nav.index_vents(&vent_volumes);
     Some(nav)
 }
 
@@ -1387,6 +1563,106 @@ mod tests {
             .brushes
             .push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 24.0, 16.0, 24.0));
         vec![region]
+    }
+
+    /// A room with a 4 WT duct bored into its +X wall at floor level, and a point
+    /// deep inside that duct.
+    fn room_with_a_duct() -> (Vec<Region>, Vec3) {
+        let mut region = Region::new(0);
+        region
+            .brushes
+            .push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 24.0, 16.0, 24.0));
+        // The duct: 4 WT bore, running +X out of the room's far wall, sitting on the
+        // room floor. Long enough that its far half is well outside the room.
+        let mut duct = Brush::new(2, Op::Subtract, 24.0, 0.0, 10.0, 12.0, 4.0, 4.0);
+        duct.vent = true;
+        region.brushes.push(duct);
+        // A point 8 WT along the duct, half a bore up — where a crawling player would be.
+        let inside = Vec3::new(30.0, 2.0, 12.0) * WORLD_SCALE;
+        (vec![region], inside)
+    }
+
+    /// **Stage 3, and the reason it cannot ship after stage 2.**
+    ///
+    /// A hunter pathing to a player inside a duct gets routed to that duct's *mouth* —
+    /// a cell it can stand on, adjacent to the opening — rather than to whatever
+    /// `nearest_cell` finds nearest in 3D.
+    #[test]
+    fn a_goal_inside_a_duct_routes_to_the_ducts_mouth() {
+        let (mut regions, inside) = room_with_a_duct();
+        let nav = bake(&mut regions, &[], &[]).expect("bakes");
+
+        assert_eq!(nav.vent_count(), 1, "the duct was indexed off its brush flag");
+        assert!(nav.vent_mouth_count(0) > 0, "and it has a mouth to watch");
+        assert_eq!(nav.vent_at(inside), Some(0), "the probe point is inside it");
+
+        // Nobody can stand in there — the stage-2 property, restated against this grid.
+        assert!(
+            nav.cell_at(inside.x, inside.y, inside.z).is_none(),
+            "no standable cell inside the bore"
+        );
+
+        let mouth = nav.nearest_vent_mouth(inside).expect("a mouth is found");
+        // The mouth is in the room, on the room side of the wall — not out in the void
+        // past the duct, and not floating in the bore.
+        assert!(
+            mouth.x < 24.0 * WORLD_SCALE,
+            "the mouth is inside the room (x = {:.2} m), not beyond the duct",
+            mouth.x
+        );
+
+        // And a real path ends there.
+        let from = Vec3::new(4.0, 0.5, 4.0) * WORLD_SCALE;
+        let path = nav.find_path(from, inside).expect("a route to the mouth exists");
+        let end = *path.last().unwrap();
+        assert!(
+            end.distance(mouth) < 1.0,
+            "the path ends at the duct mouth ({end:?} vs {mouth:?})"
+        );
+    }
+
+    /// The mouth has to be a cell that can actually *see into* the duct, not merely one
+    /// near its bounding box. Without that, a hunter is sent to stand against the far
+    /// side of the duct wall with a metre of solid between it and the bore.
+    #[test]
+    fn every_mouth_cell_opens_into_the_duct() {
+        let (mut regions, inside) = room_with_a_duct();
+        let nav = bake(&mut regions, &[], &[]).expect("bakes");
+        let i = nav.vent_at(inside).expect("indexed");
+        let v = &nav.vents[i];
+        assert!(!v.mouths.is_empty());
+        for m in &v.mouths {
+            // Some cardinal neighbour of the mouth is air inside the duct volume.
+            let opens = [
+                Vec3::X, Vec3::NEG_X, Vec3::Y,
+                Vec3::NEG_Y, Vec3::Z, Vec3::NEG_Z,
+            ]
+            .iter()
+            .any(|d| {
+                let p = *m + *d * WORLD_SCALE + Vec3::Y * (WORLD_SCALE * 0.5);
+                let w = Vec3::new(m_to_wt(p.x), m_to_wt(p.y), m_to_wt(p.z));
+                w.x >= v.min.x
+                    && w.x <= v.max.x
+                    && w.y >= v.min.y
+                    && w.y <= v.max.y
+                    && w.z >= v.min.z
+                    && w.z <= v.max.z
+            });
+            assert!(opens, "mouth {m:?} does not adjoin the duct interior");
+        }
+    }
+
+    /// A level with no ducts pays nothing and behaves exactly as before — the guard is
+    /// additive, not a change to ordinary pathing.
+    #[test]
+    fn a_level_without_ducts_is_unaffected() {
+        let mut regions = room();
+        let nav = bake(&mut regions, &[], &[]).expect("bakes");
+        assert_eq!(nav.vent_count(), 0);
+        assert!(nav.nearest_vent_mouth(Vec3::new(1.0, 0.5, 1.0)).is_none());
+        let from = Vec3::new(2.0, 0.5, 2.0) * WORLD_SCALE;
+        let to = Vec3::new(20.0, 0.5, 20.0) * WORLD_SCALE;
+        assert!(nav.find_path(from, to).is_some(), "ordinary pathing still works");
     }
 
     #[test]

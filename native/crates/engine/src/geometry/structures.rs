@@ -971,7 +971,7 @@ pub fn append_stair_block_mesh(
                 tw(run_hi, y_top, g.perp_min),
             ],
             TOP_ZONE,
-            anchor,
+            [0.0, anchor, 0.0],
             scheme,
         );
 
@@ -989,7 +989,7 @@ pub fn append_stair_block_mesh(
             if downhill_at_hi {
                 c.reverse(); // keep the normal pointing downhill, out of the block
             }
-            b.emit_quad_wt(c, SIDE_ZONE, anchor, scheme);
+            b.emit_quad_wt(c, SIDE_ZONE, [0.0, anchor, 0.0], scheme);
         }
 
         // Lateral walls — one quad per step, so the flight's staircase profile is
@@ -1001,8 +1001,8 @@ pub fn append_stair_block_mesh(
                 tw(run_hi, y_top, g.perp_min),
                 tw(run_lo, y_top, g.perp_min),
             ];
-            b.emit_quad_wt(c, SIDE_ZONE, anchor, scheme);
-            solid.emit_quad_wt(c, SIDE_ZONE, anchor, scheme);
+            b.emit_quad_wt(c, SIDE_ZONE, [0.0, anchor, 0.0], scheme);
+            solid.emit_quad_wt(c, SIDE_ZONE, [0.0, anchor, 0.0], scheme);
         }
         if !right_walled {
             let c = [
@@ -1011,8 +1011,8 @@ pub fn append_stair_block_mesh(
                 tw(run_lo, y_top, g.perp_max),
                 tw(run_hi, y_top, g.perp_max),
             ];
-            b.emit_quad_wt(c, SIDE_ZONE, anchor, scheme);
-            solid.emit_quad_wt(c, SIDE_ZONE, anchor, scheme);
+            b.emit_quad_wt(c, SIDE_ZONE, [0.0, anchor, 0.0], scheme);
+            solid.emit_quad_wt(c, SIDE_ZONE, [0.0, anchor, 0.0], scheme);
         }
 
         // Back face — the uphill side of the topmost step, where the flight meets
@@ -1028,7 +1028,7 @@ pub fn append_stair_block_mesh(
             if downhill_at_hi {
                 c.reverse();
             }
-            b.emit_quad_wt(c, SIDE_ZONE, anchor, scheme);
+            b.emit_quad_wt(c, SIDE_ZONE, [0.0, anchor, 0.0], scheme);
         }
     }
 }

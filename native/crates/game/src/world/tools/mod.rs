@@ -6,6 +6,7 @@ mod draw;
 /// the draw list, the collider pose and the tick all go through the same matrix.
 pub(crate) mod door;
 mod gizmo;
+mod ladder;
 mod light;
 mod opening;
 /// `pub(crate)` so the prop draw list + the panel can reach the pickup helpers, and
@@ -20,3 +21,5 @@ mod prop_gizmo;
 pub(crate) mod spawn_point;
 mod stairs;
 mod turret;
+/// `pub(crate)` so `World` can name the duct-network state types it stores.
+pub(crate) mod vent;

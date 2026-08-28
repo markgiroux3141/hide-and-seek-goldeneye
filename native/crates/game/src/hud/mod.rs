@@ -183,6 +183,26 @@ pub fn score_quads(
     out
 }
 
+/// The round clock: `TIME M:SS` remaining, on its own line directly under the
+/// scoreboard and right-aligned with it.
+///
+/// Only drawn when the level authors a time limit (`World::round_time_left` is `None`
+/// otherwise), so an unlimited round has no clock cluttering the corner. Seconds are
+/// rounded **up**, so the last visible number is `0:01` and not a second of `0:00`.
+pub fn time_quads(secs_left: f32, aspect: f32) -> Vec<HudVertex> {
+    let total = secs_left.max(0.0).ceil() as u32;
+    let text = format!("TIME {}:{:02}", total / 60, total % 60);
+    let gh = 0.05;
+    let gw = gh / aspect.max(1e-6) * (GLYPH_W as f32 / GLYPH_H as f32);
+    let gap = gw * 0.4;
+    let x_start = 0.94 - text_width(&text, gw, gap);
+    // One line below the scoreboard's 0.96, with a glyph's worth of air between them.
+    let y_top = 0.96 - gh * 1.4;
+    let mut out = Vec::with_capacity(text.chars().count() * 6);
+    layout_text(&text, x_start, y_top, gw, gh, gap, &mut out);
+    out
+}
+
 /// The just-collected banner: `PICKED UP <thing>`, centred a little below the middle
 /// of the screen so it reads without covering the crosshair.
 ///
@@ -336,6 +356,8 @@ mod tests {
             drawn("YOU 3-1 SIMS 2-4"),
             "scoreboard (endless)"
         );
+        assert_eq!(time_quads(161.0, 1.6).len(), drawn("TIME 2:41"), "round clock");
+        assert_eq!(time_quads(0.0, 1.6).len(), drawn("TIME 0:00"), "round clock at zero");
         assert_eq!(death_quads(1.6).len(), drawn("YOU DIEDRESPAWNING"), "death screen");
         assert_eq!(round_over_quads(true, 1.6).len(), drawn("YOU WINPRESS R"), "win screen");
         assert_eq!(
@@ -343,6 +365,21 @@ mod tests {
             drawn("SIMS WINPRESS R"),
             "loss screen"
         );
+    }
+
+    /// The clock reads as minutes and seconds, rounding **up** so the last visible
+    /// number is `0:01` — a full second showing `0:00` before the round ends reads as a
+    /// stopped clock.
+    #[test]
+    fn the_round_clock_counts_in_minutes_and_seconds() {
+        let text = |secs: f32| {
+            let t = secs.max(0.0).ceil() as u32;
+            format!("TIME {}:{:02}", t / 60, t % 60)
+        };
+        assert_eq!(text(161.0), "TIME 2:41");
+        assert_eq!(text(59.2), "TIME 1:00", "rounds up across the minute");
+        assert_eq!(text(0.4), "TIME 0:01", "the last tick still shows a second");
+        assert_eq!(text(-3.0), "TIME 0:00", "never negative");
     }
 
     /// **Every weapon name in every arsenal** survives the pickup banner.

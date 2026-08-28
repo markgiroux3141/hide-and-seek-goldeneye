@@ -169,6 +169,43 @@ impl Default for PointLight {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpawnPoint;
 
+/// A climbable ladder: a decal on a wall face that the player can go up and down.
+///
+/// **Player-only, deliberately** (`DESIGN_VENTS_LADDERS.md` §4, Option A). Hunters move
+/// on a 4-connected grid that climbs one cell (0.25 m) between neighbours, and nothing
+/// short of relaxing that invariant — the thing the `STAIR_STEP` comment is an essay
+/// about how carefully to scope — would let them use one. So a floor reachable only by
+/// ladder is a **nav island**, accepted on purpose and reported by the NAV tab as intent
+/// rather than as a fault. The tab already has the vocabulary: it distinguishes
+/// player-only climbs (measured against `character::JUMP_APEX`) from severed routes, and
+/// a ladder is a third, taller member of that family.
+///
+/// If that asymmetry turns out to hurt in play, the escalation is a per-ladder
+/// `hunter_passable` flag plus a `ladder` plane in the nav bake, mirroring how
+/// `NavDoor.passable` already lets one authored object be hunter-traversable or not. It
+/// is deliberately not built yet.
+///
+/// Geometry is entirely derived from the entity's [`Transform`]: the ladder's base sits
+/// at the transform position, it rises along +Y for `height`, and its face normal is the
+/// transform's rotation applied to +Z. That keeps the existing translate/rotate gizmos
+/// working on it for free, exactly as [`SpawnPoint`] does for pad facing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Ladder {
+    /// How far up the wall the ladder runs, metres.
+    pub height: f32,
+    /// How wide the climbable strip is, metres. Also how far out from the wall the climb
+    /// volume reaches, so you can grab it from slightly off the face.
+    pub width: f32,
+}
+
+impl Default for Ladder {
+    fn default() -> Self {
+        // 3 m is a storey and a bit — tall enough to be worth a ladder rather than a
+        // step, short enough that the default does not punch through a ceiling.
+        Ladder { height: 3.0, width: 0.75 }
+    }
+}
+
 /// Level-wide ambient fill. **Not a component** — a single global carried on the
 /// level (and its file), since ambient light has no position. `level` scales
 /// `color` into a flat term added to every lit surface so shadowed areas aren't

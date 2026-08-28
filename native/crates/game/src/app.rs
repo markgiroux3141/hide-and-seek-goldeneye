@@ -56,30 +56,38 @@ enum ShopAction {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PanelTab {
     Objects,
+    /// The match setup a hunt starts from — what `G` reads. See
+    /// [`crate::world::play_config`].
+    Play,
     Lighting,
     Spawns,
     Textures,
     Nav,
+    Levels,
 }
 
 impl PanelTab {
     /// Every tab, in display order (also the cycle order).
-    pub(crate) const ALL: [PanelTab; 5] = [
+    pub(crate) const ALL: [PanelTab; 7] = [
         PanelTab::Objects,
+        PanelTab::Play,
         PanelTab::Lighting,
         PanelTab::Spawns,
         PanelTab::Textures,
         PanelTab::Nav,
+        PanelTab::Levels,
     ];
 
     /// The header title for this tab.
     pub(crate) fn title(self) -> &'static str {
         match self {
             PanelTab::Objects => "OBJECTS",
+            PanelTab::Play => "PLAY",
             PanelTab::Lighting => "LIGHTING",
             PanelTab::Spawns => "SPAWNS",
             PanelTab::Textures => "TEXTURES",
             PanelTab::Nav => "NAV",
+            PanelTab::Levels => "LEVELS",
         }
     }
 
@@ -247,6 +255,29 @@ struct App {
     /// slot's stored label only refreshes on restart — this makes a just-saved preset
     /// show its real name immediately instead of "(empty 03)".
     theme_slot_labels: std::collections::HashMap<usize, String>,
+
+    // ── LEVELS tab: name, save, load and manage the level files ─────────────
+    /// The file this level came from, or was last saved to. `None` for a level that has
+    /// never been written — a fresh boot's starting room, or a generated arena — which
+    /// is what makes plain Save fall through to Save As.
+    current_level: Option<std::path::PathBuf>,
+    /// [`World::revision`] as of the last successful save or load. The panel shows the
+    /// unsaved marker while the world's revision differs from this.
+    saved_revision: u64,
+    /// The catalog as last read off disk. Refreshed when the tab opens and after every
+    /// file operation, never per frame: it stats and parses every level file.
+    level_rows: Vec<crate::world::persist::LevelEntry>,
+    /// The row the buttons act on, held **by path** rather than by index. The list is
+    /// sorted newest-first, so saving re-orders it — an index would silently come to
+    /// point at a different level than the one that was clicked.
+    level_sel: Option<std::path::PathBuf>,
+    /// The name field's contents (used by Save As, Rename and Duplicate).
+    level_name_draft: String,
+    /// Transient status line under the buttons ("saved …", "already exists").
+    level_status: String,
+    /// A delete waiting on its confirming second click. Any other level action clears
+    /// it, so an armed delete can't be committed by a later, unrelated click.
+    level_confirm_delete: Option<std::path::PathBuf>,
     /// Whether the preview room geometry has been uploaded this session.
     theme_preview_uploaded: bool,
     /// Which revision of the NAV overlay is on the GPU (`None` = nothing uploaded).
@@ -305,6 +336,13 @@ impl App {
             theme_draft: crate::theme_editor::ThemeDraft::default(),
             theme_status: String::new(),
             theme_slot_labels: std::collections::HashMap::new(),
+            current_level: None,
+            saved_revision: 0,
+            level_rows: Vec::new(),
+            level_sel: None,
+            level_name_draft: String::new(),
+            level_status: String::new(),
+            level_confirm_delete: None,
             theme_preview_uploaded: false,
             nav_overlay_uploaded: None,
             radial: Radial::default(),
@@ -489,41 +527,145 @@ impl App {
 
     /// Save the current editable level to numbered quick-slot `slot`.
     fn save_slot(&mut self, slot: u8) {
-        let Some(world) = self.world.as_ref() else {
-            return;
-        };
-        match world.save_slot(slot) {
-            Ok(path) => log::info!("saved level → slot {slot} ({})", path.display()),
-            Err(e) => log::warn!("save to slot {slot} failed: {e}"),
-        }
+        self.save_level_to(&crate::world::persist::slot_path(slot));
     }
 
     /// Load numbered quick-slot `slot`, replacing the editable geometry and
     /// re-uploading every region + structures mesh (stale ones cleared).
     fn load_slot(&mut self, slot: u8) {
+        self.load_level_file(&crate::world::persist::slot_path(slot));
+    }
+
+    // ─── Level files (the LEVELS tab, and the F-key quick slots) ────────────
+
+    /// Whether the open level has edits that aren't on disk.
+    ///
+    /// A revision comparison rather than a flag: see [`World::revision`]. With no file
+    /// behind the level yet, everything authored since boot is unsaved, so a level that
+    /// has been touched at all counts as dirty.
+    fn level_dirty(&self) -> bool {
+        self.world
+            .as_ref()
+            .map(|w| w.revision() != self.saved_revision)
+            .unwrap_or(false)
+    }
+
+    /// Adopt `path` as the open level and mark the world clean against it. Called after
+    /// every successful save or load, whichever front-end asked for it.
+    fn set_current_level(&mut self, path: std::path::PathBuf) {
+        self.saved_revision = self.world.as_ref().map(|w| w.revision()).unwrap_or(0);
+        self.level_name_draft = self
+            .world
+            .as_ref()
+            .map(|w| w.level_name().to_string())
+            .unwrap_or_default();
+        self.level_sel = Some(path.clone());
+        self.current_level = Some(path);
+        self.level_confirm_delete = None;
+        self.refresh_level_rows();
+    }
+
+    /// Re-read the level catalog from disk.
+    ///
+    /// Not per frame — it stats and JSON-parses every level file. Called when the tab
+    /// opens and after each file operation, which is exactly when it can have changed.
+    fn refresh_level_rows(&mut self) {
+        self.level_rows = crate::world::persist::list_levels();
+        // A selection whose file is gone (deleted here, or outside the game) would leave
+        // the buttons acting on nothing; fall back to the open level.
+        if !self
+            .level_sel
+            .as_ref()
+            .is_some_and(|sel| self.level_rows.iter().any(|r| &r.path == sel))
+        {
+            self.level_sel = self.current_level.clone();
+        }
+    }
+
+    /// Save the open level back to its own file — `Ctrl+S` and the panel's Save.
+    ///
+    /// A level with no file yet (a fresh boot's starting room, a generated arena) has
+    /// nowhere to go, and says so rather than inventing a filename.
+    fn save_current_level(&mut self) {
+        match self.current_level.clone() {
+            Some(path) => self.save_level_to(&path),
+            None => {
+                self.level_status = "this level has no file yet — name it, then Save As".into();
+                log::warn!("Ctrl+S: no current level file; use Save As");
+            }
+        }
+    }
+
+    /// Write the open level to `path`, overwriting it, and adopt it as the current file.
+    /// The shared body of Save, Save-to-slot and `Ctrl+F1..F8`.
+    fn save_level_to(&mut self, path: &std::path::Path) {
+        // A level that has never been named takes the filename it is being written to
+        // ("slot3"), so `Ctrl+F3` on a fresh level lists as something rather than as a
+        // blank row. Named levels keep the name they have.
+        if let Some(world) = self.world.as_mut() {
+            if world.level_name().trim().is_empty() {
+                if let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) {
+                    world.set_level_name(&stem);
+                }
+            }
+        }
+        let Some(world) = self.world.as_ref() else {
+            return;
+        };
+        match world.save_level(path) {
+            Ok(()) => {
+                let name = world.level_name().to_string();
+                log::info!("saved level {name:?} → {}", path.display());
+                self.set_current_level(path.to_path_buf());
+                self.level_status = format!("saved {}", short_path(path));
+            }
+            Err(e) => {
+                log::warn!("save to {} failed: {e}", path.display());
+                self.level_status = format!("save failed: {e}");
+            }
+        }
+    }
+
+    /// Load the level file at `path`, replacing the editable geometry and re-uploading
+    /// every region + the structures mesh (stale ones cleared). Returns whether it
+    /// loaded.
+    ///
+    /// The pre-load snapshot is what makes loading over unsaved work survivable: an
+    /// accidental Load is one `Ctrl+Z` from being undone, which is why there is no
+    /// "discard changes?" prompt in the way.
+    fn load_level_file(&mut self, path: &std::path::Path) -> bool {
         let meshes = match self.world.as_mut() {
             Some(world) => {
-                // Snapshot first so an accidental slot-load is undoable; commit it
-                // only once the load succeeds (a failed load leaves state as-is).
+                // Committed only once the load succeeds — a failed load leaves the
+                // world untouched, and must not leave a dead step in the history.
                 let snap = world.snapshot();
-                match world.load_slot(slot) {
+                match world.load_level(path) {
                     Ok(meshes) => {
                         world.commit_snapshot(snap);
                         meshes
                     }
                     Err(e) => {
-                        log::warn!("load slot {slot} failed: {e}");
-                        return;
+                        log::warn!("load {} failed: {e}", path.display());
+                        self.level_status = format!("load failed: {e}");
+                        return false;
                     }
                 }
             }
-            None => return,
+            None => return false,
         };
         for rm in &meshes {
             self.upload(rm);
         }
         // Selection was cleared by the load — drop any lingering highlight.
         self.refresh_highlight();
+        self.set_current_level(path.to_path_buf());
+        let name = self
+            .world
+            .as_ref()
+            .map(|w| w.level_name().to_string())
+            .unwrap_or_default();
+        self.level_status = format!("loaded {name}");
+        true
     }
 
     /// Push the current selection's highlight quad to the renderer.
@@ -622,6 +764,11 @@ impl App {
         if self.props_open {
             self.lock_before_props = self.input.pointer_locked;
             self.set_pointer_lock(false);
+            // The panel reopens on whichever tab it was left on, so O landing straight
+            // back on LEVELS has to re-read the catalog too — not just `OpenPanel`.
+            if self.panel_tab == PanelTab::Levels {
+                self.refresh_level_rows();
+            }
         } else {
             self.set_pointer_lock(self.lock_before_props);
             if let Some(w) = self.world.as_mut() {
@@ -750,6 +897,19 @@ impl App {
             grid: self.renderer.as_ref().map(|r| r.is_grid_mode()).unwrap_or(false),
             real_lighting: self.build_real_lighting,
             slots: self.radial_slots_used,
+            level: self.current_level.as_ref().map(|_| {
+                let name = self
+                    .world
+                    .as_ref()
+                    .map(|w| w.level_name().to_string())
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    "this level".to_string()
+                } else {
+                    name
+                }
+            }),
+            level_dirty: self.level_dirty(),
             ..RadialCtx::default()
         };
         if let Some(w) = self.world.as_ref() {
@@ -789,6 +949,12 @@ impl App {
                 if !self.props_open {
                     self.toggle_props();
                 }
+                // The catalog is read from disk, so it can be stale by the time the tab
+                // is opened again (another session saved, a file was deleted outside
+                // the game). Re-read on the way in rather than per frame.
+                if tab == PanelTab::Levels {
+                    self.refresh_level_rows();
+                }
             }
             EditorAction::SetScheme(scheme) => {
                 if let Some(rm) = self
@@ -807,6 +973,7 @@ impl App {
             }
             EditorAction::LoadSlot(n) => self.load_slot(n),
             EditorAction::SaveSlot(n) => self.save_slot(n),
+            EditorAction::SaveCurrentLevel => self.save_current_level(),
             EditorAction::ToggleGrid => {
                 if let Some(r) = self.renderer.as_mut() {
                     let grid = !r.is_grid_mode();
@@ -870,6 +1037,12 @@ impl App {
                 Tool::Hole => {
                     world.hole_tool_key();
                 }
+                Tool::Vent => {
+                    world.vent_tool_key();
+                }
+                Tool::Ladder => {
+                    world.ladder_tool_key();
+                }
                 Tool::Pillar => world.pillar_tool_key(),
                 Tool::Brace => world.brace_tool_key(),
                 Tool::Platform => world.platform_tool_key(),
@@ -884,6 +1057,8 @@ impl App {
                 .as_ref()
                 .map(|w| !w.is_opening_arming())
                 .unwrap_or(true),
+            Tool::Vent => self.world.as_ref().map(|w| !w.is_vent_tool()).unwrap_or(true),
+            Tool::Ladder => self.world.as_ref().map(|w| !w.is_ladder_tool()).unwrap_or(true),
             Tool::Pillar | Tool::Brace => {
                 self.world.as_ref().map(|w| !w.is_placing()).unwrap_or(true)
             }
@@ -1239,6 +1414,48 @@ impl App {
             .and_then(|w| w.nav_issues())
             .map(|i| i.lines().into_iter().map(|l| (l.text, l.sev)).collect())
             .unwrap_or_default();
+        // ── LEVELS tab snapshot. Cloned only while the tab is showing: the catalog
+        // holds a `String` or two per level, which is nothing, but there is no reason
+        // to copy it on every frame of gameplay either.
+        let levels_showing = self.props_open && self.panel_tab == PanelTab::Levels;
+        let level_rows_ui: Vec<crate::world::persist::LevelEntry> = if levels_showing {
+            self.level_rows.clone()
+        } else {
+            Vec::new()
+        };
+        let level_sel_ui = self.level_sel.clone();
+        let level_current = self.current_level.clone();
+        let level_display_name = self
+            .world
+            .as_ref()
+            .map(|w| w.level_name().to_string())
+            .unwrap_or_default();
+        // Not `self.level_dirty()`: this runs under a live `&mut self.egui_state`
+        // borrow, so it has to read the two fields rather than take `&self`.
+        let saved_rev = self.saved_revision;
+        let level_dirty_ui = self
+            .world
+            .as_ref()
+            .is_some_and(|w| w.revision() != saved_rev);
+        let level_status_ui = self.level_status.clone();
+        let level_confirm = self.level_confirm_delete.clone();
+        let mut level_name_ui = self.level_name_draft.clone();
+
+        // PLAY tab snapshot + edit buffer. Cloned only while the tab is showing (it
+        // holds a `Vec<LoadoutSlot>`), edited by value, written back after the `state`
+        // borrow ends — the same discipline as the light and door editors.
+        let play_showing = self.props_open && self.panel_tab == PanelTab::Play;
+        let mut play_ui = self
+            .world
+            .as_ref()
+            .filter(|_| play_showing)
+            .map(|w| w.play_config().clone())
+            .unwrap_or_default();
+        let play_ctx_pins = self.world.as_ref().map(|w| w.play_pins()).unwrap_or_default();
+        let play_in_hunt = self.world.as_ref().is_some_and(|w| !w.is_build());
+        let mut play_changed = false;
+        let mut play_start = false;
+
         let mut nav_overlay_ui = self.world.as_ref().is_some_and(|w| w.nav_overlay_on());
         let mut nav_calculate = false;
         let mut nav_toggle_overlay = false;
@@ -1265,6 +1482,16 @@ impl App {
         let mut draft_arm_scratch = false;
         // `(digit, Some(scheme))` binds, `(digit, None)` clears.
         let mut new_hotkey: Option<(char, Option<usize>)> = None;
+        // LEVELS tab deferred actions.
+        let mut level_save = false;
+        let mut level_save_as = false;
+        let mut level_rename = false;
+        let mut level_duplicate = false;
+        let mut level_refresh = false;
+        let mut level_name_changed = false;
+        let mut level_select: Option<std::path::PathBuf> = None;
+        let mut level_load: Option<std::path::PathBuf> = None;
+        let mut level_delete_click: Option<std::path::PathBuf> = None;
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
             if shop_open {
@@ -1669,6 +1896,20 @@ impl App {
 
                         // ── Per-tab content.
                         match panel_tab {
+                            PanelTab::Play if play_showing => {
+                                // The loadout combo lists the same guns a pickup can
+                                // name: the live arsenal minus the empty-handed slot.
+                                let ctx = PlayTabCtx {
+                                    pins: play_ctx_pins,
+                                    pads: spawn_pad_count,
+                                    weapons: &pickup_weapons,
+                                    in_hunt: play_in_hunt,
+                                };
+                                let (ch, st) = play_tab_ui(ui, &mut play_ui, &ctx);
+                                play_changed |= ch;
+                                play_start |= st;
+                            }
+                            PanelTab::Play => {}
                             PanelTab::Lighting => {
                                 if ui
                                     .selectable_label(placing_light, "+ Place Point Light")
@@ -1817,6 +2058,297 @@ impl App {
                                             );
                                         }
                                     });
+                                }
+                            }
+                            PanelTab::Levels => {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Every level is a file in native/levels/. \
+                                         F1-F8 still load slot1-slot8 \u{2014} those are \
+                                         just eight of the files listed below.",
+                                    )
+                                    .small()
+                                    .color(SHOP_DIM),
+                                );
+                                ui.add_space(6.0);
+
+                                // ── What is open, and whether it is saved.
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("OPEN")
+                                            .small()
+                                            .strong()
+                                            .color(SHOP_GOLD_DIM),
+                                    );
+                                    let (text, col) = match (&level_current, level_dirty_ui) {
+                                        (Some(_), true) => {
+                                            (format!("{level_display_name} *"), SHOP_GOLD)
+                                        }
+                                        (Some(_), false) => (level_display_name.clone(), NAV_OK),
+                                        (None, _) => {
+                                            ("never saved".to_string(), SHOP_GOLD)
+                                        }
+                                    };
+                                    ui.label(egui::RichText::new(text).color(col).strong())
+                                        .on_hover_text(
+                                            "* means there are edits this file \
+                                             doesn't have yet",
+                                        );
+                                });
+                                ui.label(
+                                    egui::RichText::new(match &level_current {
+                                        Some(p) => short_path(p),
+                                        None => "no file behind it \u{2014} name it and Save As"
+                                            .to_string(),
+                                    })
+                                    .small()
+                                    .color(SHOP_DIM),
+                                );
+                                ui.add_space(4.0);
+                                ui.add_enabled_ui(level_current.is_some(), |ui| {
+                                    if ui
+                                        .add_sized(
+                                            [200.0, 26.0],
+                                            egui::Button::new(
+                                                egui::RichText::new(if level_dirty_ui {
+                                                    "SAVE *"
+                                                } else {
+                                                    "SAVE"
+                                                })
+                                                .color(egui::Color32::BLACK)
+                                                .strong(),
+                                            )
+                                            .fill(SHOP_GOLD),
+                                        )
+                                        .on_hover_text("Ctrl+S \u{2014} overwrites this level's own file")
+                                        .clicked()
+                                    {
+                                        level_save = true;
+                                    }
+                                });
+
+                                // ── The catalog.
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "ON DISK ({})",
+                                            level_rows_ui.len()
+                                        ))
+                                        .small()
+                                        .strong()
+                                        .color(SHOP_GOLD_DIM),
+                                    );
+                                    if ui
+                                        .small_button("re-read")
+                                        .on_hover_text("in case something changed the files")
+                                        .clicked()
+                                    {
+                                        level_refresh = true;
+                                    }
+                                });
+                                if level_rows_ui.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "No levels saved yet \u{2014} name this one \
+                                             below and Save As.",
+                                        )
+                                        .small()
+                                        .color(SHOP_DIM),
+                                    );
+                                }
+                                egui::ScrollArea::vertical()
+                                    .max_height(200.0)
+                                    .show(ui, |ui| {
+                                        ui.set_width(206.0);
+                                        for row in &level_rows_ui {
+                                            let is_sel =
+                                                level_sel_ui.as_ref() == Some(&row.path);
+                                            let is_open =
+                                                level_current.as_ref() == Some(&row.path);
+                                            let title = match row.slot {
+                                                Some(n) => format!("{}   F{n}", row.name),
+                                                None => row.name.clone(),
+                                            };
+                                            let col = if row.error.is_some() {
+                                                NAV_BAD
+                                            } else if is_open {
+                                                NAV_OK
+                                            } else {
+                                                egui::Color32::from_gray(200)
+                                            };
+                                            let resp = ui.selectable_label(
+                                                is_sel,
+                                                egui::RichText::new(title).color(col),
+                                            );
+                                            if resp.clicked() {
+                                                level_select = Some(row.path.clone());
+                                            }
+                                            if resp.double_clicked() && row.error.is_none() {
+                                                level_load = Some(row.path.clone());
+                                            }
+                                            let sub = match &row.error {
+                                                Some(e) => format!("unreadable \u{2014} {e}"),
+                                                None => format!(
+                                                    "{}  \u{b7}  {} brushes  \u{b7}  {} objects{}",
+                                                    human_bytes(row.bytes),
+                                                    row.brushes,
+                                                    row.entities,
+                                                    if row.from_newer_build() {
+                                                        format!("  \u{b7}  v{} (newer build)", row.version)
+                                                    } else {
+                                                        String::new()
+                                                    }
+                                                ),
+                                            };
+                                            ui.label(
+                                                egui::RichText::new(sub).small().color(
+                                                    if row.error.is_some() {
+                                                        NAV_BAD
+                                                    } else {
+                                                        SHOP_DIM
+                                                    },
+                                                ),
+                                            );
+                                            ui.add_space(2.0);
+                                        }
+                                    });
+
+                                // ── Act on the selected row.
+                                let sel_row = level_rows_ui
+                                    .iter()
+                                    .find(|r| Some(&r.path) == level_sel_ui.as_ref());
+                                let loadable =
+                                    sel_row.is_some_and(|r| r.error.is_none());
+                                let delete_armed = level_confirm.is_some()
+                                    && level_confirm == level_sel_ui;
+                                ui.horizontal(|ui| {
+                                    ui.add_enabled_ui(loadable, |ui| {
+                                        if ui
+                                            .add_sized(
+                                                [108.0, 24.0],
+                                                egui::Button::new(
+                                                    egui::RichText::new("LOAD")
+                                                        .color(egui::Color32::BLACK)
+                                                        .strong(),
+                                                )
+                                                .fill(SHOP_GOLD),
+                                            )
+                                            .on_hover_text(
+                                                "replaces what you're editing \u{2014} \
+                                                 Ctrl+Z undoes it",
+                                            )
+                                            .clicked()
+                                        {
+                                            level_load = level_sel_ui.clone();
+                                        }
+                                    });
+                                    ui.add_enabled_ui(sel_row.is_some(), |ui| {
+                                        if ui
+                                            .add_sized(
+                                                [88.0, 24.0],
+                                                egui::Button::new(
+                                                    egui::RichText::new(if delete_armed {
+                                                        "REALLY?"
+                                                    } else {
+                                                        "Delete"
+                                                    })
+                                                    .color(if delete_armed {
+                                                        NAV_BAD
+                                                    } else {
+                                                        SHOP_DIM
+                                                    }),
+                                                ),
+                                            )
+                                            .on_hover_text(
+                                                "click twice \u{2014} deleting the file \
+                                                 cannot be undone",
+                                            )
+                                            .clicked()
+                                        {
+                                            level_delete_click = level_sel_ui.clone();
+                                        }
+                                    });
+                                });
+
+                                // ── Name it: Save As / Rename / Duplicate.
+                                ui.separator();
+                                ui.label(
+                                    egui::RichText::new("NAME")
+                                        .small()
+                                        .strong()
+                                        .color(SHOP_GOLD_DIM),
+                                );
+                                if ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut level_name_ui)
+                                            .hint_text("level name")
+                                            .desired_width(200.0),
+                                    )
+                                    .changed()
+                                {
+                                    level_name_changed = true;
+                                }
+                                let slug =
+                                    crate::world::persist::slug_for_name(&level_name_ui);
+                                ui.label(
+                                    egui::RichText::new(if slug.is_empty() {
+                                        "needs a letter or a digit".to_string()
+                                    } else {
+                                        format!("{slug}.json")
+                                    })
+                                    .small()
+                                    .color(SHOP_DIM),
+                                );
+                                ui.add_enabled_ui(!slug.is_empty(), |ui| {
+                                    if ui
+                                        .add_sized(
+                                            [200.0, 24.0],
+                                            egui::Button::new("Save As a new level"),
+                                        )
+                                        .on_hover_text(
+                                            "writes a new file, and refuses if that \
+                                             name is already taken",
+                                        )
+                                        .clicked()
+                                    {
+                                        level_save_as = true;
+                                    }
+                                    ui.horizontal(|ui| {
+                                        let has_sel = level_sel_ui.is_some();
+                                        if ui
+                                            .add_enabled(
+                                                has_sel,
+                                                egui::Button::new("Rename"),
+                                            )
+                                            .on_hover_text(
+                                                "renames the selected level and moves \
+                                                 its file to match",
+                                            )
+                                            .clicked()
+                                        {
+                                            level_rename = true;
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                has_sel,
+                                                egui::Button::new("Duplicate"),
+                                            )
+                                            .on_hover_text(
+                                                "copies the selected level to this name",
+                                            )
+                                            .clicked()
+                                        {
+                                            level_duplicate = true;
+                                        }
+                                    });
+                                });
+                                if !level_status_ui.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(&level_status_ui)
+                                            .small()
+                                            .color(SHOP_GOLD_DIM),
+                                    );
                                 }
                             }
                             PanelTab::Objects => {
@@ -2578,6 +3110,120 @@ impl App {
                 }
             }
         }
+        // \u2500\u2500 LEVELS tab. Ordered so a click reads the way it looks: the selection
+        // and the name field settle first, then the operation that uses them.
+        if level_name_changed {
+            self.level_name_draft = level_name_ui;
+        }
+        if let Some(path) = level_select {
+            // Selecting a different row disarms a pending delete, so a second click
+            // somewhere else can never commit the first row's deletion.
+            if self.level_confirm_delete.as_ref() != Some(&path) {
+                self.level_confirm_delete = None;
+            }
+            // The name field follows the selection: Rename and Duplicate both read it,
+            // and typing the selected level's name back in by hand is pure friction.
+            if let Some(row) = self.level_rows.iter().find(|r| r.path == path) {
+                self.level_name_draft = row.name.clone();
+            }
+            self.level_sel = Some(path);
+        }
+        if level_refresh {
+            self.refresh_level_rows();
+            self.level_status.clear();
+        }
+        if level_save {
+            self.save_current_level();
+        }
+        if level_save_as {
+            let name = self.level_name_draft.clone();
+            match self.world.as_mut().map(|w| w.save_level_as(&name)) {
+                Some(Ok(path)) => {
+                    self.set_current_level(path);
+                    self.level_status = format!("saved as \"{name}\"");
+                }
+                Some(Err(e)) => {
+                    log::warn!("save as {name:?} failed: {e}");
+                    self.level_status = format!("{e}");
+                }
+                None => {}
+            }
+        }
+        if let Some(path) = level_load {
+            self.load_level_file(&path);
+        }
+        if level_rename {
+            if let Some(old) = self.level_sel.clone() {
+                let name = self.level_name_draft.clone();
+                match crate::world::persist::rename_level(&old, &name) {
+                    Ok(new_path) => {
+                        // Renaming the level that is *open* has to move the world's own
+                        // name with it, or the next plain Save would write the old name
+                        // straight back into the newly-renamed file.
+                        if self.current_level.as_ref() == Some(&old) {
+                            if let Some(w) = self.world.as_mut() {
+                                w.set_level_name(&name);
+                            }
+                            // Re-syncs `saved_revision`, so the rename itself doesn't
+                            // read as an unsaved edit: the file on disk already has it.
+                            self.set_current_level(new_path);
+                        } else {
+                            self.level_sel = Some(new_path);
+                            self.refresh_level_rows();
+                        }
+                        self.level_status = format!("renamed to \"{name}\"");
+                    }
+                    Err(e) => {
+                        log::warn!("rename {} failed: {e}", old.display());
+                        self.level_status = format!("{e}");
+                    }
+                }
+            }
+        }
+        if level_duplicate {
+            if let Some(src) = self.level_sel.clone() {
+                let name = self.level_name_draft.clone();
+                match crate::world::persist::duplicate_level(&src, &name) {
+                    Ok(new_path) => {
+                        // The copy is selected but *not* opened: duplicating is how you
+                        // fork a level to try something, and that starts from the copy
+                        // being there, not from losing your place in the original.
+                        self.level_sel = Some(new_path);
+                        self.refresh_level_rows();
+                        self.level_status = format!("copied to \"{name}\" (not opened)");
+                    }
+                    Err(e) => {
+                        log::warn!("duplicate {} failed: {e}", src.display());
+                        self.level_status = format!("{e}");
+                    }
+                }
+            }
+        }
+        if let Some(path) = level_delete_click {
+            if self.level_confirm_delete.as_ref() == Some(&path) {
+                self.level_confirm_delete = None;
+                match crate::world::persist::delete_level(&path) {
+                    Ok(()) => {
+                        // The open level's file can be deleted like any other; the level
+                        // itself stays loaded and editable, it just has nowhere to Save
+                        // to any more, which is exactly the "never saved" state.
+                        if self.current_level.as_ref() == Some(&path) {
+                            self.current_level = None;
+                        }
+                        self.level_sel = None;
+                        self.refresh_level_rows();
+                        self.level_status = format!("deleted {}", short_path(&path));
+                    }
+                    Err(e) => {
+                        log::warn!("delete {} failed: {e}", path.display());
+                        self.level_status = format!("{e}");
+                    }
+                }
+            } else {
+                self.level_confirm_delete = Some(path);
+                self.level_status = "click Delete again to confirm".into();
+            }
+        }
         // Object panel: apply the selection (arms placement of that prop on the
         // World) + the close, after the `state` borrow ends.
         if let Some(sel) = new_prop_selected {
@@ -2666,6 +3312,9 @@ impl App {
         }
         if let Some(tab) = new_tab {
             self.panel_tab = tab;
+            if tab == PanelTab::Levels {
+                self.refresh_level_rows();
+            }
         }
         if ambient_edited {
             if let Some(world) = self.world.as_mut() {
@@ -2677,11 +3326,423 @@ impl App {
                 world.set_selected_light(light_color, light_intensity, light_range);
             }
         }
+        // PLAY tab. The config write comes first on purpose: clicking START in the
+        // same frame as an edit must enter the hunt with the edit, not without it.
+        if play_changed {
+            if let Some(world) = self.world.as_mut() {
+                world.set_play_config(play_ui);
+            }
+        }
+        if play_start {
+            // The panel is an authoring surface and the pointer is unlocked behind it, so
+            // it comes down on the way into the hunt — pressing G with it open does the
+            // same via `toggle_props`.
+            if self.props_open {
+                self.toggle_props();
+            }
+            self.apply(EditorAction::EnterHunt);
+        }
         if close_props {
             self.toggle_props();
         }
         Some(frame)
     }
+}
+
+/// **The PLAY tab** — the authored match setup a hunt starts from.
+///
+/// Edits `cfg` in place and returns `(changed, start_hunt)`. Split out of the panel's
+/// per-tab `match` for the same reason [`pickup_settings_ui`] is: the arm would
+/// otherwise be four hundred lines inside an already-large closure.
+///
+/// A control whose field an explicit override has claimed ([`PlayPins`]) is drawn
+/// **disabled with the reason on hover**, rather than live-but-ignored. A checkbox that
+/// silently does nothing is the worst of the three options.
+fn play_tab_ui(
+    ui: &mut egui::Ui,
+    cfg: &mut crate::world::PlayConfig,
+    ctx: &PlayTabCtx,
+) -> (bool, bool) {
+    use crate::world::play_config::{EntryMode, HunterWeapon, LoadoutMode, LoadoutSlot};
+
+    let mut changed = false;
+    let mut start = false;
+
+    // ── The button this tab exists for. `G` still does exactly this.
+    let label = if ctx.in_hunt { "\u{25a0} RETURN TO BUILD" } else { "\u{25b6} START HUNT" };
+    if ui
+        .add_sized(
+            [200.0, 32.0],
+            egui::Button::new(
+                egui::RichText::new(label).color(egui::Color32::BLACK).strong(),
+            )
+            .fill(SHOP_GOLD),
+        )
+        .on_hover_text("G \u{2014} the key still works, and reads everything below")
+        .clicked()
+    {
+        start = true;
+    }
+    ui.label(egui::RichText::new(cfg.summary()).small().color(SHOP_GOLD_DIM));
+    ui.label(
+        egui::RichText::new(
+            "Saved with the level, so a level opens with the fight it was designed for.",
+        )
+        .small()
+        .color(SHOP_DIM),
+    );
+
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        ui.set_width(206.0);
+
+        // ── ENTRY ────────────────────────────────────────────────────────────
+        play_section(ui, "WHERE YOU COME IN");
+        for mode in [EntryMode::Pads, EntryMode::Camera] {
+            if ui
+                .selectable_label(cfg.entry == mode, mode.label())
+                .on_hover_text(match mode {
+                    EntryMode::Pads => {
+                        "The pads placed in the SPAWNS tab, chosen by Perfect Dark's own \
+                         rule. Falls back to the camera when the level has none."
+                    }
+                    EntryMode::Camera => {
+                        "Drop in under the fly-cam, wherever you are looking. For testing \
+                         one corner of a big level, or a level with no pads yet."
+                    }
+                })
+                .clicked()
+                && cfg.entry != mode
+            {
+                cfg.entry = mode;
+                changed = true;
+            }
+        }
+        if cfg.entry == EntryMode::Pads {
+            let (text, col) = match ctx.pads {
+                0 => (
+                    "no pads authored \u{2014} you will enter under the camera".to_string(),
+                    SHOP_GOLD,
+                ),
+                n => (format!("{n} pad(s) authored"), NAV_OK),
+            };
+            ui.label(egui::RichText::new(text).small().color(col));
+        }
+
+        // ── PLAYER LOADOUT ───────────────────────────────────────────────────
+        play_section(ui, "WHAT YOU CARRY");
+        for mode in [LoadoutMode::Level, LoadoutMode::Custom, LoadoutMode::Empty] {
+            if ui
+                .selectable_label(cfg.loadout == mode, mode.label())
+                .on_hover_text(match mode {
+                    LoadoutMode::Level => {
+                        "The guns on the floor are the armoury. A level that places none \
+                         hands you the starting sidearm instead."
+                    }
+                    LoadoutMode::Custom => {
+                        "Start with exactly the guns listed below \u{2014} the inventory is \
+                         stripped first, so shop purchases do not add themselves."
+                    }
+                    LoadoutMode::Empty => {
+                        "Empty-handed, with no safety-net sidearm \u{2014} even on a level \
+                         with no guns to find."
+                    }
+                })
+                .clicked()
+                && cfg.loadout != mode
+            {
+                cfg.loadout = mode;
+                changed = true;
+            }
+        }
+        if cfg.loadout == LoadoutMode::Custom {
+            ui.add_space(2.0);
+            let mut remove: Option<usize> = None;
+            let mut equip: Option<usize> = None;
+            for (i, slot) in cfg.weapons.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    // The radio is which gun is in hand at G.
+                    if ui
+                        .radio(slot.equipped, "")
+                        .on_hover_text("in your hands when the hunt starts")
+                        .clicked()
+                    {
+                        equip = Some(i);
+                    }
+                    ui.label(
+                        egui::RichText::new(&slot.weapon)
+                            .color(if slot.equipped { SHOP_GOLD } else { egui::Color32::GRAY }),
+                    );
+                    if ui
+                        .small_button("\u{2715}")
+                        .on_hover_text("drop from the loadout")
+                        .clicked()
+                    {
+                        remove = Some(i);
+                    }
+                });
+                if ui
+                    .add(egui::Slider::new(&mut slot.spare_mags, 0..=20).text("spare mags"))
+                    .on_hover_text(
+                        "Magazines in reserve on top of the full one in the gun. 0 means \
+                         one magazine and no refills.",
+                    )
+                    .changed()
+                {
+                    changed = true;
+                }
+            }
+            if let Some(i) = equip {
+                for (k, s) in cfg.weapons.iter_mut().enumerate() {
+                    s.equipped = k == i;
+                }
+                changed = true;
+            }
+            if let Some(i) = remove {
+                cfg.weapons.remove(i);
+                changed = true;
+            }
+            // Add a gun. Only ones not already listed — a duplicate slot would just
+            // stock the same weapon twice, which is what the spare-mags slider is for.
+            let addable: Vec<&'static str> = ctx
+                .weapons
+                .iter()
+                .copied()
+                .filter(|n| !cfg.weapons.iter().any(|s| s.weapon == *n))
+                .collect();
+            egui::ComboBox::from_id_salt("play_add_gun")
+                .selected_text("+ add a gun")
+                .width(190.0)
+                .show_ui(ui, |ui| {
+                    for name in addable {
+                        if ui.selectable_label(false, name).clicked() {
+                            cfg.weapons.push(LoadoutSlot::new(name));
+                            changed = true;
+                        }
+                    }
+                });
+            if cfg.weapons.is_empty() {
+                ui.label(
+                    egui::RichText::new(
+                        "nothing listed \u{2014} the level's own armoury will be used instead",
+                    )
+                    .small()
+                    .color(SHOP_GOLD),
+                );
+            }
+        }
+        ui.add_space(2.0);
+        if ui
+            .add(egui::Slider::new(&mut cfg.health, 1.0..=100.0).text("start health"))
+            .changed()
+        {
+            changed = true;
+        }
+        if ui
+            .add(egui::Slider::new(&mut cfg.armor, 0.0..=100.0).text("start armour"))
+            .changed()
+        {
+            changed = true;
+        }
+
+        // ── OPPOSITION ───────────────────────────────────────────────────────
+        play_section(ui, "WHO IS HUNTING YOU");
+        ui.add_enabled_ui(!ctx.pins.wave, |ui| {
+            let r = ui
+                .add(
+                    egui::Slider::new(&mut cfg.enemy_count, 0..=crate::world::WAVE_SIZE_MAX)
+                        .text("hunters"),
+                )
+                .on_hover_text("0 spawns none \u{2014} an empty level to walk and light");
+            if r.changed() {
+                changed = true;
+            }
+        });
+        play_pin_note(ui, ctx.pins.wave, "hunter count");
+        ui.add_enabled_ui(!ctx.pins.difficulty, |ui| {
+            let r = ui
+                .add(
+                    egui::Slider::new(&mut cfg.difficulty, 0..=crate::world::DIFFICULTY_MAX)
+                        .text("difficulty"),
+                )
+                .on_hover_text(
+                    "The same dial the = / - keys sweep. 0 is the original baseline; the \
+                     top is Perfect Dark's DarkSim \u{2014} no reaction delay, no aim error.",
+                );
+            if r.changed() {
+                changed = true;
+            }
+        });
+        play_pin_note(ui, ctx.pins.difficulty, "difficulty");
+
+        // ── AI + BODIES ──────────────────────────────────────────────────────
+        play_section(ui, "HOW THEY THINK");
+        ui.add_enabled_ui(!ctx.pins.ai, |ui| {
+            ui.horizontal(|ui| {
+                for m in [crate::enemy::AiMode::Ours, crate::enemy::AiMode::Pd] {
+                    let label = if m == crate::enemy::AiMode::Ours { "Ours" } else { "Perfect Dark" };
+                    if ui
+                        .selectable_label(cfg.ai == m, label)
+                        .on_hover_text(m.summary())
+                        .clicked()
+                        && cfg.ai != m
+                    {
+                        cfg.ai = m;
+                        changed = true;
+                    }
+                }
+            });
+        });
+        play_pin_note(ui, ctx.pins.ai, "AI model");
+        ui.add_enabled_ui(!ctx.pins.bodies, |ui| {
+            ui.horizontal(|ui| {
+                for (b, label) in [
+                    (crate::world::BodySet::All, "Both"),
+                    (crate::world::BodySet::GoldenEye, "GoldenEye"),
+                    (crate::world::BodySet::PerfectDark, "PD"),
+                ] {
+                    if ui
+                        .selectable_label(cfg.bodies == b, label)
+                        .on_hover_text("which character models the wave draws from")
+                        .clicked()
+                        && cfg.bodies != b
+                    {
+                        cfg.bodies = b;
+                        changed = true;
+                    }
+                }
+            });
+        });
+        play_pin_note(ui, ctx.pins.bodies, "bodies");
+        // What they carry: the two policies, then the whole arsenal as "this one gun".
+        let current = cfg.hunter_weapon.label().to_string();
+        egui::ComboBox::from_id_salt("play_hunter_weapon")
+            .selected_text(current)
+            .width(190.0)
+            .show_ui(ui, |ui| {
+                for policy in [HunterWeapon::Loot, HunterWeapon::Roster] {
+                    if ui
+                        .selectable_label(cfg.hunter_weapon == policy, policy.label())
+                        .clicked()
+                        && cfg.hunter_weapon != policy
+                    {
+                        cfg.hunter_weapon = policy;
+                        changed = true;
+                    }
+                }
+                ui.separator();
+                for name in ctx.weapons.iter().copied() {
+                    let sel =
+                        matches!(&cfg.hunter_weapon, HunterWeapon::Fixed(n) if n.as_str() == name);
+                    if ui.selectable_label(sel, format!("all carry the {name}")).clicked() && !sel {
+                        cfg.hunter_weapon = HunterWeapon::Fixed(name.to_string());
+                        changed = true;
+                    }
+                }
+            });
+        ui.label(
+            egui::RichText::new(
+                "Loot = they start empty-handed and race you to the guns on the floor \
+                 (needs pickups placed).",
+            )
+            .small()
+            .color(SHOP_DIM),
+        );
+
+        // ── RULES ────────────────────────────────────────────────────────────
+        play_section(ui, "MATCH RULES");
+        if ui
+            .checkbox(&mut cfg.respawn, "Respawn after dying")
+            .on_hover_text(
+                "Off is one life each: you dying ends it, and so does the last hunter \
+                 falling. That is hide-and-seek rather than deathmatch.",
+            )
+            .changed()
+        {
+            changed = true;
+        }
+        ui.add_enabled_ui(cfg.respawn, |ui| {
+            if ui
+                .add(egui::Slider::new(&mut cfg.respawn_delay, 0.0..=10.0).text("delay s"))
+                .changed()
+            {
+                changed = true;
+            }
+        });
+        ui.add_enabled_ui(!ctx.pins.score_limit, |ui| {
+            let r = ui
+                .add(egui::Slider::new(&mut cfg.score_limit, 0..=50).text("kills to win"))
+                .on_hover_text("0 = endless, for an open-ended observation run");
+            if r.changed() {
+                changed = true;
+            }
+        });
+        play_pin_note(ui, ctx.pins.score_limit, "score limit");
+        if ui
+            .add(egui::Slider::new(&mut cfg.time_limit_min, 0.0..=30.0).text("minutes"))
+            .on_hover_text(
+                "0 = no limit. When time is up the side ahead on kills wins; a tie goes \
+                 to you, for having lasted the round.",
+            )
+            .changed()
+        {
+            changed = true;
+        }
+
+        // ── DEBUG ────────────────────────────────────────────────────────────
+        play_section(ui, "DEBUG");
+        ui.add_enabled_ui(!ctx.pins.cheats, |ui| {
+            if ui
+                .checkbox(&mut cfg.invincible, "Start invincible (I)")
+                .on_hover_text("Hunters still aim and fire; you just stop taking damage.")
+                .changed()
+            {
+                changed = true;
+            }
+            if ui
+                .checkbox(&mut cfg.invisible, "Start unseen (N)")
+                .on_hover_text(
+                    "No hunter can perceive you, so the pack drops to searching \u{2014} \
+                     the way to watch the AI work.",
+                )
+                .changed()
+            {
+                changed = true;
+            }
+        });
+        play_pin_note(ui, ctx.pins.cheats, "cheats");
+    });
+
+    (changed, start)
+}
+
+/// A small gold section heading inside the panel.
+fn play_section(ui: &mut egui::Ui, title: &str) {
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new(title).small().strong().color(SHOP_GOLD_DIM));
+}
+
+/// The line under a control an explicit override has claimed, naming what is actually
+/// in force. Nothing at all when the field is free.
+fn play_pin_note(ui: &mut egui::Ui, pinned: bool, what: &str) {
+    if pinned {
+        ui.label(
+            egui::RichText::new(format!(
+                "{what} is set for this session (a launch flag or a key) \u{2014} that wins"
+            ))
+            .small()
+            .color(SHOP_GOLD),
+        );
+    }
+}
+
+/// What the PLAY tab needs to know about the world that is not in the config itself.
+struct PlayTabCtx<'a> {
+    pins: crate::world::play_config::PlayPins,
+    /// Authored spawn pads, so the entry section can warn about a pad-entry level with none.
+    pads: usize,
+    /// The live arsenal's gun names (no empty-handed slot).
+    weapons: &'a [&'static str],
+    in_hunt: bool,
 }
 
 /// The pickup settings block: which weapon, how much ammo, how long until it comes
@@ -3139,6 +4200,10 @@ struct ThemeRow {
 fn armed_tool(w: &crate::world::World) -> Option<Tool> {
     if w.is_draw_tool() {
         Some(Tool::Draw)
+    } else if w.is_vent_tool() {
+        Some(Tool::Vent)
+    } else if w.is_ladder_tool() {
+        Some(Tool::Ladder)
     } else if w.is_hole_arming() {
         Some(Tool::Hole)
     } else if w.is_opening_arming() {
@@ -3172,6 +4237,25 @@ fn digit_char(code: KeyCode) -> Option<char> {
         KeyCode::Digit9 | KeyCode::Numpad9 => '9',
         _ => return None,
     })
+}
+
+/// A file size for the level list: whole KB, or MB once it passes a thousand. Levels
+/// run from a couple of KB to a few hundred, so a byte count is noise and one decimal
+/// place of MB is all the precision that means anything.
+fn human_bytes(bytes: u64) -> String {
+    if bytes >= 1_000_000 {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    } else {
+        format!("{} KB", (bytes / 1000).max(1))
+    }
+}
+
+/// A level file's name for a status line: just the filename, not the whole path,
+/// which is long, absolute and the same for every level.
+fn short_path(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// Map a function key F1–F8 to a level quick-slot number 1–8.
@@ -3214,19 +4298,30 @@ impl ApplicationHandler for App {
 
         // Build the world, upload its initial region meshes.
         let mut world = World::new();
-        // Pin the difficulty dial at boot so it doesn't have to be managed by hand (the
-        // `=`/`-` keys still sweep it). **Not max any more:** the dial now selects a
-        // Perfect Dark zeroing tier rather than multiplying a hit probability, and max is
-        // DarkSim — no reaction delay, no aim error, kills on sight from across the room.
-        // `HUNT_TIER` is the position where the model is visible as behaviour.
-        world.set_difficulty(crate::world::pd_lab::dial_for_tier(
-            crate::world::pd_lab::HUNT_TIER,
-            crate::world::DIFFICULTY_MAX,
-        ));
-        // Restore a small pack at boot (the code default stays at duel = 1 so the
-        // duel-mode tests are unaffected) — the coordinated AI (flanking, squad
-        // suppression, cover) only reads with more than one hunter on the field.
-        world.set_wave_size(crate::world::PLAYTEST_WAVE_SIZE);
+        // ── The starting match setup (the PLAY tab's config) ──────────────────
+        //
+        // These two used to be `set_difficulty` / `set_wave_size` calls right here — a
+        // pair of invisible boot pins that no level could state and no player could see.
+        // They are the same two values, installed as the *default* PLAY config instead,
+        // so the panel shows them, a level can save its own, and `G` reads whatever the
+        // open level says. `set_play_config_default` rather than `set_play_config`: this
+        // is what a level starts as, not an edit, so it must not raise the unsaved marker.
+        //
+        // The difficulty is `HUNT_TIER`, not max: the dial selects a Perfect Dark zeroing
+        // tier rather than multiplying a hit probability, and max is DarkSim — no reaction
+        // delay, no aim error, kills on sight from across the room. The wave is a small
+        // pack, because the coordinated AI (flanking, squad suppression, cover) only reads
+        // with more than one hunter on the field; the code default stays at duel = 1 so
+        // the headless duel-mode tests are unaffected.
+        {
+            let mut play = world.play_config().clone();
+            play.difficulty = crate::world::pd_lab::dial_for_tier(
+                crate::world::pd_lab::HUNT_TIER,
+                crate::world::DIFFICULTY_MAX,
+            );
+            play.enemy_count = crate::world::PLAYTEST_WAVE_SIZE;
+            world.set_play_config_default(play);
+        }
         // `SCORE_LIMIT=n` — kills to win the round; `0` = endless, for an open-ended
         // observation run where you don't want the result screen interrupting.
         if let Ok(v) = std::env::var("SCORE_LIMIT") {
@@ -3317,7 +4412,14 @@ impl ApplicationHandler for App {
         // re-applying it here is the belt to that braces — nothing between the two
         // points may pin an AI mode without an explicit `AI=` losing, which is exactly
         // how `PD_LAB` once ate `BODIES=ge` for a whole playtest.
-        world.set_ai_mode(crate::enemy::AiMode::from_env());
+        // `pin_ai_mode` only when `AI=` is actually set: pinning unconditionally would
+        // mean the PLAY tab's AI choice could never take effect, which is the same class
+        // of silent-override bug this line's own comment is about — in the other
+        // direction. With no `AI=`, the level's config decides at `G`.
+        match std::env::var("AI") {
+            Ok(v) if !v.trim().is_empty() => world.pin_ai_mode(crate::enemy::AiMode::from_env()),
+            _ => world.set_ai_mode(crate::enemy::AiMode::from_env()),
+        }
         // Say what was actually resolved, unconditionally. The wave itself logs its body
         // spread at spawn, but that is not until G — and "which hunters am I about to get"
         // is exactly the question a boot flag silently losing a fight makes unanswerable.
@@ -3335,6 +4437,11 @@ impl ApplicationHandler for App {
                     for rm in &meshes {
                         renderer.set_region_textured(rm.id, &rm.mesh);
                     }
+                    // Booting into a slot opens that level like any other load would, so
+                    // Ctrl+S saves straight back to it instead of reporting no file.
+                    self.current_level = Some(crate::world::persist::slot_path(slot));
+                    self.saved_revision = world.revision();
+                    self.level_name_draft = world.level_name().to_string();
                     log::info!("booted into level slot {slot}");
                 }
                 Err(e) => log::warn!("LOAD_SLOT {slot} failed: {e}"),
@@ -3444,7 +4551,7 @@ impl ApplicationHandler for App {
             world.attach_audio(audio);
         }
         log::info!(
-            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door(scroll=single/double)  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=block stairs[2 clicks, scroll=slide, Shift+scroll=width] F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  F1-F8=load level slot  Ctrl+F1-F8=save level slot  Y=proc-anim preview(Z=fire)  I=invincible  N=invisible  [/]=wave size  F10=hunter telemetry  J=hunters on/off  G=HUNT  M=shop menu (N64 Start)  [HUNT: click=fire  RMB=aim  B=use/open door  R=reload  Q=weapon  F=detonate mines]"
+            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door(scroll=single/double)  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=block stairs[2 clicks, scroll=slide, Shift+scroll=width] F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  Ctrl+S=save level  O=LEVELS panel(name/save as/load)  F1-F8=load slot  Ctrl+F1-F8=save slot  Y=proc-anim preview(Z=fire)  I=invincible  N=invisible  [/]=wave size  F10=hunter telemetry  J=hunters on/off  G=HUNT  M=shop menu (N64 Start)  [HUNT: click=fire  RMB=aim  B=use/open door  R=reload  Q=weapon  F=detonate mines]"
         );
 
         window.request_redraw();
@@ -3631,6 +4738,30 @@ impl ApplicationHandler for App {
                     self.refresh_highlight();
                     return;
                 }
+                // Grabbed + BUILD, ladder tool armed: a click places one.
+                if self.world.as_ref().map(|w| w.is_ladder_tool()).unwrap_or(false) {
+                    // A ladder is structures geometry, not a marker, so placing one has
+                    // to re-bake that mesh for it to appear — the same thing a platform
+                    // or a railing does.
+                    let rm = self.world.as_mut().and_then(|w| {
+                        w.with_undo(|w| w.confirm_ladder().then(|| w.rebuild_structures()))
+                    });
+                    if let Some(rm) = rm {
+                        self.upload(&rm);
+                    }
+                    self.refresh_highlight();
+                    return;
+                }
+                // Grabbed + BUILD, vent tool armed: a click carves the previewed duct
+                // segment and re-anchors the run to its far end.
+                if self.world.as_ref().map(|w| w.is_vent_tool()).unwrap_or(false) {
+                    let rm = self.world.as_mut().and_then(|w| w.with_undo(|w| w.vent_click()));
+                    if let Some(rm) = rm {
+                        self.upload(&rm);
+                    }
+                    self.refresh_highlight();
+                    return;
+                }
                 // Grabbed + BUILD: confirm an armed opening (door/hole) or
                 // placement (pillar/brace), else select the crosshair face.
                 let opening = self.world.as_ref().map(|w| w.is_opening_arming()).unwrap_or(false);
@@ -3748,7 +4879,11 @@ impl ApplicationHandler for App {
                     // placement (pillar/brace) sizing, else opening sizing (hole =
                     // free size, door = single/double width), else the sub-face
                     // selection.
-                    if world.is_draw_sizing() {
+                    if world.is_ladder_tool() {
+                        world.adjust_ladder_height(step);
+                    } else if world.is_vent_tool() {
+                        world.adjust_vent_len(step);
+                    } else if world.is_draw_sizing() {
                         world.adjust_draw_depth(step);
                     } else if world.is_draw_choosing_face() {
                         // Before the first corner, scroll disambiguates which surface the
@@ -3957,6 +5092,9 @@ impl ApplicationHandler for App {
                     let placing = self.world.as_ref().map(|w| w.is_placing()).unwrap_or(false);
                     let platform = self.world.as_ref().map(|w| w.is_platform_tool()).unwrap_or(false);
                     let drawing = self.world.as_ref().map(|w| w.is_draw_tool()).unwrap_or(false);
+                    let venting = self.world.as_ref().map(|w| w.is_vent_tool()).unwrap_or(false);
+                    let laddering =
+                        self.world.as_ref().map(|w| w.is_ladder_tool()).unwrap_or(false);
                     let pending_stair =
                         self.world.as_ref().map(|w| w.has_pending_stair()).unwrap_or(false);
                     // A pending stair suppresses the face highlight; its x-ray
@@ -3964,6 +5102,10 @@ impl ApplicationHandler for App {
                     let mesh = self.world.as_mut().and_then(|w| {
                         if pending_stair {
                             None
+                        } else if laddering {
+                            w.update_ladder_preview()
+                        } else if venting {
+                            w.update_vent_preview()
                         } else if drawing {
                             w.update_draw_preview()
                         } else if opening {
@@ -4249,6 +5391,15 @@ impl App {
                     w.cancel_stairs();
                     log::info!("stair cancelled");
                     handled = true;
+                } else if w.is_ladder_tool() {
+                    w.cancel_ladder();
+                    handled = true;
+                } else if w.is_vent_tool() {
+                    // Esc *finishes* a duct rather than discarding it — the segments are
+                    // already carved and individually undoable, so there is nothing
+                    // pending to throw away, and this is where the one-mouth check runs.
+                    w.cancel_vent();
+                    handled = true;
                 } else if w.draw_escape() {
                     // Back out one rung of the draw ladder (depth step → outline →
                     // one corner at a time). Idle returns false and falls through to
@@ -4347,6 +5498,18 @@ impl App {
             });
             return;
         }
+        // Ctrl+S saves the open level back to its own file. Sits with the other
+        // save/load keys (works grabbed or not) rather than behind the panel, because
+        // the whole point of it is not having to open anything.
+        if code == KeyCode::KeyS {
+            let ctrl = self.input.key_down(KeyCode::ControlLeft)
+                || self.input.key_down(KeyCode::ControlRight);
+            let build = self.world.as_ref().map(|w| w.is_build()).unwrap_or(false);
+            if ctrl && build {
+                self.apply(EditorAction::SaveCurrentLevel);
+                return;
+            }
+        }
         // Undo / redo (BUILD only — geometry is frozen in HUNT). Ctrl+Z steps back
         // through authored edits, Ctrl+R re-applies. Both re-bake + re-upload every
         // affected region + the structures mesh, then clear any stale highlight.
@@ -4388,11 +5551,16 @@ impl App {
             self.apply(EditorAction::ToggleInvincible);
             return;
         }
-        // J toggles hunters entirely (dev): no pack spawns, and flipping it off during a
-        // hunt clears the live one. The third of the dev observe toggles beside I
-        // (invincible) and N (invisible) — this one is for authoring and testing the
+        // Backquote toggles hunters entirely (dev): no pack spawns, and flipping it off
+        // during a hunt clears the live one. The third of the dev observe toggles beside
+        // I (invincible) and N (invisible) — this one is for authoring and testing the
         // level itself, where standing still at a door to work it is the whole point.
-        if code == KeyCode::KeyJ {
+        //
+        // **Moved off `J`**, which now places ladders. `J` was the only letter left when
+        // the ladder tool landed and its radial slot already advertised it, so the tool
+        // kept the letter and the dev toggle took the classic dev key. It is still on the
+        // radial's Debug ring either way, which is what made the swap cheap.
+        if code == KeyCode::Backquote {
             self.apply(EditorAction::ToggleHunters);
             return;
         }
@@ -4493,6 +5661,19 @@ impl App {
         // B / H toggle the opening tools (door / hole): arm a ghost preview that
         // tracks the crosshair (drawn each frame in RedrawRequested), or turn it
         // back off. Left-click is what cuts (handled in MouseInput).
+        // U ("dUct") toggles the vent tool. Stateful across clicks unlike the opening
+        // tools — see `tools::vent` — so pressing U again *finishes* the duct.
+        if code == KeyCode::KeyU {
+            self.apply(EditorAction::ArmTool(Tool::Vent));
+            return;
+        }
+        // J places a climbable ladder on a wall (player-only — see `tools::ladder`).
+        if code == KeyCode::KeyJ
+            && self.world.as_ref().map(|w| w.is_build()).unwrap_or(false)
+        {
+            self.apply(EditorAction::ArmTool(Tool::Ladder));
+            return;
+        }
         if code == KeyCode::KeyB || code == KeyCode::KeyH {
             self.apply(EditorAction::ArmTool(if code == KeyCode::KeyB {
                 Tool::Door
@@ -4591,6 +5772,17 @@ impl App {
             return;
         }
         if matches!(code, KeyCode::Enter | KeyCode::NumpadEnter) {
+            // While a duct is being run, Enter breaks it out into a protoroom at the
+            // open end and finishes the duct - the vent counterpart of the protoroom
+            // `cut_opening` seeds beyond every doorway. Otherwise Enter confirms stairs.
+            if self.world.as_ref().map(|w| w.is_vent_running()).unwrap_or(false) {
+                let rm = self.world.as_mut().and_then(|w| w.with_undo(|w| w.vent_exit_room()));
+                if let Some(rm) = rm {
+                    self.upload(&rm);
+                }
+                self.refresh_highlight();
+                return;
+            }
             self.apply(EditorAction::Selection(SelectionOp::ConfirmStairs));
             return;
         }

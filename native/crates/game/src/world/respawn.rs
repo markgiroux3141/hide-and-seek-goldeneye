@@ -61,8 +61,16 @@ impl World {
     /// Arm hunter `idx`'s respawn clock. Called from `start_death`, the single funnel
     /// every hunter death goes through (bullet and blast alike).
     pub(crate) fn arm_hunter_respawn(&mut self, idx: usize) {
+        // One life each (`PlayConfig::respawn` off) → the corpse stays a corpse, and the
+        // round is over once the last one falls. Without that check a one-life round
+        // would never end.
+        if !self.respawn_enabled() {
+            self.check_wipeout();
+            return;
+        }
+        let delay = self.respawn_delay();
         if let Some(inst) = self.enemies.get_mut(idx) {
-            inst.respawn_timer = Some(RESPAWN_DELAY);
+            inst.respawn_timer = Some(delay);
         }
     }
 
@@ -187,9 +195,17 @@ impl World {
             return;
         }
         self.player_dead = true;
-        self.player_respawn = RESPAWN_DELAY;
         self.record_player_death(killer);
-        log::info!("YOU DIED — respawning in {RESPAWN_DELAY:.0}s");
+        // One life each → no clock at all, and the hunters have won.
+        if !self.respawn_enabled() {
+            self.player_respawn = 0.0;
+            self.check_wipeout();
+            log::info!("YOU DIED — one life each, so that is the round");
+            return;
+        }
+        let delay = self.respawn_delay();
+        self.player_respawn = delay;
+        log::info!("YOU DIED — respawning in {delay:.0}s");
     }
 
     /// Bring the player back from the pool: full health, a fresh capsule pose at a chosen
@@ -200,8 +216,10 @@ impl World {
     /// pose it entered at (`hunt_spawn`), which is the fly-cam drop. That keeps the
     /// no-pads level playable instead of leaving a dead player with nowhere to go.
     pub(crate) fn respawn_player(&mut self) {
-        self.player_health = PLAYER_MAX_HEALTH;
-        self.player_armor = 0.0;
+        // Back to the authored *starting* condition, not to a hard-coded full bar: a
+        // level tuned as a 50-health handicap run stays one after a death.
+        self.player_health = self.play_config().health;
+        self.player_armor = self.play_config().armor;
         self.player_dead = false;
         self.player_respawn = 0.0;
         self.damage_flash = 0.0;
@@ -211,9 +229,17 @@ impl World {
         // and puts you back to empty hands. This is what makes the weapons on the
         // floor worth crossing the level for (`DESIGN_PICKUPS.md`).
         self.reset_loadout();
+        // …and then you get your *starting* guns back, whatever the level authored them
+        // to be. On a `LoadoutMode::Level` level that is the fallback sidearm (or
+        // nothing, when there are pickups to find), so the pickup economy is untouched;
+        // on an authored loadout it is the loadout, which is the only reading of "start
+        // with a PP7" that survives your first death.
+        self.apply_start_loadout();
         // The pad, then the step-aside — the level is full of bodies by now, which is the
-        // whole reason a respawn needs this and the initial entry does not.
-        let entry = match (self.spawn_pad_count() > 0)
+        // whole reason a respawn needs this and the initial entry does not. Honours the
+        // authored entry mode, so a camera-entry level puts you back where you dropped in.
+        let entry = match self
+            .entry_uses_pads()
             .then(|| self.choose_spawn_pad(Spawning::Player))
             .flatten()
         {
@@ -224,6 +250,10 @@ impl World {
         };
         if let Some((feet, yaw, pitch)) = entry {
             self.character = Some(CharacterController::new(feet, yaw, pitch));
+            let ladders = self.ladder_volumes();
+            if let Some(c) = self.character.as_mut() {
+                c.set_ladders(ladders);
+            }
             log::info!("respawned at {feet:?}");
         }
     }

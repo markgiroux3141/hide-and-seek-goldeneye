@@ -100,6 +100,30 @@ pub struct NavIssues {
     pub joining_climbs: usize,
     /// Representative climbs, the reconnecting ones first.
     pub climbs: Vec<NavClimb>,
+    /// Vent ducts on the grid, and how many have no standable cell at any opening.
+    ///
+    /// **A third class of finding, and it needs its own vocabulary.** The report's two
+    /// existing classes are "nobody can get there" (an error) and "they can path it but
+    /// not walk it" (a warning). A duct is neither: it is *deliberately* unreachable to
+    /// hunters, and if that is not taught here then every vent an author cuts lights the
+    /// panel up as a fault and the tab stops being worth reading.
+    ///
+    /// What *is* a fault is a duct with no mouth — nobody can stand where they can watch
+    /// it, which also means the grid and the geometry disagree about how the player got
+    /// in.
+    pub vents: usize,
+    pub mouthless_vents: Vec<usize>,
+    /// Ladders in the level, and how many of them are the **only** link between what is
+    /// at their foot and what is at their top.
+    ///
+    /// Ladders are player-only by design (`DESIGN_VENTS_LADDERS.md` §4), so one that
+    /// severs is not an error — it is the feature. But it is the single most
+    /// consequential thing an author can do here without noticing: islands are the
+    /// documented cause of the worst performance bug this project has had, and anything
+    /// authored up there is unreachable to every hunter. So it is *stated*, loudly,
+    /// rather than left to be discovered in a playtest.
+    pub ladders: usize,
+    pub severing_ladders: usize,
 }
 
 /// A corridor narrower than this cannot hold a hunter's body at all, however well
@@ -407,6 +431,26 @@ impl World {
         climbs.sort_by_key(|c| c.joins.is_none());
         let climbs = cluster(&climbs, |c| c.from, REPRESENTATIVES);
 
+        // Does each ladder join two different walkable components? Sampled just above the
+        // base and just above the top, which is where a climber actually stands.
+        let mut ladders = 0usize;
+        let mut severing_ladders = 0usize;
+        for (min, max, _) in self.ladder_volumes() {
+            ladders += 1;
+            let mid = Vec3::new((min.x + max.x) * 0.5, 0.0, (min.z + max.z) * 0.5);
+            let foot = nav.component_at(Vec3::new(mid.x, min.y + 0.1, mid.z));
+            let head = nav.component_at(Vec3::new(mid.x, max.y + 0.1, mid.z));
+            if let (Some(a), Some(b)) = (foot, head) {
+                if a != b {
+                    severing_ladders += 1;
+                }
+            }
+        }
+
+        let vents = nav.vent_count();
+        let mouthless_vents: Vec<usize> =
+            (0..vents).filter(|&i| nav.vent_mouth_count(i) == 0).collect();
+
         NavIssues {
             calc_ms: 0.0,
             total_cells: total,
@@ -417,6 +461,10 @@ impl World {
             orphans,
             excluded_pads,
             blind_doors,
+            vents,
+            mouthless_vents,
+            ladders,
+            severing_ladders,
             door_count: nav.door_count(),
             thinnest_door: (0..nav.door_count()).map(|i| nav.door_cells(i)).min().unwrap_or(0),
             pinch_cells,
@@ -516,6 +564,10 @@ impl NavIssues {
             orphans: Vec::new(),
             excluded_pads: Vec::new(),
             blind_doors: Vec::new(),
+            vents: 0,
+            mouthless_vents: Vec::new(),
+            ladders: 0,
+            severing_ladders: 0,
             door_count: 0,
             thinnest_door: 0,
             pinch_cells: 0,
@@ -666,6 +718,47 @@ impl NavIssues {
                     pos.x, pos.y, pos.z
                 ),
             );
+        }
+
+        // ── Ladders: player-only, and the ones that sever are named ──
+        if self.ladders > 0 {
+            line(
+                Info,
+                format!(
+                    "{} ladder(s) — the player climbs these, hunters cannot (by design)",
+                    self.ladders
+                ),
+            );
+            if self.severing_ladders > 0 {
+                line(
+                    Warn,
+                    format!(
+                        "{} of them are the ONLY link to what is above — hunters can never                          follow you up, and anything authored up there is unreachable to                          them. Deliberate? Fine. Accidental? Add stairs.",
+                        self.severing_ladders
+                    ),
+                );
+            }
+        }
+
+        // ── Vents: deliberate asymmetry, stated as such ──
+        if self.vents > 0 {
+            let good = self.vents - self.mouthless_vents.len();
+            if good > 0 {
+                line(
+                    Info,
+                    format!(
+                        "{good} vent duct(s) — hunters cannot enter these (by design);                          they path to the mouth instead",
+                    ),
+                );
+            }
+            for i in &self.mouthless_vents {
+                line(
+                    Error,
+                    format!(
+                        "vent {i} has no standable cell at any opening — nobody can watch                          it, and nothing can reach where the player gets in"
+                    ),
+                );
+            }
         }
 
         if self.door_count > 0 && self.blind_doors.is_empty() {
