@@ -60,16 +60,18 @@ pub(crate) enum PanelTab {
     Spawns,
     Textures,
     Nav,
+    Levels,
 }
 
 impl PanelTab {
     /// Every tab, in display order (also the cycle order).
-    pub(crate) const ALL: [PanelTab; 5] = [
+    pub(crate) const ALL: [PanelTab; 6] = [
         PanelTab::Objects,
         PanelTab::Lighting,
         PanelTab::Spawns,
         PanelTab::Textures,
         PanelTab::Nav,
+        PanelTab::Levels,
     ];
 
     /// The header title for this tab.
@@ -80,6 +82,7 @@ impl PanelTab {
             PanelTab::Spawns => "SPAWNS",
             PanelTab::Textures => "TEXTURES",
             PanelTab::Nav => "NAV",
+            PanelTab::Levels => "LEVELS",
         }
     }
 
@@ -247,6 +250,29 @@ struct App {
     /// slot's stored label only refreshes on restart — this makes a just-saved preset
     /// show its real name immediately instead of "(empty 03)".
     theme_slot_labels: std::collections::HashMap<usize, String>,
+
+    // ── LEVELS tab: name, save, load and manage the level files ─────────────
+    /// The file this level came from, or was last saved to. `None` for a level that has
+    /// never been written — a fresh boot's starting room, or a generated arena — which
+    /// is what makes plain Save fall through to Save As.
+    current_level: Option<std::path::PathBuf>,
+    /// [`World::revision`] as of the last successful save or load. The panel shows the
+    /// unsaved marker while the world's revision differs from this.
+    saved_revision: u64,
+    /// The catalog as last read off disk. Refreshed when the tab opens and after every
+    /// file operation, never per frame: it stats and parses every level file.
+    level_rows: Vec<crate::world::persist::LevelEntry>,
+    /// The row the buttons act on, held **by path** rather than by index. The list is
+    /// sorted newest-first, so saving re-orders it — an index would silently come to
+    /// point at a different level than the one that was clicked.
+    level_sel: Option<std::path::PathBuf>,
+    /// The name field's contents (used by Save As, Rename and Duplicate).
+    level_name_draft: String,
+    /// Transient status line under the buttons ("saved …", "already exists").
+    level_status: String,
+    /// A delete waiting on its confirming second click. Any other level action clears
+    /// it, so an armed delete can't be committed by a later, unrelated click.
+    level_confirm_delete: Option<std::path::PathBuf>,
     /// Whether the preview room geometry has been uploaded this session.
     theme_preview_uploaded: bool,
     /// Which revision of the NAV overlay is on the GPU (`None` = nothing uploaded).
@@ -305,6 +331,13 @@ impl App {
             theme_draft: crate::theme_editor::ThemeDraft::default(),
             theme_status: String::new(),
             theme_slot_labels: std::collections::HashMap::new(),
+            current_level: None,
+            saved_revision: 0,
+            level_rows: Vec::new(),
+            level_sel: None,
+            level_name_draft: String::new(),
+            level_status: String::new(),
+            level_confirm_delete: None,
             theme_preview_uploaded: false,
             nav_overlay_uploaded: None,
             radial: Radial::default(),
@@ -489,41 +522,145 @@ impl App {
 
     /// Save the current editable level to numbered quick-slot `slot`.
     fn save_slot(&mut self, slot: u8) {
-        let Some(world) = self.world.as_ref() else {
-            return;
-        };
-        match world.save_slot(slot) {
-            Ok(path) => log::info!("saved level → slot {slot} ({})", path.display()),
-            Err(e) => log::warn!("save to slot {slot} failed: {e}"),
-        }
+        self.save_level_to(&crate::world::persist::slot_path(slot));
     }
 
     /// Load numbered quick-slot `slot`, replacing the editable geometry and
     /// re-uploading every region + structures mesh (stale ones cleared).
     fn load_slot(&mut self, slot: u8) {
+        self.load_level_file(&crate::world::persist::slot_path(slot));
+    }
+
+    // ─── Level files (the LEVELS tab, and the F-key quick slots) ────────────
+
+    /// Whether the open level has edits that aren't on disk.
+    ///
+    /// A revision comparison rather than a flag: see [`World::revision`]. With no file
+    /// behind the level yet, everything authored since boot is unsaved, so a level that
+    /// has been touched at all counts as dirty.
+    fn level_dirty(&self) -> bool {
+        self.world
+            .as_ref()
+            .map(|w| w.revision() != self.saved_revision)
+            .unwrap_or(false)
+    }
+
+    /// Adopt `path` as the open level and mark the world clean against it. Called after
+    /// every successful save or load, whichever front-end asked for it.
+    fn set_current_level(&mut self, path: std::path::PathBuf) {
+        self.saved_revision = self.world.as_ref().map(|w| w.revision()).unwrap_or(0);
+        self.level_name_draft = self
+            .world
+            .as_ref()
+            .map(|w| w.level_name().to_string())
+            .unwrap_or_default();
+        self.level_sel = Some(path.clone());
+        self.current_level = Some(path);
+        self.level_confirm_delete = None;
+        self.refresh_level_rows();
+    }
+
+    /// Re-read the level catalog from disk.
+    ///
+    /// Not per frame — it stats and JSON-parses every level file. Called when the tab
+    /// opens and after each file operation, which is exactly when it can have changed.
+    fn refresh_level_rows(&mut self) {
+        self.level_rows = crate::world::persist::list_levels();
+        // A selection whose file is gone (deleted here, or outside the game) would leave
+        // the buttons acting on nothing; fall back to the open level.
+        if !self
+            .level_sel
+            .as_ref()
+            .is_some_and(|sel| self.level_rows.iter().any(|r| &r.path == sel))
+        {
+            self.level_sel = self.current_level.clone();
+        }
+    }
+
+    /// Save the open level back to its own file — `Ctrl+S` and the panel's Save.
+    ///
+    /// A level with no file yet (a fresh boot's starting room, a generated arena) has
+    /// nowhere to go, and says so rather than inventing a filename.
+    fn save_current_level(&mut self) {
+        match self.current_level.clone() {
+            Some(path) => self.save_level_to(&path),
+            None => {
+                self.level_status = "this level has no file yet — name it, then Save As".into();
+                log::warn!("Ctrl+S: no current level file; use Save As");
+            }
+        }
+    }
+
+    /// Write the open level to `path`, overwriting it, and adopt it as the current file.
+    /// The shared body of Save, Save-to-slot and `Ctrl+F1..F8`.
+    fn save_level_to(&mut self, path: &std::path::Path) {
+        // A level that has never been named takes the filename it is being written to
+        // ("slot3"), so `Ctrl+F3` on a fresh level lists as something rather than as a
+        // blank row. Named levels keep the name they have.
+        if let Some(world) = self.world.as_mut() {
+            if world.level_name().trim().is_empty() {
+                if let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().into_owned()) {
+                    world.set_level_name(&stem);
+                }
+            }
+        }
+        let Some(world) = self.world.as_ref() else {
+            return;
+        };
+        match world.save_level(path) {
+            Ok(()) => {
+                let name = world.level_name().to_string();
+                log::info!("saved level {name:?} → {}", path.display());
+                self.set_current_level(path.to_path_buf());
+                self.level_status = format!("saved {}", short_path(path));
+            }
+            Err(e) => {
+                log::warn!("save to {} failed: {e}", path.display());
+                self.level_status = format!("save failed: {e}");
+            }
+        }
+    }
+
+    /// Load the level file at `path`, replacing the editable geometry and re-uploading
+    /// every region + the structures mesh (stale ones cleared). Returns whether it
+    /// loaded.
+    ///
+    /// The pre-load snapshot is what makes loading over unsaved work survivable: an
+    /// accidental Load is one `Ctrl+Z` from being undone, which is why there is no
+    /// "discard changes?" prompt in the way.
+    fn load_level_file(&mut self, path: &std::path::Path) -> bool {
         let meshes = match self.world.as_mut() {
             Some(world) => {
-                // Snapshot first so an accidental slot-load is undoable; commit it
-                // only once the load succeeds (a failed load leaves state as-is).
+                // Committed only once the load succeeds — a failed load leaves the
+                // world untouched, and must not leave a dead step in the history.
                 let snap = world.snapshot();
-                match world.load_slot(slot) {
+                match world.load_level(path) {
                     Ok(meshes) => {
                         world.commit_snapshot(snap);
                         meshes
                     }
                     Err(e) => {
-                        log::warn!("load slot {slot} failed: {e}");
-                        return;
+                        log::warn!("load {} failed: {e}", path.display());
+                        self.level_status = format!("load failed: {e}");
+                        return false;
                     }
                 }
             }
-            None => return,
+            None => return false,
         };
         for rm in &meshes {
             self.upload(rm);
         }
         // Selection was cleared by the load — drop any lingering highlight.
         self.refresh_highlight();
+        self.set_current_level(path.to_path_buf());
+        let name = self
+            .world
+            .as_ref()
+            .map(|w| w.level_name().to_string())
+            .unwrap_or_default();
+        self.level_status = format!("loaded {name}");
+        true
     }
 
     /// Push the current selection's highlight quad to the renderer.
@@ -622,6 +759,11 @@ impl App {
         if self.props_open {
             self.lock_before_props = self.input.pointer_locked;
             self.set_pointer_lock(false);
+            // The panel reopens on whichever tab it was left on, so O landing straight
+            // back on LEVELS has to re-read the catalog too — not just `OpenPanel`.
+            if self.panel_tab == PanelTab::Levels {
+                self.refresh_level_rows();
+            }
         } else {
             self.set_pointer_lock(self.lock_before_props);
             if let Some(w) = self.world.as_mut() {
@@ -750,6 +892,19 @@ impl App {
             grid: self.renderer.as_ref().map(|r| r.is_grid_mode()).unwrap_or(false),
             real_lighting: self.build_real_lighting,
             slots: self.radial_slots_used,
+            level: self.current_level.as_ref().map(|_| {
+                let name = self
+                    .world
+                    .as_ref()
+                    .map(|w| w.level_name().to_string())
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    "this level".to_string()
+                } else {
+                    name
+                }
+            }),
+            level_dirty: self.level_dirty(),
             ..RadialCtx::default()
         };
         if let Some(w) = self.world.as_ref() {
@@ -789,6 +944,12 @@ impl App {
                 if !self.props_open {
                     self.toggle_props();
                 }
+                // The catalog is read from disk, so it can be stale by the time the tab
+                // is opened again (another session saved, a file was deleted outside
+                // the game). Re-read on the way in rather than per frame.
+                if tab == PanelTab::Levels {
+                    self.refresh_level_rows();
+                }
             }
             EditorAction::SetScheme(scheme) => {
                 if let Some(rm) = self
@@ -807,6 +968,7 @@ impl App {
             }
             EditorAction::LoadSlot(n) => self.load_slot(n),
             EditorAction::SaveSlot(n) => self.save_slot(n),
+            EditorAction::SaveCurrentLevel => self.save_current_level(),
             EditorAction::ToggleGrid => {
                 if let Some(r) = self.renderer.as_mut() {
                     let grid = !r.is_grid_mode();
@@ -1239,6 +1401,33 @@ impl App {
             .and_then(|w| w.nav_issues())
             .map(|i| i.lines().into_iter().map(|l| (l.text, l.sev)).collect())
             .unwrap_or_default();
+        // ── LEVELS tab snapshot. Cloned only while the tab is showing: the catalog
+        // holds a `String` or two per level, which is nothing, but there is no reason
+        // to copy it on every frame of gameplay either.
+        let levels_showing = self.props_open && self.panel_tab == PanelTab::Levels;
+        let level_rows_ui: Vec<crate::world::persist::LevelEntry> = if levels_showing {
+            self.level_rows.clone()
+        } else {
+            Vec::new()
+        };
+        let level_sel_ui = self.level_sel.clone();
+        let level_current = self.current_level.clone();
+        let level_display_name = self
+            .world
+            .as_ref()
+            .map(|w| w.level_name().to_string())
+            .unwrap_or_default();
+        // Not `self.level_dirty()`: this runs under a live `&mut self.egui_state`
+        // borrow, so it has to read the two fields rather than take `&self`.
+        let saved_rev = self.saved_revision;
+        let level_dirty_ui = self
+            .world
+            .as_ref()
+            .is_some_and(|w| w.revision() != saved_rev);
+        let level_status_ui = self.level_status.clone();
+        let level_confirm = self.level_confirm_delete.clone();
+        let mut level_name_ui = self.level_name_draft.clone();
+
         let mut nav_overlay_ui = self.world.as_ref().is_some_and(|w| w.nav_overlay_on());
         let mut nav_calculate = false;
         let mut nav_toggle_overlay = false;
@@ -1265,6 +1454,16 @@ impl App {
         let mut draft_arm_scratch = false;
         // `(digit, Some(scheme))` binds, `(digit, None)` clears.
         let mut new_hotkey: Option<(char, Option<usize>)> = None;
+        // LEVELS tab deferred actions.
+        let mut level_save = false;
+        let mut level_save_as = false;
+        let mut level_rename = false;
+        let mut level_duplicate = false;
+        let mut level_refresh = false;
+        let mut level_name_changed = false;
+        let mut level_select: Option<std::path::PathBuf> = None;
+        let mut level_load: Option<std::path::PathBuf> = None;
+        let mut level_delete_click: Option<std::path::PathBuf> = None;
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
             if shop_open {
@@ -1817,6 +2016,297 @@ impl App {
                                             );
                                         }
                                     });
+                                }
+                            }
+                            PanelTab::Levels => {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Every level is a file in native/levels/. \
+                                         F1-F8 still load slot1-slot8 \u{2014} those are \
+                                         just eight of the files listed below.",
+                                    )
+                                    .small()
+                                    .color(SHOP_DIM),
+                                );
+                                ui.add_space(6.0);
+
+                                // ── What is open, and whether it is saved.
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new("OPEN")
+                                            .small()
+                                            .strong()
+                                            .color(SHOP_GOLD_DIM),
+                                    );
+                                    let (text, col) = match (&level_current, level_dirty_ui) {
+                                        (Some(_), true) => {
+                                            (format!("{level_display_name} *"), SHOP_GOLD)
+                                        }
+                                        (Some(_), false) => (level_display_name.clone(), NAV_OK),
+                                        (None, _) => {
+                                            ("never saved".to_string(), SHOP_GOLD)
+                                        }
+                                    };
+                                    ui.label(egui::RichText::new(text).color(col).strong())
+                                        .on_hover_text(
+                                            "* means there are edits this file \
+                                             doesn't have yet",
+                                        );
+                                });
+                                ui.label(
+                                    egui::RichText::new(match &level_current {
+                                        Some(p) => short_path(p),
+                                        None => "no file behind it \u{2014} name it and Save As"
+                                            .to_string(),
+                                    })
+                                    .small()
+                                    .color(SHOP_DIM),
+                                );
+                                ui.add_space(4.0);
+                                ui.add_enabled_ui(level_current.is_some(), |ui| {
+                                    if ui
+                                        .add_sized(
+                                            [200.0, 26.0],
+                                            egui::Button::new(
+                                                egui::RichText::new(if level_dirty_ui {
+                                                    "SAVE *"
+                                                } else {
+                                                    "SAVE"
+                                                })
+                                                .color(egui::Color32::BLACK)
+                                                .strong(),
+                                            )
+                                            .fill(SHOP_GOLD),
+                                        )
+                                        .on_hover_text("Ctrl+S \u{2014} overwrites this level's own file")
+                                        .clicked()
+                                    {
+                                        level_save = true;
+                                    }
+                                });
+
+                                // ── The catalog.
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "ON DISK ({})",
+                                            level_rows_ui.len()
+                                        ))
+                                        .small()
+                                        .strong()
+                                        .color(SHOP_GOLD_DIM),
+                                    );
+                                    if ui
+                                        .small_button("re-read")
+                                        .on_hover_text("in case something changed the files")
+                                        .clicked()
+                                    {
+                                        level_refresh = true;
+                                    }
+                                });
+                                if level_rows_ui.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "No levels saved yet \u{2014} name this one \
+                                             below and Save As.",
+                                        )
+                                        .small()
+                                        .color(SHOP_DIM),
+                                    );
+                                }
+                                egui::ScrollArea::vertical()
+                                    .max_height(200.0)
+                                    .show(ui, |ui| {
+                                        ui.set_width(206.0);
+                                        for row in &level_rows_ui {
+                                            let is_sel =
+                                                level_sel_ui.as_ref() == Some(&row.path);
+                                            let is_open =
+                                                level_current.as_ref() == Some(&row.path);
+                                            let title = match row.slot {
+                                                Some(n) => format!("{}   F{n}", row.name),
+                                                None => row.name.clone(),
+                                            };
+                                            let col = if row.error.is_some() {
+                                                NAV_BAD
+                                            } else if is_open {
+                                                NAV_OK
+                                            } else {
+                                                egui::Color32::from_gray(200)
+                                            };
+                                            let resp = ui.selectable_label(
+                                                is_sel,
+                                                egui::RichText::new(title).color(col),
+                                            );
+                                            if resp.clicked() {
+                                                level_select = Some(row.path.clone());
+                                            }
+                                            if resp.double_clicked() && row.error.is_none() {
+                                                level_load = Some(row.path.clone());
+                                            }
+                                            let sub = match &row.error {
+                                                Some(e) => format!("unreadable \u{2014} {e}"),
+                                                None => format!(
+                                                    "{}  \u{b7}  {} brushes  \u{b7}  {} objects{}",
+                                                    human_bytes(row.bytes),
+                                                    row.brushes,
+                                                    row.entities,
+                                                    if row.from_newer_build() {
+                                                        format!("  \u{b7}  v{} (newer build)", row.version)
+                                                    } else {
+                                                        String::new()
+                                                    }
+                                                ),
+                                            };
+                                            ui.label(
+                                                egui::RichText::new(sub).small().color(
+                                                    if row.error.is_some() {
+                                                        NAV_BAD
+                                                    } else {
+                                                        SHOP_DIM
+                                                    },
+                                                ),
+                                            );
+                                            ui.add_space(2.0);
+                                        }
+                                    });
+
+                                // ── Act on the selected row.
+                                let sel_row = level_rows_ui
+                                    .iter()
+                                    .find(|r| Some(&r.path) == level_sel_ui.as_ref());
+                                let loadable =
+                                    sel_row.is_some_and(|r| r.error.is_none());
+                                let delete_armed = level_confirm.is_some()
+                                    && level_confirm == level_sel_ui;
+                                ui.horizontal(|ui| {
+                                    ui.add_enabled_ui(loadable, |ui| {
+                                        if ui
+                                            .add_sized(
+                                                [108.0, 24.0],
+                                                egui::Button::new(
+                                                    egui::RichText::new("LOAD")
+                                                        .color(egui::Color32::BLACK)
+                                                        .strong(),
+                                                )
+                                                .fill(SHOP_GOLD),
+                                            )
+                                            .on_hover_text(
+                                                "replaces what you're editing \u{2014} \
+                                                 Ctrl+Z undoes it",
+                                            )
+                                            .clicked()
+                                        {
+                                            level_load = level_sel_ui.clone();
+                                        }
+                                    });
+                                    ui.add_enabled_ui(sel_row.is_some(), |ui| {
+                                        if ui
+                                            .add_sized(
+                                                [88.0, 24.0],
+                                                egui::Button::new(
+                                                    egui::RichText::new(if delete_armed {
+                                                        "REALLY?"
+                                                    } else {
+                                                        "Delete"
+                                                    })
+                                                    .color(if delete_armed {
+                                                        NAV_BAD
+                                                    } else {
+                                                        SHOP_DIM
+                                                    }),
+                                                ),
+                                            )
+                                            .on_hover_text(
+                                                "click twice \u{2014} deleting the file \
+                                                 cannot be undone",
+                                            )
+                                            .clicked()
+                                        {
+                                            level_delete_click = level_sel_ui.clone();
+                                        }
+                                    });
+                                });
+
+                                // ── Name it: Save As / Rename / Duplicate.
+                                ui.separator();
+                                ui.label(
+                                    egui::RichText::new("NAME")
+                                        .small()
+                                        .strong()
+                                        .color(SHOP_GOLD_DIM),
+                                );
+                                if ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut level_name_ui)
+                                            .hint_text("level name")
+                                            .desired_width(200.0),
+                                    )
+                                    .changed()
+                                {
+                                    level_name_changed = true;
+                                }
+                                let slug =
+                                    crate::world::persist::slug_for_name(&level_name_ui);
+                                ui.label(
+                                    egui::RichText::new(if slug.is_empty() {
+                                        "needs a letter or a digit".to_string()
+                                    } else {
+                                        format!("{slug}.json")
+                                    })
+                                    .small()
+                                    .color(SHOP_DIM),
+                                );
+                                ui.add_enabled_ui(!slug.is_empty(), |ui| {
+                                    if ui
+                                        .add_sized(
+                                            [200.0, 24.0],
+                                            egui::Button::new("Save As a new level"),
+                                        )
+                                        .on_hover_text(
+                                            "writes a new file, and refuses if that \
+                                             name is already taken",
+                                        )
+                                        .clicked()
+                                    {
+                                        level_save_as = true;
+                                    }
+                                    ui.horizontal(|ui| {
+                                        let has_sel = level_sel_ui.is_some();
+                                        if ui
+                                            .add_enabled(
+                                                has_sel,
+                                                egui::Button::new("Rename"),
+                                            )
+                                            .on_hover_text(
+                                                "renames the selected level and moves \
+                                                 its file to match",
+                                            )
+                                            .clicked()
+                                        {
+                                            level_rename = true;
+                                        }
+                                        if ui
+                                            .add_enabled(
+                                                has_sel,
+                                                egui::Button::new("Duplicate"),
+                                            )
+                                            .on_hover_text(
+                                                "copies the selected level to this name",
+                                            )
+                                            .clicked()
+                                        {
+                                            level_duplicate = true;
+                                        }
+                                    });
+                                });
+                                if !level_status_ui.is_empty() {
+                                    ui.label(
+                                        egui::RichText::new(&level_status_ui)
+                                            .small()
+                                            .color(SHOP_GOLD_DIM),
+                                    );
                                 }
                             }
                             PanelTab::Objects => {
@@ -2578,6 +3068,120 @@ impl App {
                 }
             }
         }
+        // \u2500\u2500 LEVELS tab. Ordered so a click reads the way it looks: the selection
+        // and the name field settle first, then the operation that uses them.
+        if level_name_changed {
+            self.level_name_draft = level_name_ui;
+        }
+        if let Some(path) = level_select {
+            // Selecting a different row disarms a pending delete, so a second click
+            // somewhere else can never commit the first row's deletion.
+            if self.level_confirm_delete.as_ref() != Some(&path) {
+                self.level_confirm_delete = None;
+            }
+            // The name field follows the selection: Rename and Duplicate both read it,
+            // and typing the selected level's name back in by hand is pure friction.
+            if let Some(row) = self.level_rows.iter().find(|r| r.path == path) {
+                self.level_name_draft = row.name.clone();
+            }
+            self.level_sel = Some(path);
+        }
+        if level_refresh {
+            self.refresh_level_rows();
+            self.level_status.clear();
+        }
+        if level_save {
+            self.save_current_level();
+        }
+        if level_save_as {
+            let name = self.level_name_draft.clone();
+            match self.world.as_mut().map(|w| w.save_level_as(&name)) {
+                Some(Ok(path)) => {
+                    self.set_current_level(path);
+                    self.level_status = format!("saved as \"{name}\"");
+                }
+                Some(Err(e)) => {
+                    log::warn!("save as {name:?} failed: {e}");
+                    self.level_status = format!("{e}");
+                }
+                None => {}
+            }
+        }
+        if let Some(path) = level_load {
+            self.load_level_file(&path);
+        }
+        if level_rename {
+            if let Some(old) = self.level_sel.clone() {
+                let name = self.level_name_draft.clone();
+                match crate::world::persist::rename_level(&old, &name) {
+                    Ok(new_path) => {
+                        // Renaming the level that is *open* has to move the world's own
+                        // name with it, or the next plain Save would write the old name
+                        // straight back into the newly-renamed file.
+                        if self.current_level.as_ref() == Some(&old) {
+                            if let Some(w) = self.world.as_mut() {
+                                w.set_level_name(&name);
+                            }
+                            // Re-syncs `saved_revision`, so the rename itself doesn't
+                            // read as an unsaved edit: the file on disk already has it.
+                            self.set_current_level(new_path);
+                        } else {
+                            self.level_sel = Some(new_path);
+                            self.refresh_level_rows();
+                        }
+                        self.level_status = format!("renamed to \"{name}\"");
+                    }
+                    Err(e) => {
+                        log::warn!("rename {} failed: {e}", old.display());
+                        self.level_status = format!("{e}");
+                    }
+                }
+            }
+        }
+        if level_duplicate {
+            if let Some(src) = self.level_sel.clone() {
+                let name = self.level_name_draft.clone();
+                match crate::world::persist::duplicate_level(&src, &name) {
+                    Ok(new_path) => {
+                        // The copy is selected but *not* opened: duplicating is how you
+                        // fork a level to try something, and that starts from the copy
+                        // being there, not from losing your place in the original.
+                        self.level_sel = Some(new_path);
+                        self.refresh_level_rows();
+                        self.level_status = format!("copied to \"{name}\" (not opened)");
+                    }
+                    Err(e) => {
+                        log::warn!("duplicate {} failed: {e}", src.display());
+                        self.level_status = format!("{e}");
+                    }
+                }
+            }
+        }
+        if let Some(path) = level_delete_click {
+            if self.level_confirm_delete.as_ref() == Some(&path) {
+                self.level_confirm_delete = None;
+                match crate::world::persist::delete_level(&path) {
+                    Ok(()) => {
+                        // The open level's file can be deleted like any other; the level
+                        // itself stays loaded and editable, it just has nowhere to Save
+                        // to any more, which is exactly the "never saved" state.
+                        if self.current_level.as_ref() == Some(&path) {
+                            self.current_level = None;
+                        }
+                        self.level_sel = None;
+                        self.refresh_level_rows();
+                        self.level_status = format!("deleted {}", short_path(&path));
+                    }
+                    Err(e) => {
+                        log::warn!("delete {} failed: {e}", path.display());
+                        self.level_status = format!("{e}");
+                    }
+                }
+            } else {
+                self.level_confirm_delete = Some(path);
+                self.level_status = "click Delete again to confirm".into();
+            }
+        }
         // Object panel: apply the selection (arms placement of that prop on the
         // World) + the close, after the `state` borrow ends.
         if let Some(sel) = new_prop_selected {
@@ -2666,6 +3270,9 @@ impl App {
         }
         if let Some(tab) = new_tab {
             self.panel_tab = tab;
+            if tab == PanelTab::Levels {
+                self.refresh_level_rows();
+            }
         }
         if ambient_edited {
             if let Some(world) = self.world.as_mut() {
@@ -3174,6 +3781,25 @@ fn digit_char(code: KeyCode) -> Option<char> {
     })
 }
 
+/// A file size for the level list: whole KB, or MB once it passes a thousand. Levels
+/// run from a couple of KB to a few hundred, so a byte count is noise and one decimal
+/// place of MB is all the precision that means anything.
+fn human_bytes(bytes: u64) -> String {
+    if bytes >= 1_000_000 {
+        format!("{:.1} MB", bytes as f64 / 1_000_000.0)
+    } else {
+        format!("{} KB", (bytes / 1000).max(1))
+    }
+}
+
+/// A level file's name for a status line: just the filename, not the whole path,
+/// which is long, absolute and the same for every level.
+fn short_path(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|f| f.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
 /// Map a function key F1–F8 to a level quick-slot number 1–8.
 fn slot_for_fkey(code: KeyCode) -> Option<u8> {
     Some(match code {
@@ -3335,6 +3961,11 @@ impl ApplicationHandler for App {
                     for rm in &meshes {
                         renderer.set_region_textured(rm.id, &rm.mesh);
                     }
+                    // Booting into a slot opens that level like any other load would, so
+                    // Ctrl+S saves straight back to it instead of reporting no file.
+                    self.current_level = Some(crate::world::persist::slot_path(slot));
+                    self.saved_revision = world.revision();
+                    self.level_name_draft = world.level_name().to_string();
                     log::info!("booted into level slot {slot}");
                 }
                 Err(e) => log::warn!("LOAD_SLOT {slot} failed: {e}"),
@@ -3444,7 +4075,7 @@ impl ApplicationHandler for App {
             world.attach_audio(audio);
         }
         log::info!(
-            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door(scroll=single/double)  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=block stairs[2 clicks, scroll=slide, Shift+scroll=width] F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  F1-F8=load level slot  Ctrl+F1-F8=save level slot  Y=proc-anim preview(Z=fire)  I=invincible  N=invisible  [/]=wave size  F10=hunter telemetry  J=hunters on/off  G=HUNT  M=shop menu (N64 Start)  [HUNT: click=fire  RMB=aim  B=use/open door  R=reload  Q=weapon  F=detonate mines]"
+            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door(scroll=single/double)  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=block stairs[2 clicks, scroll=slide, Shift+scroll=width] F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  Ctrl+S=save level  O=LEVELS panel(name/save as/load)  F1-F8=load slot  Ctrl+F1-F8=save slot  Y=proc-anim preview(Z=fire)  I=invincible  N=invisible  [/]=wave size  F10=hunter telemetry  J=hunters on/off  G=HUNT  M=shop menu (N64 Start)  [HUNT: click=fire  RMB=aim  B=use/open door  R=reload  Q=weapon  F=detonate mines]"
         );
 
         window.request_redraw();
@@ -4346,6 +4977,18 @@ impl App {
                 EditorAction::LoadSlot(slot)
             });
             return;
+        }
+        // Ctrl+S saves the open level back to its own file. Sits with the other
+        // save/load keys (works grabbed or not) rather than behind the panel, because
+        // the whole point of it is not having to open anything.
+        if code == KeyCode::KeyS {
+            let ctrl = self.input.key_down(KeyCode::ControlLeft)
+                || self.input.key_down(KeyCode::ControlRight);
+            let build = self.world.as_ref().map(|w| w.is_build()).unwrap_or(false);
+            if ctrl && build {
+                self.apply(EditorAction::SaveCurrentLevel);
+                return;
+            }
         }
         // Undo / redo (BUILD only — geometry is frozen in HUNT). Ctrl+Z steps back
         // through authored edits, Ctrl+R re-applies. Both re-bake + re-upload every

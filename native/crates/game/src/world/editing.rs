@@ -55,6 +55,7 @@ impl World {
                 self.theme_hotkeys.remove(&key);
             }
         }
+        self.bump_revision();
     }
 
     /// As [`set_scheme_at_crosshair`](Self::set_scheme_at_crosshair), but aimed by an

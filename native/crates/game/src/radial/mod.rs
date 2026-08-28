@@ -103,6 +103,9 @@ pub enum EditorAction {
     /// Load / save a numbered quick-slot.
     LoadSlot(u8),
     SaveSlot(u8),
+    /// Save the open level back to its own file (`Ctrl+S`). A level that has never been
+    /// written has no file to save to, and the panel says so instead of guessing a name.
+    SaveCurrentLevel,
     ToggleGrid,
     ToggleLighting,
     ToggleNavOverlay,
@@ -227,6 +230,10 @@ pub struct RadialCtx {
     pub schemes: Vec<(char, String, usize)>,
     /// Whether each quick-slot 1..8 has a file on disk.
     pub slots: [bool; 8],
+    /// The open level's display name, or `None` if it has never been saved to a file.
+    pub level: Option<String>,
+    /// The open level has edits that aren't on disk (drawn as a trailing `*`).
+    pub level_dirty: bool,
 }
 
 // ─── The tables ──────────────────────────────────────────────────────────────
@@ -314,8 +321,28 @@ pub fn menu(id: MenuId, ctx: &RadialCtx) -> Vec<Slot> {
             ));
             v
         }
-        MenuId::Level => (1u8..=8)
-            .map(|n| {
+        MenuId::Level => {
+            // The named level comes first: it is the primary way to save now, and the
+            // eight files below it are just the ones the F-keys still reach.
+            let mut v = vec![
+                Slot::act(
+                    match (&ctx.level, ctx.level_dirty) {
+                        (Some(n), true) => format!("Save \"{n}\" *"),
+                        (Some(n), false) => format!("Save \"{n}\""),
+                        (None, _) => "Save (unnamed)".to_string(),
+                    },
+                    "Ctrl+S",
+                    EditorAction::SaveCurrentLevel,
+                )
+                .enabled(ctx.level.is_some())
+                .on(ctx.level_dirty),
+                Slot::act(
+                    "All levels\u{2026}",
+                    "O",
+                    EditorAction::OpenPanel(PanelTab::Levels),
+                ),
+            ];
+            v.extend((1u8..=8).map(|n| {
                 let used = ctx.slots[(n - 1) as usize];
                 let label = if ctx.ctrl {
                     format!("SAVE \u{2192} {n}")
@@ -334,8 +361,9 @@ pub fn menu(id: MenuId, ctx: &RadialCtx) -> Vec<Slot> {
                     // one is the normal case.
                     .enabled(ctx.ctrl || used)
                     .on(used)
-            })
-            .collect(),
+            }));
+            v
+        }
         MenuId::View => vec![
             Slot::act(
                 if ctx.grid { "View: grid" } else { "View: textured" },

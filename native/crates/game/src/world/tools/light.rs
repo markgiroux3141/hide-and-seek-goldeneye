@@ -193,6 +193,7 @@ impl World {
     /// Set the level-wide ambient fill (panel edit).
     pub fn set_ambient(&mut self, ambient: AmbientSettings) {
         self.ambient = ambient;
+        self.bump_revision();
     }
 
     /// The selected entity's light params `(colour_rgb, intensity, range)`, if the

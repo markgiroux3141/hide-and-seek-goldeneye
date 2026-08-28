@@ -1977,6 +1977,16 @@ pub struct World {
     /// `Brush::scheme`), and consulted ahead of the manifest's own `key` — an unbound
     /// digit falls through to whatever `themes.json` says.
     theme_hotkeys: std::collections::BTreeMap<char, String>,
+    /// This level's display name, as the LEVELS panel shows it and the level file
+    /// stores it. Empty until the level is named or loaded from a named file.
+    level_name: String,
+    /// Counts every change to the authored level state. Compared against the revision
+    /// at the last save to answer "are there unsaved edits?" — a counter rather than a
+    /// `dirty` flag because undo back to the saved state is genuinely still a change
+    /// (the redo stack differs), and because a counter cannot be left stale by a path
+    /// that forgets to clear it. Bumped at the two chokepoints every authored edit
+    /// passes through: `commit_snapshot` and `apply_snapshot`.
+    revision: u64,
     /// The player capsule; `Some` only in HUNT mode.
     character: Option<CharacterController>,
     /// Baked nav grid; `Some` only in HUNT mode.
@@ -2881,6 +2891,8 @@ impl World {
             ecs: crate::ecs::Ecs::new(),
             ambient: crate::ecs::AmbientSettings::default(),
             theme_hotkeys: std::collections::BTreeMap::new(),
+            level_name: String::new(),
+            revision: 0,
             character: None,
             nav: None,
             nav_issues: None,

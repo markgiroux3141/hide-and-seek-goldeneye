@@ -72,6 +72,7 @@ impl World {
     /// (oldest dropped) and clearing the redo stack — a new edit forks history,
     /// so anything previously undone can no longer be redone.
     pub(crate) fn commit_snapshot(&mut self, snap: LevelSnapshot) {
+        self.bump_revision();
         self.undo_stack.push(snap);
         if self.undo_stack.len() > MAX_HISTORY {
             self.undo_stack.remove(0);
@@ -159,6 +160,7 @@ impl World {
     ///
     /// [`load_level`]: World::load_level
     fn apply_snapshot(&mut self, snap: LevelSnapshot) -> Vec<RegionMesh> {
+        self.bump_revision();
         // Region ids present before the restore, so any that vanish get cleared.
         let old_ids: Vec<u32> = self.regions.iter().map(|r| r.id).collect();
 

@@ -251,18 +251,73 @@ fn motion_is_ignored_once_the_button_is_up() {
     assert_eq!(r.ptr, (0.0, 0.0));
 }
 
+/// How many entries sit ahead of the eight quick slots on the LEVEL ring: the named
+/// level's Save, and the way into the LEVELS panel.
+const LEVEL_RING_HEAD: usize = 2;
+
 #[test]
 fn ctrl_turns_the_level_ring_from_load_into_save() {
     let mut c = ctx();
     let load = menu(MenuId::Level, &c);
-    assert_eq!(load[0].target, Target::Act(EditorAction::LoadSlot(1)));
+    let slot = |v: &[Slot], n: usize| v[LEVEL_RING_HEAD + n - 1].target;
+    assert_eq!(slot(&load, 1), Target::Act(EditorAction::LoadSlot(1)));
     // Slot 2 is empty, so there is nothing to load.
-    assert!(!load[1].enabled);
+    assert!(!load[LEVEL_RING_HEAD + 1].enabled);
     c.ctrl = true;
     let save = menu(MenuId::Level, &c);
-    assert_eq!(save[0].target, Target::Act(EditorAction::SaveSlot(1)));
-    assert!(save[1].enabled, "an empty slot is a fine place to save");
-    assert!(save[1].label.contains("SAVE"));
+    assert_eq!(slot(&save, 1), Target::Act(EditorAction::SaveSlot(1)));
+    assert!(
+        save[LEVEL_RING_HEAD + 1].enabled,
+        "an empty slot is a fine place to save"
+    );
+    assert!(save[LEVEL_RING_HEAD + 1].label.contains("SAVE"));
+}
+
+/// The named level leads the LEVEL ring, and its Save is dead until the level has a
+/// file to save to — the ring must not offer a save that can only fail.
+#[test]
+fn the_level_ring_leads_with_the_named_level() {
+    let mut c = ctx();
+    let unnamed = menu(MenuId::Level, &c);
+    assert_eq!(
+        unnamed[0].target,
+        Target::Act(EditorAction::SaveCurrentLevel)
+    );
+    assert!(!unnamed[0].enabled, "nothing to save back to yet");
+    assert!(unnamed[0].label.contains("unnamed"));
+    assert_eq!(
+        unnamed[1].target,
+        Target::Act(EditorAction::OpenPanel(PanelTab::Levels))
+    );
+
+    c.level = Some("Bunker Base".into());
+    c.level_dirty = true;
+    let named = menu(MenuId::Level, &c);
+    assert!(named[0].enabled);
+    assert!(named[0].label.contains("Bunker Base"));
+    assert!(named[0].label.ends_with('*'), "unsaved edits are marked");
+    assert!(named[0].on);
+
+    c.level_dirty = false;
+    let saved = menu(MenuId::Level, &c);
+    assert!(!saved[0].label.ends_with('*'));
+    assert!(!saved[0].on);
+}
+
+/// Every panel tab is reachable from the Objects ring, so a new tab can't be added
+/// without the radial learning about it.
+#[test]
+fn the_objects_ring_covers_every_panel_tab() {
+    let slots = menu(MenuId::Objects, &ctx());
+    assert_eq!(slots.len(), PanelTab::ALL.len());
+    for tab in PanelTab::ALL {
+        assert!(
+            slots
+                .iter()
+                .any(|s| s.target == Target::Act(EditorAction::OpenPanel(tab))),
+            "{tab:?} is not on the Objects ring"
+        );
+    }
 }
 
 #[test]
