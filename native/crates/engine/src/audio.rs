@@ -39,7 +39,8 @@ pub struct AudioManager {
     /// clone per play — the sample data is `Arc`-shared inside `StaticSoundData`.
     sounds: HashMap<String, StaticSoundData>,
     /// Handle to the looping background track, kept alive so it keeps playing and
-    /// can be stopped/replaced later (mode/level changes — not used this pass).
+    /// can be stopped when the mode changes (music is HUNT-only — see
+    /// `World::sync_mode_music`). `None` while nothing is playing.
     music: Option<StaticSoundHandle>,
     /// `native/assets/audio/`, resolved once from the engine crate's manifest dir.
     root: PathBuf,
@@ -109,21 +110,27 @@ impl AudioManager {
         }
     }
 
-    /// Start the background music track, replacing any current one. `looping` loops
-    /// the whole track end-to-end (JS `new Audio(path); audio.loop = true`). The
-    /// handle is retained so the track keeps playing and can be stopped later.
+    /// Start the background music track from the top, replacing any current one.
+    /// `looping` loops the whole track end-to-end (JS `new Audio(path); audio.loop =
+    /// true`). The handle is retained so the track keeps playing and can be stopped
+    /// later.
+    ///
+    /// Decodes through the same cache as the one-shots rather than reading the file
+    /// each call. The track is a 10 MB MP3 and this is now called on every BUILD→HUNT
+    /// switch: decoding it there would hitch the exact frame that bakes the nav grid
+    /// and floods the wave in. Preload it with [`Self::load`] at startup and every
+    /// later start is a cheap `Arc` clone of the samples.
     pub fn play_music(&mut self, name: &str, looping: bool) {
         self.stop_music();
-        let mut data = match StaticSoundData::from_file(self.path(name)) {
-            Ok(d) => d,
-            Err(e) => {
-                log::warn!("audio: music '{name}' failed to load: {e}");
-                return;
-            }
+        self.load(name);
+        let Some(data) = self.sounds.get(name) else {
+            return; // decode failed / missing — silent, already warned by `load`.
         };
-        if looping {
-            data = data.loop_region(..);
-        }
+        let data = if looping {
+            data.clone().loop_region(..)
+        } else {
+            data.clone()
+        };
         match self.manager.play(data) {
             Ok(handle) => {
                 self.music = Some(handle);
@@ -133,8 +140,8 @@ impl AudioManager {
         }
     }
 
-    /// Stop the background music (immediately). No-op if none is playing. Retained
-    /// for the future mode/level-change paths; unused while music plays throughout.
+    /// Stop the background music (immediately). No-op if none is playing. The BUILD
+    /// half of the mode switch: the editor is silent, the hunt is not.
     pub fn stop_music(&mut self) {
         if let Some(handle) = self.music.as_mut() {
             handle.stop(Tween::default());

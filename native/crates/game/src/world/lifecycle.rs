@@ -825,6 +825,10 @@ impl World {
                 log::info!("→ BUILD");
             }
         }
+        // After the match, so it reads the mode we just landed in. The early return
+        // in the BUILD arm (no floor under the camera) skips it on purpose: nothing
+        // changed, so neither should the music.
+        self.sync_mode_music();
     }
 
     /// Seat the player for a hunt: at a pad drawn from the shared pool, or — when the

@@ -8,8 +8,11 @@ use super::*;
 use crate::combat::attack_anim;
 
 /// The looping background-music track (asset-relative under `native/assets/audio/`).
-/// The JS default (`Game.ts`: `/music/102 Facility.mp3`). Plays in both BUILD and
-/// HUNT, started once when the audio subsystem attaches and never stopped.
+/// The JS default (`Game.ts`: `/music/102 Facility.mp3`). **HUNT only** — it is
+/// decoded when the audio subsystem attaches and started/stopped by
+/// [`World::sync_mode_music`] on each mode switch. The editor works in silence: one
+/// looping track under an authoring session you dip in and out of for an hour wears
+/// thin, and its absence is a useful cue for which mode you are in.
 const BG_MUSIC: &str = "music/102 Facility.mp3";
 
 /// Total weapon-switch dip duration (s): the outgoing gun lowers over the first
@@ -242,8 +245,28 @@ impl World {
         audio.load(MINE_PLACE_SOUND);
         audio.load(MINE_TIMER_SOUND);
         audio.load(DETONATOR_SOUND);
-        audio.play_music(BG_MUSIC, true);
+        // Decode the music now — a 10 MB MP3 — so the BUILD→HUNT switch that starts
+        // it pays nothing. Loading is not playing: `sync_mode_music` decides that.
+        audio.load(BG_MUSIC);
         self.audio = Some(audio);
+        self.sync_mode_music();
+    }
+
+    /// Start or stop the background music to match the current mode: HUNT has it,
+    /// BUILD is silent. Called after every mode switch and once when audio attaches,
+    /// so the two can never disagree.
+    ///
+    /// No-op without an audio subsystem, which is every headless caller.
+    pub(crate) fn sync_mode_music(&mut self) {
+        let hunting = self.mode == Mode::Hunt;
+        let Some(audio) = self.audio.as_mut() else {
+            return;
+        };
+        if hunting {
+            audio.play_music(BG_MUSIC, true);
+        } else {
+            audio.stop_music();
+        }
     }
 
     /// The crosshair's screen-space offset this frame, in aspect-corrected NDC
