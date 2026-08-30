@@ -5,6 +5,7 @@
 use super::*;
 use super::editing::find_room_brushes;
 use engine::render::textures::simple_scheme;
+use engine::geometry::csg_runtime::FaceTex;
 
 /// Put weapon `name` in the player's hands, owned and loaded.
 ///
@@ -4918,4 +4919,223 @@ mod aim_overlay {
         }
         assert!(checked >= 4, "only {checked} hunters checked — the roster did not spawn");
     }
+}
+
+// ─── Face painting (the PAINT tab) ───────────────────────────────────────────
+
+/// Aim the camera at the −Z wall (where it already points on spawn) and hand back
+/// the ray the PAINT tab would use.
+fn paint_ray(world: &World) -> (Vec3, Vec3) {
+    (world.camera.pos, world.camera.forward())
+}
+
+#[test]
+fn the_probe_names_the_face_the_classifier_actually_used() {
+    let mut world = World::new();
+    world.initial_meshes();
+    let (o, d) = paint_ray(&world);
+    let probe = world.probe_surface(o, d).expect("the crosshair is on a wall");
+    assert!(probe.blocked.is_none(), "a plain room wall is paintable: {:?}", probe.blocked);
+    let (brush_id, axis, side) = probe.target().expect("a paint target");
+    assert_eq!(axis, Axis::Z, "the spawn camera looks down −Z at a Z-facing wall");
+    assert!(
+        probe.candidates.iter().any(|c| c.chosen && c.brush_id == brush_id),
+        "the reported target is the candidate that won"
+    );
+    // Painting exactly what the probe named must reach the render.
+    let tex = FaceTex { scheme: simple_scheme(), zone: None };
+    let rm = world
+        .set_face_tex(brush_id, axis, side, Some(tex))
+        .expect("painting a face re-bakes its region");
+    assert!(
+        rm.mesh.groups.iter().any(|g| g.scheme as usize == simple_scheme()),
+        "the painted theme reaches the region's draw groups"
+    );
+}
+
+#[test]
+fn painting_the_same_face_twice_is_a_no_op() {
+    // The panel paints on click-and-drag, so a re-paint of an unchanged face must
+    // not churn the undo stack or invalidate the CSG memo cache.
+    let mut world = World::new();
+    world.initial_meshes();
+    let (o, d) = paint_ray(&world);
+    let tex = FaceTex { scheme: simple_scheme(), zone: Some(1) };
+    assert!(world.paint_face_along(o, d, Some(tex)).is_some(), "first paint applies");
+    assert!(
+        world.paint_face_along(o, d, Some(tex)).is_none(),
+        "repainting the identical override changes nothing"
+    );
+}
+
+#[test]
+fn clearing_a_face_restores_the_rooms_own_theme() {
+    let mut world = World::new();
+    world.initial_meshes();
+    let (o, d) = paint_ray(&world);
+    let probe = world.probe_surface(o, d).expect("a wall");
+    let (brush_id, axis, side) = probe.target().expect("a target");
+    let before = probe.scheme;
+
+    world
+        .set_face_tex(brush_id, axis, side, Some(FaceTex { scheme: simple_scheme(), zone: None }))
+        .expect("paint");
+    assert_eq!(world.face_tex_count(), 1, "one override in the level");
+    let painted = world.probe_surface(o, d).expect("a wall");
+    assert!(painted.overridden, "the probe reports the face as overridden");
+    assert_eq!(painted.scheme, simple_scheme(), "and reports the painted theme");
+
+    world.set_face_tex(brush_id, axis, side, None).expect("clear");
+    assert_eq!(world.face_tex_count(), 0, "the override is gone");
+    assert_eq!(
+        world.probe_surface(o, d).expect("a wall").scheme,
+        before,
+        "the face is back to its room's theme"
+    );
+}
+
+#[test]
+fn clear_all_sweeps_every_painted_face() {
+    let mut world = World::new();
+    world.initial_meshes();
+    let (o, d) = paint_ray(&world);
+    let probe = world.probe_surface(o, d).expect("a wall");
+    let (brush_id, axis, _) = probe.target().expect("a target");
+    for side in [Side::Min, Side::Max] {
+        world.set_face_tex(brush_id, axis, side, Some(FaceTex { scheme: simple_scheme(), zone: None }));
+    }
+    assert_eq!(world.face_tex_count(), 2);
+    assert!(!world.clear_all_face_tex().is_empty(), "clearing re-bakes the region");
+    assert_eq!(world.face_tex_count(), 0);
+    assert!(world.clear_all_face_tex().is_empty(), "a second clear has nothing to do");
+}
+
+#[test]
+fn a_painted_face_survives_undo_redo_and_a_save_load_round_trip() {
+    // The whole reason the override rides on `Brush` instead of on the region: it
+    // has to survive reclustering, the undo snapshot, and the level file with no
+    // plumbing of its own. This is that claim, tested.
+    let dir = std::env::temp_dir().join(format!("bh-paint-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("painted.json");
+
+    let mut world = World::new();
+    world.initial_meshes();
+    let (o, d) = paint_ray(&world);
+    let tex = FaceTex { scheme: simple_scheme(), zone: Some(3) };
+    world.with_undo(|w| w.paint_face_along(o, d, Some(tex))).expect("paint");
+    let target = world.probe_surface(o, d).expect("a wall").target().expect("a target");
+
+    world.undo();
+    assert_eq!(world.face_tex_count(), 0, "undo removes the paint");
+    world.redo();
+    assert_eq!(world.face_tex_count(), 1, "redo puts it back");
+    assert_eq!(world.face_tex(target.0, target.1, target.2), Some(tex));
+
+    world.save_level(&path).expect("save");
+    let mut reloaded = World::new();
+    reloaded.load_level(&path).expect("load");
+    assert_eq!(reloaded.face_tex_count(), 1, "the override is in the file");
+    assert_eq!(
+        reloaded.face_tex(target.0, target.1, target.2),
+        Some(tex),
+        "and comes back on the same face"
+    );
+
+    // An unpainted level must not grow the field at all.
+    let plain_path = dir.join("plain.json");
+    World::new().save_level(&plain_path).expect("save");
+    let text = std::fs::read_to_string(&plain_path).expect("read");
+    assert!(
+        !text.contains("face_tex"),
+        "brushes with no overrides stay out of the file"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Bake cost + triangle count for the real levels on disk, printed rather than
+/// asserted. `cargo test --release -p game bake_cost -- --nocapture --ignored`.
+///
+/// Ignored because it is a measurement, not a check: the numbers depend on which
+/// levels happen to be in `native/levels/`, and a machine-speed threshold is the
+/// kind of assertion that fails for reasons that have nothing to do with the code.
+#[test]
+#[ignore]
+fn bake_cost_of_the_levels_on_disk() {
+    let dir = crate::world::persist::levels_dir();
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "json"))
+        .collect();
+    paths.sort();
+    for path in paths {
+        let mut world = World::new();
+        let Ok(meshes) = world.load_level(&path) else { continue };
+        let tris: usize = meshes.iter().map(|m| m.mesh.indices.len() / 3).sum();
+        let brushes: usize = world.regions.iter().map(|r| r.brushes.len()).sum();
+        // Re-bake from cold (the load already filled the memo cache, so clear it).
+        world.csg_cache = crate::world::regions::CsgCache::new();
+        let t0 = std::time::Instant::now();
+        world.recluster_all();
+        let ms = t0.elapsed().as_secs_f32() * 1000.0;
+        println!(
+            "{:<20} {brushes:>4} brushes  {tris:>7} tris  {ms:>8.2} ms",
+            path.file_name().unwrap().to_string_lossy()
+        );
+    }
+}
+
+#[test]
+fn a_carved_vent_does_not_halo_its_theme_onto_the_surrounding_wall() {
+    // End-to-end version of the classifier's own halo guard, driven through the real
+    // vent tool — the shape the defect actually reached the player in: a band of duct
+    // texture ringing the mouth, on the wall and across the floor.
+    //
+    // A duct carries its own theme and its mouth lies in the *same plane* as the wall
+    // it was bored through, so on that plane the duct ties the room on distance and
+    // wins on size. It must still only own the bore.
+    let mut world = World::new();
+    world.initial_meshes();
+    world.vent_tool_key(); // arms only — it carves nothing, so it returns no mesh
+    assert!(world.is_vent_tool(), "the vent tool is armed");
+    let rm = world.vent_click().expect("the crosshair is on a wall, so a duct carves");
+
+    let duct_scheme = world
+        .regions
+        .iter()
+        .flat_map(|r| r.brushes.iter())
+        .find(|b| b.vent)
+        .map(|b| b.scheme)
+        .expect("the carve produced a vent brush");
+
+    // Every triangle wearing the duct's theme must lie inside the duct's own bounds.
+    // A halo shows up as duct-themed geometry outside them.
+    let bore = world
+        .regions
+        .iter()
+        .flat_map(|r| r.brushes.iter())
+        .find(|b| b.vent)
+        .copied()
+        .expect("the vent brush");
+    let mut strays = 0;
+    for g in rm.mesh.groups.iter().filter(|g| g.scheme as usize == duct_scheme) {
+        for i in g.start..g.start + g.count {
+            let p = rm.mesh.vertices[rm.mesh.indices[i as usize] as usize].pos;
+            let wt = [p[0] / WORLD_SCALE, p[1] / WORLD_SCALE, p[2] / WORLD_SCALE];
+            const EPS: f32 = 1e-3;
+            let inside = wt[0] >= bore.x - EPS
+                && wt[0] <= bore.x + bore.w + EPS
+                && wt[1] >= bore.y - EPS
+                && wt[1] <= bore.y + bore.h + EPS
+                && wt[2] >= bore.z - EPS
+                && wt[2] <= bore.z + bore.d + EPS;
+            if !inside {
+                strays += 1;
+            }
+        }
+    }
+    assert_eq!(strays, 0, "{strays} duct-themed vertices sit outside the bore");
 }
