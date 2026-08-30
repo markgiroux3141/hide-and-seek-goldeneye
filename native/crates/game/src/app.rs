@@ -24,6 +24,7 @@ use engine::render::renderer::{EguiFrame, Renderer};
 use crate::gamepad::N64Pad;
 use crate::radial::{EditorAction, LockRequest, Radial, RadialCtx, SelectionOp, Tool};
 use crate::world::{World, PUSH_PULL_STEP};
+use engine::geometry::csg_runtime::{Axis, FaceTex, Side};
 
 /// A frame this slow (ms) is worth a line of its own. Two and a half times the 60 Hz
 /// budget: past this the drop is visible, and below it the once-per-second average is
@@ -62,18 +63,23 @@ pub(crate) enum PanelTab {
     Lighting,
     Spawns,
     Textures,
+    /// One face at a time: override the texture on the surface under the cursor,
+    /// and show why the classifier gave it the texture it has. See
+    /// [`crate::world::FaceProbe`].
+    Paint,
     Nav,
     Levels,
 }
 
 impl PanelTab {
     /// Every tab, in display order (also the cycle order).
-    pub(crate) const ALL: [PanelTab; 7] = [
+    pub(crate) const ALL: [PanelTab; 8] = [
         PanelTab::Objects,
         PanelTab::Play,
         PanelTab::Lighting,
         PanelTab::Spawns,
         PanelTab::Textures,
+        PanelTab::Paint,
         PanelTab::Nav,
         PanelTab::Levels,
     ];
@@ -86,6 +92,7 @@ impl PanelTab {
             PanelTab::Lighting => "LIGHTING",
             PanelTab::Spawns => "SPAWNS",
             PanelTab::Textures => "TEXTURES",
+            PanelTab::Paint => "PAINT",
             PanelTab::Nav => "NAV",
             PanelTab::Levels => "LEVELS",
         }
@@ -102,6 +109,20 @@ impl PanelTab {
         let i = Self::ALL.iter().position(|&t| t == self).unwrap_or(0);
         Self::ALL[(i + Self::ALL.len() - 1) % Self::ALL.len()]
     }
+}
+
+/// A zone slot's display name — the same seven the theme editor exposes, plus the
+/// two the classifier can emit that no one authors directly.
+///
+/// The PAINT tab has to be able to *name* whatever the classifier came back with,
+/// including a slot the editor's own list leaves out, so this is a total function
+/// over `0..8` rather than a lookup that can miss.
+fn zone_name(zone: u8) -> &'static str {
+    crate::theme_editor::EDITABLE_ZONES
+        .iter()
+        .find(|(z, _)| *z == zone)
+        .map(|(_, label)| *label)
+        .unwrap_or("zone 4 (unused)")
 }
 
 // ─── Shop palette (GoldenEye gold-on-black spy-terminal look) ──────────────────
@@ -232,6 +253,18 @@ struct App {
     // ── TEXTURES tab: browse ~390 extracted themes, apply, keep/reject ──────
     /// Theme index armed for application, if any. Clicking geometry applies it.
     theme_armed: Option<usize>,
+    /// PAINT tab: the theme a painted face takes. Independent of
+    /// [`Self::theme_armed`] (the room-wide retexture) — arming one disarms the
+    /// other, since a click can only mean one thing.
+    paint_scheme: usize,
+    /// PAINT tab: the zone slot a painted face is forced into, or `None` to keep
+    /// whatever the classifier derived (a wall stays a wall, a floor a floor).
+    paint_zone: Option<u8>,
+    /// PAINT tab: whether a left-click paints the face under the cursor.
+    paint_armed: bool,
+    /// PAINT tab: what the classifier says about the surface under the cursor,
+    /// refreshed each frame the tab is open. Both the readout and the paint target.
+    paint_probe: Option<crate::world::FaceProbe>,
     /// Case-insensitive substring filter over theme name/label/group.
     theme_filter: String,
     /// Which verdicts the list shows.
@@ -328,6 +361,10 @@ impl App {
             build_real_lighting: true,
             panel_tab: PanelTab::Objects,
             theme_armed: None,
+            paint_scheme: engine::render::textures::default_scheme(),
+            paint_zone: None,
+            paint_armed: false,
+            paint_probe: None,
             theme_filter: String::new(),
             theme_review_filter: crate::theme_review::ReviewFilter::All,
             theme_review: crate::theme_review::ThemeReview::load(),
@@ -780,6 +817,10 @@ impl App {
             // A theme armed for click-application only makes sense with the panel
             // open and the cursor free; closing must not leave clicks retexturing.
             self.theme_armed = None;
+            self.paint_armed = false;
+            self.paint_probe = None;
+            // Hand the highlight back to face-select — the PAINT tab borrowed it.
+            self.refresh_highlight();
         }
     }
 
@@ -946,6 +987,11 @@ impl App {
             EditorAction::Selection(op) => self.selection_op(op),
             EditorAction::OpenPanel(tab) => {
                 self.panel_tab = tab;
+                if tab != PanelTab::Paint {
+                    self.paint_armed = false;
+                    self.paint_probe = None;
+                    self.refresh_highlight();
+                }
                 if !self.props_open {
                     self.toggle_props();
                 }
@@ -1179,18 +1225,75 @@ impl App {
     /// afterwards, because the egui closure can't also hold a `&mut World`. State the
     /// UI reads (credits, ownership, ammo, prices) is snapshotted up front for the
     /// same reason.
+    /// Paint (or with `None`, clear) the face the PAINT tab's probe is pointing at.
+    ///
+    /// Routes through the probe rather than re-picking, so the face that changes is
+    /// exactly the one the readout named — the tab would be worse than useless if
+    /// the thing it explained and the thing it painted could differ.
+    fn paint_probe_face(&mut self, tex: Option<FaceTex>) {
+        let Some((brush_id, axis, side)) = self.paint_probe.as_ref().and_then(|p| p.target())
+        else {
+            return;
+        };
+        let rm = self
+            .world
+            .as_mut()
+            .and_then(|w| w.with_undo(|w| w.set_face_tex(brush_id, axis, side, tex)));
+        if let Some(rm) = rm {
+            self.upload(&rm);
+        }
+    }
+
     fn build_egui_frame(&mut self) -> Option<EguiFrame> {
+        // ── PAINT tab prep: re-probe the surface under the cursor.
+        //
+        // Every frame the tab is open, and only then. It costs one raycast plus a
+        // classify of the single triangle that came back — the panel is a live
+        // readout, so a stale answer is worse than no answer, and there is nothing
+        // to invalidate it against short of doing the work.
+        let paint_tab_open = self.props_open && self.panel_tab == PanelTab::Paint;
+        if !paint_tab_open {
+            self.paint_probe = None;
+        } else if !self.egui_ctx.is_pointer_over_area() {
+            // Frozen while the pointer is over the panel — last frame's answer, which
+            // egui's context is what knows. Without this the readout would change out
+            // from under you the moment you reached for a button, and "Paint this"
+            // would act on whatever the panel happens to be sitting in front of.
+            self.paint_probe = self.mouse_world_ray().and_then(|(o, d)| {
+                self.world.as_mut().and_then(|w| w.probe_surface(o, d))
+            });
+        }
+        // Outline the face a click would repaint. While the tab is open this owns the
+        // highlight slot outright — the face-select highlight is for push/pull, and
+        // showing both would say two different things about what the next click does.
+        if paint_tab_open {
+            let quad = self
+                .paint_probe
+                .as_ref()
+                .and_then(|p| p.target())
+                .and_then(|(id, axis, side)| {
+                    self.world.as_ref()?.face_highlight_mesh(id, axis, side)
+                });
+            if let Some(r) = self.renderer.as_mut() {
+                r.set_highlight(quad.as_ref());
+            }
+        }
+
+        // Its theme label comes from the same `&mut self` window as the swatches.
+        let paint_scheme_label = self.theme_label(self.paint_scheme);
+
         // ── TEXTURES tab prep, which MUST come first.
         //
         // Everything below this holds a shared borrow of `self`, but building a
         // swatch needs `&mut self` (it fills a cache and touches the egui context).
         // So the theme snapshot happens up front, while `self` is still free.
-        let theme_visible: Vec<usize> =
-            if self.props_open && self.panel_tab == PanelTab::Textures {
-                self.visible_themes()
-            } else {
-                Vec::new()
-            };
+        let theme_visible: Vec<usize> = if self.props_open
+            && matches!(self.panel_tab, PanelTab::Textures | PanelTab::Paint)
+        {
+            self.visible_themes()
+        } else {
+            Vec::new()
+        };
         let theme_swatches = self.collect_theme_swatches(&theme_visible);
         let theme_rows: Vec<ThemeRow> = theme_visible
             .iter()
@@ -1455,6 +1558,19 @@ impl App {
         let play_in_hunt = self.world.as_ref().is_some_and(|w| !w.is_build());
         let mut play_changed = false;
         let mut play_start = false;
+
+        // ── PAINT tab snapshot + deferred actions.
+        let paint_probe_ui = self.paint_probe.clone();
+        let paint_scheme_ui = self.paint_scheme;
+        let paint_zone_ui = self.paint_zone;
+        let paint_armed_ui = self.paint_armed;
+        let paint_count = self.world.as_ref().map(|w| w.face_tex_count()).unwrap_or(0);
+        let mut paint_set_scheme: Option<usize> = None;
+        let mut paint_set_zone: Option<Option<u8>> = None;
+        let mut paint_toggle_armed = false;
+        let mut paint_apply_now = false;
+        let mut paint_clear_face = false;
+        let mut paint_clear_all = false;
 
         let mut nav_overlay_ui = self.world.as_ref().is_some_and(|w| w.nav_overlay_on());
         let mut nav_calculate = false;
@@ -2455,6 +2571,306 @@ impl App {
                                     }
                                 });
                             }
+                            PanelTab::Paint => {
+                                ui.label(
+                                    egui::RichText::new("ONE FACE AT A TIME")
+                                        .small()
+                                        .strong()
+                                        .color(SHOP_GOLD_DIM),
+                                );
+                                ui.label(
+                                    egui::RichText::new(
+                                        "point at a surface — the readout is what the \
+                                         renderer decided, not a second guess",
+                                    )
+                                    .small()
+                                    .color(SHOP_DIM),
+                                );
+                                ui.add_space(4.0);
+
+                                // ── What is under the cursor, and why.
+                                match paint_probe_ui.as_ref() {
+                                    None => {
+                                        ui.label(
+                                            egui::RichText::new("— nothing under the cursor —")
+                                                .small()
+                                                .color(SHOP_DIM),
+                                        );
+                                    }
+                                    Some(p) => {
+                                        ui.label(
+                                            egui::RichText::new(p.face_label())
+                                                .strong()
+                                                .color(SHOP_GOLD),
+                                        );
+                                        ui.label(
+                                            egui::RichText::new(format!(
+                                                "region {} · {} · {}",
+                                                p.region_id,
+                                                zone_name(p.zone),
+                                                engine::render::textures::scheme_name(p.scheme),
+                                            ))
+                                            .small()
+                                            .color(SHOP_TEXT),
+                                        );
+                                        if p.overridden {
+                                            ui.label(
+                                                egui::RichText::new("✎ painted")
+                                                    .small()
+                                                    .color(SHOP_GOLD),
+                                            );
+                                        }
+                                        if let Some(why) = p.blocked {
+                                            ui.label(
+                                                egui::RichText::new(format!("✕ {why}"))
+                                                    .small()
+                                                    .color(SHOP_DIM),
+                                            );
+                                        }
+                                        // The tell for the defect this tab was built
+                                        // for: one fold triangle wearing two themes.
+                                        if p.distinct_schemes > 1 {
+                                            ui.label(
+                                                egui::RichText::new(format!(
+                                                    "⚠ this triangle spans {} themes",
+                                                    p.distinct_schemes
+                                                ))
+                                                .small()
+                                                .strong()
+                                                .color(egui::Color32::from_rgb(226, 132, 60)),
+                                            );
+                                        }
+                                        egui::CollapsingHeader::new(format!(
+                                            "WHY ({} candidate{}, {} fragment{})",
+                                            p.candidates.len(),
+                                            if p.candidates.len() == 1 { "" } else { "s" },
+                                            p.fragments,
+                                            if p.fragments == 1 { "" } else { "s" },
+                                        ))
+                                        .id_salt("paint-why")
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                egui::RichText::new(
+                                                    "a brush containing the surface beats \
+                                                     one merely near it; then nearest, \
+                                                     then smaller",
+                                                )
+                                                .small()
+                                                .color(SHOP_DIM),
+                                            );
+                                            for c in &p.candidates {
+                                                let mark = if c.chosen { "✓" } else { " " };
+                                                // Not a disqualification: a face that
+                                                // does not contain the surface can still
+                                                // win on the slop tier, if nothing does.
+                                                let miss =
+                                                    if c.contains { "" } else { "  (near)" };
+                                                let ovr = if c.overridden { " ✎" } else { "" };
+                                                let sign =
+                                                    if c.side == Side::Max { '+' } else { '-' };
+                                                let axis = match c.axis {
+                                                    Axis::X => 'X',
+                                                    Axis::Y => 'Y',
+                                                    Axis::Z => 'Z',
+                                                };
+                                                ui.label(
+                                                    egui::RichText::new(format!(
+                                                        "{mark} brush {} {sign}{axis}  \
+                                                         d {:.3}  vol {:.0}  {}{ovr}{miss}",
+                                                        c.brush_id,
+                                                        c.dist,
+                                                        c.volume,
+                                                        engine::render::textures::scheme_name(
+                                                            c.scheme
+                                                        ),
+                                                    ))
+                                                    .small()
+                                                    .monospace()
+                                                    .color(if c.chosen {
+                                                        SHOP_GOLD
+                                                    } else {
+                                                        SHOP_DIM
+                                                    }),
+                                                );
+                                            }
+                                        });
+                                    }
+                                }
+                                ui.separator();
+
+                                // ── What a click paints with.
+                                ui.label(
+                                    egui::RichText::new("PAINT WITH")
+                                        .small()
+                                        .strong()
+                                        .color(SHOP_GOLD_DIM),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!("theme: {paint_scheme_label}"))
+                                        .small()
+                                        .color(SHOP_TEXT),
+                                );
+                                egui::ComboBox::from_label("slot")
+                                    .selected_text(match paint_zone_ui {
+                                        None => "(keep)".to_string(),
+                                        Some(z) => zone_name(z).to_string(),
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        if ui
+                                            .selectable_label(paint_zone_ui.is_none(), "(keep)")
+                                            .on_hover_text(
+                                                "a wall stays a wall, a floor a floor — only \
+                                                 the theme changes",
+                                            )
+                                            .clicked()
+                                        {
+                                            paint_set_zone = Some(None);
+                                        }
+                                        for (z, label) in crate::theme_editor::EDITABLE_ZONES {
+                                            if ui
+                                                .selectable_label(
+                                                    paint_zone_ui == Some(z),
+                                                    label,
+                                                )
+                                                .clicked()
+                                            {
+                                                paint_set_zone = Some(Some(z));
+                                            }
+                                        }
+                                    });
+                                if paint_zone_ui.is_some() {
+                                    ui.label(
+                                        egui::RichText::new(
+                                            "forcing a slot flattens a wall's lower/upper band",
+                                        )
+                                        .small()
+                                        .color(SHOP_DIM),
+                                    );
+                                }
+                                ui.add_space(2.0);
+
+                                let can_paint = paint_probe_ui
+                                    .as_ref()
+                                    .is_some_and(|p| p.target().is_some());
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .selectable_label(
+                                            paint_armed_ui,
+                                            if paint_armed_ui {
+                                                "Armed — click faces (Q to stop)"
+                                            } else {
+                                                "Arm brush"
+                                            },
+                                        )
+                                        .clicked()
+                                    {
+                                        paint_toggle_armed = true;
+                                    }
+                                    if ui
+                                        .add_enabled(can_paint, egui::Button::new("Paint this"))
+                                        .clicked()
+                                    {
+                                        paint_apply_now = true;
+                                    }
+                                });
+                                let painted_here = paint_probe_ui
+                                    .as_ref()
+                                    .is_some_and(|p| p.overridden && p.target().is_some());
+                                if ui
+                                    .add_enabled(painted_here, egui::Button::new("Clear this face"))
+                                    .clicked()
+                                {
+                                    paint_clear_face = true;
+                                }
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(format!(
+                                            "{paint_count} painted face{}",
+                                            if paint_count == 1 { "" } else { "s" }
+                                        ))
+                                        .small()
+                                        .color(SHOP_TEXT),
+                                    );
+                                    if ui
+                                        .add_enabled(
+                                            paint_count > 0,
+                                            egui::Button::new("Clear all"),
+                                        )
+                                        .clicked()
+                                    {
+                                        paint_clear_all = true;
+                                    }
+                                });
+                                ui.separator();
+
+                                // ── The theme list, shared with the TEXTURES tab.
+                                if ui
+                                    .add(
+                                        egui::TextEdit::singleline(&mut theme_filter_ui)
+                                            .hint_text("filter by name or level")
+                                            .desired_width(196.0),
+                                    )
+                                    .changed()
+                                {
+                                    theme_filter_changed = true;
+                                }
+                                egui::ScrollArea::vertical()
+                                    .id_salt("paint-themes")
+                                    .show(ui, |ui| {
+                                        ui.set_width(206.0);
+                                        for (row, swatches) in
+                                            theme_rows.iter().zip(theme_swatches.iter())
+                                        {
+                                            // An undefined zone still takes its slot,
+                                            // or rows of different length would make
+                                            // the list jitter as you scroll it.
+                                            ui.horizontal(|ui| {
+                                                for sw in swatches.iter() {
+                                                    match sw {
+                                                        Some(h) => {
+                                                            ui.add(egui::Image::new(
+                                                                egui::load::SizedTexture::new(
+                                                                    h.id(),
+                                                                    egui::vec2(22.0, 22.0),
+                                                                ),
+                                                            ));
+                                                        }
+                                                        None => {
+                                                            let (rect, _) = ui
+                                                                .allocate_exact_size(
+                                                                    egui::vec2(22.0, 22.0),
+                                                                    egui::Sense::hover(),
+                                                                );
+                                                            ui.painter().rect_stroke(
+                                                                rect,
+                                                                0.0,
+                                                                egui::Stroke::new(1.0, SHOP_DIM),
+                                                                egui::StrokeKind::Inside,
+                                                            );
+                                                        }
+                                                    }
+                                                }
+                                            });
+                                            if ui
+                                                .selectable_label(
+                                                    paint_scheme_ui == row.idx,
+                                                    row.label.as_str(),
+                                                )
+                                                .on_hover_text(row.name)
+                                                .clicked()
+                                            {
+                                                paint_set_scheme = Some(row.idx);
+                                            }
+                                        }
+                                        if theme_rows.is_empty() {
+                                            ui.label(
+                                                egui::RichText::new("no themes match")
+                                                    .small()
+                                                    .color(SHOP_DIM),
+                                            );
+                                        }
+                                    });
+                            }
                             PanelTab::Textures if theme_edit_mode => {
                                 ui.horizontal(|ui| {
                                     if ui.selectable_label(false, "◄ Library").clicked() {
@@ -3002,11 +3418,49 @@ impl App {
         if close {
             self.toggle_shop();
         }
+        // ── PAINT tab: apply the deferred picks.
+        if let Some(sch) = paint_set_scheme {
+            self.paint_scheme = sch;
+        }
+        if let Some(z) = paint_set_zone {
+            self.paint_zone = z;
+        }
+        if paint_toggle_armed {
+            self.paint_armed = !self.paint_armed;
+            if self.paint_armed {
+                // A click can only mean one thing — arming the brush stands down
+                // every other click-owner, exactly as arming a theme does.
+                self.theme_armed = None;
+                if let Some(world) = self.world.as_mut() {
+                    world.cancel_prop_placement();
+                    world.cancel_light_placement();
+                }
+                self.props_selected = None;
+            }
+        }
+        if paint_apply_now || paint_clear_face {
+            let tex = (!paint_clear_face).then_some(FaceTex {
+                scheme: self.paint_scheme,
+                zone: self.paint_zone,
+            });
+            self.paint_probe_face(tex);
+        }
+        if paint_clear_all {
+            let meshes = self
+                .world
+                .as_mut()
+                .map(|w| w.with_undo_many(|w| w.clear_all_face_tex()))
+                .unwrap_or_default();
+            for rm in &meshes {
+                self.upload(rm);
+            }
+        }
         // TEXTURES tab: apply the deferred picks. Arming a theme cancels any prop /
         // light / spawn placement, since a click can only mean one thing.
         if let Some(armed) = new_theme_armed {
             self.theme_armed = armed;
             if armed.is_some() {
+                self.paint_armed = false;
                 if let Some(world) = self.world.as_mut() {
                     world.cancel_prop_placement();
                     world.cancel_light_placement();
@@ -3312,6 +3766,14 @@ impl App {
         }
         if let Some(tab) = new_tab {
             self.panel_tab = tab;
+            // The paint brush belongs to its own tab: leaving it must not leave
+            // clicks quietly repainting faces from a panel that no longer says so,
+            // nor keep the paint-target outline up over another tab's work.
+            if tab != PanelTab::Paint {
+                self.paint_armed = false;
+                self.paint_probe = None;
+                self.refresh_highlight();
+            }
             if tab == PanelTab::Levels {
                 self.refresh_level_rows();
             }
@@ -4676,6 +5138,26 @@ impl ApplicationHandler for App {
                     }
                     return;
                 }
+                // PAINT tab: while the brush is armed, a left-click paints the one
+                // face under the cursor. Ahead of the armed-theme branch because the
+                // two are mutually exclusive by construction (arming either disarms
+                // the other) and this is the narrower of the pair.
+                if self.paint_armed {
+                    // The probe is refreshed in the egui pass, which runs after the
+                    // cursor moved — so re-probe here rather than paint whatever the
+                    // last frame happened to be looking at.
+                    if let Some((o, d)) = self.mouse_world_ray() {
+                        self.paint_probe = self
+                            .world
+                            .as_mut()
+                            .and_then(|w| w.probe_surface(o, d));
+                    }
+                    self.paint_probe_face(Some(FaceTex {
+                        scheme: self.paint_scheme,
+                        zone: self.paint_zone,
+                    }));
+                    return;
+                }
                 // TEXTURES tab: while a theme is armed, a left-click retextures the
                 // room under the *cursor*. Ray-aimed rather than crosshair-aimed
                 // because the panel frees the cursor, which leaves the camera
@@ -5446,6 +5928,7 @@ impl App {
             // props (no need to leave + re-enter object mode).
             if code == KeyCode::Escape || code == KeyCode::KeyQ {
                 self.theme_armed = None;
+                self.paint_armed = false;
                 if let Some(w) = self.world.as_mut() {
                     w.cancel_prop_placement();
                     w.cancel_light_placement();

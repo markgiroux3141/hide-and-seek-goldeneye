@@ -64,6 +64,9 @@ pub(crate) mod persist;
 /// The authored per-level match setup the `G` transition reads (the PLAY panel tab).
 pub mod play_config;
 pub use play_config::{EntryMode, HunterWeapon, LoadoutMode, LoadoutSlot, PlayConfig};
+/// Per-face texture overrides + the surface probe behind the PAINT tab.
+mod paint;
+pub use paint::FaceProbe;
 mod pick;
 mod regions;
 mod respawn;

@@ -20,6 +20,27 @@ pub struct RayHit {
     pub point: Vec3,
     pub normal: Vec3,
     pub collider: ColliderHandle,
+    /// For a trimesh collider (every region), the index of the triangle that was
+    /// struck. Rapier reports it as the ray intersection's feature, and a region's
+    /// collider is built straight from the CSG fold in fold order — so this is a
+    /// direct handle on the *authored* triangle, which the editor's surface probe
+    /// needs to explain (and repaint) the exact surface under the cursor.
+    ///
+    /// `None` for a hit on anything that isn't a trimesh (capsules, cuboids).
+    pub triangle: Option<u32>,
+}
+
+/// The triangle index behind a ray hit's feature, for a trimesh.
+///
+/// Rapier names the two sides of a triangle separately, so a back-face hit comes
+/// back as `face + triangle_count`. The caller only ever wants the triangle, and
+/// checks the index against the mesh it reads it from anyway, so the raw feature
+/// index is what we keep.
+fn trimesh_face(feature: FeatureId) -> Option<u32> {
+    match feature {
+        FeatureId::Face(i) => Some(i),
+        _ => None,
+    }
 }
 
 /// The collision world. Holds one static trimesh collider per CSG region, keyed
@@ -394,6 +415,37 @@ impl PhysicsWorld {
         self.dirty = true;
     }
 
+    /// Which region a collider handle belongs to, or `None` for anything that
+    /// isn't region geometry (an enemy capsule, a prop, a door panel).
+    pub fn region_of_collider(&self, handle: ColliderHandle) -> Option<u32> {
+        self.region_colliders
+            .iter()
+            .find(|(_, &h)| h == handle)
+            .map(|(&id, _)| id)
+    }
+
+    /// The world-space triangle a ray hit landed on, read back out of the
+    /// collider's trimesh.
+    ///
+    /// Reading it from rapier rather than keeping a second copy of every region's
+    /// geometry is the whole point: the collider is already the CSG fold, vertex for
+    /// vertex, so there is nothing to keep in sync. Returns `None` if the hit
+    /// carried no face (not a trimesh) or the index is out of range — which is what
+    /// a hit on a region's *appended* stair ramp geometry looks like from here.
+    pub fn hit_triangle(&self, hit: &RayHit) -> Option<[Vec3; 3]> {
+        let tri = hit.triangle?;
+        let collider = self.colliders.get(hit.collider)?;
+        let mesh = collider.shape().as_trimesh()?;
+        let indices = mesh.indices();
+        let idx = *indices.get(tri as usize % indices.len().max(1))?;
+        let verts = mesh.vertices();
+        let p = |i: u32| -> Option<Vec3> {
+            let v = verts.get(i as usize)?;
+            Some(Vec3::new(v.x, v.y, v.z))
+        };
+        Some([p(idx[0])?, p(idx[1])?, p(idx[2])?])
+    }
+
     /// Refresh the acceleration structure if any collider changed since the last
     /// query. Cheap when nothing is dirty.
     fn ensure_current(&mut self) {
@@ -447,6 +499,7 @@ impl PhysicsWorld {
             point: Vec3::new(p.x, p.y, p.z),
             normal: Vec3::new(n.x, n.y, n.z),
             collider: handle,
+            triangle: trimesh_face(intersection.feature),
         })
     }
 
@@ -490,6 +543,7 @@ impl PhysicsWorld {
             point: Vec3::new(p.x, p.y, p.z),
             normal: Vec3::new(n.x, n.y, n.z),
             collider: handle,
+            triangle: trimesh_face(intersection.feature),
         })
     }
 

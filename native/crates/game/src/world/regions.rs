@@ -72,6 +72,18 @@ pub(crate) fn region_hash(region: &Region) -> u64 {
         (b.door as u8).hash(&mut h);
         (b.frame as u8).hash(&mut h);
         b.scheme.hash(&mut h);
+        // Painted face overrides change the classified mesh, so a repaint has to
+        // miss the memo cache — without this the region returns its pre-paint bake.
+        for ft in &b.face_tex {
+            match ft {
+                Some(t) => {
+                    1u8.hash(&mut h);
+                    t.scheme.hash(&mut h);
+                    t.zone.hash(&mut h);
+                }
+                None => 0u8.hash(&mut h),
+            }
+        }
     }
     region.stairs.len().hash(&mut h);
     for s in &region.stairs {

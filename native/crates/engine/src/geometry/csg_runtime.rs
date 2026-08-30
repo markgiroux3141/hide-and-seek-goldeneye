@@ -115,6 +115,83 @@ pub enum Side {
     Max,
 }
 
+impl Side {
+    /// The opposite end of the axis.
+    #[inline]
+    pub fn flipped(self) -> Side {
+        match self {
+            Side::Min => Side::Max,
+            Side::Max => Side::Min,
+        }
+    }
+}
+
+/// A brush has six faces; this is the slot one occupies in
+/// [`Brush::face_tex`]. `axis * 2 + side`, so X-min is 0 and Z-max is 5.
+#[inline]
+pub fn face_slot(axis: Axis, side: Side) -> usize {
+    axis.index() * 2 + side as usize
+}
+
+/// Which slot in the six-face array a slot index refers to — the inverse of
+/// [`face_slot`], for the UI that has to name a stored override.
+#[inline]
+pub fn face_slot_parts(slot: usize) -> (Axis, Side) {
+    let axis = match slot / 2 {
+        0 => Axis::X,
+        1 => Axis::Y,
+        _ => Axis::Z,
+    };
+    let side = if slot % 2 == 0 { Side::Min } else { Side::Max };
+    (axis, side)
+}
+
+/// A **per-face texture override**: this face of this brush renders with `scheme`
+/// (and optionally a forced zone slot) instead of whatever the classifier would
+/// have derived.
+///
+/// It exists for two jobs that turn out to be the same job. The first is repair:
+/// [`crate::render::uv_zones`] recovers a triangle's theme by *guessing* which brush
+/// owns it (`face_owner`), and a guess can be wrong — an override is the manual
+/// answer that always wins. The second is authoring: an accent wall, a signage
+/// panel, one deliberately mismatched floor, none of which the per-room flood-fill
+/// retexture can express.
+///
+/// **Keyed by face, not by triangle.** A triangle has no persistent identity — the
+/// CSG fold regenerates the soup on every edit, splits it at frames and at the
+/// wall band, then sorts it by (scheme, zone) — so a triangle index means nothing
+/// after the next keystroke. `(brush, axis, side)` survives all of that, and it is
+/// what the classifier itself keys on, so an override is guaranteed to reach the
+/// triangles it was aimed at. It rides on [`Brush`] rather than on the region so it
+/// survives reclustering, undo and save/load with no plumbing of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FaceTex {
+    /// The theme this face renders with. Persisted by *name*, exactly as
+    /// [`Brush::scheme`] is, and for the same reason.
+    #[serde(serialize_with = "ser_scheme", deserialize_with = "de_scheme")]
+    pub scheme: usize,
+    /// Force every triangle of the face into this zone slot, or `None` to keep the
+    /// zone the classifier derived.
+    ///
+    /// `None` is the useful default: a wall keeps its lower/upper band split and a
+    /// floor stays a floor, they just draw from a different theme. Forcing a zone is
+    /// how you put a specific *texture* on a face — a ceiling tile on a wall — at the
+    /// cost of flattening any band split the face had.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<u8>,
+}
+
+/// Default (and empty) value for [`Brush::face_tex`].
+fn no_face_tex() -> [Option<FaceTex>; 6] {
+    [None; 6]
+}
+
+/// Whether a face-override array carries nothing, so serde can leave it out of the
+/// file entirely — which is the case for all but a handful of brushes.
+fn face_tex_is_empty(a: &[Option<FaceTex>; 6]) -> bool {
+    a.iter().all(Option::is_none)
+}
+
 /// A single CSG brush: an axis-aligned box in WT units plus its operation.
 ///
 /// Position `(x, y, z)` is the **min corner**; `(w, h, d)` are the dimensions —
@@ -192,6 +269,15 @@ pub struct Brush {
     /// invalidate a memoized bake.
     #[serde(default)]
     pub group: u32,
+    /// Per-face texture overrides, indexed by [`face_slot`] (`axis * 2 + side`).
+    ///
+    /// Empty for almost every brush, and skipped entirely when it is, so the level
+    /// file only grows where an author actually painted. See [`FaceTex`].
+    #[serde(
+        default = "no_face_tex",
+        skip_serializing_if = "face_tex_is_empty"
+    )]
+    pub face_tex: [Option<FaceTex>; 6],
 }
 
 /// Serialize a theme index as its stable *name*.
@@ -249,6 +335,7 @@ impl Brush {
             floor_y: y,
             scheme: default_scheme(),
             group: 0,
+            face_tex: no_face_tex(),
         }
     }
 
@@ -286,6 +373,24 @@ impl Brush {
             Side::Min => self.min(axis),
             Side::Max => self.min(axis) + self.dim(axis),
         }
+    }
+
+    /// This face's texture override, if one has been painted. See [`FaceTex`].
+    #[inline]
+    pub fn face_tex(&self, axis: Axis, side: Side) -> Option<FaceTex> {
+        self.face_tex[face_slot(axis, side)]
+    }
+
+    /// Paint (or with `None`, clear) this face's texture override.
+    #[inline]
+    pub fn set_face_tex(&mut self, axis: Axis, side: Side, tex: Option<FaceTex>) {
+        self.face_tex[face_slot(axis, side)] = tex;
+    }
+
+    /// How many of this brush's six faces carry an override.
+    #[inline]
+    pub fn face_tex_count(&self) -> usize {
+        self.face_tex.iter().filter(|f| f.is_some()).count()
     }
 
     /// Grow this brush's face outward by `step` WT (JS `applyFullFacePush`): a
@@ -1142,20 +1247,17 @@ impl Region {
         CpuMesh::from_csg(&pos, &norm, &idx)
     }
 
-    /// Re-run CSG and classify the result into a textured, per-zone-grouped mesh
-    /// for rendering (port of `assignUVsAndZones` + the stair zoned emission). The
-    /// collider still comes from [`evaluate`](Self::evaluate); this is render-only.
-    pub fn evaluate_textured(&mut self) -> TexturedMesh {
-        self.update_shell();
-        let polys = evaluate(&self.shell, &self.brushes, WORLD_SCALE);
-        let (pos, _norm, idx) = polygons_to_mesh(&polys);
-
-        // Per-brush attributes drive per-triangle scheme + wall-UV floor anchor
-        // (the face-map recovers the owner inside `classify_soup`).
-        let brush_infos: Vec<BrushInfo> = self
-            .brushes
+    /// This region's brushes as the classifier wants them (WT AABB + the owner
+    /// attributes it recovers per triangle).
+    ///
+    /// Public because the editor's surface probe has to classify with *exactly* the
+    /// same inputs as the bake — an explanation of why a triangle looks the way it
+    /// does is worthless if it is computed from a slightly different brush list.
+    pub fn brush_infos(&self) -> Vec<BrushInfo> {
+        self.brushes
             .iter()
             .map(|b| BrushInfo {
+                id: b.id,
                 min: [b.x, b.y, b.z],
                 max: [b.x + b.w, b.y + b.h, b.z + b.d],
                 floor_y: b.floor_y,
@@ -1166,8 +1268,22 @@ impl Region {
                 scheme: b.scheme,
                 frame: b.frame,
                 door: b.door,
+                face_tex: b.face_tex,
             })
-            .collect();
+            .collect()
+    }
+
+    /// Re-run CSG and classify the result into a textured, per-zone-grouped mesh
+    /// for rendering (port of `assignUVsAndZones` + the stair zoned emission). The
+    /// collider still comes from [`evaluate`](Self::evaluate); this is render-only.
+    pub fn evaluate_textured(&mut self) -> TexturedMesh {
+        self.update_shell();
+        let polys = evaluate(&self.shell, &self.brushes, WORLD_SCALE);
+        let (pos, _norm, idx) = polygons_to_mesh(&polys);
+
+        // Per-brush attributes drive per-triangle scheme + wall-UV floor anchor
+        // (the face-map recovers the owner inside `classify_soup`).
+        let brush_infos = self.brush_infos();
 
         let mut b = ZonedBuilder::new();
         uv_zones::classify_soup(&mut b, &pos, &idx, &brush_infos, default_scheme());
@@ -1208,22 +1324,7 @@ impl Region {
 
         // Textured render mesh: classify the same soup into per-zone groups, then
         // append the stepped stair geometry with explicit zones/UVs.
-        let brush_infos: Vec<BrushInfo> = self
-            .brushes
-            .iter()
-            .map(|b| BrushInfo {
-                min: [b.x, b.y, b.z],
-                max: [b.x + b.w, b.y + b.h, b.z + b.d],
-                floor_y: b.floor_y,
-                // A duct anchors its UVs to its own corner; everything else keeps the
-                // world-space grid it has always had. Derived, not persisted — the
-                // `vent` flag already says which brushes want it.
-                origin_xz: if b.vent { [b.x, b.z] } else { [0.0, 0.0] },
-                scheme: b.scheme,
-                frame: b.frame,
-                door: b.door,
-            })
-            .collect();
+        let brush_infos = self.brush_infos();
         let mut zb = ZonedBuilder::new();
         uv_zones::classify_soup(&mut zb, &pos, &idx, &brush_infos, default_scheme());
         for s in &self.stairs {
