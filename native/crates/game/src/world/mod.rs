@@ -68,6 +68,7 @@ pub mod play_config;
 pub use play_config::{EntryMode, HunterWeapon, LoadoutMode, LoadoutSlot, PlayConfig};
 /// Per-face texture overrides + the surface probe behind the PAINT tab.
 mod paint;
+mod patch;
 pub use paint::FaceProbe;
 mod pick;
 mod regions;
@@ -1614,7 +1615,7 @@ pub(crate) struct GizmoDrag {
     accumulated: f32,
 }
 
-/// Which prop gizmo is active (object mode). One shown at a time, cycled with Tab.
+/// Which prop gizmo is active (object mode). One shown at a time, cycled with `T`.
 /// Scale is a later addition; props are uniform-scaled for now.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PropGizmoMode {
@@ -1713,6 +1714,10 @@ pub(crate) enum SubOp {
 
 /// The selected face's in-plane U/V extent in WT (JS `getFaceUVInfo`), plus the
 /// face-plane coord on the normal axis, plus the owning brush's texture theme.
+///
+/// `Copy` so `world::patch` can widen the U/V extent to a patch bounding rect with
+/// struct-update syntax and keep the anchor's plane + theme untouched.
+#[derive(Clone, Copy)]
 pub(crate) struct FaceInfo {
     u_axis: Axis,
     v_axis: Axis,
@@ -2446,6 +2451,11 @@ pub struct World {
     /// the rest hit the cache. (JS `wasmResultCache`.)
     csg_cache: regions::CsgCache,
     selected: Option<Selection>,
+    /// Patch scope (`0`): when on, a full-face push/pull acts on every face
+    /// coplanar with the selected one across the room, and a sub-rect may be
+    /// scrolled out to the whole patch's extent instead of one brush's face. Off by
+    /// default — see [`world::patch`](crate::world::patch).
+    patch_scope: bool,
     /// Doors, populated at G→HUNT: the fixed **spawn-door seal** (a black
     /// non-breakable panel) plus (when re-enabled) breakable doors. Cleared on
     /// return to BUILD. `Some`-active only during the hunt.
@@ -2529,7 +2539,7 @@ pub struct World {
     /// Whether hunters spawn at all (dev toggle, `J`). Off lets you author and test the
     /// level — doors especially — without being hunted while you do it.
     hunters_enabled: bool,
-    /// Which prop gizmo is active (Translate / Rotate); cycled with Tab.
+    /// Which prop gizmo is active (Translate / Rotate); cycled with `T`.
     prop_gizmo_mode: PropGizmoMode,
     /// The in-progress prop gizmo drag, if any.
     prop_gizmo_drag: Option<PropGizmoDrag>,
@@ -3086,6 +3096,7 @@ impl World {
             next_region_id: 1,
             csg_cache: regions::CsgCache::new(),
             selected: None,
+            patch_scope: false,
             doors: Vec::new(),
             opening_tool: None,
             opening_preview: None,

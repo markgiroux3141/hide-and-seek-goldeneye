@@ -472,11 +472,20 @@ fn nesting_stops_at_the_platform_ring() {
 fn confirm_stairs_lights_up_only_with_a_pending_op() {
     let mut c = ctx();
     c.has_selection = true;
+    // Found by label, not by index: the ring grows from the end, and a hard-coded
+    // slot number turns every future addition into a spurious test failure.
+    let confirm = |c: &RadialCtx| {
+        menu(MenuId::Selection, c)
+            .into_iter()
+            .find(|s| s.label.starts_with("Confirm stairs"))
+            .expect("the Selection ring has a confirm-stairs slot")
+            .enabled
+    };
     let slots = menu(MenuId::Selection, &c);
     assert!(slots[0].enabled, "push needs only a selection");
-    assert!(!slots[7].enabled, "nothing pending to confirm");
+    assert!(!confirm(&c), "nothing pending to confirm");
     c.pending_stair = true;
-    assert!(menu(MenuId::Selection, &c)[7].enabled);
+    assert!(confirm(&c));
 }
 
 #[test]
