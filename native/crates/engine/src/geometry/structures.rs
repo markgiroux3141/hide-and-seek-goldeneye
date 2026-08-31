@@ -65,6 +65,24 @@ pub enum Anchor {
     Ground { x: f32, y: f32, z: f32 },
 }
 
+/// How a platform is *rendered*. Its solid box, collision and nav are the same
+/// either way — this picks the shell drawn over them, exactly as
+/// [`StairStyle`] does for a flight.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformStyle {
+    /// The JS `PLATFORM_STYLES.simple` look: a slab with a top plane, a skirt on
+    /// every free edge and L-pillar legs down to the floor when grounded, always in
+    /// the blue `simple_blue` scheme. The default, so every platform authored before
+    /// styles existed keeps the look it had.
+    #[default]
+    Solid,
+    /// The multiplayer-arena look: nothing but the top plane, wearing the floor
+    /// texture of the room it stands in. No skirt, no legs. See
+    /// [`append_platform_plane_mesh`].
+    Plane,
+}
+
 /// A rectangular slab at a given height (JS `Platform`). `(x, z)` is the
 /// min-corner, `y` the **top** surface, `size_x`/`size_z` the footprint,
 /// `thickness` the slab depth. `grounded` extends the underside down to the
@@ -80,6 +98,10 @@ pub struct Platform {
     pub thickness: f32,
     pub grounded: bool,
     pub railings: bool,
+    /// Render style. `#[serde(default)]` = [`PlatformStyle::Solid`], so a level saved
+    /// before this field existed loads with every platform looking as it did.
+    #[serde(default)]
+    pub style: PlatformStyle,
 }
 
 impl Platform {
@@ -162,6 +184,14 @@ pub enum StairStyle {
     /// texture on the treads, upper-wall texture on every vertical face. See
     /// [`append_stair_block_mesh`].
     Block,
+    /// The multiplayer-arena look: no steps at all, just the flight's own smooth
+    /// slope as a two-sided plane in the room's floor texture — the ramp counterpart
+    /// of [`PlatformStyle::Plane`]. Grounded closes the wedge down to the floor.
+    ///
+    /// The player has *always* walked this surface: [`stair_run_ramp`] is what the
+    /// collider gets for every style. This style stops drawing steps over it. See
+    /// [`append_stair_ramp_mesh`].
+    Ramp,
 }
 
 /// A flight of stairs connecting two platforms, or a platform to the ground, or
@@ -340,7 +370,11 @@ fn resolve_run(
     // something to perturb as a side effect of a render change.
     let floor_y = if run.grounded {
         match run.style {
-            StairStyle::Block => floor_y_under(bottom_pt.x, bottom_pt.z, bottom_pt.y, brushes),
+            // Ramp joins Block on the stair-correct probe: it is new, so there is no
+            // already-authored nav for the difference to perturb.
+            StairStyle::Block | StairStyle::Ramp => {
+                floor_y_under(bottom_pt.x, bottom_pt.z, bottom_pt.y, brushes)
+            }
             StairStyle::Platform => {
                 find_floor_y_at(bottom_pt.x, bottom_pt.z, bottom_pt.y, brushes)
             }
@@ -763,6 +797,38 @@ pub fn append_platform_mesh(p: &Platform, brushes: &[Brush], b: &mut ZonedBuilde
     }
 }
 
+/// Append a **plane-style** platform: the top surface and nothing else, wearing the
+/// floor texture of the room it stands in.
+///
+/// One quad, and one quad is enough to be visible from both sides — the structures
+/// pipeline runs `cull_mode: None` and `shader_textured.wgsl` shades on `abs(N·L)`
+/// precisely because this mesh is single-winding (see that shader's header). So there
+/// is no second winding to emit and no lighting seam from below.
+///
+/// UVs are **world-planar** (`emit_quad_wt`, the treatment room floors get), so the
+/// plane continues the room's own floor grid rather than carrying a private tiling —
+/// walk from floor to platform and the texture lines up.
+///
+/// The platform's [`Platform::solid_box`] is unchanged: still a full
+/// `thickness`-deep solid for collision and nav. That is deliberate — the nav grid is
+/// sampled at WT cell *centres*, so a box thinner than one tile has no cell centre
+/// inside it and disappears from navigation entirely. The cost is that the walkable
+/// top coincides with the plane while `thickness` WT of invisible solid remains below
+/// it, which is only noticeable walking *underneath* one.
+pub fn append_platform_plane_mesh(p: &Platform, b: &mut ZonedBuilder, scheme: usize) {
+    b.emit_quad_wt(
+        [
+            [p.x, p.y, p.z],
+            [p.x, p.y, p.max_z()],
+            [p.max_x(), p.y, p.max_z()],
+            [p.max_x(), p.y, p.z],
+        ],
+        TOP_ZONE,
+        [0.0, p.y, 0.0],
+        scheme,
+    );
+}
+
 /// Append a stair-run's simple-style shell (treads + short risers + two sloped
 /// stringers + bridge) into the zoned builder, with the JS per-face zones + UVs.
 /// Port of `buildSimpleStairGeometry`.
@@ -1031,6 +1097,113 @@ pub fn append_stair_block_mesh(
             b.emit_quad_wt(c, SIDE_ZONE, [0.0, anchor, 0.0], scheme);
         }
     }
+}
+
+/// Append a stair-run's **ramp-style** shell: the flight's own smooth slope as a
+/// single two-sided plane in the room's floor texture, with no steps drawn over it.
+///
+/// The slope is not new geometry — it is [`stair_run_ramp`], the quad the player
+/// collider has always been given for every style, so what you see is exactly what you
+/// walk. Nav keeps the stepped [`stair_run_boxes`] (hunters climb a ramp with no AI
+/// work at all, and the `nav::STAIR_STEP` relaxation already applies to them).
+///
+/// A **grounded** ramp closes into a solid wedge: two side profiles down to the floor
+/// beneath its foot, plus the downhill face. An ungrounded one is a bare plane you can
+/// walk under. `solid` receives the two side profiles only, for the player collider —
+/// the downhill face is left out for the reason a block stair leaves its risers out
+/// (collision there is a lip at the bottom of the climb).
+pub fn append_stair_ramp_mesh(
+    run: &StairRun,
+    from_platform: Option<&Platform>,
+    to_platform: Option<&Platform>,
+    brushes: &[Brush],
+    b: &mut ZonedBuilder,
+    solid: &mut ZonedBuilder,
+    scheme: usize,
+) {
+    let Some(g) = resolve_run(run, from_platform, to_platform, brushes) else {
+        return;
+    };
+    if g.steps == 0 {
+        return;
+    }
+    let tw = |r: f32, y: f32, perp: f32| -> [f32; 3] {
+        match g.run_axis {
+            RunAxis::X => [r, y, perp],
+            RunAxis::Z => [perp, y, r],
+        }
+    };
+    let width = g.perp_max - g.perp_min;
+    // Slope length in WT — one texture tile per tile of *slope*, so the floor texture
+    // climbs the ramp at its true scale instead of being stretched by the projection.
+    let dr = g.top_run - g.bottom_run;
+    let dy = g.top_y - g.stair_base_y;
+    let slope = (dr * dr + dy * dy).sqrt();
+    if slope <= 0.0 || width <= 0.0 {
+        return;
+    }
+
+    // The walking surface. Explicit UVs, deliberately **not** `emit_quad_wt`: that
+    // derives its UV axis from the dominant component of the face normal, and a flight
+    // between two grid-clicked points is routinely exactly 45° — where the Y and run
+    // components tie and the axis choice becomes a coin flip that can differ between
+    // two ramps facing different ways. Shipping a tie-break as geometry is how the
+    // coplanar-straddle bug happened.
+    b.emit_quad_uv(
+        [
+            tw(g.bottom_run, g.stair_base_y, g.perp_min),
+            tw(g.top_run, g.top_y, g.perp_min),
+            tw(g.top_run, g.top_y, g.perp_max),
+            tw(g.bottom_run, g.stair_base_y, g.perp_max),
+        ],
+        [[0.0, 0.0], [slope, 0.0], [slope, width], [0.0, width]],
+        scheme,
+        TOP_ZONE,
+    );
+
+    if !run.grounded || g.floor_y >= g.stair_base_y {
+        return;
+    }
+    // Wall UVs anchor at the surface the wedge stands on, so its sides line up with
+    // the room walls around it — the same treatment the block stair's sides get.
+    let anchor = g.floor_y;
+    let left_walled = stair_side_against_wall(&g, g.perp_min, -1.0, brushes);
+    let right_walled = stair_side_against_wall(&g, g.perp_max, 1.0, brushes);
+    // Side profiles: floor → slope, the flight's true trapezoidal section. Culling is
+    // off and the shader lights `abs(N·L)`, so the winding these end up with is
+    // immaterial; the collider derives its own contact normals too.
+    if !left_walled {
+        let c = [
+            tw(g.bottom_run, g.floor_y, g.perp_min),
+            tw(g.top_run, g.floor_y, g.perp_min),
+            tw(g.top_run, g.top_y, g.perp_min),
+            tw(g.bottom_run, g.stair_base_y, g.perp_min),
+        ];
+        b.emit_quad_wt(c, SIDE_ZONE, [0.0, anchor, 0.0], scheme);
+        solid.emit_quad_wt(c, SIDE_ZONE, [0.0, anchor, 0.0], scheme);
+    }
+    if !right_walled {
+        let c = [
+            tw(g.bottom_run, g.floor_y, g.perp_max),
+            tw(g.top_run, g.floor_y, g.perp_max),
+            tw(g.top_run, g.top_y, g.perp_max),
+            tw(g.bottom_run, g.stair_base_y, g.perp_max),
+        ];
+        b.emit_quad_wt(c, SIDE_ZONE, [0.0, anchor, 0.0], scheme);
+        solid.emit_quad_wt(c, SIDE_ZONE, [0.0, anchor, 0.0], scheme);
+    }
+    // The downhill face at the foot of the wedge. Render only.
+    b.emit_quad_wt(
+        [
+            tw(g.bottom_run, g.floor_y, g.perp_min),
+            tw(g.bottom_run, g.floor_y, g.perp_max),
+            tw(g.bottom_run, g.stair_base_y, g.perp_max),
+            tw(g.bottom_run, g.stair_base_y, g.perp_min),
+        ],
+        SIDE_ZONE,
+        [0.0, anchor, 0.0],
+        scheme,
+    );
 }
 
 // ─── Railings (render-only) ──────────────────────────────────────────
@@ -1361,6 +1534,7 @@ pub fn append_stair_railings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::geometry::csg_runtime::WORLD_SCALE;
 
     fn plat(id: u32, x: f32, y: f32, z: f32) -> Platform {
         Platform {
@@ -1373,6 +1547,7 @@ mod tests {
             thickness: 1.0,
             grounded: false,
             railings: false,
+            style: PlatformStyle::Solid,
         }
     }
 
@@ -1445,6 +1620,175 @@ mod tests {
             coll.vertices.len() < b.finish().vertices.len(),
             "the collider is a subset of what is drawn"
         );
+    }
+
+    /// The same flight, drawn as a ramp instead of a staircase.
+    fn ramp_run(grounded: bool) -> StairRun {
+        StairRun {
+            style: StairStyle::Ramp,
+            ..block_run(grounded)
+        }
+    }
+
+    /// A plane platform is exactly its top surface: one horizontal quad in the floor
+    /// zone and nothing vertical at all. No skirt, no legs — that is the whole point.
+    /// One winding is enough: the structures pipeline draws with culling off and the
+    /// textured shader lights `abs(N·L)`, so the single quad reads from both sides.
+    #[test]
+    fn a_plane_platform_is_one_horizontal_quad_in_the_floor_zone() {
+        let p = Platform {
+            style: PlatformStyle::Plane,
+            ..plat(1, 10.0, 6.0, 10.0)
+        };
+        let mut b = ZonedBuilder::new();
+        append_platform_plane_mesh(&p, &mut b, 0);
+        let mesh = b.finish();
+
+        assert_eq!(mesh.vertices.len(), 6, "one quad, two triangles, and no more");
+        assert!(
+            mesh.vertices.iter().all(|v| v.normal[1].abs() > 0.9),
+            "every face is horizontal — no skirt and no pillar legs"
+        );
+        assert!(
+            mesh.vertices
+                .iter()
+                .all(|v| (v.pos[1] / WORLD_SCALE - 6.0).abs() < 1e-3),
+            "the plane sits on the platform's top surface, where the collider's is"
+        );
+        assert_eq!(
+            mesh.groups.iter().map(|g| g.zone).collect::<Vec<_>>(),
+            vec![TOP_ZONE],
+            "floor zone only, so it wears the room's floor texture"
+        );
+
+        // And the solid style is genuinely different — it has walls.
+        let mut b2 = ZonedBuilder::new();
+        append_platform_mesh(&plat(1, 10.0, 6.0, 10.0), &[], &mut b2, 0);
+        assert!(
+            b2.finish().vertices.iter().any(|v| v.normal[1].abs() < 0.1),
+            "the solid style still emits its skirt"
+        );
+    }
+
+    /// A plane platform's *solid box* is untouched by the style. It has to be: the nav
+    /// grid samples WT cell centres, so a box thinner than a tile has no cell centre
+    /// inside it and the platform would vanish from navigation entirely.
+    #[test]
+    fn a_plane_platforms_solid_box_is_unchanged_by_its_style() {
+        let solid = plat(1, 10.0, 6.0, 10.0);
+        let plane = Platform {
+            style: PlatformStyle::Plane,
+            ..solid
+        };
+        assert_eq!(
+            plane.solid_box(&[]),
+            solid.solid_box(&[]),
+            "collision and nav see the same slab either way"
+        );
+    }
+
+    /// An ungrounded ramp is the flight's own slope and nothing else: no steps drawn
+    /// over it, and nothing handed to the collider — so it stays a plane you can walk
+    /// under, exactly like a plane platform.
+    #[test]
+    fn an_ungrounded_ramp_is_one_sloped_plane_with_no_side_collision() {
+        let run = ramp_run(false);
+        let mut b = ZonedBuilder::new();
+        let mut solid = ZonedBuilder::new();
+        append_stair_ramp_mesh(&run, None, None, &[], &mut b, &mut solid, 0);
+        let mesh = b.finish();
+
+        assert_eq!(mesh.vertices.len(), 6, "one quad — no treads, no risers");
+        assert_eq!(
+            mesh.groups.iter().map(|g| g.zone).collect::<Vec<_>>(),
+            vec![TOP_ZONE],
+            "the slope wears the room's floor texture"
+        );
+        // What is drawn is the very quad the player collider already walks, so the
+        // surface and its collision cannot drift apart.
+        let quad = stair_run_ramp(&run, None, None, &[]).expect("the run has a ramp");
+        for c in quad {
+            let m = [
+                c[0] * WORLD_SCALE,
+                c[1] * WORLD_SCALE,
+                c[2] * WORLD_SCALE,
+            ];
+            assert!(
+                mesh.vertices.iter().any(|v| (v.pos[0] - m[0]).abs() < 1e-3
+                    && (v.pos[1] - m[1]).abs() < 1e-3
+                    && (v.pos[2] - m[2]).abs() < 1e-3),
+                "corner {c:?} of the collider's ramp is drawn"
+            );
+        }
+        assert!(
+            solid.finish().vertices.is_empty(),
+            "a floating ramp adds no side collision — the player walks under it"
+        );
+    }
+
+    /// Grounding a ramp closes it into a solid wedge: side profiles down to the floor,
+    /// in the render *and* the collider, so it can no longer be walked through side-on.
+    /// The downhill face stays render-only — collision there is a lip at the bottom of
+    /// the climb, the same reason the block stair leaves its risers out.
+    #[test]
+    fn a_grounded_ramp_closes_into_a_wedge_the_player_cannot_walk_through() {
+        // A room whose floor is at y=2, with the flight starting on it at y=4.
+        let room = Brush::new(1, Op::Subtract, 0.0, 2.0, 0.0, 24.0, 16.0, 24.0);
+        let mut run = ramp_run(true);
+        run.anchor_from = Anchor::Ground { x: 4.0, y: 4.0, z: 10.0 };
+        run.anchor_to = Anchor::Ground { x: 12.0, y: 12.0, z: 10.0 };
+
+        let mut b = ZonedBuilder::new();
+        let mut solid = ZonedBuilder::new();
+        append_stair_ramp_mesh(&run, None, None, &[room], &mut b, &mut solid, 0);
+        let mesh = b.finish();
+        let coll = solid.finish();
+
+        assert!(
+            mesh.vertices
+                .iter()
+                .map(|v| v.pos[1] / WORLD_SCALE)
+                .fold(f32::MAX, f32::min)
+                - 2.0
+                < 1e-3,
+            "the wedge reaches the room floor beneath the flight"
+        );
+        assert!(!coll.vertices.is_empty(), "the sides are solid");
+        assert!(
+            coll.vertices.iter().all(|v| v.normal[1].abs() < 0.001),
+            "every collider face is vertical — the slope itself did not leak in"
+        );
+        // The flight runs along X, so its sides face ±Z. The downhill face (±X) is not
+        // in the collider.
+        assert!(
+            coll.vertices.iter().all(|v| v.normal[2].abs() > 0.9),
+            "the collider is the lateral pair only, not the foot of the ramp"
+        );
+    }
+
+    /// A level written before these styles existed loads with every structure looking
+    /// exactly as it did — the whole reason both fields are `#[serde(default)]` and the
+    /// file format was not bumped.
+    #[test]
+    fn structures_saved_before_the_plane_styles_load_as_they_were() {
+        let p: Platform = serde_json::from_str(
+            r#"{"id":1,"x":0,"y":4,"z":0,"size_x":4,"size_z":4,
+                "thickness":1,"grounded":false,"railings":false}"#,
+        )
+        .expect("a style-less platform still parses");
+        assert_eq!(p.style, PlatformStyle::Solid);
+
+        // And the new variants survive a round trip by name, not by ordinal.
+        let plane = Platform {
+            style: PlatformStyle::Plane,
+            ..plat(1, 0.0, 4.0, 0.0)
+        };
+        let back: Platform =
+            serde_json::from_str(&serde_json::to_string(&plane).unwrap()).unwrap();
+        assert_eq!(back.style, PlatformStyle::Plane);
+        let ramp: StairRun =
+            serde_json::from_str(&serde_json::to_string(&ramp_run(false)).unwrap()).unwrap();
+        assert_eq!(ramp.style, StairStyle::Ramp);
     }
 
     /// Grounding a block flight is what makes it read as one mass: every face drops to

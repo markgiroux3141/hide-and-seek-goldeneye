@@ -13,8 +13,8 @@
 //! matching [`Brush`]. `floor` is the WT y of a room's floor; `height` its
 //! interior height (so the ceiling is at `floor + height`).
 
-use engine::geometry::csg_runtime::{Axis, Brush, Op, Side, StairDesc, StairDir};
-use engine::geometry::structures::{Anchor, Edge, Platform, StairRun, StairStyle};
+use engine::geometry::csg_runtime::{Axis, Brush, Op, Side, StairDesc, StairDir, StairShell};
+use engine::geometry::structures::{Anchor, Edge, Platform, PlatformStyle, StairRun, StairStyle};
 use glam::Vec3;
 
 /// The horizontal in-plane axis for a wall whose normal is `axis` (Z for an
@@ -342,9 +342,17 @@ impl LevelBuilder {
             u1,
             floor,
             ceil,
+            // The harness cuts full-height stairwells — `ceil` *is* the wall's top — so
+            // there is no wall above the doorway for the carve to take and no lintel to
+            // close. `None` says exactly that.
+            face_top: None,
             floor_y,
             scheme: self.cur_scheme,
             void_ids: [id1, id2],
+            // The headless harness carves the original 45° staircase; the ramp shell and
+            // the shallower slopes are hand-authoring choices, made in the O panel.
+            shell: StairShell::Steps,
+            run_per_step: 1.0,
         });
     }
 
@@ -374,6 +382,9 @@ impl LevelBuilder {
             thickness: 1.0,
             grounded: false,
             railings,
+            // The headless harness authors the original look; plane platforms are a
+            // hand-authoring choice, made in BUILD with Shift+T.
+            style: PlatformStyle::Solid,
         });
         // Label the platform top as a "room" so it appears in the graph/floorplan.
         self.rooms.push(RoomLabel {

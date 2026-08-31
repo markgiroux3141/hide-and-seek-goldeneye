@@ -346,9 +346,9 @@ fn toggle_labels_carry_their_state() {
 }
 
 #[test]
-fn the_armed_tool_is_accented_on_both_rings() {
+fn the_armed_tool_is_accented_on_every_ring_above_it() {
     let mut c = ctx();
-    c.armed = Some(Tool::Platform);
+    c.armed = Some(Tool::Draw);
     assert!(menu(MenuId::Root, &c)[0].on, "root Tools shows something is armed");
     let tools = menu(MenuId::Tools, &c);
     // Found by target, not by index: the ring's order is a presentation choice and
@@ -359,16 +359,97 @@ fn the_armed_tool_is_accented_on_both_rings() {
             .find(|s| s.target == Target::Act(EditorAction::ArmTool(t)))
             .unwrap_or_else(|| panic!("{t:?} is on the Tools ring"))
     };
-    assert!(slot(Tool::Platform).on, "the armed tool is accented");
-    assert!(!slot(Tool::Draw).on, "and the others are not");
+    assert!(slot(Tool::Draw).on, "the armed tool is accented");
+    assert!(!slot(Tool::Door).on, "and the others are not");
     assert!(tools.iter().filter(|s| s.on).count() == 1, "exactly one accent");
+
+    // A tool one ring deeper accents the whole path down to it, so a submenu never
+    // hides the fact that something inside it is live.
+    c.armed = Some(Tool::Platform);
+    let tools = menu(MenuId::Tools, &c);
+    let gate = tools
+        .iter()
+        .find(|s| s.target == Target::Menu(MenuId::Platform))
+        .expect("the Platform ring is reachable from Tools");
+    assert!(gate.on, "Tools shows the platform tool is armed");
+    assert!(menu(MenuId::Root, &c)[0].on, "and so does the root");
+    let inner = menu(MenuId::Platform, &c);
+    assert_eq!(
+        inner
+            .iter()
+            .filter(|s| s.on && matches!(s.target, Target::Act(EditorAction::ArmTool(_))))
+            .count(),
+        1,
+        "exactly one armed tool on the ring it actually lives on"
+    );
 }
 
+/// The platform system lives on its own ring, reached from Tools. Its three tools plus
+/// a style pair is half a ring on its own, and the Tools ring has every other tool to
+/// hold.
 #[test]
-fn only_the_root_holds_submenus() {
+fn the_platform_tools_live_on_their_own_ring() {
+    let c = ctx();
+    let tools = menu(MenuId::Tools, &c);
+    assert!(
+        tools
+            .iter()
+            .any(|s| s.target == Target::Menu(MenuId::Platform)),
+        "Tools opens the Platform ring"
+    );
+    for t in [Tool::Platform, Tool::BlockStairs, Tool::Connect] {
+        assert!(
+            !tools
+                .iter()
+                .any(|s| s.target == Target::Act(EditorAction::ArmTool(t))),
+            "{t:?} moved off the Tools ring"
+        );
+        assert!(
+            menu(MenuId::Platform, &c)
+                .iter()
+                .any(|s| s.target == Target::Act(EditorAction::ArmTool(t))),
+            "{t:?} is on the Platform ring"
+        );
+    }
+}
+
+/// The ring **reports** the live build style and opens the tab that owns it. Three
+/// independent settings with a handful of values each is panel-shaped, not ring-shaped —
+/// the same call the 390-theme texture library forced. But the ring still has to answer
+/// "which am I building?" without you placing one to find out, so the label carries the
+/// state even though the controls don't.
+#[test]
+fn the_platform_ring_reports_the_build_style_and_opens_the_tab_that_owns_it() {
+    use engine::geometry::csg_runtime::StairShell;
+    use engine::geometry::structures::PlatformStyle;
+
+    let style = |c: &RadialCtx| {
+        menu(MenuId::Platform, c)
+            .into_iter()
+            .find(|s| s.target == Target::Act(EditorAction::OpenPanel(PanelTab::Tools)))
+            .expect("the style slot opens the TOOLS tab")
+            .label
+    };
+    let mut c = ctx();
+    assert_eq!(style(&c), "Style: slab + stairs");
+
+    c.platform_style = PlatformStyle::Plane;
+    c.stair_shell = StairShell::Ramp;
+    assert_eq!(style(&c), "Style: plane + ramp");
+
+    // Both halves move independently — they are two settings, not one switch.
+    c.stair_shell = StairShell::Steps;
+    assert_eq!(style(&c), "Style: plane + stairs");
+}
+
+/// Nesting is allowed but rationed. `Root → Tools → Platform` is the one path three
+/// deep; everything else is a leaf ring, so the deepest thing you ever have to back out
+/// of is two levels.
+#[test]
+fn nesting_stops_at_the_platform_ring() {
     let c = ctx();
     for id in [
-        MenuId::Tools,
+        MenuId::Platform,
         MenuId::Selection,
         MenuId::Objects,
         MenuId::Textures,
@@ -377,9 +458,14 @@ fn only_the_root_holds_submenus() {
         MenuId::Debug,
     ] {
         for slot in menu(id, &c) {
-            assert!(!slot.is_menu(), "{id:?} must not nest — depth is capped at 2");
+            assert!(!slot.is_menu(), "{id:?} is a leaf ring — depth is capped at 3");
         }
     }
+    assert_eq!(
+        menu(MenuId::Tools, &c).iter().filter(|s| s.is_menu()).count(),
+        1,
+        "Tools nests exactly once, into Platform"
+    );
 }
 
 #[test]

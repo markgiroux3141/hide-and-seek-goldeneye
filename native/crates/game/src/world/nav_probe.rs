@@ -659,6 +659,7 @@ mod tests {
             thickness: 2.0,
             grounded: true,
             railings: false,
+            style: PlatformStyle::Solid,
         });
         let mut world = hunt(world);
         let r = world.probe_walk(Vec3::new(3.0, 0.0, 3.0), Vec3::new(11.0, 0.5, 11.0), 10.0);
@@ -696,6 +697,7 @@ mod tests {
                 thickness: 2.0,
                 grounded: true,
                 railings: false,
+                style: PlatformStyle::Solid,
             });
         }
         world.set_spawn_enemies(true);

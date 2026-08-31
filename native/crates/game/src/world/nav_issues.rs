@@ -218,8 +218,12 @@ impl World {
                 let mut solids = self.structure_solid_boxes();
                 solids.extend(self.prop_solid_boxes());
                 let stair_volumes = self.stair_run_solid_boxes();
+                let ramp_planes = self.ramp_planes();
                 match nav::bake(&mut self.regions, &solids, &stair_volumes) {
-                    Some(nav) => self.nav_pass(&nav),
+                    Some(mut nav) => {
+                        nav.set_ramps(&ramp_planes);
+                        self.nav_pass(&nav)
+                    }
                     None => (NavIssues::empty(), ColoredMesh::default()),
                 }
             }
@@ -871,6 +875,7 @@ mod tests {
             thickness: 2.0,
             grounded: true,
             railings: false,
+            style: PlatformStyle::Solid,
         });
         world
     }
@@ -933,6 +938,7 @@ mod tests {
             thickness: 2.0,
             grounded: true,
             railings: false,
+            style: PlatformStyle::Solid,
         });
         world.platforms.push(Platform {
             id: 2,
@@ -944,6 +950,7 @@ mod tests {
             thickness: 5.0,
             grounded: true,
             railings: false,
+            style: PlatformStyle::Solid,
         });
         world.calculate_nav_issues();
         let issues = world.nav_issues().expect("calculated");

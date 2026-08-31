@@ -792,6 +792,7 @@ mod tests {
             thickness: 1.0,
             grounded: true,
             railings: true,
+            style: PlatformStyle::Solid,
         });
         world.next_platform_id = 2;
 

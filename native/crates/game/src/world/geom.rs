@@ -99,6 +99,34 @@ pub(crate) fn boxes_mesh(boxes: &[[f32; 6]]) -> CpuMesh {
     CpuMesh::from_csg(&positions, &normals, &indices)
 }
 
+/// Build a combined ghost mesh (meters) from WT AABB `boxes` plus flat WT `quads`
+/// (four CCW corners each), for previews that are not made of boxes — the ramp-style
+/// stair ghost, whose whole point is that it has no steps. Both faces are emitted so
+/// the sloped plane reads from either side in the x-ray channel.
+pub(crate) fn ghost_mesh(boxes: &[[f32; 6]], quads: &[[[f32; 3]; 4]]) -> CpuMesh {
+    let mut mesh = boxes_mesh(boxes);
+    for q in quads {
+        let s = |p: [f32; 3]| [p[0] * WORLD_SCALE, p[1] * WORLD_SCALE, p[2] * WORLD_SCALE];
+        let c = [s(q[0]), s(q[1]), s(q[2]), s(q[3])];
+        let e1 = [c[1][0] - c[0][0], c[1][1] - c[0][1], c[1][2] - c[0][2]];
+        let e2 = [c[2][0] - c[0][0], c[2][1] - c[0][1], c[2][2] - c[0][2]];
+        let n = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        for (normal, order) in [(n, [0usize, 1, 2, 0, 2, 3]), ([-n[0], -n[1], -n[2]], [0, 2, 1, 0, 3, 2])] {
+            let base = mesh.vertices.len() as u32;
+            for p in c {
+                mesh.vertices.push(engine::render::mesh::Vertex { pos: p, normal });
+            }
+            mesh.indices
+                .extend(order.iter().map(|&i| base + i as u32));
+        }
+    }
+    mesh
+}
+
 /// Build the structures **collider** mesh (meters): platform slabs as solid AABB
 /// `boxes`, plus one **double-sided sloped ramp** quad per stair-run in `ramps`
 /// (WT CCW corner quads). The ramps let the player walk a run's true slope

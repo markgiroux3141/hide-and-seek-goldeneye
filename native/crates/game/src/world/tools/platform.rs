@@ -61,6 +61,66 @@ impl World {
         }
     }
 
+    /// What the stair and platform tools build with — read by the `O` panel's TOOLS tab
+    /// and by the radial's live label.
+    pub fn build_style(&self) -> BuildStyle {
+        self.build_style
+    }
+
+    /// Set the platform shell (skirted slab, or a bare plane in the room's floor
+    /// texture). With a platform selected it **converts that one as well** and returns the
+    /// rebuilt mesh — conversion is free, being one field over unchanged solid boxes,
+    /// collider and nav, so a level authored before these styles existed can be re-skinned
+    /// in place one platform at a time.
+    pub fn set_platform_style(&mut self, style: PlatformStyle) -> Option<RegionMesh> {
+        if self.mode != Mode::Build {
+            return None;
+        }
+        self.build_style.platform = style;
+        log::info!("platforms: {style:?}");
+        let pid = self.selected_platform?;
+        let p = self.platforms.iter_mut().find(|p| p.id == pid)?;
+        p.style = style;
+        log::info!("platform {pid} converted to {style:?}");
+        Some(self.rebuild_structures())
+    }
+
+    /// Set the stair shell — treads and risers, or the bare slope. Honoured by `K`, `C`
+    /// **and** the `↑`/`↓` CSG stair tool (whose pending op reads it live, so its ghost
+    /// changes with the setting).
+    ///
+    /// Converts a selected free-standing stair-run too. Converting *out* of a ramp lands
+    /// on [`StairStyle::Block`], not `Platform`: block stairs wear the room's theme
+    /// exactly as the ramp does, so the shell changes without the palette changing. The
+    /// legacy blue tread-and-stringer look is reachable by authoring one with `C`, never
+    /// by converting into it.
+    pub fn set_stair_shell(&mut self, shell: StairShell) -> Option<RegionMesh> {
+        if self.mode != Mode::Build {
+            return None;
+        }
+        self.build_style.stairs = shell;
+        log::info!("stairs: {shell:?}");
+        let rid = self.selected_run?;
+        let style = self.build_style.stair_style(StairStyle::Block);
+        let r = self.stair_runs.iter_mut().find(|r| r.id == rid)?;
+        r.style = style;
+        log::info!("stair-run {rid} converted to {style:?}");
+        Some(self.rebuild_structures())
+    }
+
+    /// Set the horizontal run of one `↑`/`↓` stair step, in WT — the slope dial. Clamped
+    /// to the shallow half of [`STAIR_RUN_PRESETS`]; see that constant for why steeper is
+    /// not on offer.
+    pub fn set_stair_run(&mut self, run: f32) {
+        if self.mode != Mode::Build {
+            return;
+        }
+        let lo = STAIR_RUN_PRESETS[0];
+        let hi = STAIR_RUN_PRESETS[STAIR_RUN_PRESETS.len() - 1];
+        self.build_style.stair_run = run.clamp(lo, hi);
+        log::info!("stair slope: {}", stair_run_label(self.build_style.stair_run));
+    }
+
     /// Esc while the platform tool is active: cancel an active gizmo drag
     /// (restoring the platform), else back out of a sub-phase (connect /
     /// simple-stair). Returns `(consumed, changed_mesh)` — `consumed` tells the
@@ -197,6 +257,7 @@ impl World {
             thickness: PLATFORM_THICKNESS,
             grounded: false,
             railings: false,
+            style: self.build_style.platform,
         })
     }
 
@@ -223,6 +284,13 @@ impl World {
                     return None;
                 }
                 let p = self.resolve_platform_placement(hit)?;
+                // The ghost is what the style *looks* like, not what it collides as: a
+                // plane platform previews as the plane you will see, even though the
+                // slab underneath it is what nav and the collider get. Showing the box
+                // there made the two styles indistinguishable until you clicked.
+                if p.style == PlatformStyle::Plane {
+                    return Some(ghost_mesh(&[], &[platform_plane_quad(&p)]));
+                }
                 let brushes = self.all_region_brushes();
                 let b = p.solid_box(&brushes)?;
                 Some(boxes_mesh(&[b]))
@@ -244,10 +312,9 @@ impl World {
             }
             PlatformPhase::ConnectSrc => {
                 let run = self.resolve_connect_run()?;
-                let (fp, tp) = self.run_platforms(&run);
                 let brushes = self.all_region_brushes();
-                let boxes = structures::stair_run_boxes(&run, fp.as_ref(), tp.as_ref(), &brushes);
-                Some(boxes_mesh(&boxes))
+                let (boxes, quads) = self.run_ghost_geometry(&run, &brushes);
+                Some(ghost_mesh(&boxes, &quads))
             }
             _ => None,
         }
@@ -411,7 +478,7 @@ impl World {
             rise_over_run: STAIR_RISE_OVER_RUN,
             grounded: false,
             railings: false,
-            style: StairStyle::Platform,
+            style: self.build_style.stair_style(StairStyle::Platform),
         })
     }
 
@@ -565,7 +632,7 @@ impl World {
             rise_over_run: STAIR_RISE_OVER_RUN,
             grounded: false,
             railings: false,
-            style: StairStyle::Block,
+            style: self.build_style.stair_style(StairStyle::Block),
         })
     }
 
@@ -584,20 +651,23 @@ impl World {
             .pick_structure_hit()
             .map(|h| Vec3::new(h.hit_wt.x.round(), h.hit_wt.y.round(), h.hit_wt.z.round()));
         let mut boxes: Vec<[f32; 6]> = Vec::new();
+        let mut quads: Vec<[[f32; 3]; 4]> = Vec::new();
         if phase == PlatformPhase::SimpleFrom {
             boxes.push(endpoint_marker_box(cursor?));
         } else {
             let from = self.simple_from?;
             match cursor.and_then(|to| self.resolve_simple_run(from, to)) {
                 // A valid flight: mark the run's *resolved* ends, so the markers stay
-                // on the ghost as the wheel slides it, and show the steps themselves.
+                // on the ghost as the wheel slides it, and show the flight itself.
                 Some(run) => {
                     let brushes = self.all_region_brushes();
                     for a in [&run.anchor_from, &run.anchor_to] {
                         let p = structures::resolve_run_anchor(None, a);
                         boxes.push(endpoint_marker_box(Vec3::new(p[0], p[1], p[2])));
                     }
-                    boxes.extend(structures::stair_run_boxes(&run, None, None, &brushes));
+                    let (b, q) = self.run_ghost_geometry(&run, &brushes);
+                    boxes.extend(b);
+                    quads.extend(q);
                 }
                 // Degenerate (or nothing under the crosshair): the locked first
                 // endpoint still shows, so the tool never looks dead.
@@ -609,7 +679,26 @@ impl World {
                 }
             }
         }
-        Some(boxes_mesh(&boxes))
+        Some(ghost_mesh(&boxes, &quads))
+    }
+
+    /// What a stair-run's ghost is made of: its stepped blocks, or — for a ramp — the
+    /// slope itself as a quad. Shared by the connect and simple-stair previews so
+    /// neither can show steps a ramp will not have.
+    fn run_ghost_geometry(
+        &self,
+        run: &StairRun,
+        brushes: &[Brush],
+    ) -> (Vec<[f32; 6]>, Vec<[[f32; 3]; 4]>) {
+        let (fp, tp) = self.run_platforms(run);
+        if run.style == StairStyle::Ramp {
+            let q = structures::stair_run_ramp(run, fp.as_ref(), tp.as_ref(), brushes);
+            return (Vec::new(), q.into_iter().collect());
+        }
+        (
+            structures::stair_run_boxes(run, fp.as_ref(), tp.as_ref(), brushes),
+            Vec::new(),
+        )
     }
 
     pub(crate) fn simple_stair_first_click(&mut self) {
@@ -795,6 +884,35 @@ impl World {
         boxes
     }
 
+    /// The sloped planes of every **ramp-style** stair-run (WT quads), for
+    /// [`engine::sim::nav::NavWorld::set_ramps`].
+    ///
+    /// Ramp-style runs only. The grid bakes every flight as its stepped boxes — that is
+    /// what makes one climbable — but a ramp draws nothing on those steps, so the floor
+    /// snap would leave hunters riding up to one cell above the surface you can see. On a
+    /// block or platform-style flight the steps *are* the render, and a plane through
+    /// their corners would sink hunters into the treads instead.
+    pub(crate) fn ramp_planes(&self) -> Vec<[[f32; 3]; 4]> {
+        let brushes = self.all_region_brushes();
+        let free_standing = self
+            .stair_runs
+            .iter()
+            .filter(|r| r.style == StairStyle::Ramp)
+            .filter_map(|r| {
+                let (fp, tp) = self.run_platforms(r);
+                structures::stair_run_ramp(r, fp.as_ref(), tp.as_ref(), &brushes)
+            });
+        // In-wall CSG stairs cut with `↑`/`↓` have exactly the same problem when they
+        // wear the ramp shell: still voxelised as steps, drawn as a slope.
+        let carved = self
+            .regions
+            .iter()
+            .flat_map(|r| r.stairs.iter())
+            .filter(|s| s.shell == StairShell::Ramp)
+            .filter_map(|s| s.ramp_quad());
+        free_standing.chain(carved).collect()
+    }
+
     /// Re-derive the structures mesh + collider from the current platforms /
     /// stair-runs and return it for GPU upload (under [`STRUCT_ID`]). **Collider +
     /// nav use the solid boxes** (`structure_solid_boxes`, matching JS nav
@@ -812,7 +930,18 @@ impl World {
         // the exception: they wear the scheme of the room they stand in.
         let mut b = ZonedBuilder::new();
         for p in &self.platforms {
-            structures::append_platform_mesh(p, &brushes, &mut b, simple_scheme());
+            match p.style {
+                PlatformStyle::Solid => {
+                    structures::append_platform_mesh(p, &brushes, &mut b, simple_scheme())
+                }
+                // Plane platforms are the other exception: floor texture of the room
+                // they stand in, so walking on to one continues that room's grid.
+                PlatformStyle::Plane => structures::append_platform_plane_mesh(
+                    p,
+                    &mut b,
+                    self.platform_room_scheme(p, &brushes),
+                ),
+            }
         }
         // A block-style run also hands back its lateral walls, which go into the
         // collider below so the block is solid to walk into from the side.
@@ -829,6 +958,15 @@ impl World {
                     simple_scheme(),
                 ),
                 StairStyle::Block => structures::append_stair_block_mesh(
+                    r,
+                    fp.as_ref(),
+                    tp.as_ref(),
+                    &brushes,
+                    &mut b,
+                    &mut block_solid,
+                    self.run_room_scheme(r, &brushes),
+                ),
+                StairStyle::Ramp => structures::append_stair_ramp_mesh(
                     r,
                     fp.as_ref(),
                     tp.as_ref(),
@@ -881,6 +1019,14 @@ impl World {
     /// **bottom** end stands in, so the flight continues that room's floor and wall
     /// textures. Falls back to the level default when the flight's foot is not inside
     /// any room (a run out over open ground).
+    /// The texture scheme a plane-style platform wears: the theme of the room beneath
+    /// it, probed from its centre. Falls back to the level default for a platform out
+    /// over open ground. The stair counterpart of [`Self::run_room_scheme`].
+    fn platform_room_scheme(&self, p: &Platform, brushes: &[Brush]) -> usize {
+        structures::scheme_at(p.center_x(), p.center_z(), p.y, brushes)
+            .unwrap_or_else(default_scheme)
+    }
+
     fn run_room_scheme(&self, run: &StairRun, brushes: &[Brush]) -> usize {
         let (fp, tp) = self.run_platforms(run);
         let a = structures::resolve_run_anchor(fp.as_ref(), &run.anchor_from);
@@ -974,4 +1120,16 @@ impl World {
 /// x-ray channel, so it stays visible even where the room geometry is in front of it.
 fn endpoint_marker_box(p: Vec3) -> [f32; 6] {
     [p.x - 0.5, p.y + 0.5, p.z - 0.5, 1.0, 1.0, 1.0]
+}
+
+/// A plane platform's top surface as a WT quad — the same four corners
+/// [`structures::append_platform_plane_mesh`] draws, so the ghost and the placed
+/// platform cannot disagree.
+fn platform_plane_quad(p: &Platform) -> [[f32; 3]; 4] {
+    [
+        [p.x, p.y, p.z],
+        [p.x, p.y, p.max_z()],
+        [p.max_x(), p.y, p.max_z()],
+        [p.max_x(), p.y, p.z],
+    ]
 }

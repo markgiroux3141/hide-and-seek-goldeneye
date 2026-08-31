@@ -3398,6 +3398,53 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         assert!(!world.has_pending_stair());
     }
 
+    /// The `↑`/`↓` tool honours the panel too, and a ramp cut into a wall has exactly the
+    /// same hunter problem a free-standing one does — voxelised as steps, drawn as a
+    /// slope — so it has to reach the nav overlay as well.
+    ///
+    /// The pending op reads the settings **live** rather than freezing them when the first
+    /// arrow was pressed, so changing the shell mid-op updates the ghost you are looking
+    /// at instead of only the next stair.
+    #[test]
+    fn a_csg_stair_takes_its_shell_and_slope_from_the_panel() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.set_stair_shell(StairShell::Ramp);
+        world.set_stair_run(2.0);
+
+        world.select_at_crosshair(); // full-face −Z wall, touches floor
+        assert!(world.push_stairs(StairDir::Down), "one step down");
+        world.push_stairs(StairDir::Down); // 2 steps
+        let pending = world.pending_desc().expect("a pending descriptor");
+        assert_eq!(pending.shell, StairShell::Ramp, "the ghost is a ramp already");
+        assert_eq!(pending.total_run(), 4.0, "2 steps at 2x run");
+
+        assert!(world.confirm_stairs().is_some(), "confirmed");
+        let desc = world.regions[0].stairs[0];
+        assert_eq!(desc.shell, StairShell::Ramp);
+        assert_eq!(desc.run_per_step, 2.0);
+
+        // The carve follows the stretched run: the corridor void starts where the flight
+        // ends, 4 WT out, not 2.
+        assert!(
+            world.regions[0]
+                .brushes
+                .iter()
+                .any(|b| (b.d - 1.0).abs() < 1e-3 || (b.w - 1.0).abs() < 1e-3),
+            "a 1-WT destination corridor was carved past the flight"
+        );
+
+        // And hunters get the slope, not the invisible treads under it.
+        let planes = world.ramp_planes();
+        assert_eq!(planes.len(), 1, "the carved ramp reaches the nav overlay");
+        world.set_stair_shell(StairShell::Steps);
+        world.regions[0].stairs[0].shell = StairShell::Steps;
+        assert!(
+            world.ramp_planes().is_empty(),
+            "a stepped flight must not — its steps ARE the render"
+        );
+    }
+
     /// Arrow keys accumulate a pending step counter; the opposite arrow shrinks
     /// the same op, and confirming creates two void brushes + one descriptor with
     /// the tread mesh folded into the region (more triangles than before).
@@ -3604,6 +3651,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
             thickness: 1.0,
             grounded: false,
             railings: false,
+            style: PlatformStyle::Solid,
         });
         world.next_platform_id = 2;
         world.stair_runs.push(StairRun {
@@ -3629,6 +3677,175 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         world.next_run_id = 2;
         world.rebuild_structures();
         world
+    }
+
+    /// Choosing a structure style sets what `T`/`K`/`C` build next and — with something
+    /// selected — converts that one in place. The conversion is the whole reason a style
+    /// is a field rather than two separate tools.
+    #[test]
+    fn setting_a_shell_converts_the_selection_and_what_is_built_next() {
+        let mut world = room_with_platform_and_stair();
+        let bs = world.build_style();
+        assert_eq!(bs.platform, PlatformStyle::Solid, "levels start on the original look");
+        assert_eq!(bs.stairs, StairShell::Steps);
+
+        // Nothing selected: the setting moves, nothing is rebuilt, nothing is converted.
+        world.platform_phase = Some(PlatformPhase::Idle);
+        assert!(
+            world.set_stair_shell(StairShell::Ramp).is_none(),
+            "no selection, no edit"
+        );
+        assert_eq!(world.build_style().stairs, StairShell::Ramp);
+        assert_eq!(world.stair_runs[0].style, StairStyle::Platform, "untouched");
+
+        // And that setting is what the build path stamps — here through the block-stair
+        // resolver, which is the same function the tool commits.
+        let run = world
+            .resolve_simple_run(Vec3::new(4.0, 0.0, 4.0), Vec3::new(12.0, 8.0, 4.0))
+            .expect("a valid flight");
+        assert_eq!(run.style, StairStyle::Ramp, "K now builds ramps");
+
+        // With a platform selected, choosing a platform shell converts it too — and
+        // touches nothing else, the two settings being independent.
+        world.selected_platform = Some(1);
+        world.platform_phase = Some(PlatformPhase::Selected);
+        assert!(
+            world.set_platform_style(PlatformStyle::Plane).is_some(),
+            "geometry changed"
+        );
+        assert_eq!(world.platforms[0].style, PlatformStyle::Plane);
+        assert_eq!(world.build_style().stairs, StairShell::Ramp, "stairs unaffected");
+        world.set_platform_style(PlatformStyle::Solid);
+        assert_eq!(world.platforms[0].style, PlatformStyle::Solid);
+
+        // A selected run converts the same way. Coming back out of a ramp lands on
+        // `Block`, not the legacy blue tread-and-stringer look — block stairs wear the
+        // room's theme exactly as the ramp does, so the shell changes without the palette
+        // changing.
+        world.selected_platform = None;
+        world.selected_run = Some(1);
+        world.set_stair_shell(StairShell::Ramp);
+        assert_eq!(world.stair_runs[0].style, StairStyle::Ramp);
+        world.set_stair_shell(StairShell::Steps);
+        assert_eq!(world.stair_runs[0].style, StairStyle::Block);
+    }
+
+    /// The slope dial only goes shallower, and that is not a taste call: the player
+    /// capsule climbs 50°, and the walking surface is the flight's slope in **both**
+    /// shells, so a steeper stair is one nobody can get up.
+    #[test]
+    fn the_stair_slope_only_goes_shallower_than_the_original_45_degrees() {
+        let mut world = World::new();
+        assert_eq!(world.build_style().stair_run, 1.0, "45° to begin with");
+
+        world.set_stair_run(0.5); // 63° — steeper than the player can climb
+        assert_eq!(
+            world.build_style().stair_run,
+            1.0,
+            "clamped back to the steepest walkable flight"
+        );
+        world.set_stair_run(3.0);
+        assert_eq!(world.build_style().stair_run, 3.0, "shallower is fine");
+        world.set_stair_run(99.0);
+        assert_eq!(world.build_style().stair_run, 3.0, "clamped at the shallow end too");
+
+        for run in STAIR_RUN_PRESETS {
+            assert!(run >= 1.0, "no preset is steeper than 45°");
+        }
+    }
+
+    /// **The ghost previews the style, not the collider.** A plane platform ghosts as the
+    /// flat plane you will get; the slab ghosts as its box. Both styles ghosting as the
+    /// same box is what made them indistinguishable until you had already clicked.
+    #[test]
+    fn the_placement_ghost_shows_which_style_will_be_placed() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.camera.pitch = -1.4; // look almost straight down at the floor
+        world.platform_tool_key();
+        assert!(world.is_platform_placing());
+
+        let solid = world.update_platform_preview().expect("a slab ghost");
+        assert!(
+            solid.vertices.iter().any(|v| v.normal[1].abs() < 0.1),
+            "the slab ghosts as a box — it has vertical faces"
+        );
+
+        world.set_platform_style(PlatformStyle::Plane);
+        let plane = world.update_platform_preview().expect("a plane ghost");
+        assert!(
+            plane.vertices.iter().all(|v| v.normal[1].abs() > 0.9),
+            "the plane ghosts flat — no box sides"
+        );
+        let y = plane.vertices[0].pos[1];
+        assert!(
+            plane.vertices.iter().all(|v| (v.pos[1] - y).abs() < 1e-4),
+            "and every corner is at one height"
+        );
+        assert!(
+            plane.vertices.len() < solid.vertices.len(),
+            "one quad, both windings, against a whole box"
+        );
+    }
+
+    /// Style is a **render** choice. Collision and nav must not notice it at all — which
+    /// is what lets a level be re-skinned after the fact without re-validating its nav.
+    #[test]
+    fn converting_to_plane_and_ramp_leaves_the_solid_boxes_untouched() {
+        let mut world = room_with_platform_and_stair();
+        let before = world.structure_solid_boxes();
+        world.platforms[0].style = PlatformStyle::Plane;
+        world.stair_runs[0].style = StairStyle::Ramp;
+        world.rebuild_structures();
+        assert_eq!(
+            format!("{:?}", world.structure_solid_boxes()),
+            format!("{before:?}"),
+            "the same slab and the same stepped flight, whatever is drawn over them"
+        );
+    }
+
+    /// Only ramp-style runs hand a plane to nav. On a block or platform-style flight the
+    /// steps *are* the render, and a plane through their corners would sink hunters into
+    /// the treads.
+    #[test]
+    fn only_ramp_style_runs_contribute_a_nav_plane() {
+        let mut world = room_with_platform_and_stair();
+        assert!(
+            world.ramp_planes().is_empty(),
+            "a tread-and-stringer flight is not a ramp"
+        );
+        world.stair_runs[0].style = StairStyle::Block;
+        assert!(world.ramp_planes().is_empty(), "nor is a block staircase");
+        world.stair_runs[0].style = StairStyle::Ramp;
+        assert_eq!(world.ramp_planes().len(), 1, "the ramp does");
+    }
+
+    /// A plane platform wears the floor texture of the room it stands in, not the blue
+    /// `simple_blue` scheme every solid platform carries — that is what makes one read as
+    /// part of the level instead of a prop dropped into it.
+    #[test]
+    fn a_plane_platform_wears_the_rooms_theme_not_the_blue_one() {
+        let mut world = room_with_platform_and_stair();
+        world.stair_runs.clear(); // the platform's shell alone
+        let blue = engine::render::textures::simple_scheme();
+
+        let solid = world.rebuild_structures();
+        assert!(
+            solid.mesh.groups.iter().all(|g| g.scheme as usize == blue),
+            "the original slab is blue throughout"
+        );
+
+        world.platforms[0].style = PlatformStyle::Plane;
+        let plane = world.rebuild_structures();
+        assert_eq!(plane.mesh.groups.len(), 1, "one quad, one group");
+        let g = &plane.mesh.groups[0];
+        assert_eq!(g.zone, 0, "the floor zone");
+        assert_ne!(g.scheme as usize, blue, "and not the blue platform scheme");
+        assert_eq!(
+            g.scheme as usize,
+            world.regions[0].brushes[0].scheme,
+            "it is the scheme of the room underneath"
+        );
     }
 
     /// A platform + connecting stair-run are walkable by the hunter's grid nav:

@@ -117,6 +117,7 @@ impl World {
             u1,
             floor,
             ceil,
+            face_top: info.v_max,
             scheme,
         });
         true
@@ -148,9 +149,15 @@ impl World {
             u1: op.u1,
             floor: op.floor,
             ceil: op.ceil,
+            face_top: Some(op.face_top),
             floor_y,
             scheme: op.scheme,
             void_ids: [0, 0], // filled in at confirm once brush ids are allocated
+            // Read live off the panel rather than frozen when the op started, so
+            // changing the shell or the slope mid-op updates the ghost you are looking
+            // at instead of only the next stair you build.
+            shell: self.build_style.stairs,
+            run_per_step: self.build_style.stair_run,
         })
     }
 
@@ -183,12 +190,16 @@ impl World {
         let op = self.pending_stair.take()?;
         let sc = op.step_count as f32;
         let dir = if op.side == Side::Max { 1.0 } else { -1.0 };
+        // How far out the flight reaches. The rise is always `sc`; the slope dial
+        // stretches the *run*, so the carve has to follow it or the last steps end up
+        // buried in the wall.
+        let total_run = desc.total_run();
 
         // Brush 1: the main stairwell, flush with the wall face.
         let (b1_lo, b1_hi) = if dir > 0.0 {
-            (op.face_pos, op.face_pos + sc)
+            (op.face_pos, op.face_pos + total_run)
         } else {
-            (op.face_pos - sc, op.face_pos)
+            (op.face_pos - total_run, op.face_pos)
         };
         let (b1_ymin, b1_ymax) = match op.direction {
             StairDir::Down => (op.floor - sc, op.ceil),
@@ -203,9 +214,9 @@ impl World {
 
         // Brush 2: the destination corridor, 1 WT deep past the stairwell.
         let (b2_lo, b2_hi) = if dir > 0.0 {
-            (op.face_pos + sc, op.face_pos + sc + 1.0)
+            (op.face_pos + total_run, op.face_pos + total_run + 1.0)
         } else {
-            (op.face_pos - sc - 1.0, op.face_pos - sc)
+            (op.face_pos - total_run - 1.0, op.face_pos - total_run)
         };
         let (b2_ymin, b2_ymax) = match op.direction {
             StairDir::Down => (op.floor - sc, op.ceil - sc),

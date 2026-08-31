@@ -154,6 +154,9 @@ pub struct NavWorld {
     /// The one thing hunters need to know about a duct they can never enter: where it
     /// meets the floor they *can* stand on. See [`NavVent`] and [`Self::find_path`].
     vents: Vec<NavVent>,
+    /// Sloped walking surfaces that the *grid* only knows as a staircase — ramp-style
+    /// stair-runs. Empty until [`Self::set_ramps`]; a post-bake overlay, like the doors.
+    ramps: Vec<NavRamp>,
     /// cellIdx → connected-component id (0 = not standable), from [`Self::label_components`].
     ///
     /// **This is what makes "you cannot get there" cheap.** A\* answers *reachable* fast
@@ -193,6 +196,87 @@ pub struct NavVent {
     /// and watch the opening. Empty for a sealed duct, which is an authoring fault the
     /// NAV tab reports rather than something nav can fix.
     mouths: Vec<Vec3>,
+}
+
+/// One sloped walking surface, in metres: an XZ footprint plus the heights at the two
+/// ends of the axis the slope runs along. See [`NavWorld::set_ramps`].
+///
+/// Axis-aligned by construction — a stair-run advances along X or Z, never diagonally —
+/// so the footprint is an AABB and the height is linear in one coordinate.
+struct NavRamp {
+    x0: f32,
+    x1: f32,
+    z0: f32,
+    z1: f32,
+    /// Slope runs along X (else Z).
+    along_x: bool,
+    /// Height at the minimum end of that axis, and at the maximum end.
+    y_lo: f32,
+    y_hi: f32,
+}
+
+impl NavRamp {
+    /// Build from a WT quad in `stair_run_ramp` corner order. `None` for a degenerate
+    /// footprint.
+    ///
+    /// The run axis is read off the **`q0`→`q1` edge**, which that function always lays
+    /// along the slope, rather than from whichever pair of corners happens to be lowest
+    /// and highest: two corners share each height, so an argmin/argmax would pick a
+    /// diagonal on a coin flip and get the axis wrong half the time.
+    fn from_quad(q: &[[f32; 3]; 4]) -> Option<NavRamp> {
+        let along_x = (q[1][0] - q[0][0]).abs() >= (q[1][2] - q[0][2]).abs();
+        let xs = [q[0][0], q[1][0], q[2][0], q[3][0]];
+        let zs = [q[0][2], q[1][2], q[2][2], q[3][2]];
+        let (x0, x1) = (
+            xs.iter().copied().fold(f32::INFINITY, f32::min),
+            xs.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+        );
+        let (z0, z1) = (
+            zs.iter().copied().fold(f32::INFINITY, f32::min),
+            zs.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+        );
+        if x1 <= x0 || z1 <= z0 {
+            return None;
+        }
+        // `q0` and `q1` sit at opposite ends of the run; which end of the axis each is
+        // on decides whether the slope ascends with the coordinate.
+        let (a0, a1) = if along_x {
+            (q[0][0], q[1][0])
+        } else {
+            (q[0][2], q[1][2])
+        };
+        if (a1 - a0).abs() <= f32::EPSILON {
+            return None;
+        }
+        let (y_lo, y_hi) = if a1 > a0 {
+            (q[0][1], q[1][1])
+        } else {
+            (q[1][1], q[0][1])
+        };
+        Some(NavRamp {
+            x0: wt_to_m(x0),
+            x1: wt_to_m(x1),
+            z0: wt_to_m(z0),
+            z1: wt_to_m(z1),
+            along_x,
+            y_lo: wt_to_m(y_lo),
+            y_hi: wt_to_m(y_hi),
+        })
+    }
+
+    /// Height (metres) of the plane over this XZ point, or `None` outside the footprint.
+    fn height_at(&self, mx: f32, mz: f32) -> Option<f32> {
+        if mx < self.x0 || mx > self.x1 || mz < self.z0 || mz > self.z1 {
+            return None;
+        }
+        let (v, lo, hi) = if self.along_x {
+            (mx, self.x0, self.x1)
+        } else {
+            (mz, self.z0, self.z1)
+        };
+        let t = ((v - lo) / (hi - lo)).clamp(0.0, 1.0);
+        Some(self.y_lo + (self.y_hi - self.y_lo) * t)
+    }
 }
 
 // ─── Validation findings (the BUILD NAV tab) ─────────────────────────────────
@@ -761,8 +845,55 @@ impl NavWorld {
     /// So the reach has to be read from the same place the step limit is, or the mover and
     /// the grid disagree about what "walkable" means. Outside stairs this is identical to
     /// probing one step up.
+    /// Sloped, and known to the grid only as a staircase: see [`Self::set_ramps`].
     pub fn walk_surface_at(&self, feet: Vec3) -> Option<f32> {
-        self.floor_height_at(feet.x, feet.z, feet.y + self.step_reach_at(feet) + 1e-3)
+        let grid = self.floor_height_at(feet.x, feet.z, feet.y + self.step_reach_at(feet) + 1e-3);
+        let Some(ramp_y) = self.ramp_surface_at(feet.x, feet.z) else {
+            return grid;
+        };
+        // The grid answer is what disambiguates. A ramp's XZ footprint also covers the
+        // floor *underneath* a floating one, and an agent walking there must not be
+        // yanked up onto the slope — so the plane only wins when the grid already put
+        // this agent within one step of it, i.e. on the flight's own stepped volume.
+        match grid {
+            Some(gy) if (gy - ramp_y).abs() <= wt_to_m(STAIR_STEP as f32) => Some(ramp_y),
+            other => other,
+        }
+    }
+
+    /// Register the **ramp-style** stair-runs' sloped planes as an overlay on the baked
+    /// grid, as WT quads in [`crate::geometry::structures::stair_run_ramp`] corner order
+    /// (`q0`→`q1` runs up the slope, `q0`→`q3` spans the width). Replaces any previous set.
+    ///
+    /// **Why the grid needs an exception it cannot voxelise.** A ramp-style run is still
+    /// baked as its stepped [`crate::geometry::structures::stair_run_boxes`] — that is
+    /// what makes it climbable at all, and it is what the `STAIR_STEP` relaxation is
+    /// tagged through. But nothing is *drawn* on those steps any more: the visible
+    /// surface is the smooth slope. So the cell tops the floor snap returns sit up to one
+    /// cell (0.25 m, ~17% of a 1.5 m body) above the surface the player sees, and hunters
+    /// climbing a ramp float. Only [`Self::walk_surface_at`] needs to know; A\*, LOS and
+    /// the step limits all keep working off the stepped cells.
+    ///
+    /// Pass only ramp-style runs. On a block or platform-style flight the steps *are* the
+    /// render, and snapping to a plane through their corners would sink hunters into the
+    /// treads.
+    pub fn set_ramps(&mut self, quads: &[[[f32; 3]; 4]]) {
+        self.ramps = quads.iter().filter_map(|q| NavRamp::from_quad(q)).collect();
+    }
+
+    /// Number of registered ramp planes (diagnostics + tests).
+    pub fn ramp_count(&self) -> usize {
+        self.ramps.len()
+    }
+
+    /// The height (metres) of the highest ramp plane covering this XZ column, if any.
+    /// Highest, so a ramp stacked over another resolves to the one on top — the same
+    /// convention the floor probe uses.
+    fn ramp_surface_at(&self, mx: f32, mz: f32) -> Option<f32> {
+        self.ramps
+            .iter()
+            .filter_map(|r| r.height_at(mx, mz))
+            .fold(None, |best: Option<f32>, y| Some(best.map_or(y, |b| b.max(y))))
     }
 
     /// How far up an agent standing here may step, in metres: one cell normally,
@@ -1542,6 +1673,7 @@ pub fn bake(
         nz,
         solid,
         stair,
+        ramps: Vec::new(),
         doors: Vec::new(),
         door_grid: Vec::new(),
         vents: Vec::new(),
@@ -1556,6 +1688,7 @@ pub fn bake(
 mod tests {
     use super::*;
     use crate::geometry::csg_runtime::{Brush, Op, Region};
+    use crate::geometry::structures::{self, Anchor, StairRun, StairStyle};
 
     fn room() -> Vec<Region> {
         let mut region = Region::new(0);
@@ -2031,6 +2164,86 @@ mod tests {
         let main = nav.main_component().unwrap();
         assert!(cells.iter().all(|(_, c)| *c == main), "all of it is the main component");
         assert!(nav.overclimb_edges(0.8).is_empty(), "flat floor has no steps");
+    }
+
+    /// A ramp-style flight, and the room it stands in. `y_base` lifts the whole flight
+    /// so the space underneath it is open (a floating ramp).
+    fn ramp_flight(y_base: f32) -> (Vec<Region>, StairRun) {
+        let mut region = Region::new(0);
+        region
+            .brushes
+            .push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 24.0, 32.0, 24.0));
+        let run = StairRun {
+            id: 1,
+            from_platform: None,
+            to_platform: None,
+            anchor_from: Anchor::Ground { x: 4.0, y: y_base, z: 10.0 },
+            anchor_to: Anchor::Ground { x: 12.0, y: y_base + 8.0, z: 10.0 },
+            width: 4.0,
+            step_height: 1.0,
+            rise_over_run: 1.0,
+            grounded: false,
+            railings: false,
+            style: StairStyle::Ramp,
+        };
+        (vec![region], run)
+    }
+
+    /// **The defect a ramp introduces, and the whole reason for the overlay.**
+    ///
+    /// A ramp is baked as a staircase like every other flight — that is what makes it
+    /// climbable at all — so the raw grid stands an agent on the *invisible* tread tops,
+    /// up to a cell above the surface anyone can see. The overlay puts them back on the
+    /// slope, without touching A\*, LOS or the step limits.
+    #[test]
+    fn a_ramp_overlay_walks_the_slope_not_the_invisible_treads_under_it() {
+        let (mut regions, run) = ramp_flight(0.0);
+        let boxes = structures::stair_run_boxes(&run, None, None, &[]);
+        let quad = structures::stair_run_ramp(&run, None, None, &[]).expect("the run has a ramp");
+        let mut nav = bake(&mut regions, &boxes, &boxes).expect("bakes");
+
+        // Mid-flight. The run climbs y = x − 4 in WT, so the true surface here is 4.5 WT
+        // while the tread this sits on tops out at 5.
+        let probe = Vec3::new(8.5, 5.0, 10.0) * WORLD_SCALE;
+        let stepped = nav.walk_surface_at(probe).expect("stands on the flight");
+        assert!(
+            (stepped / WORLD_SCALE - 5.0).abs() < 1e-3,
+            "the raw grid answers with the tread top ({} WT)",
+            stepped / WORLD_SCALE
+        );
+
+        nav.set_ramps(&[quad]);
+        assert_eq!(nav.ramp_count(), 1, "the plane was accepted");
+        let sloped = nav.walk_surface_at(probe).expect("still stands on the flight");
+        assert!(
+            (sloped / WORLD_SCALE - 4.5).abs() < 1e-3,
+            "with the overlay it is the slope itself ({} WT)",
+            sloped / WORLD_SCALE
+        );
+        assert!(sloped < stepped, "and that is lower — hunters stop floating");
+    }
+
+    /// A ramp's XZ footprint also covers the floor *underneath* a floating one, so the
+    /// overlay has to be able to tell "on the ramp" from "under it". The grid answer is
+    /// what decides: the plane only wins within one step of where the grid already put
+    /// this agent.
+    #[test]
+    fn the_ramp_overlay_does_not_hijack_the_floor_under_a_floating_ramp() {
+        let (mut regions, run) = ramp_flight(8.0);
+        let boxes = structures::stair_run_boxes(&run, None, None, &[]);
+        let quad = structures::stair_run_ramp(&run, None, None, &[]).expect("the run has a ramp");
+        let mut nav = bake(&mut regions, &boxes, &boxes).expect("bakes");
+
+        // On the room floor, directly beneath the middle of the flight.
+        let under = Vec3::new(8.0, 0.0, 10.0) * WORLD_SCALE;
+        let before = nav.walk_surface_at(under).expect("stands on the room floor");
+        nav.set_ramps(&[quad]);
+        assert_eq!(
+            nav.walk_surface_at(under),
+            Some(before),
+            "walking under a ramp still walks on the floor, not 3 m up on the slope"
+        );
+        assert!(before.abs() < 1e-3, "and that floor is y=0");
     }
 
     #[test]

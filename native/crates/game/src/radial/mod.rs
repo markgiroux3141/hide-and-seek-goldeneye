@@ -29,6 +29,8 @@
 //!   or by opening the ring when the cursor was already free.
 
 use crate::app::PanelTab;
+use engine::geometry::csg_runtime::StairShell;
+use engine::geometry::structures::PlatformStyle;
 
 pub mod paint;
 
@@ -121,12 +123,17 @@ pub enum EditorAction {
     DumpTelemetry,
 }
 
-/// Which ring is showing. Depth is capped at 2 by construction: only [`MenuId::Root`]
-/// contains submenus.
+/// Which ring is showing. The stack is arbitrary-depth, but the tables keep it to
+/// three: `Root → Tools → Platform` is the only nesting that goes that far, and it
+/// earns it — the free-standing platform system is four verbs and a style, which is
+/// half a ring on its own.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MenuId {
     Root,
     Tools,
+    /// The free-standing platform/stair system: its three tools plus the shell they
+    /// build with.
+    Platform,
     Selection,
     Objects,
     Textures,
@@ -228,6 +235,10 @@ pub struct RadialCtx {
     pub pending_stair: bool,
     /// Which modal tool is armed, if any (drawn with the "on" accent).
     pub armed: Option<Tool>,
+    /// What the stair/platform tools build with, so the Platform ring can say so
+    /// without you having to place one to find out. Set in the panel's TOOLS tab.
+    pub platform_style: PlatformStyle,
+    pub stair_shell: StairShell,
     /// The digit-bound texture schemes: `(key, label, scheme index)`.
     pub schemes: Vec<(char, String, usize)>,
     /// Whether each quick-slot 1..8 has a file on disk.
@@ -268,9 +279,40 @@ pub fn menu(id: MenuId, ctx: &RadialCtx) -> Vec<Slot> {
                 t(Tool::Ladder, "Ladder", "J"),
                 t(Tool::Pillar, "Pillar", "P"),
                 t(Tool::Brace, "Brace", "R"),
+                // The platform system is its own ring: three tools and the shell they
+                // build with is too much to spend on a ring that also has to hold every
+                // other tool.
+                Slot::menu("Platform", "T", MenuId::Platform).on(matches!(
+                    ctx.armed,
+                    Some(Tool::Platform | Tool::BlockStairs | Tool::Connect)
+                )),
+            ]
+        }
+        MenuId::Platform => {
+            let t = |tool: Tool, label: &str, hint: &'static str| {
+                Slot::act(label, hint, EditorAction::ArmTool(tool)).on(ctx.armed == Some(tool))
+            };
+            // What these build with is three independent settings with a handful of
+            // values each — panel-shaped, not ring-shaped, exactly as the 390-theme
+            // texture library is. So the ring *reports* the live setting and opens the
+            // panel that owns it, rather than carrying a second copy of the controls
+            // that could drift from it.
+            let style = format!(
+                "Style: {} + {}",
+                match ctx.platform_style {
+                    PlatformStyle::Solid => "slab",
+                    PlatformStyle::Plane => "plane",
+                },
+                match ctx.stair_shell {
+                    StairShell::Steps => "stairs",
+                    StairShell::Ramp => "ramp",
+                }
+            );
+            vec![
                 t(Tool::Platform, "Platform", "T"),
                 t(Tool::BlockStairs, "Block stairs", "K"),
                 t(Tool::Connect, "Connect", "C"),
+                Slot::act(style, "O", EditorAction::OpenPanel(PanelTab::Tools)),
             ]
         }
         MenuId::Selection => {
@@ -450,6 +492,7 @@ pub fn menu_title(id: MenuId) -> &'static str {
     match id {
         MenuId::Root => "BUILD",
         MenuId::Tools => "TOOLS",
+        MenuId::Platform => "PLATFORM",
         MenuId::Selection => "SELECTION",
         MenuId::Objects => "OBJECTS",
         MenuId::Textures => "TEXTURES",

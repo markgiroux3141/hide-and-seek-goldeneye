@@ -57,6 +57,9 @@ enum ShopAction {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum PanelTab {
     Objects,
+    /// What the stair and platform tools build with — shells and the stair slope.
+    /// See [`crate::world::BuildStyle`].
+    Tools,
     /// The match setup a hunt starts from — what `G` reads. See
     /// [`crate::world::play_config`].
     Play,
@@ -73,8 +76,9 @@ pub(crate) enum PanelTab {
 
 impl PanelTab {
     /// Every tab, in display order (also the cycle order).
-    pub(crate) const ALL: [PanelTab; 8] = [
+    pub(crate) const ALL: [PanelTab; 9] = [
         PanelTab::Objects,
+        PanelTab::Tools,
         PanelTab::Play,
         PanelTab::Lighting,
         PanelTab::Spawns,
@@ -88,6 +92,7 @@ impl PanelTab {
     pub(crate) fn title(self) -> &'static str {
         match self {
             PanelTab::Objects => "OBJECTS",
+            PanelTab::Tools => "TOOLS",
             PanelTab::Play => "PLAY",
             PanelTab::Lighting => "LIGHTING",
             PanelTab::Spawns => "SPAWNS",
@@ -963,6 +968,9 @@ impl App {
             c.has_selection = w.has_selection();
             c.pending_stair = w.has_pending_stair();
             c.armed = armed_tool(w);
+            let bs = w.build_style();
+            c.platform_style = bs.platform;
+            c.stair_shell = bs.stairs;
             c.schemes = "123456789"
                 .chars()
                 .filter_map(|d| {
@@ -984,6 +992,7 @@ impl App {
     fn apply(&mut self, action: EditorAction) {
         match action {
             EditorAction::ArmTool(tool) => self.arm_tool(tool),
+
             EditorAction::Selection(op) => self.selection_op(op),
             EditorAction::OpenPanel(tab) => {
                 self.panel_tab = tab;
@@ -1577,6 +1586,17 @@ impl App {
         let mut nav_toggle_overlay = false;
         let mut real_lighting_ui = self.build_real_lighting;
         let mut set_real_lighting: Option<bool> = None;
+        // TOOLS tab: what the stair/platform tools build with. Read once here (the egui
+        // closure can't hold a `&World`), written back after it as one deferred action
+        // each — a style change can convert the current selection, so it is a real edit.
+        let build_style = self
+            .world
+            .as_ref()
+            .map(|w| w.build_style())
+            .unwrap_or_default();
+        let mut set_platform_style: Option<engine::geometry::structures::PlatformStyle> = None;
+        let mut set_stair_shell: Option<engine::geometry::csg_runtime::StairShell> = None;
+        let mut set_stair_run: Option<f32> = None;
         let panel_tab = self.panel_tab;
         let mut new_tab: Option<PanelTab> = None;
         // TEXTURES tab deferred actions. `Some(None)` on `arm` means "disarm".
@@ -2024,6 +2044,84 @@ impl App {
                                 let (ch, st) = play_tab_ui(ui, &mut play_ui, &ctx);
                                 play_changed |= ch;
                                 play_start |= st;
+                            }
+                            PanelTab::Tools => {
+                                use engine::geometry::csg_runtime::StairShell;
+                                use engine::geometry::structures::PlatformStyle;
+                                let dim = |s: &str| {
+                                    egui::RichText::new(s).small().color(SHOP_DIM)
+                                };
+                                let head = |s: &str| {
+                                    egui::RichText::new(s).small().strong().color(SHOP_GOLD_DIM)
+                                };
+
+                                ui.label(head("PLATFORMS (T)"));
+                                for (style, label, hint) in [
+                                    (
+                                        PlatformStyle::Solid,
+                                        "Slab",
+                                        "skirted block, blue platform texture",
+                                    ),
+                                    (
+                                        PlatformStyle::Plane,
+                                        "Plane",
+                                        "flat, two-sided, the room's floor texture",
+                                    ),
+                                ] {
+                                    if ui
+                                        .selectable_label(
+                                            build_style.platform == style,
+                                            label,
+                                        )
+                                        .clicked()
+                                    {
+                                        set_platform_style = Some(style);
+                                    }
+                                    ui.label(dim(hint));
+                                }
+                                ui.add_space(6.0);
+
+                                ui.label(head("STAIRS (K / C / \u{2191}\u{2193})"));
+                                for (shell, label, hint) in [
+                                    (StairShell::Steps, "Steps", "treads and risers"),
+                                    (StairShell::Ramp, "Ramp", "the bare slope, no steps"),
+                                ] {
+                                    if ui
+                                        .selectable_label(build_style.stairs == shell, label)
+                                        .clicked()
+                                    {
+                                        set_stair_shell = Some(shell);
+                                    }
+                                    ui.label(dim(hint));
+                                }
+                                ui.add_space(6.0);
+
+                                ui.label(head("SLOPE (\u{2191}\u{2193} STAIRS ONLY)"));
+                                ui.label(dim("run per step \u{2014} K and C take their slope"));
+                                ui.label(dim("from where you click instead"));
+                                ui.add_space(2.0);
+                                for run in crate::world::STAIR_RUN_PRESETS {
+                                    if ui
+                                        .selectable_label(
+                                            (build_style.stair_run - run).abs() < 0.01,
+                                            crate::world::stair_run_label(run),
+                                        )
+                                        .clicked()
+                                    {
+                                        set_stair_run = Some(run);
+                                    }
+                                }
+                                ui.add_space(2.0);
+                                ui.label(dim(
+                                    "steeper than 45\u{b0} isn't offered: the player can",
+                                ));
+                                ui.label(dim("only climb 50\u{b0}, and the slope is what"));
+                                ui.label(dim("you walk in both shells"));
+                                ui.add_space(6.0);
+                                ui.label(dim(
+                                    "with a platform or stair-run selected, changing",
+                                ));
+                                ui.label(dim("a shell converts that one too"));
                             }
                             PanelTab::Play => {}
                             PanelTab::Lighting => {
@@ -3764,6 +3862,27 @@ impl App {
         if let Some(real) = set_real_lighting {
             self.build_real_lighting = real;
         }
+        // TOOLS tab. Through `with_undo` because a shell change also converts whatever is
+        // selected — a geometry edit like any other, and one you should be able to undo.
+        // The slope is a setting only; it changes nothing already built.
+        for rm in [
+            set_platform_style.and_then(|s| {
+                self.world.as_mut().and_then(|w| w.with_undo(|w| w.set_platform_style(s)))
+            }),
+            set_stair_shell.and_then(|s| {
+                self.world.as_mut().and_then(|w| w.with_undo(|w| w.set_stair_shell(s)))
+            }),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            self.upload(&rm);
+        }
+        if let Some(run) = set_stair_run {
+            if let Some(world) = self.world.as_mut() {
+                world.set_stair_run(run);
+            }
+        }
         if let Some(tab) = new_tab {
             self.panel_tab = tab;
             // The paint brush belongs to its own tab: leaving it must not leave
@@ -5013,7 +5132,7 @@ impl ApplicationHandler for App {
             world.attach_audio(audio);
         }
         log::info!(
-            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door(scroll=single/double)  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=block stairs[2 clicks, scroll=slide, Shift+scroll=width] F=ground V=rails X=del)  1-9=room texture  \\=grid/textured  Ctrl+S=save level  O=LEVELS panel(name/save as/load)  F1-F8=load slot  Ctrl+F1-F8=save slot  Y=proc-anim preview(Z=fire)  I=invincible  N=invisible  [/]=wave size  F10=hunter telemetry  J=hunters on/off  G=HUNT  M=shop menu (N64 Start)  [HUNT: click=fire  RMB=aim  B=use/open door  R=reload  Q=weapon  F=detonate mines]"
+            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door(scroll=single/double)  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=block stairs[2 clicks, scroll=slide, Shift+scroll=width] F=ground V=rails X=del)  O\u{2192}TOOLS tab=platform/stair shell + stair slope  1-9=room texture  \\=grid/textured  Ctrl+S=save level  O=LEVELS panel(name/save as/load)  F1-F8=load slot  Ctrl+F1-F8=save slot  Y=proc-anim preview(Z=fire)  I=invincible  N=invisible  [/]=wave size  F10=hunter telemetry  J=hunters on/off  G=HUNT  M=shop menu (N64 Start)  [HUNT: click=fire  RMB=aim  B=use/open door  R=reload  Q=weapon  F=detonate mines]"
         );
 
         window.request_redraw();
@@ -6224,6 +6343,11 @@ impl App {
         // Platform + stair-run tool. T toggles the tool; the rest act on the
         // current selection / phase. Grounded/railings/delete change geometry, so
         // they return the rebuilt structures mesh to upload.
+        // `T` arms the platform tool, and only that. What it *builds* — slab or plane,
+        // stairs or ramp, and the stair slope — lives in the panel's TOOLS tab. It was a
+        // hotkey and a modified wheel first, and both were wrong for the same reason: a
+        // setting you cannot see is one you have to place something to discover, and the
+        // wheel was already carrying footprint size and the stair slide.
         if code == KeyCode::KeyT {
             self.apply(EditorAction::ArmTool(Tool::Platform));
             return;

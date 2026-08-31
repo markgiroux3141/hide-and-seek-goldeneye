@@ -734,8 +734,13 @@ impl World {
                 // Which of those boxes are stairs — the grid allows a taller step inside
                 // them, so a flight with sub-cell treads stays walkable.
                 let stair_volumes = self.stair_run_solid_boxes();
+                // Ramp-style flights are baked as steps like any other, then handed
+                // their real sloped surface as an overlay so hunters walk the slope they
+                // can see instead of the invisible treads under it.
+                let ramp_planes = self.ramp_planes();
                 match nav::bake(&mut self.regions, &structure_solids, &stair_volumes) {
-                    Some(nav) => {
+                    Some(mut nav) => {
+                        nav.set_ramps(&ramp_planes);
                         let bake_ms = t0.elapsed().as_secs_f32() * 1000.0;
                         log::info!(
                             "nav baked in {bake_ms:.2} ms ({} cells)",

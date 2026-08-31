@@ -462,6 +462,27 @@ impl Brush {
 //      nav voxelizer (the mesh isn't visible to grid nav, which reads CSG
 //      membership) — the `collectExtraSolids` port.
 
+/// What a flight is *made of* — the authoring choice shared by every stair tool
+/// (`\u{2191}`/`\u{2193}` CSG stairs, `K` free-standing flights, `C` connects).
+///
+/// A **render** choice: the walking surface, the collider and the nav solids are the
+/// same either way. Steps draw treads and risers over the flight's slope; a ramp draws
+/// the slope itself. The collider has always been the smooth ramp
+/// ([`StairDesc::append_ramp_collision`]) — a ramp just stops drawing steps over it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StairShell {
+    #[default]
+    Steps,
+    Ramp,
+}
+
+/// Default horizontal run of one step, in WT — one tile out per tile down, the 45°
+/// flight every CSG stair was before the slope became configurable.
+fn default_run_per_step() -> f32 {
+    1.0
+}
+
 /// Which way a staircase runs from the selected wall face.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StairDir {
@@ -490,9 +511,17 @@ pub struct StairDesc {
     /// Horizontal span [u0, u1) along `u_axis`.
     pub u0: f32,
     pub u1: f32,
-    /// Face bottom (vMin) and the stairwell ceiling H, in WT Y.
+    /// Face bottom (vMin) and the stairwell ceiling H, in WT Y. `ceil` is the top of the
+    /// *selection*, which is the doorway height — not necessarily the wall's own top.
     pub floor: f32,
     pub ceil: f32,
+    /// The anchoring wall face's own top (its `v_max`), in WT Y — how high the wall this
+    /// was cut into actually goes. Only needed to size the lintel over an up-stair; see
+    /// [`Self::lintel`]. `None` in a level saved before it was recorded, which reads as
+    /// "assume the selection reached the top" and emits no lintel, exactly as those levels
+    /// looked.
+    #[serde(default)]
+    pub face_top: Option<f32>,
     /// Wall-texture floor anchor in WT (JS descriptor `floorY` = the pit/dest
     /// floor). Used to anchor the stair side-wall UVs so they don't shift.
     pub floor_y: f32,
@@ -508,6 +537,16 @@ pub struct StairDesc {
     /// The two void-brush ids this stair carved (JS `voidBrushIds`), so a room
     /// retexture flood-fill can find and re-scheme the matching tread mesh.
     pub void_ids: [u32; 2],
+    /// Treads and risers, or the bare slope. `#[serde(default)]` = [`StairShell::Steps`],
+    /// so a level saved before ramps existed loads as stairs.
+    #[serde(default)]
+    pub shell: StairShell,
+    /// Horizontal run of one step, in WT — the slope dial. 1.0 is the original 45°;
+    /// larger is shallower. **Steeper than 1.0 is not offered**: the player capsule's
+    /// `max_slope_climb_angle` is 50°, and the walking surface is the slope in both
+    /// shells, so a steeper flight is one nobody can walk up.
+    #[serde(default = "default_run_per_step")]
+    pub run_per_step: f32,
 }
 
 impl StairDesc {
@@ -523,6 +562,92 @@ impl StairDesc {
         p
     }
 
+    /// Which way along the wall normal the flight advances: +1 off a `Max` face.
+    #[inline]
+    fn dir(&self) -> f32 {
+        if self.side == Side::Max {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+
+    /// Horizontal run of one step, in WT. Guarded so a level carrying a zero (or a
+    /// negative) never collapses the flight into the wall.
+    #[inline]
+    fn run(&self) -> f32 {
+        if self.run_per_step > 0.0 {
+            self.run_per_step
+        } else {
+            default_run_per_step()
+        }
+    }
+
+    /// Total horizontal run of the whole flight, in WT — how far out from the wall it
+    /// reaches. The slope dial makes this **longer** than `step_count`, never shorter.
+    pub fn total_run(&self) -> f32 {
+        self.step_count as f32 * self.run()
+    }
+
+    /// The destination floor: `step_count` WT below the anchor floor going down, above
+    /// it going up. One step is always 1 WT of rise; only the run varies.
+    #[inline]
+    fn dest_y(&self) -> f32 {
+        match self.direction {
+            StairDir::Down => self.floor - self.step_count as f32,
+            StairDir::Up => self.floor + self.step_count as f32,
+        }
+    }
+
+    /// The walking surface as a WT quad: the flight's true slope, from the nosing at the
+    /// wall face to the destination floor. `None` for a zero-step op.
+    ///
+    /// This is the one source for the slope — the collider, the ramp shell's visible
+    /// surface, the sloped ceiling (which is this plus the headroom) and the nav overlay
+    /// all read it, so none of them can disagree about where the flight actually is.
+    pub fn ramp_quad(&self) -> Option<[[f32; 3]; 4]> {
+        if self.step_count == 0 {
+            return None;
+        }
+        Some(self.sloped_quad(0.0))
+    }
+
+    /// The vertical strip of wall an **up**-stair's carve takes from *above* its doorway,
+    /// as `(y_lo, y_hi)` in WT — `None` when there is none to close.
+    ///
+    /// `confirm_stairs` carves the stairwell from the floor to `ceil + step_count`, one
+    /// box, because a box is all a subtract brush is. When the selection reached the top of
+    /// the wall that overshoot lands in the solid above the room and nothing shows. When the
+    /// author scaled the selection *down* to make a doorway, it eats real wall above the
+    /// lintel — and the flat ceiling used to hide that (the opening simply read as a tall
+    /// stairwell) where the sloped soffit, which starts at the doorway head, does not.
+    ///
+    /// So this is closed with a panel rather than by carving less: the void has to stay
+    /// tall enough to contain the flight, and one AABB cannot have a sloped top. Clamped to
+    /// [`Self::face_top`] so the panel fills the hole and never overlaps the CSG wall face
+    /// above it, which would z-fight.
+    fn lintel(&self) -> Option<(f32, f32)> {
+        if self.direction != StairDir::Up || self.step_count == 0 {
+            return None;
+        }
+        let top = (self.ceil + self.step_count as f32).min(self.face_top?);
+        (top > self.ceil).then_some((self.ceil, top))
+    }
+
+    /// The slope raised by `lift` WT — the walking surface at 0, the sloped ceiling at
+    /// the flight's headroom.
+    fn sloped_quad(&self, lift: f32) -> [[f32; 3]; 4] {
+        let n0 = self.face_pos;
+        let n1 = self.face_pos + self.dir() * self.total_run();
+        let (y0, y1) = (self.floor + lift, self.dest_y() + lift);
+        [
+            self.tw(n0, y0, self.u0),
+            self.tw(n1, y1, self.u0),
+            self.tw(n1, y1, self.u1),
+            self.tw(n0, y0, self.u1),
+        ]
+    }
+
     /// Append this stair's tread/riser/side/fill geometry (in meters) to a mesh
     /// buffer. Port of `buildCsgStairGeometry`, but every quad is emitted
     /// **double-sided** — so backface culling is a non-issue and the JS `flip`
@@ -530,110 +655,117 @@ impl StairDesc {
     /// normal toward the viewer). The extra reversed triangles are harmless in
     /// the region's trimesh collider.
     fn append_geometry(&self, pos: &mut Vec<f32>, norm: &mut Vec<f32>, idx: &mut Vec<u32>, ws: f32) {
-        let dir = if self.side == Side::Max { 1.0 } else { -1.0 };
+        let dir = self.dir();
         let (u0, u1) = (self.u0, self.u1);
         let floor = self.floor;
-        let h_ceil = self.ceil;
         let sc = self.step_count as i32;
+        let run = self.run();
+        if sc <= 0 {
+            return;
+        }
 
         let mut quad = |a: [f32; 3], b: [f32; 3], c: [f32; 3], d: [f32; 3]| {
             geom::push_quad_double(pos, norm, idx, a, b, c, d, ws);
         };
 
-        for k in 0..sc {
-            let kf = k as f32;
-            // Normal-axis span for this step (1 WT deep).
-            let (n_lo, n_hi) = if dir > 0.0 {
-                (self.face_pos + kf, self.face_pos + kf + 1.0)
-            } else {
-                (self.face_pos - (kf + 1.0), self.face_pos - kf)
-            };
-            // Vertical span for this step.
-            let (step_floor, step_top) = match self.direction {
-                StairDir::Down => (floor - (kf + 1.0), floor - kf),
-                StairDir::Up => (floor + kf, floor + kf + 1.0),
-            };
-
-            // Tread (top surface).
-            quad(
-                self.tw(n_lo, step_top, u0),
-                self.tw(n_hi, step_top, u0),
-                self.tw(n_hi, step_top, u1),
-                self.tw(n_lo, step_top, u1),
-            );
-
-            // Riser (vertical front face of the step).
-            let riser_pos = match self.direction {
-                StairDir::Down => if dir > 0.0 { n_hi } else { n_lo },
-                StairDir::Up => if dir > 0.0 { n_lo } else { n_hi },
-            };
-            quad(
-                self.tw(riser_pos, step_floor, u0),
-                self.tw(riser_pos, step_floor, u1),
-                self.tw(riser_pos, step_top, u1),
-                self.tw(riser_pos, step_top, u0),
-            );
-
-            // Left/right side walls.
-            quad(
-                self.tw(n_lo, step_floor, u0),
-                self.tw(n_hi, step_floor, u0),
-                self.tw(n_hi, step_top, u0),
-                self.tw(n_lo, step_top, u0),
-            );
-            quad(
-                self.tw(n_hi, step_floor, u1),
-                self.tw(n_lo, step_floor, u1),
-                self.tw(n_lo, step_top, u1),
-                self.tw(n_hi, step_top, u1),
-            );
-        }
-
-        // Far-end fill (JS `csgStairGeometry` closing panels).
-        match self.direction {
-            StairDir::Down if sc > 0 => {
-                let scf = sc as f32;
-                let (last_lo, last_hi) = if dir > 0.0 {
-                    (self.face_pos + (scf - 1.0), self.face_pos + scf)
-                } else {
-                    (self.face_pos - scf, self.face_pos - (scf - 1.0))
-                };
-                let ceil_drop = h_ceil - scf;
-                // Ceiling panel at the far column.
-                quad(
-                    self.tw(last_lo, ceil_drop, u0),
-                    self.tw(last_hi, ceil_drop, u0),
-                    self.tw(last_hi, ceil_drop, u1),
-                    self.tw(last_lo, ceil_drop, u1),
-                );
-                // Vertical wall dropping from H to H-stepCount.
-                let ceil_wall = if dir > 0.0 { last_lo } else { last_hi };
-                quad(
-                    self.tw(ceil_wall, ceil_drop, u0),
-                    self.tw(ceil_wall, ceil_drop, u1),
-                    self.tw(ceil_wall, h_ceil, u1),
-                    self.tw(ceil_wall, h_ceil, u0),
-                );
-            }
-            StairDir::Up if sc > 0 => {
-                // Fill the stepped floor underneath the stairs.
-                for k in 0..(sc - 1) {
+        match self.shell {
+            StairShell::Steps => {
+                for k in 0..sc {
                     let kf = k as f32;
-                    let (fill_lo, fill_hi) = if dir > 0.0 {
-                        (self.face_pos + kf, self.face_pos + kf + 1.0)
+                    // Normal-axis span for this step (`run_per_step` WT deep).
+                    let (n_lo, n_hi) = if dir > 0.0 {
+                        (self.face_pos + kf * run, self.face_pos + (kf + 1.0) * run)
                     } else {
-                        (self.face_pos - (kf + 1.0), self.face_pos - kf)
+                        (self.face_pos - (kf + 1.0) * run, self.face_pos - kf * run)
                     };
-                    let fill_y = floor + (kf + 1.0);
+                    // Vertical span for this step.
+                    let (step_floor, step_top) = match self.direction {
+                        StairDir::Down => (floor - (kf + 1.0), floor - kf),
+                        StairDir::Up => (floor + kf, floor + kf + 1.0),
+                    };
+
+                    // Tread (top surface).
                     quad(
-                        self.tw(fill_lo, fill_y, u0),
-                        self.tw(fill_hi, fill_y, u0),
-                        self.tw(fill_hi, fill_y, u1),
-                        self.tw(fill_lo, fill_y, u1),
+                        self.tw(n_lo, step_top, u0),
+                        self.tw(n_hi, step_top, u0),
+                        self.tw(n_hi, step_top, u1),
+                        self.tw(n_lo, step_top, u1),
+                    );
+
+                    // Riser (vertical front face of the step).
+                    let riser_pos = match self.direction {
+                        StairDir::Down => if dir > 0.0 { n_hi } else { n_lo },
+                        StairDir::Up => if dir > 0.0 { n_lo } else { n_hi },
+                    };
+                    quad(
+                        self.tw(riser_pos, step_floor, u0),
+                        self.tw(riser_pos, step_floor, u1),
+                        self.tw(riser_pos, step_top, u1),
+                        self.tw(riser_pos, step_top, u0),
+                    );
+
+                    // Left/right side walls.
+                    quad(
+                        self.tw(n_lo, step_floor, u0),
+                        self.tw(n_hi, step_floor, u0),
+                        self.tw(n_hi, step_top, u0),
+                        self.tw(n_lo, step_top, u0),
+                    );
+                    quad(
+                        self.tw(n_hi, step_floor, u1),
+                        self.tw(n_lo, step_floor, u1),
+                        self.tw(n_lo, step_top, u1),
+                        self.tw(n_hi, step_top, u1),
+                    );
+                }
+                // Fill the stepped floor underneath an up-stair.
+                if self.direction == StairDir::Up {
+                    for k in 0..(sc - 1) {
+                        let kf = k as f32;
+                        let (fill_lo, fill_hi) = if dir > 0.0 {
+                            (self.face_pos + kf * run, self.face_pos + (kf + 1.0) * run)
+                        } else {
+                            (self.face_pos - (kf + 1.0) * run, self.face_pos - kf * run)
+                        };
+                        let fill_y = floor + (kf + 1.0);
+                        quad(
+                            self.tw(fill_lo, fill_y, u0),
+                            self.tw(fill_hi, fill_y, u0),
+                            self.tw(fill_hi, fill_y, u1),
+                            self.tw(fill_lo, fill_y, u1),
+                        );
+                    }
+                }
+            }
+            StairShell::Ramp => {
+                let q = self.sloped_quad(0.0);
+                quad(q[0], q[1], q[2], q[3]);
+                let base_y = floor.min(self.dest_y());
+                for (near, far) in [(q[0], q[1]), (q[3], q[2])] {
+                    quad(
+                        [near[0], base_y, near[2]],
+                        near,
+                        far,
+                        [far[0], base_y, far[2]],
                     );
                 }
             }
-            _ => {}
+        }
+
+        // The lintel over an up-stair's doorway, then the sloped ceiling — see
+        // `append_zoned` for why neither needs a CSG change.
+        if let Some((lo, hi)) = self.lintel() {
+            quad(
+                self.tw(self.face_pos, lo, u0),
+                self.tw(self.face_pos, lo, u1),
+                self.tw(self.face_pos, hi, u1),
+                self.tw(self.face_pos, hi, u0),
+            );
+        }
+        let headroom = self.ceil - self.floor;
+        if headroom > 0.0 {
+            let c = self.sloped_quad(headroom);
+            quad(c[0], c[1], c[2], c[3]);
         }
     }
 
@@ -651,31 +783,10 @@ impl StairDesc {
         idx: &mut Vec<u32>,
         ws: f32,
     ) {
-        let sc = self.step_count as f32;
-        if sc <= 0.0 {
+        let Some(q) = self.ramp_quad() else {
             return;
-        }
-        let dir = if self.side == Side::Max { 1.0 } else { -1.0 };
-        let (u0, u1) = (self.u0, self.u1);
-        // Base edge sits on the room floor at the wall face; the top edge lands on
-        // the destination floor `step_count` WT away along the wall normal.
-        let n0 = self.face_pos;
-        let n1 = self.face_pos + dir * sc;
-        let y0 = self.floor;
-        let y1 = match self.direction {
-            StairDir::Up => self.floor + sc,
-            StairDir::Down => self.floor - sc,
         };
-        geom::push_quad_double(
-            pos,
-            norm,
-            idx,
-            self.tw(n0, y0, u0),
-            self.tw(n1, y1, u0),
-            self.tw(n1, y1, u1),
-            self.tw(n0, y0, u1),
-            ws,
-        );
+        geom::push_quad_double(pos, norm, idx, q[0], q[1], q[2], q[3], ws);
     }
 
     /// The tread/riser/side geometry as a standalone mesh (meters), for the ghost
@@ -695,145 +806,201 @@ impl StairDesc {
     /// wall / brown)** — not the gradient. Per-quad UVs so the gradient riser maps
     /// 0..1 vertically per step. Single-winding (rendered with culling off).
     fn append_zoned(&self, b: &mut ZonedBuilder) {
-        let dir = if self.side == Side::Max { 1.0 } else { -1.0 };
+        let dir = self.dir();
         let (u0, u1) = (self.u0, self.u1);
         let floor = self.floor;
-        let h_ceil = self.ceil;
         let sc = self.step_count as i32;
         let step_width = u1 - u0;
+        let run = self.run();
         let sch = self.scheme;
         const TREAD: u8 = 0;
+        const CEIL: u8 = 1;
         const RISER: u8 = 5;
         const SIDE: u8 = 3;
-
-        for k in 0..sc {
-            let kf = k as f32;
-            let (n_lo, n_hi) = if dir > 0.0 {
-                (self.face_pos + kf, self.face_pos + kf + 1.0)
-            } else {
-                (self.face_pos - (kf + 1.0), self.face_pos - kf)
-            };
-            let (step_floor, step_top) = match self.direction {
-                StairDir::Down => (floor - (kf + 1.0), floor - kf),
-                StairDir::Up => (floor + kf, floor + kf + 1.0),
-            };
-            let riser_h = step_top - step_floor;
-
-            // Tread (top surface): U across the 1-WT depth, V across the width.
-            b.emit_quad_uv(
-                [
-                    self.tw(n_lo, step_top, u0),
-                    self.tw(n_hi, step_top, u0),
-                    self.tw(n_hi, step_top, u1),
-                    self.tw(n_lo, step_top, u1),
-                ],
-                [[0.0, 0.0], [1.0, 0.0], [1.0, step_width], [0.0, step_width]],
-                sch,
-                TREAD,
-            );
-
-            // Riser (front face): the gradient maps 0..1 top-to-bottom per step.
-            let riser_pos = match self.direction {
-                StairDir::Down => if dir > 0.0 { n_hi } else { n_lo },
-                StairDir::Up => if dir > 0.0 { n_lo } else { n_hi },
-            };
-            let riser_u = step_width / riser_h;
-            b.emit_quad_uv(
-                [
-                    self.tw(riser_pos, step_floor, u0),
-                    self.tw(riser_pos, step_floor, u1),
-                    self.tw(riser_pos, step_top, u1),
-                    self.tw(riser_pos, step_top, u0),
-                ],
-                [[0.0, 0.0], [riser_u, 0.0], [riser_u, 1.0], [0.0, 1.0]],
-                sch,
-                RISER,
-            );
-
-            // Left/right side walls → upper-wall zone.
-            b.emit_quad_uv(
-                [
-                    self.tw(n_lo, step_floor, u0),
-                    self.tw(n_hi, step_floor, u0),
-                    self.tw(n_hi, step_top, u0),
-                    self.tw(n_lo, step_top, u0),
-                ],
-                [[0.0, 0.0], [1.0, 0.0], [1.0, riser_h], [0.0, riser_h]],
-                sch,
-                SIDE,
-            );
-            b.emit_quad_uv(
-                [
-                    self.tw(n_hi, step_floor, u1),
-                    self.tw(n_lo, step_floor, u1),
-                    self.tw(n_lo, step_top, u1),
-                    self.tw(n_hi, step_top, u1),
-                ],
-                [[0.0, 0.0], [1.0, 0.0], [1.0, riser_h], [0.0, riser_h]],
-                sch,
-                SIDE,
-            );
+        if sc <= 0 {
+            return;
         }
+        // Texture length along the slope, so both shells tile at their true scale
+        // instead of being stretched by the horizontal projection.
+        let slope_len = (self.total_run().powi(2) + (sc as f32).powi(2)).sqrt();
 
-        match self.direction {
-            StairDir::Down if sc > 0 => {
-                let scf = sc as f32;
-                let (last_lo, last_hi) = if dir > 0.0 {
-                    (self.face_pos + (scf - 1.0), self.face_pos + scf)
-                } else {
-                    (self.face_pos - scf, self.face_pos - (scf - 1.0))
-                };
-                let ceil_drop = h_ceil - scf;
-                // Far-column ceiling panel → upper-wall zone (JS sideZone).
-                b.emit_quad_uv(
-                    [
-                        self.tw(last_lo, ceil_drop, u0),
-                        self.tw(last_hi, ceil_drop, u0),
-                        self.tw(last_hi, ceil_drop, u1),
-                        self.tw(last_lo, ceil_drop, u1),
-                    ],
-                    [[0.0, 0.0], [1.0, 0.0], [1.0, step_width], [0.0, step_width]],
-                    sch,
-                    SIDE,
-                );
-                // Vertical ceiling-drop wall (the dipping "roof") → upper-wall.
-                let ceil_wall = if dir > 0.0 { last_lo } else { last_hi };
-                let drop_h = h_ceil - ceil_drop;
-                b.emit_quad_uv(
-                    [
-                        self.tw(ceil_wall, ceil_drop, u0),
-                        self.tw(ceil_wall, ceil_drop, u1),
-                        self.tw(ceil_wall, h_ceil, u1),
-                        self.tw(ceil_wall, h_ceil, u0),
-                    ],
-                    [[0.0, 0.0], [step_width, 0.0], [step_width, drop_h], [0.0, drop_h]],
-                    sch,
-                    SIDE,
-                );
-            }
-            StairDir::Up if sc > 0 => {
-                for k in 0..(sc - 1) {
+        match self.shell {
+            StairShell::Steps => {
+                for k in 0..sc {
                     let kf = k as f32;
-                    let (fill_lo, fill_hi) = if dir > 0.0 {
-                        (self.face_pos + kf, self.face_pos + kf + 1.0)
+                    let (n_lo, n_hi) = if dir > 0.0 {
+                        (self.face_pos + kf * run, self.face_pos + (kf + 1.0) * run)
                     } else {
-                        (self.face_pos - (kf + 1.0), self.face_pos - kf)
+                        (self.face_pos - (kf + 1.0) * run, self.face_pos - kf * run)
                     };
-                    let fill_y = floor + (kf + 1.0);
+                    let (step_floor, step_top) = match self.direction {
+                        StairDir::Down => (floor - (kf + 1.0), floor - kf),
+                        StairDir::Up => (floor + kf, floor + kf + 1.0),
+                    };
+                    let riser_h = step_top - step_floor;
+
+                    // Tread (top surface): U across the tread depth, V across the width.
                     b.emit_quad_uv(
                         [
-                            self.tw(fill_lo, fill_y, u0),
-                            self.tw(fill_hi, fill_y, u0),
-                            self.tw(fill_hi, fill_y, u1),
-                            self.tw(fill_lo, fill_y, u1),
+                            self.tw(n_lo, step_top, u0),
+                            self.tw(n_hi, step_top, u0),
+                            self.tw(n_hi, step_top, u1),
+                            self.tw(n_lo, step_top, u1),
                         ],
-                        [[0.0, 0.0], [1.0, 0.0], [1.0, step_width], [0.0, step_width]],
+                        [[0.0, 0.0], [run, 0.0], [run, step_width], [0.0, step_width]],
+                        sch,
+                        TREAD,
+                    );
+
+                    // Riser (front face): the gradient maps 0..1 top-to-bottom per step.
+                    let riser_pos = match self.direction {
+                        StairDir::Down => if dir > 0.0 { n_hi } else { n_lo },
+                        StairDir::Up => if dir > 0.0 { n_lo } else { n_hi },
+                    };
+                    let riser_u = step_width / riser_h;
+                    b.emit_quad_uv(
+                        [
+                            self.tw(riser_pos, step_floor, u0),
+                            self.tw(riser_pos, step_floor, u1),
+                            self.tw(riser_pos, step_top, u1),
+                            self.tw(riser_pos, step_top, u0),
+                        ],
+                        [[0.0, 0.0], [riser_u, 0.0], [riser_u, 1.0], [0.0, 1.0]],
+                        sch,
+                        RISER,
+                    );
+
+                    // Left/right side walls → upper-wall zone.
+                    b.emit_quad_uv(
+                        [
+                            self.tw(n_lo, step_floor, u0),
+                            self.tw(n_hi, step_floor, u0),
+                            self.tw(n_hi, step_top, u0),
+                            self.tw(n_lo, step_top, u0),
+                        ],
+                        [[0.0, 0.0], [run, 0.0], [run, riser_h], [0.0, riser_h]],
+                        sch,
+                        SIDE,
+                    );
+                    b.emit_quad_uv(
+                        [
+                            self.tw(n_hi, step_floor, u1),
+                            self.tw(n_lo, step_floor, u1),
+                            self.tw(n_lo, step_top, u1),
+                            self.tw(n_hi, step_top, u1),
+                        ],
+                        [[0.0, 0.0], [run, 0.0], [run, riser_h], [0.0, riser_h]],
+                        sch,
+                        SIDE,
+                    );
+                }
+                // Fill the stepped floor underneath an up-stair.
+                if self.direction == StairDir::Up {
+                    for k in 0..(sc - 1) {
+                        let kf = k as f32;
+                        let (fill_lo, fill_hi) = if dir > 0.0 {
+                            (self.face_pos + kf * run, self.face_pos + (kf + 1.0) * run)
+                        } else {
+                            (self.face_pos - (kf + 1.0) * run, self.face_pos - kf * run)
+                        };
+                        let fill_y = floor + (kf + 1.0);
+                        b.emit_quad_uv(
+                            [
+                                self.tw(fill_lo, fill_y, u0),
+                                self.tw(fill_hi, fill_y, u0),
+                                self.tw(fill_hi, fill_y, u1),
+                                self.tw(fill_lo, fill_y, u1),
+                            ],
+                            [[0.0, 0.0], [run, 0.0], [run, step_width], [0.0, step_width]],
+                            sch,
+                            SIDE,
+                        );
+                    }
+                }
+            }
+            StairShell::Ramp => {
+                // The walking surface itself — the quad the collider has always had.
+                b.emit_quad_uv(
+                    self.sloped_quad(0.0),
+                    [
+                        [0.0, 0.0],
+                        [slope_len, 0.0],
+                        [slope_len, step_width],
+                        [0.0, step_width],
+                    ],
+                    sch,
+                    TREAD,
+                );
+                // Close the wedge underneath: from the slope down to the lower of the two
+                // floors — the pit floor going down, the room floor going up. Without
+                // these you see straight through the flight from the side, where the
+                // stepped shell's per-step side walls did that job.
+                let base_y = floor.min(self.dest_y());
+                let q = self.sloped_quad(0.0);
+                // `sloped_quad` runs near→far down the u0 edge (corners 0,1) and
+                // near→far down the u1 edge (corners 3,2).
+                for (near, far) in [(q[0], q[1]), (q[3], q[2])] {
+                    b.emit_quad_uv(
+                        [
+                            [near[0], base_y, near[2]],
+                            near,
+                            far,
+                            [far[0], base_y, far[2]],
+                        ],
+                        [
+                            [0.0, 0.0],
+                            [0.0, near[1] - base_y],
+                            [slope_len, far[1] - base_y],
+                            [slope_len, 0.0],
+                        ],
                         sch,
                         SIDE,
                     );
                 }
             }
-            _ => {}
+        }
+
+        // Close the wall the carve took from above the doorway (up-stairs only).
+        if let Some((lo, hi)) = self.lintel() {
+            b.emit_quad_uv(
+                [
+                    self.tw(self.face_pos, lo, u0),
+                    self.tw(self.face_pos, lo, u1),
+                    self.tw(self.face_pos, hi, u1),
+                    self.tw(self.face_pos, hi, u0),
+                ],
+                [
+                    [0.0, 0.0],
+                    [step_width, 0.0],
+                    [step_width, hi - lo],
+                    [0.0, hi - lo],
+                ],
+                sch,
+                SIDE,
+            );
+        }
+
+        // ── The sloped ceiling, both shells.
+        //
+        // The flight's own slope lifted by its headroom, so the tunnel keeps the height
+        // of the room it leaves all the way along instead of the ceiling staying flat and
+        // then falling off a cliff at the far end. It needs no change to the CSG: the
+        // void brushes are already carved to the *taller* of the two ends, so this panel
+        // always sits at or below what was cut, and seals flush against the destination
+        // corridor's ceiling. The dead space above it is enclosed and never seen.
+        let headroom = self.ceil - self.floor;
+        if headroom > 0.0 {
+            b.emit_quad_uv(
+                self.sloped_quad(headroom),
+                [
+                    [0.0, 0.0],
+                    [slope_len, 0.0],
+                    [slope_len, step_width],
+                    [0.0, step_width],
+                ],
+                sch,
+                CEIL,
+            );
         }
     }
 
@@ -842,8 +1009,9 @@ impl StairDesc {
     /// `navWorld.stairSolidBoxes`; fed to the nav voxelizer so grid nav sees the
     /// treads as walkable ground (the mesh isn't visible to grid nav).
     pub fn solid_boxes(&self) -> Vec<[f32; 6]> {
-        let dir = if self.side == Side::Max { 1.0 } else { -1.0 };
+        let dir = self.dir();
         let sc = self.step_count as f32;
+        let run = self.run();
         let void_floor = match self.direction {
             StairDir::Down => self.floor - sc,
             StairDir::Up => self.floor,
@@ -853,9 +1021,9 @@ impl StairDesc {
         for k in 0..self.step_count as i32 {
             let kf = k as f32;
             let n_lo = if dir > 0.0 {
-                self.face_pos + kf
+                self.face_pos + kf * run
             } else {
-                self.face_pos - (kf + 1.0)
+                self.face_pos - (kf + 1.0) * run
             };
             let step_top = match self.direction {
                 StairDir::Down => self.floor - kf,
@@ -866,8 +1034,8 @@ impl StairDesc {
                 continue;
             }
             match self.axis {
-                Axis::X => boxes.push([n_lo, void_floor, u0, 1.0, h, u1 - u0]),
-                _ => boxes.push([u0, void_floor, n_lo, u1 - u0, h, 1.0]),
+                Axis::X => boxes.push([n_lo, void_floor, u0, run, h, u1 - u0]),
+                _ => boxes.push([u0, void_floor, n_lo, u1 - u0, h, run]),
             }
         }
         boxes
@@ -1365,6 +1533,211 @@ impl Region {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 4-step down-stair off a `Max` X wall at x=8, in a room whose floor is y=0 and
+    /// whose ceiling is y=8.
+    fn csg_stair(shell: StairShell, run_per_step: f32) -> StairDesc {
+        StairDesc {
+            direction: StairDir::Down,
+            step_count: 4,
+            axis: Axis::X,
+            side: Side::Max,
+            face_pos: 8.0,
+            u_axis: Axis::Z,
+            u0: 2.0,
+            u1: 6.0,
+            floor: 0.0,
+            ceil: 8.0,
+            // The selection reached the top of the wall — the ordinary case, and the one
+            // with no wall left above the doorway.
+            face_top: Some(8.0),
+            floor_y: -4.0,
+            scheme: 0,
+            void_ids: [0, 0],
+            shell,
+            run_per_step,
+        }
+    }
+
+    /// The slope dial stretches the **run**, never the rise, and every consumer reads it
+    /// off the same place. A flight whose carve, treads and nav boxes disagreed about how
+    /// far out it reached would bury its last steps in the wall.
+    #[test]
+    fn the_slope_dial_stretches_the_run_across_every_consumer() {
+        let steep = csg_stair(StairShell::Steps, 1.0);
+        let shallow = csg_stair(StairShell::Steps, 3.0);
+        assert_eq!(steep.total_run(), 4.0, "1x: four steps, four tiles out");
+        assert_eq!(shallow.total_run(), 12.0, "3x: same drop, three times the run");
+
+        // Nav solids: same count and same tops, three times as deep, reaching as far as
+        // the flight says it does.
+        let (a, b) = (steep.solid_boxes(), shallow.solid_boxes());
+        assert_eq!(a.len(), b.len(), "the same four steps either way");
+        for (sa, sb) in a.iter().zip(&b) {
+            assert_eq!(sa[1], sb[1], "same floor");
+            assert_eq!(sa[4], sb[4], "same height — the rise never changes");
+            assert!((sb[3] - 3.0 * sa[3]).abs() < 1e-5, "three times the tread depth");
+        }
+        assert!(
+            (b.last().unwrap()[0] + b.last().unwrap()[3] - (8.0 + 12.0)).abs() < 1e-5,
+            "the last step ends where `total_run` says the flight does"
+        );
+
+        // And the walking surface agrees with both.
+        let q = shallow.ramp_quad().expect("a ramp");
+        assert!((q[0][0] - 8.0).abs() < 1e-5, "starts at the wall face");
+        assert!((q[1][0] - 20.0).abs() < 1e-5, "and reaches 12 WT out");
+        assert!((q[1][1] + 4.0).abs() < 1e-5, "landing 4 WT down, as always");
+    }
+
+    /// The ramp shell draws the flight's own slope and closes the wedge under it — the
+    /// job the stepped shell's per-step side walls were doing. Nav is untouched: it still
+    /// gets the stepped boxes, which is what makes a ramp climbable at all.
+    #[test]
+    fn the_ramp_shell_draws_the_slope_and_closes_under_it() {
+        let steps = csg_stair(StairShell::Steps, 1.0);
+        let ramp = csg_stair(StairShell::Ramp, 1.0);
+        assert_eq!(
+            format!("{:?}", steps.solid_boxes()),
+            format!("{:?}", ramp.solid_boxes()),
+            "the shell is a render choice — nav sees the same flight"
+        );
+
+        let mut b = ZonedBuilder::new();
+        ramp.append_zoned(&mut b);
+        let mesh = b.finish();
+        // Walking surface + two side wedges + the sloped ceiling. Nothing per-step.
+        assert_eq!(mesh.vertices.len(), 4 * 6, "four quads, whatever the step count");
+        let mut steps_b = ZonedBuilder::new();
+        steps.append_zoned(&mut steps_b);
+        assert!(
+            steps_b.finish().vertices.len() > mesh.vertices.len(),
+            "the stepped shell is the one with per-step geometry"
+        );
+
+        // The drawn slope IS the collider's ramp — they cannot drift.
+        let q = ramp.ramp_quad().expect("a ramp");
+        for c in q {
+            let m = [c[0] * WORLD_SCALE, c[1] * WORLD_SCALE, c[2] * WORLD_SCALE];
+            assert!(
+                mesh.vertices.iter().any(|v| (v.pos[0] - m[0]).abs() < 1e-3
+                    && (v.pos[1] - m[1]).abs() < 1e-3
+                    && (v.pos[2] - m[2]).abs() < 1e-3),
+                "corner {c:?} of the collider ramp is drawn"
+            );
+        }
+    }
+
+    /// **The ceiling follows the stairs.** It used to stay flat the whole way down and
+    /// then fall off a cliff at the far end; now it is the flight's own slope lifted by
+    /// the headroom, so the tunnel keeps the height of the room it left. Both shells.
+    ///
+    /// It needs no CSG change because the void brushes are already carved to the taller
+    /// of the two ends — this panel always sits at or below what was cut.
+    #[test]
+    fn the_stairwell_ceiling_follows_the_flight_in_both_shells() {
+        for shell in [StairShell::Steps, StairShell::Ramp] {
+            let s = csg_stair(shell, 2.0);
+            let mut b = ZonedBuilder::new();
+            s.append_zoned(&mut b);
+            let mesh = b.finish();
+
+            // The soffit is the one thing in the ceiling zone.
+            let ceil_group = mesh
+                .groups
+                .iter()
+                .find(|g| g.zone == 1)
+                .unwrap_or_else(|| panic!("{shell:?}: a ceiling quad is emitted"));
+            assert_eq!(ceil_group.count, 6, "{shell:?}: one quad (6 indices), no more");
+
+            let headroom = s.ceil - s.floor;
+            let floor_q = s.ramp_quad().expect("a ramp");
+            for (i, c) in s.sloped_quad(headroom).iter().enumerate() {
+                assert!(
+                    (c[1] - (floor_q[i][1] + headroom)).abs() < 1e-5,
+                    "{shell:?}: the ceiling is the floor slope plus the headroom"
+                );
+            }
+            // It lands exactly on the destination corridor's ceiling, so the two meet
+            // flush instead of leaving a step.
+            let far = s.sloped_quad(headroom)[1];
+            assert!(
+                (far[1] - (s.ceil - s.step_count as f32)).abs() < 1e-5,
+                "{shell:?}: the far end meets the corridor ceiling"
+            );
+            // And never above what the void carved, or it would poke into solid rock.
+            assert!(
+                s.sloped_quad(headroom).iter().all(|c| c[1] <= s.ceil + 1e-5),
+                "{shell:?}: the soffit stays inside the carve"
+            );
+        }
+    }
+
+    /// **The hole the sloped ceiling exposed.** An up-stair's carve is one box reaching
+    /// `step_count` WT above the doorway, because that is all a subtract brush is. With a
+    /// full-height selection that overshoot lands in the solid above the room and nothing
+    /// shows; scale the selection down to make a doorway and it eats real wall over the
+    /// lintel. The old flat ceiling hid it — the opening just read as a tall stairwell —
+    /// and the soffit, which starts at the doorway head, does not.
+    #[test]
+    fn an_up_stair_closes_the_wall_its_carve_takes_above_the_doorway() {
+        // A 12 WT wall, doorway selected only to y=6, four steps up.
+        let mut s = csg_stair(StairShell::Ramp, 1.0);
+        s.direction = StairDir::Up;
+        s.ceil = 6.0;
+        s.face_top = Some(12.0);
+        let (lo, hi) = s.lintel().expect("there is wall above the doorway to close");
+        assert_eq!((lo, hi), (6.0, 10.0), "from the doorway head to the top of the carve");
+
+        let mut b = ZonedBuilder::new();
+        s.append_zoned(&mut b);
+        let mesh = b.finish();
+        let ws = WORLD_SCALE;
+        for y in [lo, hi] {
+            assert!(
+                mesh.vertices
+                    .iter()
+                    .any(|v| (v.pos[0] - 8.0 * ws).abs() < 1e-4 && (v.pos[1] - y * ws).abs() < 1e-4),
+                "the lintel panel sits in the wall plane at y={y}"
+            );
+        }
+
+        // Clamped to the wall's own top, so the panel fills the hole and never overlaps
+        // the CSG wall face above it — that overlap is what would z-fight.
+        s.face_top = Some(8.0);
+        assert_eq!(s.lintel(), Some((6.0, 8.0)), "clamped to the wall top");
+
+        // A selection that reached the top has no wall above it to lose.
+        s.ceil = 8.0;
+        assert_eq!(s.lintel(), None);
+
+        // And neither has a down-stair: its carve tops out at the doorway head already.
+        s.direction = StairDir::Down;
+        s.ceil = 6.0;
+        s.face_top = Some(12.0);
+        assert_eq!(s.lintel(), None, "a down-stair carves nothing above its doorway");
+    }
+
+    /// A level saved before ramps and the slope dial existed loads as the 45° staircase
+    /// it was — both fields default, so the file format did not need a bump.
+    #[test]
+    fn csg_stairs_saved_before_ramps_load_as_stairs() {
+        let s: StairDesc = serde_json::from_str(
+            r#"{"direction":"Down","step_count":4,"axis":"X","side":"Max","face_pos":8,
+                "u_axis":"Z","u0":2,"u1":6,"floor":0,"ceil":8,"floor_y":-4,
+                "void_ids":[1,2]}"#,
+        )
+        .expect("a shell-less stair still parses");
+        assert_eq!(s.shell, StairShell::Steps);
+        assert_eq!(s.run_per_step, 1.0);
+        assert_eq!(s.total_run(), 4.0, "the original 45° flight");
+
+        let back: StairDesc =
+            serde_json::from_str(&serde_json::to_string(&csg_stair(StairShell::Ramp, 2.0)).unwrap())
+                .unwrap();
+        assert_eq!(back.shell, StairShell::Ramp);
+        assert_eq!(back.run_per_step, 2.0);
+    }
 
     #[test]
     fn room_shell_is_nonempty_and_watertight_count() {

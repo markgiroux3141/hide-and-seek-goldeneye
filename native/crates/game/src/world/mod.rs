@@ -23,7 +23,7 @@ use crate::combat::enemy_weapons::{
 };
 use crate::combat::{enemy_def_for, EnemyWeaponClass, EnemyWeaponDef, Weapon};
 use engine::geometry::csg_runtime::{
-    Axis, Brush, Op, Region, Side, StairDesc, StairDir, WALL_THICKNESS, WORLD_SCALE,
+    Axis, Brush, Op, Region, Side, StairDesc, StairDir, StairShell, WALL_THICKNESS, WORLD_SCALE,
 };
 use crate::enemy::{AiState, Enemy};
 use rapier3d::prelude::ColliderHandle;
@@ -41,7 +41,9 @@ use engine::skeletal::layers::{
     LocomotionBlendLayer, Pose, PoseLayer, RootTranslateLayer, TwoBoneIkLayer,
 };
 use engine::skeletal::gltf_skin::{self, SkinnedModel};
-use engine::geometry::structures::{self, Anchor, Edge, Platform, StairRun, StairStyle};
+use engine::geometry::structures::{
+    self, Anchor, Edge, Platform, PlatformStyle, StairRun, StairStyle,
+};
 use engine::render::textures::default_scheme;
 use engine::render::uv_zones::ZonedBuilder;
 
@@ -90,8 +92,8 @@ mod ai_testbed;
 // through `use super::*` regardless of which file defines them. (`find_room_brushes`
 // / `brushes_touching` are used only within `editing`, so they aren't re-exported.)
 pub(crate) use geom::{
-    append_textured_collision, boxes_mesh, make_stair_void, make_wall_brush, push_colored_box,
-    push_colored_quad_y, structure_collider_mesh,
+    append_textured_collision, boxes_mesh, ghost_mesh, make_stair_void, make_wall_brush,
+    push_colored_box, push_colored_quad_y, structure_collider_mesh,
 };
 pub(crate) use hunt::band_for_speed;
 pub(crate) use lifecycle::pick_spread_spawns;
@@ -1508,6 +1510,67 @@ pub(crate) enum PlatformPhase {
     SimpleTo,
 }
 
+/// The build-style settings every stair and platform tool reads — the **TOOLS** tab of
+/// the `O` panel, and the only place they are set.
+///
+/// They live in a panel rather than on keys or the wheel because that is what they are:
+/// three independent choices with a handful of values each. Sharing one hotkey between
+/// them, or a wheel already carrying footprint size and stair slide, made the live
+/// setting invisible — and an invisible mode is one you have to place something to
+/// discover. Every value here is a **render** or **shape** choice over identical solid
+/// boxes, colliders and nav, which is what lets an authored structure be re-skinned in
+/// place afterwards.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct BuildStyle {
+    /// Skirted slab, or a bare two-sided plane in the room's floor texture.
+    pub platform: PlatformStyle,
+    /// Treads and risers, or the bare slope — honoured by `K`, `C` **and** the `↑`/`↓`
+    /// CSG stair tool.
+    pub stairs: StairShell,
+    /// Horizontal run of one `↑`/`↓` stair step, in WT. One of [`STAIR_RUN_PRESETS`].
+    pub stair_run: f32,
+}
+
+impl Default for BuildStyle {
+    fn default() -> Self {
+        BuildStyle {
+            platform: PlatformStyle::Solid,
+            stairs: StairShell::Steps,
+            stair_run: STAIR_RUN_PRESETS[0],
+        }
+    }
+}
+
+impl BuildStyle {
+    /// The free-standing stair style this builds, given the tool's own steps-side
+    /// default — `K` makes block stairs and `C` makes tread-and-stringer flights, so the
+    /// `Steps` setting has to preserve each tool's existing behaviour rather than unify
+    /// them.
+    fn stair_style(&self, steps_default: StairStyle) -> StairStyle {
+        match self.stairs {
+            StairShell::Steps => steps_default,
+            StairShell::Ramp => StairStyle::Ramp,
+        }
+    }
+}
+
+/// Selectable horizontal runs for one `↑`/`↓` stair step, in WT, with the slope each
+/// gives. Shallower only, and that is not a taste call: the player capsule's
+/// `max_slope_climb_angle` is 50° ([`engine::sim::physics`]) and the walking surface is
+/// the flight's slope in both shells, so anything steeper than the original 1:1 (45°) is
+/// a staircase nobody can climb.
+pub const STAIR_RUN_PRESETS: [f32; 4] = [1.0, 1.5, 2.0, 3.0];
+
+/// Human label for a run preset — the angle is the number that means something.
+pub fn stair_run_label(run: f32) -> &'static str {
+    match run {
+        r if r < 1.25 => "1x  (45\u{b0})",
+        r if r < 1.75 => "1.5x  (34\u{b0})",
+        r if r < 2.5 => "2x  (27\u{b0})",
+        _ => "3x  (18\u{b0})",
+    }
+}
+
 /// The locked connect destination (JS `platformConnectTo`): a platform edge, or a
 /// free-standing ground point.
 #[derive(Clone, Copy)]
@@ -1625,6 +1688,9 @@ pub(crate) struct PendingStair {
     /// Face bottom (vMin) and stairwell ceiling H, in WT Y.
     floor: f32,
     ceil: f32,
+    /// The wall face's own top (`v_max`) — how high the wall goes, as opposed to how
+    /// high the selection reaches. Sizes the lintel over an up-stair.
+    face_top: f32,
     /// Texture scheme inherited from the wall the stair anchors to.
     scheme: usize,
 }
@@ -2586,6 +2652,10 @@ pub struct World {
     /// Footprint of the next placed platform in WT (scroll = X, Shift+scroll = Z).
     platform_size_x: f32,
     platform_size_z: f32,
+    /// What every stair and platform tool builds with (the `O` panel's TOOLS tab). Not
+    /// persisted — it is an authoring mode, not level data; what gets saved is the
+    /// per-structure style and slope it stamped.
+    build_style: BuildStyle,
     /// Id allocators for platforms / stair-runs (JS `nextPlatformId`/`nextStairRunId`).
     next_platform_id: u32,
     next_run_id: u32,
@@ -3098,6 +3168,7 @@ impl World {
             simple_ghost: None,
             platform_size_x: PLATFORM_SIZE,
             platform_size_z: PLATFORM_SIZE,
+            build_style: BuildStyle::default(),
             next_platform_id: 1,
             next_run_id: 1,
             gizmo_drag: None,
