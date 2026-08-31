@@ -66,6 +66,35 @@
           "texture": "floor_doorframe"
         }
       }
+    },
+    "custom_03": {
+      "label": "complex custom",
+      "zones": {
+        "0": {
+          "repeat": 0.33180001378059387,
+          "texture": "tempImgEd0276"
+        },
+        "1": {
+          "repeat": 0.3871000111103058,
+          "texture": "tempImgEd09A8"
+        },
+        "2": {
+          "repeat": 0.19349999725818634,
+          "texture": "tempImgEd00A1"
+        },
+        "3": {
+          "repeat": 0.19439999759197235,
+          "texture": "tempImgEd00A4"
+        },
+        "5": {
+          "repeat": 1.0,
+          "texture": "stair_gradient"
+        },
+        "6": {
+          "repeat": 0.3499999940395355,
+          "texture": "floor_doorframe"
+        }
+      }
     }
   }
 }
