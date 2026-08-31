@@ -119,16 +119,28 @@ impl PanelTab {
 /// A zone slot's display name — the same seven the theme editor exposes, plus the
 /// two the classifier can emit that no one authors directly.
 ///
-/// The PAINT tab has to be able to *name* whatever the classifier came back with,
-/// including a slot the editor's own list leaves out, so this is a total function
-/// over `0..8` rather than a lookup that can miss.
+/// The PAINT tab has to be able to *name* whatever the classifier came back with, so
+/// this is a total function over `0..8` rather than a lookup that can miss. Every slot
+/// is accounted for now that zone 4 is the cornice, but the fallback stays: the zone
+/// table is a contract shared with the classifier, and a label is a poor place to
+/// discover it has grown.
 fn zone_name(zone: u8) -> &'static str {
     crate::theme_editor::EDITABLE_ZONES
         .iter()
         .find(|(z, _)| *z == zone)
         .map(|(_, label)| *label)
-        .unwrap_or("zone 4 (unused)")
+        .unwrap_or("unnamed zone")
 }
+
+/// How many zones the theme lists preview as swatches, in bottom-to-top reading order:
+/// floor, ceiling, lower wall, upper wall, cornice.
+///
+/// Deliberately not every zone. Stair/frame (5), doorframe floor (6) and brace (7) are
+/// fittings rather than room surfaces and have never been previewed here. The cornice is
+/// a room surface, so it belongs — and showing it as an **empty** slot for the 394
+/// themes that define none is the point: that is what "this theme has no cornice" looks
+/// like, and it is a slot an author can go and fill.
+const PREVIEW_ZONES: usize = 5;
 
 // ─── Shop palette (GoldenEye gold-on-black spy-terminal look) ──────────────────
 /// Signature gold accent — headings, borders, buy buttons, selection.
@@ -317,7 +329,14 @@ struct App {
     /// it, so an armed delete can't be committed by a later, unrelated click.
     level_confirm_delete: Option<std::path::PathBuf>,
     /// Whether the preview room geometry has been uploaded this session.
-    theme_preview_uploaded: bool,
+    /// The scheme the uploaded theme-preview room is tagged with, or `None` when none
+    /// is uploaded.
+    ///
+    /// A scheme index rather than a "was it built" flag: the preview now serves both
+    /// panel modes — the scratch theme while editing, and whichever library theme is
+    /// armed while browsing — so it has to be rebuilt when the subject changes, not
+    /// merely once.
+    theme_preview_scheme: Option<usize>,
     /// Which revision of the NAV overlay is on the GPU (`None` = nothing uploaded).
     /// The mesh is far too big to re-upload per frame — see `World::nav_overlay_rev`.
     nav_overlay_uploaded: Option<u32>,
@@ -385,7 +404,7 @@ impl App {
             level_name_draft: String::new(),
             level_status: String::new(),
             level_confirm_delete: None,
-            theme_preview_uploaded: false,
+            theme_preview_scheme: None,
             nav_overlay_uploaded: None,
             radial: Radial::default(),
             lock_before_radial: false,
@@ -423,8 +442,11 @@ impl App {
     /// (see `build_egui_frame`), and loading a texture needs the context plus the
     /// cache. Only themes passing the current filter are built, so the cost tracks
     /// what is actually on screen.
-    fn collect_theme_swatches(&mut self, visible: &[usize]) -> Vec<[Option<egui::TextureHandle>; 4]> {
-        let names: Vec<[Option<String>; 4]> = visible
+    fn collect_theme_swatches(
+        &mut self,
+        visible: &[usize],
+    ) -> Vec<[Option<egui::TextureHandle>; PREVIEW_ZONES]> {
+        let names: Vec<[Option<String>; PREVIEW_ZONES]> = visible
             .iter()
             .map(|&i| {
                 let s = &engine::render::textures::schemes()[i];
@@ -449,6 +471,16 @@ impl App {
     /// unconditional statement rather than an invariant to maintain.
     fn push_theme_to(&mut self, scheme: usize) {
         let zones = self.theme_draft.zones;
+        // The cornice is the one zone that is not just a material: it moves a band
+        // boundary, so it goes to the classifier's table and anything drawn with this
+        // scheme has to be re-folded. Everything else is a texture or a UV parameter
+        // and the renderer can swap it under the existing geometry.
+        let depth = zones[engine::render::textures::CORNICE_ZONE as usize].map(|z| z.height);
+        if engine::render::textures::cornice_of(scheme) != depth {
+            engine::render::textures::set_cornice(scheme, depth);
+            self.theme_preview_scheme = None;
+            self.rebuild_all_regions_for_theme_change();
+        }
         let Some(r) = self.renderer.as_mut() else { return };
         for (zi, z) in zones.iter().enumerate() {
             let Some(z) = z else { continue };
@@ -457,28 +489,78 @@ impl App {
         }
     }
 
+    /// Re-fold every region and re-upload it, for a change that moved band boundaries
+    /// rather than textures.
+    ///
+    /// Only reachable from the texture editor, and only when a cornice depth actually
+    /// changed — a full re-bake of the level is far too expensive to do on every slider
+    /// drag, which is why `push_theme_to` guards it on a real difference.
+    fn rebuild_all_regions_for_theme_change(&mut self) {
+        let Some(w) = self.world.as_mut() else { return };
+        let meshes = w.initial_meshes();
+        if let Some(r) = self.renderer.as_mut() {
+            for m in meshes {
+                r.set_region_textured(m.id, &m.mesh);
+            }
+        }
+    }
+
+    /// Finish a theme save: make the slot live and say so.
+    ///
+    /// Saving to disk cannot update the registry (a `OnceLock`), so the slot's materials
+    /// are pushed here and its label remembered for this session; both refresh from the
+    /// file on the next run. `push_theme_to` also re-folds the level when the cornice
+    /// depth moved, which is the one theme property that changes geometry.
+    fn after_theme_saved(&mut self, slot: usize, verb: &str) {
+        self.push_theme_to(slot);
+        let label = self.theme_draft.save_name.trim().to_string();
+        let label = if label.is_empty() {
+            engine::render::textures::schemes()[slot].label.to_string()
+        } else {
+            label
+        };
+        self.theme_slot_labels.insert(slot, label.clone());
+        self.theme_status = format!("{verb} \"{label}\" — usable now");
+        log::info!("theme preset {verb} custom slot {slot} as {label:?}");
+    }
+
     /// Mirror the draft into the scratch scheme so the world shows it immediately.
     fn sync_theme_scratch(&mut self) {
         let scratch = engine::render::textures::scratch_scheme();
         self.push_theme_to(scratch);
     }
 
-    /// Upload the preview room, tagged with the scratch scheme, once.
+    /// The theme the preview room should be showing, or `None` to leave the preview
+    /// target to whatever else wants it.
     ///
-    /// Built lazily on first entry to the editor rather than at startup: it costs a
-    /// CSG fold and most sessions never open the editor. The mesh only depends on the
-    /// scheme *index* (zone groups carry it), and the scratch index is fixed, so one
-    /// upload serves the whole session — subsequent edits change materials, not
-    /// geometry.
-    fn ensure_theme_preview_room(&mut self) {
-        if self.theme_preview_uploaded {
+    /// Editing shows the scratch theme. Browsing shows the **armed** theme, which is
+    /// what a click on a row selects — without this, leaving the editor dropped you back
+    /// to the level's own textures and a 419-theme review list you could not see.
+    fn theme_preview_subject(&self) -> Option<usize> {
+        if self.panel_tab != PanelTab::Textures || !self.props_open {
+            return None;
+        }
+        if self.theme_edit_mode {
+            return Some(engine::render::textures::scratch_scheme());
+        }
+        self.theme_armed
+    }
+
+    /// Upload the preview room tagged with `scheme`, if that is not already what is up.
+    ///
+    /// Built lazily rather than at startup: it costs a CSG fold and most sessions never
+    /// open the panel. The mesh depends on the scheme *index* (zone groups carry it) and
+    /// on that scheme's **cornice depth**, which moves a band boundary — so
+    /// `push_theme_to` clears this when the depth changes. Every other theme edit
+    /// changes materials, not geometry, and needs no rebuild.
+    fn ensure_theme_preview_room(&mut self, scheme: usize) {
+        if self.theme_preview_scheme == Some(scheme) {
             return;
         }
-        let scratch = engine::render::textures::scratch_scheme();
-        let mesh = crate::theme_editor::preview_room_mesh(scratch);
+        let mesh = crate::theme_editor::preview_room_mesh(scheme);
         if let Some(r) = self.renderer.as_mut() {
             r.set_theme_preview_room(&mesh);
-            self.theme_preview_uploaded = true;
+            self.theme_preview_scheme = Some(scheme);
         }
     }
 
@@ -1338,10 +1420,19 @@ impl App {
                     group: s.group,
                     key: s.key,
                     verdict: self.theme_review.get(s.name),
+                    editable: matches!(
+                        s.kind,
+                        engine::render::textures::SchemeKind::Custom { .. }
+                    ),
                     repeats: std::array::from_fn(|z| s.zones[z].map(|zd| zd.repeat)),
                 }
             })
             .collect();
+        let platforms_are_floors = self
+            .world
+            .as_ref()
+            .map(|w| w.platforms_are_floors())
+            .unwrap_or(false);
         let theme_armed = self.theme_armed;
         let theme_armed_label = theme_armed.map(|i| self.theme_label(i)).unwrap_or_default();
         // What each quick key resolves to right now, and whether that came from this
@@ -1382,6 +1473,11 @@ impl App {
         let theme_edit_mode = self.theme_edit_mode;
         let mut draft_zone_sel = self.theme_draft.zone_sel;
         let mut draft_save_name = self.theme_draft.save_name.clone();
+        // Resolved before the egui closure, which cannot hold `&mut self`.
+        let draft_overwrite_label = self
+            .theme_draft
+            .overwrite_target()
+            .map(|slot| self.theme_label(slot));
         let draft_zones = self.theme_draft.zones;
         let draft_dirty = self.theme_draft.dirty;
         let theme_status = self.theme_status.clone();
@@ -1618,6 +1714,7 @@ impl App {
             .map(|w| w.build_style())
             .unwrap_or_default();
         let mut set_platform_style: Option<engine::geometry::structures::PlatformStyle> = None;
+        let mut set_platforms_are_floors: Option<bool> = None;
         let mut set_stair_shell: Option<engine::geometry::csg_runtime::StairShell> = None;
         let mut set_stair_run: Option<f32> = None;
         let panel_tab = self.panel_tab;
@@ -1635,8 +1732,10 @@ impl App {
         let mut draft_pick_texture: Option<&'static str> = None;
         let mut draft_new_repeat: Option<f32> = None;
         let mut draft_new_offset: Option<[f32; 2]> = None;
+        let mut draft_new_height: Option<f32> = None;
         let mut draft_clear_zone = false;
         let mut draft_seed_from: Option<usize> = None;
+        let mut draft_save_over = false;
         let mut draft_save = false;
         let mut draft_arm_scratch = false;
         // `(digit, Some(scheme))` binds, `(digit, None)` clears.
@@ -2102,6 +2201,27 @@ impl App {
                                     }
                                     ui.label(dim(hint));
                                 }
+                                ui.add_space(6.0);
+
+                                ui.label(head("PLATFORMS AS FLOORS"));
+                                let mut decks_are_floors = platforms_are_floors;
+                                if ui
+                                    .checkbox(
+                                        &mut decks_are_floors,
+                                        "deck top restarts the wall band",
+                                    )
+                                    .on_hover_text(
+                                        "re-folds every region — a band boundary is \
+                                         geometry, not a material",
+                                    )
+                                    .changed()
+                                {
+                                    set_platforms_are_floors = Some(decks_are_floors);
+                                }
+                                ui.label(dim("off: walls band from the carved room"));
+                                ui.label(dim("alone, so dropping a platform in never"));
+                                ui.label(dim("restyles the wall behind it"));
+                                ui.label(dim("on: a deck reads as a mezzanine floor"));
                                 ui.add_space(6.0);
 
                                 ui.label(head("STAIRS (K / C / \u{2191}\u{2193})"));
@@ -2946,7 +3066,8 @@ impl App {
                                             // or rows of different length would make
                                             // the list jitter as you scroll it.
                                             ui.horizontal(|ui| {
-                                                for sw in swatches.iter() {
+                                                for (zi, sw) in swatches.iter().enumerate() {
+                                                    let name = zone_name(zi as u8);
                                                     match sw {
                                                         Some(h) => {
                                                             ui.add(egui::Image::new(
@@ -2954,7 +3075,8 @@ impl App {
                                                                     h.id(),
                                                                     egui::vec2(22.0, 22.0),
                                                                 ),
-                                                            ));
+                                                            ))
+                                                            .on_hover_text(name);
                                                         }
                                                         None => {
                                                             let (rect, _) = ui
@@ -3091,6 +3213,26 @@ impl App {
                                         if off_changed {
                                             draft_new_offset = Some(off);
                                         }
+                                        // The cornice is the one band whose extent the
+                                        // theme decides rather than the geometry, so it
+                                        // is the one zone with a depth to drag.
+                                        if self.theme_draft.zone_sel
+                                            == engine::render::textures::CORNICE_ZONE
+                                        {
+                                            let mut h = z.height;
+                                            if ui
+                                                .add(
+                                                    egui::Slider::new(
+                                                        &mut h,
+                                                        crate::theme_editor::CORNICE_RANGE,
+                                                    )
+                                                    .text("depth (WT)"),
+                                                )
+                                                .changed()
+                                            {
+                                                draft_new_height = Some(h);
+                                            }
+                                        }
                                         if ui
                                             .button("Clear zone")
                                             .on_hover_text(
@@ -3224,18 +3366,39 @@ impl App {
                                 {
                                     draft_name_changed = true;
                                 }
+                                // Save back over the slot this draft came from, when
+                                // it came from an editable one. Gated on `dirty` so an
+                                // unchanged draft cannot overwrite its own source by a
+                                // stray click, and labelled with the target so the
+                                // button never lands somewhere the text did not say.
+                                if let Some(target) = draft_overwrite_label.as_deref() {
+                                    if ui
+                                        .add_enabled(
+                                            draft_dirty,
+                                            egui::Button::new(format!("Save to \"{target}\"")),
+                                        )
+                                        .on_hover_text(if draft_dirty {
+                                            "overwrites this preset in user_themes.json"
+                                        } else {
+                                            "no changes to save"
+                                        })
+                                        .clicked()
+                                    {
+                                        draft_save_over = true;
+                                    }
+                                }
                                 let free = engine::render::textures::first_free_custom_slot();
                                 if ui
                                     .add_enabled(
                                         free.is_some(),
                                         egui::Button::new(if draft_dirty {
-                                            "Save as preset *"
+                                            "Save as new preset *"
                                         } else {
-                                            "Save as preset"
+                                            "Save as new preset"
                                         }),
                                     )
                                     .on_hover_text(match free {
-                                        Some(_) => "writes user_themes.json",
+                                        Some(_) => "writes a new slot in user_themes.json",
                                         None => "all custom slots are full",
                                     })
                                     .clicked()
@@ -3372,29 +3535,41 @@ impl App {
                                                     .color(SHOP_GOLD_DIM),
                                             );
                                         }
-                                        // Four zone swatches: floor, ceiling, lower, upper.
+                                        // The wall stack, floor to cornice — see
+                                        // `PREVIEW_ZONES`. 24 px rather than 30 so five
+                                        // slots occupy the width four used to: the
+                                        // keep/cut buttons share this row and the panel
+                                        // is a fixed 206 wide.
                                         ui.horizontal(|ui| {
-                                            for sw in swatches.iter() {
+                                            for (zi, sw) in swatches.iter().enumerate() {
+                                                let name = zone_name(zi as u8);
                                                 match sw {
                                                     Some(h) => {
                                                         ui.add(egui::Image::new(
                                                             egui::load::SizedTexture::new(
                                                                 h.id(),
-                                                                egui::vec2(30.0, 30.0),
+                                                                egui::vec2(24.0, 24.0),
                                                             ),
-                                                        ));
+                                                        ))
+                                                        .on_hover_text(name);
                                                     }
                                                     None => {
-                                                        let (rect, _) = ui.allocate_exact_size(
-                                                            egui::vec2(30.0, 30.0),
-                                                            egui::Sense::hover(),
-                                                        );
+                                                        let (rect, resp) = ui
+                                                            .allocate_exact_size(
+                                                                egui::vec2(24.0, 24.0),
+                                                                egui::Sense::hover(),
+                                                            );
                                                         ui.painter().rect_stroke(
                                                             rect,
                                                             0.0,
                                                             egui::Stroke::new(1.0, SHOP_DIM),
                                                             egui::StrokeKind::Inside,
                                                         );
+                                                        // An empty slot is otherwise
+                                                        // cryptic; say which zone it is.
+                                                        resp.on_hover_text(format!(
+                                                            "{name} — not defined"
+                                                        ));
                                                     }
                                                 }
                                             }
@@ -3423,11 +3598,17 @@ impl App {
                                                     crate::theme_review::Verdict::Reject,
                                                 ));
                                             }
-                                            // Start a custom theme from this one — the
-                                            // usual way in is "nearly right, but…".
+                                            // Open this theme in the editor. A custom
+                                            // slot can then be saved back over itself;
+                                            // a library theme can only become a copy,
+                                            // so the hint says which you are getting.
                                             if ui
                                                 .selectable_label(false, "✎")
-                                                .on_hover_text("edit a copy")
+                                                .on_hover_text(if row.editable {
+                                                    "edit in place"
+                                                } else {
+                                                    "edit a copy"
+                                                })
                                                 .clicked()
                                             {
                                                 draft_seed_from = Some(row.idx);
@@ -3605,7 +3786,6 @@ impl App {
             self.theme_edit_mode = !self.theme_edit_mode;
             self.theme_status.clear();
             if self.theme_edit_mode {
-                self.ensure_theme_preview_room();
                 self.sync_theme_scratch();
             } else {
                 self.theme_armed = None;
@@ -3640,6 +3820,10 @@ impl App {
                 self.theme_draft.set_offset(o);
                 changed = true;
             }
+            if let Some(h) = draft_new_height {
+                self.theme_draft.set_height(h);
+                changed = true;
+            }
             if draft_clear_zone {
                 self.theme_draft.clear_zone();
                 changed = true;
@@ -3662,22 +3846,21 @@ impl App {
             self.theme_armed = Some(scratch);
             self.sync_theme_scratch();
         }
+        if draft_save_over {
+            match self.theme_draft.save_over_origin() {
+                Ok(slot) => {
+                    self.after_theme_saved(slot, "updated");
+                }
+                Err(e) => {
+                    self.theme_status = e.clone();
+                    log::warn!("theme preset overwrite failed: {e}");
+                }
+            }
+        }
         if draft_save {
             match self.theme_draft.save_as_preset() {
                 Ok(slot) => {
-                    // Saving to disk cannot update the registry (a `OnceLock`), so the
-                    // slot's materials are pushed here and its label remembered for
-                    // this session. Both refresh from the file on the next run.
-                    self.push_theme_to(slot);
-                    let label = self.theme_draft.save_name.trim().to_string();
-                    let label = if label.is_empty() {
-                        engine::render::textures::schemes()[slot].label.to_string()
-                    } else {
-                        label
-                    };
-                    self.theme_slot_labels.insert(slot, label.clone());
-                    self.theme_status = format!("saved as \"{label}\" — usable now");
-                    log::info!("theme preset saved into custom slot {slot} as {label:?}");
+                    self.after_theme_saved(slot, "saved as");
                 }
                 Err(e) => {
                     self.theme_status = e.clone();
@@ -3904,6 +4087,20 @@ impl App {
         if let Some(run) = set_stair_run {
             if let Some(world) = self.world.as_mut() {
                 world.set_stair_run(run);
+            }
+        }
+        // Whether a platform deck counts as a floor moves band boundaries, so every
+        // region re-folds. Collected before uploading because the world borrow has to
+        // end first. Untouched regions hit the memo cache, which is what makes a
+        // whole-level re-fold affordable on a checkbox.
+        if let Some(on) = set_platforms_are_floors {
+            let meshes = self
+                .world
+                .as_mut()
+                .map(|w| w.set_platforms_are_floors(on))
+                .unwrap_or_default();
+            for rm in &meshes {
+                self.upload(rm);
             }
         }
         if let Some(tab) = new_tab {
@@ -4793,6 +4990,9 @@ struct ThemeRow {
     group: &'static str,
     key: Option<char>,
     verdict: Option<crate::theme_review::Verdict>,
+    /// Whether this theme can be saved back over itself — true for a custom slot,
+    /// false for the read-only library.
+    editable: bool,
     /// Per-zone `repeat` for zones 0..3, for the detail readout.
     repeats: [Option<f32>; 4],
 }
@@ -5776,6 +5976,13 @@ impl ApplicationHandler for App {
                 // needs its own &mut self), then hand the tessellated UI to render().
                 let egui_frame = self.build_egui_frame();
 
+                // Which theme the preview room should show, resolved (and uploaded)
+                // before the render borrow block, which cannot take `&mut self` again.
+                let theme_preview_subject = self.theme_preview_subject();
+                if let Some(scheme) = theme_preview_subject {
+                    self.ensure_theme_preview_room(scheme);
+                }
+
                 if let (Some(world), Some(renderer)) =
                     (self.world.as_ref(), self.renderer.as_mut())
                 {
@@ -5873,12 +6080,12 @@ impl ApplicationHandler for App {
                     // Object panel open → render the selected prop into the same
                     // offscreen preview texture (the panel samples it as an image).
                     //
-                    // The theme editor draws its preview *room* into that same target.
-                    // Only one can be on screen (they're different tabs), and the
-                    // editor wins when it's showing — it's the one that needs to track
-                    // a slider drag frame by frame.
-                    if self.props_open && self.theme_edit_mode && self.panel_tab == PanelTab::Textures
-                    {
+                    // The TEXTURES tab draws its preview *room* into that same target,
+                    // for the scratch theme while editing and for the armed theme while
+                    // browsing. Only one can be on screen (they're different tabs), and
+                    // the theme room wins when it has a subject — it is the one that has
+                    // to track a slider drag frame by frame.
+                    if theme_preview_subject.is_some() {
                         renderer.render_theme_preview(self.props_preview_angle);
                     } else if self.props_open {
                         // A weapon pickup previews through the SHOP's weapon preview

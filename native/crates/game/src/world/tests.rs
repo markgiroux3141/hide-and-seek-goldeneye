@@ -2964,7 +2964,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         world.update_door_preview();
         world.confirm_door().expect("door cut");
 
-        let tex = world.regions[0].evaluate_textured();
+        let tex = world.regions[0].evaluate_textured(&[]);
         let zones: std::collections::BTreeSet<u8> = tex.groups.iter().map(|g| g.zone).collect();
         assert!(zones.contains(&5), "doorway reveal → zone 5; got {zones:?}");
         assert!(
@@ -4741,18 +4741,18 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         let n = 100;
         // Warm up.
         let _ = region.evaluate();
-        let _ = region.evaluate_textured();
+        let _ = region.evaluate_textured(&[]);
 
         let t = Instant::now();
         for _ in 0..n { let _ = region.evaluate(); }
         let eval_ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
 
         let t = Instant::now();
-        for _ in 0..n { let _ = region.evaluate_textured(); }
+        for _ in 0..n { let _ = region.evaluate_textured(&[]); }
         let tex_ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
 
         let t = Instant::now();
-        for _ in 0..n { let _ = region.evaluate_both(); }
+        for _ in 0..n { let _ = region.evaluate_both(&[]); }
         let both_ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
 
         let brushes = region.brushes.len();
@@ -4793,11 +4793,11 @@ fn arm_with(world: &mut World, name: &str) -> usize {
                 }
             }
             let brushes = region.brushes.len();
-            let _ = region.evaluate_both(); // warm
+            let _ = region.evaluate_both(&[]); // warm
             let n = 10;
             let t = Instant::now();
             for _ in 0..n {
-                let _ = region.evaluate_both();
+                let _ = region.evaluate_both(&[]);
             }
             let ms = t.elapsed().as_secs_f64() * 1000.0 / n as f64;
             let per_brush = ms / brushes as f64 * 1000.0;

@@ -3976,8 +3976,22 @@ fn build_materials(
         let mut zones: [Option<wgpu::BindGroup>; 8] = std::array::from_fn(|_| None);
         let mut zone_bufs: [Option<wgpu::Buffer>; 8] = std::array::from_fn(|_| None);
         for (zi, zone) in scheme.zones.iter().enumerate() {
-            let Some(zdef) = zone else { continue };
-            let Some(name) = zdef.texture else { continue };
+            // **Every slot gets a bind group, defined or not.**
+            //
+            // `set_material_texture` can only rewrite a slot that already has one, and
+            // the table is built once at startup — so a zone an author fills *later*
+            // (the cornice is the first that can be) would never receive its texture,
+            // and `render_*` skips a group whose bind group is missing, leaving a hole
+            // in the wall showing whatever is behind it. Pre-allocating is the same
+            // reason the custom theme slots themselves are pre-allocated.
+            //
+            // Drawing an unfilled slot is not a risk: the classifier only emits the
+            // cornice zone for a theme that defines it, and no zone but that one is
+            // optional.
+            let Some(name) = textures::material_texture_for(scheme, zi) else { continue };
+            let (repeat, offset) = zone
+                .map(|z| (z.repeat, z.offset))
+                .unwrap_or((1.0, [0.0, 0.0]));
 
             if !view_by_name.contains_key(name) {
                 // Never fails: a missing BMP comes back magenta so the gap is
@@ -4027,7 +4041,7 @@ fn build_materials(
             let ubuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("material-uniform"),
                 contents: bytemuck::cast_slice(&[MaterialUniform {
-                    params: [zdef.repeat, zdef.offset[0], zdef.offset[1], 0.0],
+                    params: [repeat, offset[0], offset[1], 0.0],
                 }]),
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             });

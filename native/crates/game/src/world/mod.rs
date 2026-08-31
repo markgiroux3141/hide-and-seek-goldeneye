@@ -2666,6 +2666,18 @@ pub struct World {
     /// persisted — it is an authoring mode, not level data; what gets saved is the
     /// per-structure style and slope it stamped.
     build_style: BuildStyle,
+    /// Whether a **platform deck counts as a floor** for wall-texture banding.
+    ///
+    /// A room is CSG; a platform is not. Its slab is solid to nav and collision, so the
+    /// band probe can honestly treat its top as a floor and restart the lower band on the
+    /// wall above it — which is right for a mezzanine built as a deck, and wrong for a
+    /// catwalk you would rather read as furniture inside one tall room.
+    ///
+    /// **Off by default**, so a level's walls are banded by its *carved* shape alone and
+    /// dropping a platform in never restyles the wall behind it. Persisted per level: it
+    /// changes how existing geometry looks, unlike [`BuildStyle`], which only decides
+    /// what the *next* thing built gets.
+    platforms_are_floors: bool,
     /// Id allocators for platforms / stair-runs (JS `nextPlatformId`/`nextStairRunId`).
     next_platform_id: u32,
     next_run_id: u32,
@@ -3180,6 +3192,7 @@ impl World {
             platform_size_x: PLATFORM_SIZE,
             platform_size_z: PLATFORM_SIZE,
             build_style: BuildStyle::default(),
+            platforms_are_floors: false,
             next_platform_id: 1,
             next_run_id: 1,
             gizmo_drag: None,
@@ -3718,8 +3731,13 @@ impl World {
         self.spawn_enemies = on;
     }
 
-    /// Evaluate every region once, set colliders, and return the meshes so the
-    /// app can upload them. Call at startup.
+    /// Evaluate every region once, set colliders, and return the meshes so the app can
+    /// upload them.
+    ///
+    /// Called at startup, and again when something outside the brushes changes how they
+    /// classify — a theme's cornice depth moves a band boundary, so every region drawn
+    /// with that theme has to be re-folded. Unchanged regions hit the memo cache and
+    /// cost nothing, which is what makes the second use affordable.
     pub fn initial_meshes(&mut self) -> Vec<RegionMesh> {
         let ids: Vec<u32> = self.regions.iter().map(|r| r.id).collect();
         ids.into_iter()

@@ -565,6 +565,251 @@ pub fn floor_y_under(x: f32, z: f32, y: f32, brushes: &[Brush]) -> f32 {
     best.unwrap_or(y).min(y)
 }
 
+// ─── Air-column probe (wall-band anchoring) ──────────────────────────
+
+/// Vertical slack for the column probe, in WT. Brush coordinates are whole tiles in
+/// practice, so anything well under half a tile behaves identically.
+const COLUMN_EPS: f32 = 0.001;
+
+/// Everything the wall-band classifier needs to probe air columns: the region's
+/// brushes **as authored**, plus the level's platform slabs resolved once.
+///
+/// The classifier itself works from `BrushInfo`, an AABB plus texture attributes that
+/// deliberately carries no `op`. Solidity is an *ordered* replay of adds and
+/// subtracts, so the raw brushes are required — and `Op::Add` is not a detail here:
+/// a partial-face pull builds a solid ledge protruding into the room, which is a
+/// floor partway up a wall.
+pub struct ColumnInputs<'a> {
+    brushes: &'a [Brush],
+    /// Platform solid boxes, resolved at construction. A *grounded* platform's box
+    /// costs a floor lookup over every brush, and the probe runs per wall triangle,
+    /// so resolving it per query was never affordable.
+    slabs: Vec<[f32; 6]>,
+}
+
+impl<'a> ColumnInputs<'a> {
+    pub fn new(brushes: &'a [Brush], platforms: &[Platform]) -> Self {
+        let slabs = platforms.iter().filter_map(|p| p.solid_box(brushes)).collect();
+        ColumnInputs { brushes, slabs }
+    }
+
+    /// Solidity at a WT point: the same ordered CSG replay as
+    /// [`Region::solid_at`](crate::geometry::csg_runtime::Region::solid_at) — start
+    /// solid, then every brush containing the point flips it — plus platform slabs,
+    /// which are solid wherever they sit.
+    ///
+    /// The shell is deliberately not consulted. It only decides points *outside* the
+    /// level, and those are solid either way.
+    pub fn solid_at(&self, x: f32, y: f32, z: f32) -> bool {
+        let mut solid = true;
+        for b in self.brushes {
+            if b.contains(x, y, z) {
+                solid = b.op == Op::Add;
+            }
+        }
+        solid
+            || self.slabs.iter().any(|&[bx, by, bz, bw, bh, bd]| {
+                x >= bx && x <= bx + bw && y >= by && y <= by + bh && z >= bz && z <= bz + bd
+            })
+    }
+
+    /// Heights strictly below `y` at which solidity can change in the column through
+    /// `(x, z)`, descending into `out`. Only a brush or slab face can change it, so
+    /// these are the only candidate floors.
+    fn boundaries_below(&self, x: f32, z: f32, y: f32, out: &mut Vec<f32>) {
+        out.clear();
+        for b in self.brushes {
+            if x >= b.x && x <= b.x + b.w && z >= b.z && z <= b.z + b.d {
+                for v in [b.y, b.y + b.h] {
+                    if v < y - COLUMN_EPS {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+        for &[bx, by, bz, bw, bh, bd] in &self.slabs {
+            if x >= bx && x <= bx + bw && z >= bz && z <= bz + bd {
+                for v in [by, by + bh] {
+                    if v < y - COLUMN_EPS {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+        out.sort_by(|a, b| b.total_cmp(a));
+    }
+
+    /// The floor at the bottom of the connected air column through `(x, z)` that
+    /// contains height `y` (all WT), reusing `scratch` so the per-triangle hot path
+    /// allocates nothing. Returns `y` when the floor is right there.
+    ///
+    /// This is the question the wall-band split wants and never asked: *is there a
+    /// floor here at all?* Two cases it gets right that a brush base cannot:
+    ///
+    /// * Rooms are subtractive cavities, so two stacked flush are one air column with
+    ///   **no floor at the seam** — anchoring a band there paints a skirting board in
+    ///   mid-air.
+    /// * A solid `Op::Add` ledge pulled out of a wall **is** a floor partway up it, so
+    ///   the wall above the ledge should start a fresh band while the wall beside it
+    ///   keeps the room's.
+    ///
+    /// Walks down boundary to boundary, sampling the midpoint of each interval. That
+    /// is exact rather than a guess: solidity cannot change between two consecutive
+    /// boundaries.
+    pub fn base_at_with(&self, x: f32, z: f32, y: f32, scratch: &mut Vec<f32>) -> f32 {
+        self.boundaries_below(x, z, y, scratch);
+        let mut base = y;
+        for k in 0..scratch.len() {
+            let b = scratch[k];
+            if b >= base - COLUMN_EPS {
+                continue;
+            }
+            if self.solid_at(x, (b + base) * 0.5, z) {
+                return base; // solid immediately below: this really is a floor
+            }
+            base = b;
+        }
+        base
+    }
+
+    /// Every place the band structure of a wall can change inside the window
+    /// `t0..t1` × `y0..y1` (exclusive, all WT), along the probe line whose `perp_axis`
+    /// coordinate is `perp`: horizontal steps into `out_t`, heights into `out_y`.
+    ///
+    /// The band boundary a wall draws at is `base(t, y) + WALL_SPLIT_V`, and `base` is
+    /// **piecewise constant** — it steps where a solid starts or stops being underfoot.
+    /// Both directions are needed and for different reasons:
+    ///
+    /// * **Horizontal** (`out_t`): the wall beside a ledge and the wall above it want
+    ///   different bands, so a triangle spanning the ledge's side edge must be cut.
+    /// * **Vertical** (`out_y`): a triangle spanning a ledge's top has its own bottom
+    ///   edge *below* the ledge, so it probes the room floor and misses the ledge
+    ///   entirely. Cutting at the ledge's top and bottom gives the part above it a
+    ///   bottom edge that finds it.
+    ///
+    /// Nothing in the CSG fold cuts at either: a ledge pulled from a wall is
+    /// *coplanar* with it, and coplanar polygons do not split each other in a BSP —
+    /// the same reason `uv_zones::straddle_planes` has to exist.
+    ///
+    /// Over-reporting is safe here (a redundant cut costs two triangles and draws
+    /// identically); under-reporting is the bug.
+    #[allow(clippy::too_many_arguments)]
+    pub fn column_edges_near_wall(
+        &self,
+        tan_axis: usize,
+        perp_axis: usize,
+        perp: f32,
+        t0: f32,
+        t1: f32,
+        y0: f32,
+        y1: f32,
+        out_t: &mut Vec<f32>,
+        out_y: &mut Vec<f32>,
+    ) {
+        let mut consider = |bx: f32, by: f32, bz: f32, bw: f32, bh: f32, bd: f32| {
+            // Deliberately not pruned by height. An earlier version skipped anything
+            // at or above the reference height, which was right while only the *floor*
+            // mattered; the cornice is measured from the ceiling, so geometry above
+            // steps the band too.
+            let (plo, phi) = if perp_axis == 0 { (bx, bx + bw) } else { (bz, bz + bd) };
+            if perp < plo - COLUMN_EPS || perp > phi + COLUMN_EPS {
+                return; // not on the probe line, so it can never be underfoot here
+            }
+            let (tlo, thi) = if tan_axis == 0 { (bx, bx + bw) } else { (bz, bz + bd) };
+            // Misses the window along the wall entirely.
+            if thi <= t0 + COLUMN_EPS || tlo >= t1 - COLUMN_EPS {
+                return;
+            }
+            for v in [tlo, thi] {
+                if v > t0 + COLUMN_EPS && v < t1 - COLUMN_EPS && !out_t.contains(&v) {
+                    out_t.push(v);
+                }
+            }
+            for v in [by, by + bh] {
+                if v > y0 + COLUMN_EPS && v < y1 - COLUMN_EPS && !out_y.contains(&v) {
+                    out_y.push(v);
+                }
+            }
+        };
+        for b in self.brushes {
+            consider(b.x, b.y, b.z, b.w, b.h, b.d);
+        }
+        for &[bx, by, bz, bw, bh, bd] in &self.slabs {
+            consider(bx, by, bz, bw, bh, bd);
+        }
+    }
+
+    /// [`base_at_with`](Self::base_at_with) with its own scratch buffer — for tests
+    /// and one-off queries, never the per-triangle path.    /// The ceiling at the top of the connected air column through `(x, z)` that
+    /// contains height `y` (all WT) — [`base_at_with`](Self::base_at_with) run upward.
+    ///
+    /// The cornice band is measured *down* from here, so that a theme's trim sits flush
+    /// against the ceiling in a 6-WT corridor and a 28-WT atrium alike, instead of
+    /// floating at whatever absolute height a single constant would put it.
+    pub fn top_at_with(&self, x: f32, z: f32, y: f32, scratch: &mut Vec<f32>) -> f32 {
+        self.boundaries_above(x, z, y, scratch);
+        let mut top = y;
+        for k in 0..scratch.len() {
+            let b = scratch[k];
+            if b <= top + COLUMN_EPS {
+                continue;
+            }
+            if self.solid_at(x, (b + top) * 0.5, z) {
+                return top; // solid immediately above: this really is a ceiling
+            }
+            top = b;
+        }
+        top
+    }
+
+    /// Heights strictly above `y` at which solidity can change in the column through
+    /// `(x, z)`, ascending into `out` — the mirror of
+    /// [`boundaries_below`](Self::boundaries_below).
+    fn boundaries_above(&self, x: f32, z: f32, y: f32, out: &mut Vec<f32>) {
+        out.clear();
+        for b in self.brushes {
+            if x >= b.x - COLUMN_EPS
+                && x <= b.x + b.w + COLUMN_EPS
+                && z >= b.z - COLUMN_EPS
+                && z <= b.z + b.d + COLUMN_EPS
+            {
+                for v in [b.y, b.y + b.h] {
+                    if v > y + COLUMN_EPS {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+        for &[bx, by, bz, bw, bh, bd] in &self.slabs {
+            if x >= bx - COLUMN_EPS
+                && x <= bx + bw + COLUMN_EPS
+                && z >= bz - COLUMN_EPS
+                && z <= bz + bd + COLUMN_EPS
+            {
+                for v in [by, by + bh] {
+                    if v > y + COLUMN_EPS {
+                        out.push(v);
+                    }
+                }
+            }
+        }
+        out.sort_by(|a, b| a.total_cmp(b));
+    }
+
+    /// [`base_at_with`](Self::base_at_with) with its own scratch buffer — for tests
+    /// and one-off queries, never the per-triangle path.
+    pub fn base_at(&self, x: f32, z: f32, y: f32) -> f32 {
+        let mut scratch = Vec::new();
+        self.base_at_with(x, z, y, &mut scratch)
+    }
+
+    /// [`top_at_with`](Self::top_at_with) with its own scratch buffer.
+    pub fn top_at(&self, x: f32, z: f32, y: f32) -> f32 {
+        let mut scratch = Vec::new();
+        self.top_at_with(x, z, y, &mut scratch)
+    }
+}
+
 // ─── Connect-flow edge helpers ───────────────────────────────────────
 
 /// The platform edge closest to a WT XZ point (JS `closestPlatformEdge`). Used
@@ -1549,6 +1794,206 @@ mod tests {
             railings: false,
             style: PlatformStyle::Solid,
         }
+    }
+
+    // ─── Air-column probe ────────────────────────────────────────────
+
+    /// A room sitting on world solid: its own floor is the column base, and the probe
+    /// must not wander below it.
+    #[test]
+    fn a_lone_room_anchors_to_its_own_floor() {
+        let brushes = [Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 8.0, 20.0)];
+        let cols = ColumnInputs::new(&brushes, &[]);
+        assert_eq!(cols.base_at(10.0, 10.0, 0.0), 0.0, "standing on the floor");
+        assert_eq!(cols.base_at(10.0, 10.0, 5.0), 0.0, "and from mid-air above it");
+    }
+
+    /// The reported bug. Two rooms stacked flush are one air column with no floor
+    /// between them, so the upper room's walls band from the *lower* floor — otherwise
+    /// the lower-wall texture repeats in mid-air.
+    #[test]
+    fn stacked_rooms_are_one_column_through_the_seam() {
+        let brushes = [
+            Brush::new(1, Op::Subtract, 0.0, -8.0, 0.0, 20.0, 8.0, 20.0),
+            Brush::new(2, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 28.0, 20.0),
+        ];
+        let cols = ColumnInputs::new(&brushes, &[]);
+        assert_eq!(cols.base_at(10.0, 10.0, 0.0), -8.0, "the seam is not a floor");
+        assert_eq!(cols.base_at(10.0, 10.0, -8.0), -8.0, "the real floor is");
+    }
+
+    /// Three storeys of open atrium collapse to one band, not three.
+    #[test]
+    fn a_three_storey_atrium_has_a_single_column_base() {
+        let brushes = [
+            Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 8.0, 20.0),
+            Brush::new(2, Op::Subtract, 0.0, 8.0, 0.0, 20.0, 8.0, 20.0),
+            Brush::new(3, Op::Subtract, 0.0, 16.0, 0.0, 20.0, 8.0, 20.0),
+        ];
+        let cols = ColumnInputs::new(&brushes, &[]);
+        assert_eq!(cols.base_at(10.0, 10.0, 16.0), 0.0);
+    }
+
+    /// A gap of solid between two cavities *is* a floor, so the walk stops at it.
+    #[test]
+    fn solid_between_two_cavities_stops_the_walk() {
+        let brushes = [
+            Brush::new(1, Op::Subtract, 0.0, -8.0, 0.0, 20.0, 6.0, 20.0), // top at -2
+            Brush::new(2, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 12.0, 20.0),
+        ];
+        let cols = ColumnInputs::new(&brushes, &[]);
+        assert_eq!(
+            cols.base_at(10.0, 10.0, 0.0),
+            0.0,
+            "2 WT of solid under the upper room is a floor"
+        );
+    }
+
+    /// **The mezzanine report.** A partial-face pull with `-` builds a solid `Op::Add`
+    /// ledge protruding into the room, and its top is a floor partway up the wall. The
+    /// probe has to see it — an earlier version considered only subtractive cavities
+    /// and walked straight through the ledge — and the answer has to depend on *where*
+    /// on the wall it is asked, because the wall above the ledge and the wall beside it
+    /// are the same brush face.
+    #[test]
+    fn a_solid_ledge_pulled_from_a_wall_is_a_floor_above_it_only() {
+        let brushes = [
+            Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 24.0, 20.0),
+            // Against the Z-min wall, 8..10 WT up, spanning x 4..16 of the room's 20.
+            Brush::new(2, Op::Add, 4.0, 8.0, 0.0, 12.0, 2.0, 6.0),
+        ];
+        let cols = ColumnInputs::new(&brushes, &[]);
+
+        assert!(cols.solid_at(10.0, 9.0, 3.0), "the ledge is solid");
+        assert!(!cols.solid_at(1.0, 9.0, 3.0), "beside it is air");
+        assert_eq!(
+            cols.base_at(10.0, 3.0, 10.0),
+            10.0,
+            "the wall above the ledge bands from the ledge top"
+        );
+        assert_eq!(
+            cols.base_at(1.0, 3.0, 10.0),
+            0.0,
+            "the wall beside the ledge still bands from the room floor"
+        );
+        assert_eq!(
+            cols.base_at(10.0, 3.0, 4.0),
+            0.0,
+            "and the wall under the ledge does too"
+        );
+    }
+
+    /// A shaft carved against part of a wall: the wall above it keeps the room's floor,
+    /// the wall *inside* it bands from the shaft floor. Per-position is what makes both
+    /// true at once — the earlier per-face rule had to pick one answer for the whole
+    /// wall and gave up whenever the two disagreed.
+    #[test]
+    fn a_partial_shaft_bands_from_its_own_floor_without_moving_the_rooms() {
+        let brushes = [
+            Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 12.0, 20.0),
+            Brush::new(2, Op::Subtract, 2.0, -6.0, 0.0, 4.0, 6.0, 4.0),
+        ];
+        let cols = ColumnInputs::new(&brushes, &[]);
+        assert_eq!(cols.base_at(4.0, 2.0, -6.0), -6.0, "inside the shaft");
+        assert_eq!(cols.base_at(4.0, 2.0, 0.0), -6.0, "the shaft is open to the room");
+        assert_eq!(cols.base_at(12.0, 2.0, 0.0), 0.0, "beside it, the room floor");
+    }
+
+    /// A platform slab is the one floor surface that is not a brush boundary, so the
+    /// probe resolves platform solid boxes too. 6 of the 7 stacked-room seams in
+    /// `facility_2` have a platform at them.
+    #[test]
+    fn a_platform_across_the_seam_restores_the_floor() {
+        let brushes = [
+            Brush::new(1, Op::Subtract, 0.0, -8.0, 0.0, 20.0, 8.0, 20.0),
+            Brush::new(2, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 28.0, 20.0),
+        ];
+        // `Platform::y` is the *top* surface, so a top at 0 is the upper room's floor.
+        let mut deck = plat(1, 0.0, 0.0, 0.0);
+        deck.size_x = 20.0;
+        deck.size_z = 20.0;
+
+        assert_eq!(
+            ColumnInputs::new(&brushes, &[deck]).base_at(10.0, 10.0, 0.0),
+            0.0,
+            "the slab underfoot is a floor"
+        );
+        assert_eq!(
+            ColumnInputs::new(&brushes, &[]).base_at(10.0, 10.0, 0.0),
+            -8.0,
+            "and without it there is none"
+        );
+    }
+
+    /// The TOOLS-tab toggle, at the level it actually works: "off" is an empty platform
+    /// slice, so the probe's answer changes without the probe knowing a toggle exists.
+    ///
+    /// That is the whole implementation — `evaluate_both` and `region_hash` already take
+    /// a platform slice, so the flag only decides which one they get, and the memo cache
+    /// invalidates on the change for free because the hash covers what it was handed.
+    #[test]
+    fn a_deck_is_a_floor_only_when_it_is_handed_to_the_probe() {
+        let brushes = [
+            Brush::new(1, Op::Subtract, 0.0, -8.0, 0.0, 20.0, 8.0, 20.0),
+            Brush::new(2, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 28.0, 20.0),
+        ];
+        let mut deck = plat(1, 0.0, 0.0, 0.0);
+        deck.size_x = 20.0;
+        deck.size_z = 20.0;
+
+        assert_eq!(
+            ColumnInputs::new(&brushes, &[deck]).base_at(10.0, 10.0, 0.0),
+            0.0,
+            "on: the deck top is the floor the band starts from"
+        );
+        assert_eq!(
+            ColumnInputs::new(&brushes, &[]).base_at(10.0, 10.0, 0.0),
+            -8.0,
+            "off: the wall bands from the carved room alone, straight through the seam"
+        );
+    }
+
+    /// A mezzanine decking part of a seam: each side of the room gets the honest
+    /// answer for where it stands, with no fallback needed.
+    #[test]
+    fn a_mezzanine_edge_answers_per_position() {
+        let brushes = [
+            Brush::new(1, Op::Subtract, 0.0, -8.0, 0.0, 20.0, 8.0, 20.0),
+            Brush::new(2, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 28.0, 20.0),
+        ];
+        let mut deck = plat(1, 0.0, 0.0, 0.0);
+        deck.size_x = 20.0;
+        deck.size_z = 6.0; // decks z 0..6 of the room's 20
+        let cols = ColumnInputs::new(&brushes, &[deck]);
+
+        assert_eq!(cols.base_at(10.0, 3.0, 0.0), 0.0, "over the deck");
+        assert_eq!(cols.base_at(10.0, 15.0, 0.0), -8.0, "past its edge, open to below");
+    }
+
+    /// A degenerate brush set (cavities that mutually contain each other) must
+    /// terminate rather than spin in the descent loop.
+    #[test]
+    fn the_walk_terminates_on_overlapping_cavities() {
+        let brushes = [
+            Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 20.0, 20.0),
+            Brush::new(2, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 20.0, 20.0),
+            Brush::new(3, Op::Subtract, 0.0, -5.0, 0.0, 20.0, 30.0, 20.0),
+        ];
+        let cols = ColumnInputs::new(&brushes, &[]);
+        assert_eq!(cols.base_at(10.0, 10.0, 0.0), -5.0);
+    }
+
+    /// A later `Op::Add` filling a cavity back in is solid, because solidity is an
+    /// ordered replay and not a "subtract wins" rule.
+    #[test]
+    fn a_later_add_refills_a_cavity() {
+        let brushes = [
+            Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 20.0, 20.0),
+            Brush::new(2, Op::Add, 0.0, 0.0, 0.0, 20.0, 6.0, 20.0),
+        ];
+        let cols = ColumnInputs::new(&brushes, &[]);
+        assert!(cols.solid_at(10.0, 3.0, 10.0), "refilled up to y=6");
+        assert_eq!(cols.base_at(10.0, 10.0, 6.0), 6.0, "so the floor is the refill top");
     }
 
     /// A free block-style flight: 8 WT of run, 8 WT of rise, 4 WT wide, on X.

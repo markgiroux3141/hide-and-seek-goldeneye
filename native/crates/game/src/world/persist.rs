@@ -105,6 +105,14 @@ struct LevelFile {
     /// files load with none bound and fall through to the manifest's own keys.
     #[serde(default)]
     theme_hotkeys: std::collections::BTreeMap<char, String>,
+    /// Whether platform decks count as floors for wall-texture banding (TOOLS tab).
+    ///
+    /// Persisted because it changes how the level's *existing* walls are banded, so a
+    /// level has to carry its own answer rather than inherit whatever the last session
+    /// happened to leave switched on. `#[serde(default)]` = **off**, which is both the
+    /// default for a new level and what every file written before this field says.
+    #[serde(default)]
+    platforms_are_floors: bool,
     /// **How a hunt on this level starts** — the PLAY tab's authored match setup
     /// (`world::play_config`).
     ///
@@ -472,6 +480,7 @@ impl World {
             entities: self.ecs.save_authored(),
             ambient: self.ambient,
             theme_hotkeys: self.theme_hotkeys.clone(),
+            platforms_are_floors: self.platforms_are_floors,
             play: Some(self.play.clone()),
             next_brush_id: self.next_brush_id,
             next_platform_id: self.next_platform_id,
@@ -562,6 +571,8 @@ impl World {
             // A generated level starts with no quick keys bound; the digits fall
             // through to the manifest's own defaults until an author binds them.
             theme_hotkeys: std::collections::BTreeMap::new(),
+            // …and bands its walls from its carved shape alone, like a new level.
+            platforms_are_floors: false,
             // …and says nothing about the match setup, so whatever the caller has
             // configured (the app's boot default, a test's explicit setup) stands.
             play: None,
@@ -605,6 +616,8 @@ impl World {
         self.spawn_point = Vec3::from(file.spawn_point);
         self.ambient = file.ambient;
         self.theme_hotkeys = file.theme_hotkeys.clone();
+        // Before `rebuild_from_flat` below: the band probe reads it during the bake.
+        self.platforms_are_floors = file.platforms_are_floors;
         self.level_name = file.name.clone();
         // Only when the file actually carries one — see the field's docs for why the
         // absent case must not fall through to `PlayConfig::default`.
@@ -772,7 +785,38 @@ mod tests {
     use engine::geometry::csg_runtime::{Brush, Op};
 
     /// Save the default world, mutate it, then load the saved file back and
-    /// confirm the authored geometry + allocators round-trip exactly.
+    /// confirm the authored geometry + allocators round-trip exactly.    /// The banding toggle is level data, not a session preference: a level carries its
+    /// own answer so it looks the same however the last session left the checkbox.
+    ///
+    /// And a file written before the field existed loads as **off**, which is also the
+    /// default for a new level — so no existing level's walls move.
+    #[test]
+    fn the_platform_banding_toggle_round_trips_and_defaults_off() {
+        let dir = std::env::temp_dir().join("bah_platform_banding_toggle");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("lvl.json");
+
+        let mut w = World::new();
+        assert!(!w.platforms_are_floors(), "a new level bands from its carved shape");
+        let _ = w.set_platforms_are_floors(true);
+        assert!(w.platforms_are_floors());
+        w.save_level(&path).expect("save");
+
+        let mut back = World::new();
+        back.load_level(&path).expect("load");
+        assert!(back.platforms_are_floors(), "the level carried its own answer");
+
+        // A file with no such field — every level written before this — loads off.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let mut v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        v.as_object_mut().unwrap().remove("platforms_are_floors");
+        std::fs::write(&path, serde_json::to_string(&v).unwrap()).unwrap();
+        let mut old = World::new();
+        old.load_level(&path).expect("load an older file");
+        assert!(!old.platforms_are_floors(), "an older level bands as it always did");
+    }
+
+
     #[test]
     fn save_load_round_trips_authored_geometry() {
         let mut world = World::new();

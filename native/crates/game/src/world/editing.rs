@@ -431,13 +431,18 @@ impl World {
         // Memoize by the region's authored data: undo/redo/load re-bakes only the
         // region that actually changed; unchanged regions hit the cache and skip
         // the fold (JS `wasmResultCache`).
-        let key = super::regions::region_hash(&self.regions[idx]);
+        // Only the platforms the band probe is allowed to see — none unless the level
+        // says decks are floors. Cloned rather than borrowed because `evaluate_both`
+        // takes the region mutably; a handful of `Copy` slabs is nothing beside a CSG
+        // fold. Hashed as well as baked, so flipping the toggle misses the memo cache.
+        let platforms = self.band_platforms().to_vec();
+        let key = super::regions::region_hash(&self.regions[idx], &platforms);
         let (collider, tex) = if let Some((c, t)) = self.csg_cache.get(key) {
             (c.clone(), t.clone())
         } else {
             let t0 = Instant::now();
             // One CSG fold, both outputs derived from it (was two full folds).
-            let (c, t) = self.regions[idx].evaluate_both();
+            let (c, t) = self.regions[idx].evaluate_both(&platforms);
             let bake_ms = t0.elapsed().as_secs_f32() * 1000.0;
             log::info!(
                 "region {region_id} re-baked in {bake_ms:.2} ms ({} tris)",

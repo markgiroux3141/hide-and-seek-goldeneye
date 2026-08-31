@@ -21,6 +21,7 @@ use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::geom;
+use crate::geometry::structures::{ColumnInputs, Platform};
 use crate::render::mesh::{CpuMesh, TexturedMesh};
 use crate::render::textures::{self, default_scheme};
 use crate::render::uv_zones::{self, BrushInfo, ZonedBuilder};
@@ -1444,7 +1445,7 @@ impl Region {
     /// Re-run CSG and classify the result into a textured, per-zone-grouped mesh
     /// for rendering (port of `assignUVsAndZones` + the stair zoned emission). The
     /// collider still comes from [`evaluate`](Self::evaluate); this is render-only.
-    pub fn evaluate_textured(&mut self) -> TexturedMesh {
+    pub fn evaluate_textured(&mut self, platforms: &[Platform]) -> TexturedMesh {
         self.update_shell();
         let polys = evaluate(&self.shell, &self.brushes, WORLD_SCALE);
         let (pos, _norm, idx) = polygons_to_mesh(&polys);
@@ -1454,7 +1455,9 @@ impl Region {
         let brush_infos = self.brush_infos();
 
         let mut b = ZonedBuilder::new();
-        uv_zones::classify_soup(&mut b, &pos, &idx, &brush_infos, default_scheme());
+        let cols = ColumnInputs::new(&self.brushes, platforms);
+        let cornice = textures::cornice_table();
+        uv_zones::classify_soup(&mut b, &pos, &idx, &brush_infos, default_scheme(), &cols, &cornice);
         for s in &self.stairs {
             s.append_zoned(&mut b);
         }
@@ -1472,7 +1475,7 @@ impl Region {
     /// reference; the collider clones it only to append the stair **ramp** surface
     /// (the render mesh keeps the stepped treads via [`append_zoned`]). The clone
     /// is a cheap memcpy next to the fold.
-    pub fn evaluate_both(&mut self) -> (CpuMesh, TexturedMesh) {
+    pub fn evaluate_both(&mut self, platforms: &[Platform]) -> (CpuMesh, TexturedMesh) {
         self.update_shell();
         let polys = evaluate(&self.shell, &self.brushes, WORLD_SCALE);
         let (pos, norm, idx) = polygons_to_mesh(&polys);
@@ -1494,7 +1497,9 @@ impl Region {
         // append the stepped stair geometry with explicit zones/UVs.
         let brush_infos = self.brush_infos();
         let mut zb = ZonedBuilder::new();
-        uv_zones::classify_soup(&mut zb, &pos, &idx, &brush_infos, default_scheme());
+        let cols = ColumnInputs::new(&self.brushes, platforms);
+        let cornice = textures::cornice_table();
+        uv_zones::classify_soup(&mut zb, &pos, &idx, &brush_infos, default_scheme(), &cols, &cornice);
         for s in &self.stairs {
             s.append_zoned(&mut zb);
         }

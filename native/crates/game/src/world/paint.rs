@@ -31,6 +31,7 @@
 //! tool and the renderer cannot disagree about which face a pixel came from.
 
 use engine::geometry::csg_runtime::{Axis, FaceTex, Side, WORLD_SCALE};
+use engine::geometry::structures::ColumnInputs;
 use engine::render::uv_zones::{self, OwnerCandidate, ZonedBuilder};
 
 use super::*;
@@ -150,12 +151,18 @@ impl World {
         let brushes = region.brush_infos();
         let pos: Vec<f32> = tri.iter().flat_map(|v| [v.x, v.y, v.z]).collect();
         let mut b = ZonedBuilder::new();
+        // The probe inputs have to be the bake's, or the probe explains a band the
+        // bake did not draw: the band anchor is probed per triangle from the region's
+        // brushes plus whichever platforms the level lets count as floors.
+        let cols = ColumnInputs::new(&region.brushes, self.band_platforms());
         uv_zones::classify_soup(
             &mut b,
             &pos,
             &[0, 1, 2],
             &brushes,
             engine::render::textures::default_scheme(),
+            &cols,
+            &engine::render::textures::cornice_table(),
         );
         let mesh = b.finish();
 

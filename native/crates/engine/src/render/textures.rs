@@ -33,15 +33,24 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use std::sync::RwLock;
+
 use image::ImageFormat;
 use serde::Deserialize;
 
-/// One zone's texture + repeat, or a flat color when `texture` is `None`
-/// (zone 4 only; never actually emitted by the classifier).
+/// One zone's texture + repeat, or a flat color when `texture` is `None` (which
+/// renders nothing at all — see [`Scheme::zones`]).
 #[derive(Clone, Copy, Debug)]
 pub struct ZoneDef {
     pub texture: Option<&'static str>,
     pub repeat: f32,
+    /// Band thickness in WT. Read **only** for [`CORNICE_ZONE`], where it is how far
+    /// down from the ceiling the top-wall band reaches; every other zone's extent is
+    /// decided by geometry, not by the theme.
+    ///
+    /// Per theme because the right answer is a look, not a constant: a narrow picture
+    /// rail and a deep frieze are both cornices. Defaults to [`DEFAULT_CORNICE_V`].
+    pub height: f32,
     /// Texture-space UV offset (JS `zone.offsetX`/`offsetY`), applied after
     /// [`repeat`](Self::repeat). Units are whole textures: `0.5` slides the texture
     /// half a tile across the surface. Lets a theme align a band or a tile grid
@@ -87,6 +96,26 @@ pub struct Scheme {
 /// Unlike a scheme index this genuinely is fixed: it's part of the zone contract
 /// shared with `uv_zones`, not a position in a loaded list.
 pub const RAILING_ZONE: u8 = 7;
+
+/// The **top-wall / cornice** band: the strip of wall flush against the ceiling.
+///
+/// Opt-in per theme, and it has to be. A zone with no definition has no bind group,
+/// and [`crate::render::renderer`] skips a draw group whose bind group is missing —
+/// so emitting this band for a theme that does not define it would not fall back to
+/// the upper wall, it would punch a **hole** in the wall. The classifier therefore
+/// splits the band only where `zones[CORNICE_ZONE]` is present, which is also why the
+/// 392 extracted themes needed no editing to stay exactly as they were.
+///
+/// This was the last free slot in the 8-zone table (the packing key is
+/// `scheme * 8 + zone`), so a further band needs that key widened first.
+pub const CORNICE_ZONE: u8 = 4;
+
+/// Default cornice thickness in WT, when a theme defines zone 4 without a `height`.
+///
+/// Half of [`crate::render::uv_zones::WALL_SPLIT_V`]: at a quarter it read as a hairline
+/// against a room's full height rather than as trim, so it starts at a depth you can
+/// see and an author dials *down*. Per-theme via `ZoneDef::height`.
+pub const DEFAULT_CORNICE_V: f32 = 3.0;
 
 /// The theme used by new regions. Required to exist by name in `themes.json`.
 const DEFAULT_SCHEME_NAME: &str = "facility_white_tile";
@@ -188,6 +217,9 @@ struct ZoneJson {
     offset_x: f32,
     #[serde(default)]
     offset_y: f32,
+    /// Band thickness in WT, honoured only for zone 4 (see [`ZoneDef::height`]).
+    #[serde(default)]
+    height: Option<f32>,
     /// `#RRGGBB`, used only when `texture` is absent.
     #[serde(default)]
     color: Option<String>,
@@ -323,6 +355,7 @@ fn load_registry() -> Result<Registry, String> {
                 texture: z.texture.map(leak),
                 repeat: z.repeat,
                 offset: [z.offset_x, z.offset_y],
+                height: z.height.unwrap_or(DEFAULT_CORNICE_V),
                 color: z.color.as_deref().map(parse_hex_rgb).unwrap_or(LEGACY_TUNNEL_COLOR),
             });
         }
@@ -372,6 +405,7 @@ fn load_registry() -> Result<Registry, String> {
                         texture: z.texture.clone().map(leak),
                         repeat: z.repeat,
                         offset: [z.offset_x, z.offset_y],
+                        height: z.height.unwrap_or(DEFAULT_CORNICE_V),
                         color: z
                             .color
                             .as_deref()
@@ -494,12 +528,86 @@ pub fn first_free_custom_slot() -> Option<usize> {
     custom_slots().find(|&i| schemes()[i].kind == SchemeKind::Custom { used: false })
 }
 
+impl Scheme {
+    /// How deep this theme's cornice is, in WT, or `None` when it has no cornice —
+    /// which is the answer for every shipped theme and the reason existing levels
+    /// render unchanged. See [`CORNICE_ZONE`].
+    pub fn cornice_v(&self) -> Option<f32> {
+        self.zones[CORNICE_ZONE as usize]
+            .filter(|z| z.texture.is_some() && z.height > 0.0)
+            .map(|z| z.height)
+    }
+}
+
+/// The texture a scheme's zone `zone` should bind, falling back to a stand-in for a
+/// zone the theme leaves undefined.
+///
+/// **Every slot must resolve to something.** The renderer builds its
+/// `materials[scheme][zone]` table once at startup and can only *rewrite* a slot that
+/// already holds a bind group, so a zone an author fills later — the cornice is the
+/// first that can be — would otherwise never receive its texture, and a draw group with
+/// no bind group is skipped, leaving a hole in the wall showing whatever is behind it.
+///
+/// Binding a stand-in is safe because an unfilled slot is never drawn: the classifier
+/// emits the cornice only for a theme that defines it, and no other zone is optional.
+pub fn material_texture_for(scheme: &Scheme, zone: usize) -> Option<&'static str> {
+    if let Some(t) = scheme.zones.get(zone).copied().flatten().and_then(|z| z.texture) {
+        return Some(t);
+    }
+    // Upper wall first, then floor: every theme defines both, so this is a fallback in
+    // name only — `every_zone_slot_resolves_to_a_texture` pins that.
+    scheme.zones[3]
+        .and_then(|z| z.texture)
+        .or_else(|| scheme.zones[0].and_then(|z| z.texture))
+}
+
+/// Live cornice depth per scheme index, seeded from the registry.
+///
+/// Separate from the registry, and mutable, because a cornice is the first theme
+/// property that changes **geometry** rather than material parameters. Every other
+/// live edit in the texture editor is pushed straight to the renderer's material
+/// table; this one decides which zone a triangle lands in, so it has to be readable
+/// by the classifier at bake time and writable while authoring — and the registry
+/// itself is a `OnceLock`.
+static CORNICE: OnceLock<RwLock<Vec<Option<f32>>>> = OnceLock::new();
+
+fn cornice_cell() -> &'static RwLock<Vec<Option<f32>>> {
+    CORNICE.get_or_init(|| RwLock::new(schemes().iter().map(|s| s.cornice_v()).collect()))
+}
+
+/// Cornice depth per scheme index, for the classifier — which takes it as data rather
+/// than reaching into this module, so its tests can run without a registry at all.
+pub fn cornice_table() -> Vec<Option<f32>> {
+    cornice_cell().read().map(|t| t.clone()).unwrap_or_default()
+}
+
+/// This scheme's live cornice depth.
+pub fn cornice_of(scheme: usize) -> Option<f32> {
+    cornice_cell().read().ok().and_then(|t| t.get(scheme).copied().flatten())
+}
+
+/// Set (or clear) a scheme's cornice depth while authoring.
+///
+/// **Callers must re-bake anything drawn with `scheme`.** This changes where band
+/// boundaries fall, so a mesh classified before the call is stale — which is also why
+/// `region_hash` folds this value in, so the memo cache cannot serve that stale mesh.
+pub fn set_cornice(scheme: usize, depth: Option<f32>) {
+    if let Ok(mut t) = cornice_cell().write() {
+        if let Some(slot) = t.get_mut(scheme) {
+            *slot = depth.filter(|d| *d > 0.0);
+        }
+    }
+}
+
 /// One zone of a hand-authored preset, as the editor holds it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ZoneSpec {
     pub texture: &'static str,
     pub repeat: f32,
     pub offset: [f32; 2],
+    /// Carried so a hand-authored cornice depth survives a save from the editor;
+    /// meaningful only for [`CORNICE_ZONE`].
+    pub height: f32,
 }
 
 /// Write a preset into custom slot `slot`, persisting `user_themes.json`.
@@ -541,6 +649,10 @@ pub fn save_custom_preset(
         }
         if z.offset[1] != 0.0 {
             entry.insert("offset_y".into(), serde_json::Value::from(z.offset[1]));
+        }
+        // Only zone 4 reads it, so writing it elsewhere would be misleading noise.
+        if zi == CORNICE_ZONE as usize {
+            entry.insert("height".into(), serde_json::Value::from(z.height));
         }
         zone_map.insert(zi.to_string(), serde_json::Value::Object(entry));
     }
@@ -809,14 +921,93 @@ mod tests {
         assert!(schemes().iter().any(|s| s.name == "simple_blue" && s.key.is_none()));
     }
 
+    /// Every scheme resolves a texture for **every** one of its 8 zone slots, so the
+    /// renderer can pre-allocate a material for each and the theme editor can fill one
+    /// later.
+    ///
+    /// This is the invariant the cornice broke on its first playtest. The band was
+    /// emitted correctly and then drew as a hole — the material table had no slot 4 for
+    /// any scheme, because it was built only from zones that had a texture at load time,
+    /// and no theme on disk defines a cornice. Guarding the *classifier* was not enough;
+    /// the renderer had to be able to receive the zone too.
+    #[test]
+    fn every_zone_slot_resolves_to_a_texture() {
+        for s in schemes() {
+            for z in 0..8 {
+                assert!(
+                    material_texture_for(s, z).is_some(),
+                    "scheme '{}' zone {z} resolves no texture, so the renderer cannot \
+                     pre-allocate its material and an author could never fill it",
+                    s.name
+                );
+            }
+            // A defined zone always binds its own texture, never the stand-in.
+            for z in 0..8 {
+                if let Some(own) = s.zones[z].and_then(|zd| zd.texture) {
+                    assert_eq!(material_texture_for(s, z), Some(own), "{} zone {z}", s.name);
+                }
+            }
+        }
+    }
+
+    /// No **library** theme defines a cornice, so no existing level's appearance
+    /// changes until an author opts one in.
+    ///
+    /// Measured when the band was added: all 394 shipped themes define exactly
+    /// `[0,1,2,3,5,6]` (four of them also 7), leaving index 4 — the vestigial
+    /// flat-colour "legacy tunnel" slot the JS had and this port never emitted — free
+    /// for it. So the cornice is the *fifth* room surface a theme can define while
+    /// occupying the *fourth* index, and the 8-slot table went from 7 used to 8.
+    ///
+    /// Adding a cornice to `themes.json` would restyle every room already using that
+    /// theme, so this failing is the intended way to notice that decision being made
+    /// rather than a hurdle: update it deliberately.
+    #[test]
+    fn the_shipped_library_defines_no_cornice() {
+        for s in schemes().iter().filter(|s| s.kind == SchemeKind::Library) {
+            assert!(
+                s.zones[CORNICE_ZONE as usize].is_none(),
+                "library theme '{}' defines a cornice, which restyles every room                  already using it",
+                s.name
+            );
+        }
+        // Which slots the shipped library occupies. Scoped to the library on purpose: a
+        // *user* theme defining zone 4 is the cornice feature working, so asserting over
+        // every scheme would fail the moment an author used it.
+        //
+        // The tripwire this keeps is for a further band: all 8 slots of the
+        // `scheme * 8 + zone` key are now claimed (0-3 and 5-7 by the library, 4 by the
+        // cornice contract), so a sixth room surface needs that key widened first.
+        let library: Vec<usize> = (0..8)
+            .filter(|&z| {
+                schemes()
+                    .iter()
+                    .filter(|s| s.kind == SchemeKind::Library)
+                    .any(|s| s.zones[z].is_some())
+            })
+            .collect();
+        assert_eq!(
+            library,
+            vec![0, 1, 2, 3, 5, 6, 7],
+            "the shipped library's zone occupancy changed"
+        );
+    }
+
     #[test]
     fn schemes_have_expected_shape() {
         // A lower bound, not an exact count: themes are content and get added.
         assert!(schemes().len() >= 10, "expected the shipped themes at minimum");
         for s in schemes() {
-            // Zone 4 is never emitted by the classifier (flat-color legacy tunnel),
-            // so defining it is silently dead content.
-            assert!(s.zones[4].is_none(), "{} unexpectedly defines zone 4", s.name);
+            // A cornice is opt-in and needs a texture: an untextured zone draws
+            // nothing, so a cornice without one would be a hole against the ceiling.
+            if let Some(z) = s.zones[CORNICE_ZONE as usize] {
+                assert!(
+                    z.texture.is_some(),
+                    "{} defines a cornice with no texture, which renders as a hole",
+                    s.name
+                );
+                assert!(z.height > 0.0, "{} has a zero-depth cornice", s.name);
+            }
             // A theme that can't texture a room's basic surfaces is a mistake.
             for zi in 0..4 {
                 assert!(s.zones[zi].is_some(), "{} leaves zone {zi} undefined", s.name);

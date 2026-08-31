@@ -85,6 +85,38 @@ impl World {
         Some(self.rebuild_structures())
     }
 
+    /// Whether platform decks count as floors for wall banding.
+    pub fn platforms_are_floors(&self) -> bool {
+        self.platforms_are_floors
+    }
+
+    /// The platforms the **band probe** should see: all of them, or none.
+    ///
+    /// Returning a slice rather than a flag is what keeps the toggle out of the engine
+    /// entirely — `evaluate_both` and `region_hash` already take a platform slice, so
+    /// "off" is simply an empty one, and the memo cache invalidates on the change for
+    /// free because the hash covers what it was handed.
+    pub(crate) fn band_platforms(&self) -> &[Platform] {
+        if self.platforms_are_floors {
+            &self.platforms
+        } else {
+            &[]
+        }
+    }
+
+    /// Toggle whether platform decks count as floors for wall banding, re-folding every
+    /// region because it moves band boundaries.
+    pub fn set_platforms_are_floors(&mut self, on: bool) -> Vec<RegionMesh> {
+        if self.platforms_are_floors == on {
+            return Vec::new();
+        }
+        self.platforms_are_floors = on;
+        // Persisted level data, so the LEVELS tab has to show unsaved work.
+        self.bump_revision();
+        log::info!("platforms count as floors for banding: {on}");
+        self.initial_meshes()
+    }
+
     /// Set the stair shell — treads and risers, or the bare slope. Honoured by `K`, `C`
     /// **and** the `↑`/`↓` CSG stair tool (whose pending op reads it live, so its ghost
     /// changes with the setting).

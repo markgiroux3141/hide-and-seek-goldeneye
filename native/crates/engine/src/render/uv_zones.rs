@@ -6,7 +6,7 @@
 //!   1. **Face-map** ([`face_owner`], port of `buildFaceMap`): match each triangle
 //!      to its owning brush by dominant-normal axis + face-position + centroid
 //!      containment (smaller brushes win ties). The owner supplies the triangle's
-//!      texture `scheme` and its `floor_y` wall-UV anchor — so a room and the room
+//!      texture `scheme` and its per-face wall-UV anchor — so a room and the room
 //!      beyond its door can carry different schemes, and a stair pit's walls
 //!      anchor to the pit floor instead of shifting the whole level.
 //!   2. **Zone classification** (port of `assignUVsAndZones`): dominant normal →
@@ -22,6 +22,8 @@
 //!   5 stair/doorframe sides+ceiling · 6 doorframe floor · 7 brace.
 
 use crate::geometry::csg_runtime::{face_slot, Axis, FaceTex, Side, WALL_THICKNESS};
+use crate::geometry::structures::ColumnInputs;
+use crate::render::textures;
 use crate::render::mesh::{TexVertex, TexturedMesh, ZoneGroup};
 
 /// Meters per world tile (mirrors `csg_runtime::WORLD_SCALE`; kept local so the
@@ -30,6 +32,16 @@ const WORLD_SCALE: f32 = 0.25;
 
 /// Wall vertical split height in WT (JS `WALL_SPLIT_V`).
 pub const WALL_SPLIT_V: f32 = 6.0;
+
+/// How far inside the cavity the band-anchor probe samples, in WT — enough to be in
+/// the air the wall faces rather than on its own plane, and small enough to stay inside
+/// a 1-WT duct bore.
+const PROBE_INSET: f32 = 0.25;
+
+/// How much upper wall a cornice has to leave below itself, in WT, or it is dropped.
+/// A room barely taller than its own trim looks better with one honest band than with a
+/// cornice sitting on the skirting.
+const CORNICE_MIN_UPPER: f32 = 1.0;
 
 /// Face-identity tolerance in WT (JS `CSG_CENTROID_TOL`).
 const CSG_CENTROID_TOL: f32 = 0.5;
@@ -43,11 +55,19 @@ pub struct BrushInfo {
     pub id: u32,
     pub min: [f32; 3],
     pub max: [f32; 3],
+    /// The brush's authored wall-UV floor anchor, in WT.
+    ///
+    /// Only a **pin** now, not the anchor the bands actually use. It defaults to the
+    /// brush's own `y`, and the classifier probes the real air-column floor per
+    /// triangle instead (see [`classify_fragment`]). Where an author has moved this off
+    /// `y` — by hand, or via the draw tool giving one drawn shape's decomposed rects a
+    /// single anchor so they cannot texture-shift against each other — that is an
+    /// explicit decision and the probe stands down.
     pub floor_y: f32,
     /// WT-space **horizontal** UV anchor, the XZ counterpart of [`Self::floor_y`].
     ///
-    /// `floor_y` exists because a wall's texture has to start at *its own* floor rather
-    /// than at world zero, or a stair pit shifts the whole level's wall texture. Floors
+    /// A vertical anchor exists because a wall's texture has to start at *its own* floor
+    /// rather than at world zero, or a stair pit shifts the whole level's wall texture. Floors
     /// and ceilings had no equivalent — their UVs are raw world `[wx, wz]` — which is
     /// invisible for a room (a room's floor is a big field of tile, and where the grid
     /// starts does not read) and glaring for a **vent duct**, whose texture is a single
@@ -479,7 +499,7 @@ const MAX_STRADDLE_FRAGMENTS: usize = 256;
 
 /// Classify a CSG triangle soup (positions/indices in meters) into the builder.
 /// Each triangle is attributed to its owning brush face (face-map) for its
-/// `scheme` and `floor_y` anchor, then classified into a zone. `brushes` are the
+/// `scheme` and wall anchor, then classified into a zone. `brushes` are the
 /// region's brushes (WT); `default_scheme` is used for triangles with no owner
 /// (e.g. shell boundary, or the structures mesh which passes an empty brush list).
 ///
@@ -509,6 +529,8 @@ pub fn classify_soup(
     idx: &[u32],
     brushes: &[BrushInfo],
     default_scheme: usize,
+    cols: &ColumnInputs,
+    cornice: &[Option<f32>],
 ) {
     let frames: Vec<FrameAabb> = brushes
         .iter()
@@ -529,6 +551,8 @@ pub fn classify_soup(
     // triangles and `split_tris` hands back a fresh vector by design.
     let mut cands: Vec<(usize, Side)> = Vec::new();
     let mut planes: Vec<(usize, f32)> = Vec::new();
+    let mut col_scratch: Vec<f32> = Vec::new();
+    let mut col_scratch_y: Vec<f32> = Vec::new();
 
     let tri_count = idx.len() / 3;
     for t in 0..tri_count {
@@ -553,9 +577,15 @@ pub fn classify_soup(
         straddle_planes(
             brushes, &cands, dom, c_wt[dom], tri, owner, default_scheme, &mut planes,
         );
+        // ...and where the air column in front of a wall changes its floor, because
+        // that is where the band boundary steps. Walls only: a floor or ceiling has no
+        // vertical band to step.
+        if dom != 1 {
+            column_planes(cols, dom, n, tri, &mut col_scratch, &mut col_scratch_y, &mut planes);
+        }
 
         if planes.is_empty() {
-            classify_fragment(b, tri, n, dom, owner, brushes, &frames, has_frames, default_scheme);
+            classify_fragment(b, tri, n, dom, owner, brushes, &frames, has_frames, default_scheme, cols, cornice, &mut col_scratch);
             continue;
         }
 
@@ -573,12 +603,12 @@ pub fn classify_soup(
                 cands.len(),
                 frags.len()
             );
-            classify_fragment(b, tri, n, dom, owner, brushes, &frames, has_frames, default_scheme);
+            classify_fragment(b, tri, n, dom, owner, brushes, &frames, has_frames, default_scheme, cols, cornice, &mut col_scratch);
             continue;
         }
         for &frag in &frags {
             let owner = owner_from_candidates(brushes, &cands, centroid_wt(frag), dom);
-            classify_fragment(b, frag, n, dom, owner, brushes, &frames, has_frames, default_scheme);
+            classify_fragment(b, frag, n, dom, owner, brushes, &frames, has_frames, default_scheme, cols, cornice, &mut col_scratch);
         }
     }
 }
@@ -603,6 +633,12 @@ fn face_outcome(
     // difference. It is not a detail: `floor_y` varies room to room and is
     // irrelevant to every floor and ceiling, and comparing it anyway had the
     // classifier cutting floors along boundaries that draw identically.
+    //
+    // This stays the *authored* anchor even though the bands are probed per triangle.
+    // Its only job is deciding whether two candidate owners would draw a triangle
+    // differently, and the probe's answer is a function of position rather than of
+    // which owner wins — so it cannot distinguish them, and a slightly conservative
+    // cut here is harmless where a missing one is not.
     let anchor = match axis {
         0 => [b.floor_y, b.origin_xz[1]],
         1 => [b.origin_xz[0], b.origin_xz[1]],
@@ -763,7 +799,55 @@ fn push_edge(out: &mut Vec<(usize, f32)>, axis: usize, edge: f32, lo: f32, hi: f
     }
 }
 
-/// Zone-classify one owner-consistent triangle and emit it. This is the body the
+/// Cut planes where the band structure of a wall triangle changes, in world **metres**,
+/// appended to `out` in the same `(axis, value)` form [`straddle_planes`] produces.
+///
+/// See [`ColumnInputs::column_edges_near_wall`] for why both a horizontal and a vertical
+/// family are required. Without them a single triangle spanning a step gets one answer
+/// for the whole of itself, which draws as a wedge of the wrong band split along
+/// whatever diagonal the fold happened to triangulate it with.
+fn column_planes(
+    cols: &ColumnInputs,
+    dom: usize,
+    n: [f32; 3],
+    tri: [[f32; 3]; 3],
+    scratch_t: &mut Vec<f32>,
+    scratch_y: &mut Vec<f32>,
+    out: &mut Vec<(usize, f32)>,
+) {
+    let tan = if dom == 0 { 2 } else { 0 };
+    let (tmin, tmax) = tri_bbox(tri[0], tri[1], tri[2]);
+    // The probe line the classifier will actually sample along: one step inside the
+    // cavity, on the wall's own axis.
+    let perp = tri[0][dom] / WORLD_SCALE + n[dom] * PROBE_INSET;
+    scratch_t.clear();
+    scratch_y.clear();
+    cols.column_edges_near_wall(
+        tan,
+        dom,
+        perp,
+        tmin[tan] / WORLD_SCALE,
+        tmax[tan] / WORLD_SCALE,
+        tmin[1] / WORLD_SCALE,
+        tmax[1] / WORLD_SCALE,
+        scratch_t,
+        scratch_y,
+    );
+    let mut push = |axis: usize, v_wt: f32| {
+        let v = v_wt * WORLD_SCALE;
+        if !out.iter().any(|&(a, e)| a == axis && (e - v).abs() < 1e-5) {
+            out.push((axis, v));
+        }
+    };
+    for k in 0..scratch_t.len() {
+        push(tan, scratch_t[k]);
+    }
+    for k in 0..scratch_y.len() {
+        push(1, scratch_y[k]);
+    }
+}
+
+/// Zone-classify one owner-consistent triangle and emit it./// Zone-classify one owner-consistent triangle and emit it. This is the body the
 /// classifier always had; `classify_soup` now feeds it fragments rather than raw
 /// fold triangles.
 #[allow(clippy::too_many_arguments)]
@@ -777,6 +861,9 @@ fn classify_fragment(
     frames: &[FrameAabb],
     has_frames: bool,
     default_scheme: usize,
+    cols: &ColumnInputs,
+    cornice: &[Option<f32>],
+    col_scratch: &mut Vec<f32>,
 ) {
     let [va, vb, vc] = tri;
     let axis = dom as u8;
@@ -801,7 +888,6 @@ fn classify_fragment(
         None => (default_scheme, [0.0, 0.0, 0.0], None),
     };
     let zone_of = |derived: u8| forced_zone.unwrap_or(derived);
-    let split_y = (origin[1] + WALL_SPLIT_V) * WORLD_SCALE;
 
     let (tmin, tmax) = tri_bbox(va, vb, vc);
     let near = has_frames && tri_overlaps_any_frame(frames, tmin, tmax);
@@ -835,8 +921,60 @@ fn classify_fragment(
         }
     } else {
         // ── Wall (X or Z face) ──
+        //
+        // The band anchor is probed **per fragment**, not per brush. A brush base is
+        // simply not where a wall's floor is: two rooms stacked flush share one air
+        // column with no floor at the seam, and a solid ledge pulled out of a wall is a
+        // floor partway up it. Both need the answer to depend on *where on the wall*
+        // this triangle sits, which no per-brush or even per-face value can give — the
+        // wall above a ledge and the wall beside it are the same face.
+        //
+        // Probing from the fragment's own bottom edge is what makes that work. A
+        // fragment sitting on a floor reports that floor; one whose bottom is mid-air
+        // (an artefact of how the fold triangulated a tall wall) descends through the
+        // air to the same answer.
+        //
+        // An authored `floor_y` stands down the probe — see `BrushInfo::floor_y`.
+        let (origin, split_y, cornice_band) = {
+            let anchor = match owner {
+                Some((i, _)) if (brushes[i].floor_y - brushes[i].min[1]).abs() <= 1e-3 => {
+                    let c = centroid_wt([va, vb, vc]);
+                    // A step inside the cavity along the face normal, so the sample is
+                    // in the air the wall faces rather than on the plane itself.
+                    let px = c[0] + n[0] * PROBE_INSET;
+                    let pz = c[2] + n[2] * PROBE_INSET;
+                    cols.base_at_with(px, pz, tmin[1] / WORLD_SCALE, col_scratch)
+                }
+                // Authored pin, or no owner at all (the shell's outer skin, which lies
+                // on no brush face and keeps the world-zero default it always had).
+                _ => origin[1],
+            };
+            // The cornice is measured *down from the ceiling*, so it needs the other
+            // end of the same column and its own UV anchor: V has to start at 0 at the
+            // band's bottom edge or the trim slides by however tall the room is.
+            //
+            // Opt-in per theme, and not for tidiness — an undefined zone has no bind
+            // group and its draw group is skipped, so emitting this band for a theme
+            // without it would leave a hole against the ceiling rather than falling
+            // back to the upper wall.
+            let band = cornice.get(scheme).copied().flatten().and_then(|v| {
+                let c = tri.iter().map(|p| p[0]).sum::<f32>() / 3.0 / WORLD_SCALE;
+                let cz = tri.iter().map(|p| p[2]).sum::<f32>() / 3.0 / WORLD_SCALE;
+                let (px, pz) = (c + n[0] * PROBE_INSET, cz + n[2] * PROBE_INSET);
+                let top = cols.top_at_with(px, pz, tmax[1] / WORLD_SCALE, col_scratch);
+                let foot = top - v;
+                // A room shorter than its own trim gets none: better one honest band
+                // than a cornice sunk below the floor.
+                (foot > anchor + CORNICE_MIN_UPPER).then_some(foot)
+            });
+            (
+                [origin[0], anchor, origin[2]],
+                (anchor + WALL_SPLIT_V) * WORLD_SCALE,
+                band,
+            )
+        };
         if !near {
-            emit_wall_split(b, [va, vb, vc], n, axis, split_y, origin, scheme, forced_zone);
+            emit_wall_split(b, [va, vb, vc], n, axis, split_y, cornice_band, origin, scheme, forced_zone);
             return;
         }
         let mut tris = vec![[va, vb, vc]];
@@ -858,7 +996,7 @@ fn classify_fragment(
                     let rotate = f.h_wt != WALL_THICKNESS;
                     b.emit_tri(tri[0], tri[1], tri[2], n, axis, zone_of(5), rotate, origin, scheme);
                 }
-                None => emit_wall_split(b, tri, n, axis, split_y, origin, scheme, forced_zone),
+                None => emit_wall_split(b, tri, n, axis, split_y, cornice_band, origin, scheme, forced_zone),
             }
         }
     }
@@ -876,11 +1014,22 @@ fn centroid_in_brush(b: &BrushInfo, axis: usize, c: [f32; 3], tol: f32) -> bool 
     }
 }
 
-/// Emit a room-wall triangle, split at the zone-2/3 boundary `split_y` (meters).
+/// Emit a room-wall triangle, cut into its bands: lower (zone 2) below `split_y`,
+/// upper (zone 3) above it, and — where the theme defines one — a cornice (zone 4)
+/// in the top `cornice_foot`..ceiling strip. All heights in metres.
 ///
-/// `forced_zone` (a painted face override that pins a slot) collapses the band
-/// split: the whole wall then draws one texture, which is the point of asking for
-/// a specific one.
+/// `cornice_foot` is the band's **bottom** in metres, already resolved against the air
+/// column's ceiling by the caller. It doubles as that band's UV anchor: V has to start
+/// at 0 at the bottom edge of the trim, or the pattern slides by however tall the room
+/// happens to be, which is the whole reason a ceiling-flush band needs its own origin
+/// rather than the floor one every other band shares.
+///
+/// `forced_zone` (a painted face override that pins a slot) collapses every split: the
+/// whole wall then draws one texture, which is the point of asking for a specific one.
+///
+/// The cuts go through [`split_tris`], which is the same algorithm this function used
+/// to inline, generalised over the axis — so a wall with no cornice comes out
+/// triangle-for-triangle as it did before the band existed.
 #[allow(clippy::too_many_arguments)]
 fn emit_wall_split(
     b: &mut ZonedBuilder,
@@ -888,6 +1037,7 @@ fn emit_wall_split(
     n: [f32; 3],
     axis: u8,
     split_y: f32,
+    cornice_foot: Option<f32>,
     origin: [f32; 3],
     scheme: usize,
     forced_zone: Option<u8>,
@@ -896,32 +1046,27 @@ fn emit_wall_split(
         b.emit_tri(tri[0], tri[1], tri[2], n, axis, z, false, origin, scheme);
         return;
     }
-    let (min_y, max_y) = (
-        tri[0][1].min(tri[1][1]).min(tri[2][1]),
-        tri[0][1].max(tri[1][1]).max(tri[2][1]),
-    );
-    if max_y <= split_y {
-        b.emit_tri(tri[0], tri[1], tri[2], n, axis, 2, false, origin, scheme);
-        return;
+    let cornice_y = cornice_foot.map(|f| f * WORLD_SCALE);
+
+    let mut pieces = split_tris(vec![tri], 1, split_y);
+    if let Some(cy) = cornice_y {
+        pieces = split_tris(pieces, 1, cy);
     }
-    if min_y >= split_y {
-        b.emit_tri(tri[0], tri[1], tri[2], n, axis, 3, false, origin, scheme);
-        return;
-    }
-    let mut v = tri;
-    v.sort_by(|a, b| a[1].total_cmp(&b[1]));
-    let (lo, mid, hi) = (v[0], v[1], v[2]);
-    let p_lo_hi = lerp_at_y(lo, hi, split_y);
-    if mid[1] <= split_y {
-        let p_mid_hi = lerp_at_y(mid, hi, split_y);
-        b.emit_tri(lo, mid, p_lo_hi, n, axis, 2, false, origin, scheme);
-        b.emit_tri(mid, p_mid_hi, p_lo_hi, n, axis, 2, false, origin, scheme);
-        b.emit_tri(p_lo_hi, p_mid_hi, hi, n, axis, 3, false, origin, scheme);
-    } else {
-        let p_lo_mid = lerp_at_y(lo, mid, split_y);
-        b.emit_tri(lo, p_lo_mid, p_lo_hi, n, axis, 2, false, origin, scheme);
-        b.emit_tri(p_lo_mid, mid, p_lo_hi, n, axis, 3, false, origin, scheme);
-        b.emit_tri(mid, hi, p_lo_hi, n, axis, 3, false, origin, scheme);
+    // Each piece lies wholly within one band, so its own midpoint names that band.
+    for t in pieces {
+        let mid_y = (t[0][1] + t[1][1] + t[2][1]) / 3.0;
+        let (zone, o) = if cornice_y.is_some_and(|cy| mid_y >= cy) {
+            // Anchored at the trim's foot, in WT to match `origin`.
+            (
+                textures::CORNICE_ZONE,
+                [origin[0], cornice_foot.unwrap_or(0.0), origin[2]],
+            )
+        } else if mid_y >= split_y {
+            (3, origin)
+        } else {
+            (2, origin)
+        };
+        b.emit_tri(t[0], t[1], t[2], n, axis, zone, false, o, scheme);
     }
 }
 
@@ -1073,7 +1218,7 @@ mod tests {
         region
             .brushes
             .push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 12.0, 12.0, 12.0));
-        let tex = region.evaluate_textured();
+        let tex = region.evaluate_textured(&[]);
         let zones = zone_counts(&tex);
         assert!(zones.contains_key(&0), "floor zone present: {zones:?}");
         assert!(zones.contains_key(&1), "ceiling zone present: {zones:?}");
@@ -1095,7 +1240,7 @@ mod tests {
         region
             .brushes
             .push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 4.0, 8.0, 4.0));
-        let tex = region.evaluate_textured();
+        let tex = region.evaluate_textured(&[]);
         let floor = tex.groups.iter().find(|g| g.zone == 0).expect("floor group");
         let mut max_u = 0.0f32;
         for k in floor.start..(floor.start + floor.count) {
@@ -1112,7 +1257,7 @@ mod tests {
         let mut b = Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 8.0, 8.0, 8.0);
         b.scheme = 2;
         region.brushes.push(b);
-        let tex = region.evaluate_textured();
+        let tex = region.evaluate_textured(&[]);
         assert!(
             tex.groups.iter().any(|g| g.scheme == 2),
             "room brush scheme 2 should reach the draw groups: {:?}",
@@ -1174,7 +1319,7 @@ mod tests {
         ];
         let (pos, idx) = floor_tri(0.0, 16.0, 0.0, 8.0, 0.0);
         let mut b = ZonedBuilder::new();
-        classify_soup(&mut b, &pos, &idx, &brushes, 0);
+        classify_soup(&mut b, &pos, &idx, &brushes, 0, &ColumnInputs::new(&[], &[]), &[]);
         let mesh = b.finish();
         assert_eq!(
             schemes_present(&mesh),
@@ -1191,7 +1336,7 @@ mod tests {
         let brushes = [info(1, [0.0, 0.0, 0.0], [16.0, 8.0, 16.0], 1)];
         let (pos, idx) = floor_tri(2.0, 6.0, 2.0, 6.0, 0.0);
         let mut b = ZonedBuilder::new();
-        classify_soup(&mut b, &pos, &idx, &brushes, 0);
+        classify_soup(&mut b, &pos, &idx, &brushes, 0, &ColumnInputs::new(&[], &[]), &[]);
         let mesh = b.finish();
         assert_eq!(mesh.indices.len(), 3, "one triangle in, one triangle out");
         assert_eq!(schemes_present(&mesh), [1u16].into_iter().collect());
@@ -1223,7 +1368,7 @@ mod tests {
         b.scheme = 1;
         b.set_face_tex(Axis::Y, Side::Min, Some(FaceTex { scheme: 3, zone: None }));
         region.brushes.push(b);
-        let tex = region.evaluate_textured();
+        let tex = region.evaluate_textured(&[]);
         let painted: Vec<u8> = tex.groups.iter().filter(|g| g.scheme == 3).map(|g| g.zone).collect();
         assert_eq!(painted, vec![0], "only the floor zone repaints: {painted:?}");
         assert!(
@@ -1241,7 +1386,7 @@ mod tests {
         b.scheme = 1;
         b.set_face_tex(Axis::X, Side::Min, Some(FaceTex { scheme: 3, zone: Some(1) }));
         region.brushes.push(b);
-        let tex = region.evaluate_textured();
+        let tex = region.evaluate_textured(&[]);
         let painted: Vec<u8> = tex.groups.iter().filter(|g| g.scheme == 3).map(|g| g.zone).collect();
         assert_eq!(painted, vec![1], "the whole face lands in the forced slot");
         assert!(
@@ -1330,7 +1475,7 @@ mod tests {
         }
 
         let mut b = ZonedBuilder::new();
-        classify_soup(&mut b, &pos, &idx, &brushes, 0);
+        classify_soup(&mut b, &pos, &idx, &brushes, 0, &ColumnInputs::new(&[], &[]), &[]);
         let tex = b.finish();
         assert_eq!(
             triangles_spanning_a_boundary(&brushes, &tex),
@@ -1377,7 +1522,7 @@ mod tests {
         quad(8.0, 12.0, 4.0, 12.0); // above it
 
         let mut b = ZonedBuilder::new();
-        classify_soup(&mut b, &pos, &idx, &brushes, 0);
+        classify_soup(&mut b, &pos, &idx, &brushes, 0, &ColumnInputs::new(&[], &[]), &[]);
         let tex = b.finish();
 
         let ducted: u32 = tex.groups.iter().filter(|g| g.scheme == 5).map(|g| g.count / 3).sum();
@@ -1403,6 +1548,545 @@ mod tests {
         );
     }
 
+    /// End-to-end counterpart of the probe's unit tests: two rooms stacked flush are
+    /// one air column, so the upper room's walls carry **no lower band at all** — the
+    /// band belongs to the storey that has the floor. Before the wall anchor was probed
+    /// this bake repeated lower/upper up the column once per stacked brush, which is
+    /// the authoring complaint the probe exists to answer.
+    ///
+    /// Scoped to the cavity's own wall planes. The fold also emits the **outside** of
+    /// the shell, and those triangles lie on no brush face at all, so they take the
+    /// no-owner default anchor of world zero and band at a height that means nothing —
+    /// true before this change and after it, and never visible from inside a level.
+    #[test]
+    fn stacked_rooms_do_not_repeat_the_lower_band_up_the_column() {
+        // A tall upper room over a short lower one, sharing the full footprint, so no
+        // face can disagree with itself and the all-or-nothing rule always fires.
+        const W: f32 = 20.0;
+        let mut region = Region::new(0);
+        region
+            .brushes
+            .push(Brush::new(1, Op::Subtract, 0.0, -8.0, 0.0, W, 8.0, W));
+        region
+            .brushes
+            .push(Brush::new(2, Op::Subtract, 0.0, 0.0, 0.0, W, 28.0, W));
+        let tex = region.evaluate_textured(&[]);
+
+        // A wall triangle is axis-aligned, so it is constant along x or along z. It is
+        // an interior face when that constant is a cavity wall plane (0 or W in WT)
+        // rather than a shell plane. Judged per triangle, not per vertex: a shell-skin
+        // triangle can still have one corner sitting at x = 0.
+        let interior = |t: [[f32; 3]; 3]| {
+            for ax in [0usize, 2] {
+                let c = t[0][ax] / WORLD_SCALE;
+                if (t[1][ax] / WORLD_SCALE - c).abs() < 1e-3
+                    && (t[2][ax] / WORLD_SCALE - c).abs() < 1e-3
+                {
+                    return c.abs() < 1e-3 || (c - W).abs() < 1e-3;
+                }
+            }
+            false
+        };
+
+        // The one real floor is at y = -8, so there is exactly one band boundary.
+        let split_m = (-8.0 + WALL_SPLIT_V) * WORLD_SCALE;
+        let mut lower_tris = 0;
+        for g in tex.groups.iter().filter(|g| g.zone == 2) {
+            for t in (g.start..g.start + g.count).step_by(3) {
+                let tri = [
+                    tex.vertices[tex.indices[t as usize] as usize].pos,
+                    tex.vertices[tex.indices[t as usize + 1] as usize].pos,
+                    tex.vertices[tex.indices[t as usize + 2] as usize].pos,
+                ];
+                if !interior(tri) {
+                    continue;
+                }
+                let top = tri[0][1].max(tri[1][1]).max(tri[2][1]);
+                assert!(
+                    top <= split_m + 1e-4,
+                    "an interior lower-wall triangle reaches y={top}, above the only band \
+                     boundary ({split_m}) — the band has repeated up the column"
+                );
+                lower_tris += 1;
+            }
+        }
+        assert!(lower_tris > 0, "the bottom storey still has its lower band");
+        assert!(
+            tex.groups.iter().any(|g| g.zone == 3),
+            "and the upper wall zone is present"
+        );
+    }
+
+    /// Interior sample points of one wall triangle, as barycentric mixes. Never a
+    /// vertex or an edge midpoint: those sit exactly on brush boundaries, where a
+    /// solidity probe's inclusivity is ambiguous and the answer is a coin toss.
+    const BARY: [[f32; 3]; 7] = [
+        [0.3334, 0.3333, 0.3333],
+        [0.70, 0.15, 0.15],
+        [0.15, 0.70, 0.15],
+        [0.15, 0.15, 0.70],
+        [0.45, 0.45, 0.10],
+        [0.45, 0.10, 0.45],
+        [0.10, 0.45, 0.45],
+    ];
+
+    /// Every wall triangle in `tex` whose drawn band disagrees with the air column at
+    /// some point inside it, as `(zone, signed WT error, triangle)`.
+    ///
+    /// **The invariant.** A wall draws its lower band below `column base +
+    /// WALL_SPLIT_V` and its upper band above. `base` steps where a solid starts or
+    /// stops being underfoot, so a triangle spanning a step must have been cut there;
+    /// if it wasn't, one answer covers the whole triangle and half of it draws the
+    /// wrong band — visibly, as a wedge along whatever diagonal the fold triangulated
+    /// it with.
+    ///
+    /// Two exclusions, both deliberate rather than convenient:
+    ///
+    /// * **Samples in solid.** The shell's outer skin and buried faces are not the
+    ///   subject; only surfaces facing open air draw a band anyone can see.
+    /// * **Brushes with an authored `floor_y`.** Those pin their bands by hand and the
+    ///   classifier honours the pin over the column, by design.
+    fn band_violations(
+        tex: &TexturedMesh,
+        infos: &[BrushInfo],
+        cols: &ColumnInputs,
+    ) -> Vec<(u8, f32, [[f32; 3]; 3])> {
+        let mut out = Vec::new();
+        for g in tex.groups.iter().filter(|g| g.zone == 2 || g.zone == 3) {
+            for t in (g.start..g.start + g.count).step_by(3) {
+                let mut pt = [[0.0f32; 3]; 3];
+                let mut n = [0.0f32; 3];
+                for k in 0..3 {
+                    let v = &tex.vertices[tex.indices[t as usize + k] as usize];
+                    pt[k] = [
+                        v.pos[0] / WORLD_SCALE,
+                        v.pos[1] / WORLD_SCALE,
+                        v.pos[2] / WORLD_SCALE,
+                    ];
+                    n = v.normal;
+                }
+                // Vertical faces only. Horizontal ones are floors, ceilings, or stair
+                // treads and have no vertical band to place.
+                if n[1].abs() > 0.5 {
+                    continue;
+                }
+                let c = [
+                    (pt[0][0] + pt[1][0] + pt[2][0]) / 3.0,
+                    (pt[0][1] + pt[1][1] + pt[2][1]) / 3.0,
+                    (pt[0][2] + pt[1][2] + pt[2][2]) / 3.0,
+                ];
+                let dom = if n[0].abs() > n[2].abs() { 0 } else { 2 };
+                let pinned = owner_candidates(infos, c, dom)
+                    .iter()
+                    .find(|k| k.chosen)
+                    .and_then(|k| infos.iter().find(|b| b.id == k.brush_id))
+                    .is_some_and(|b| (b.floor_y - b.min[1]).abs() > 1e-3);
+                if pinned {
+                    continue;
+                }
+                for w in BARY {
+                    let s: Vec<f32> = (0..3)
+                        .map(|a| w[0] * pt[0][a] + w[1] * pt[1][a] + w[2] * pt[2][a])
+                        .collect();
+                    let px = s[0] + n[0] * PROBE_INSET;
+                    let pz = s[2] + n[2] * PROBE_INSET;
+                    if cols.solid_at(px, s[1], pz) {
+                        continue;
+                    }
+                    let over = s[1] - (cols.base_at(px, pz, s[1]) + WALL_SPLIT_V);
+                    if (g.zone == 2 && over > 1e-2) || (g.zone == 3 && over < -1e-2) {
+                        out.push((g.zone, over, pt));
+                        break;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The band a wall draws must agree with the air column *everywhere inside every
+    /// triangle*, not merely at the centroid the anchor was probed from.
+    ///
+    /// This is the invariant the mezzanine bug broke. Anchoring per fragment fixed
+    /// *which* band a triangle drew, but a triangle spanning a step in the column floor
+    /// still drew one band across the whole of itself — the wedge in the report. A
+    /// pulled ledge is coplanar with its wall, so the CSG fold does not cut there and
+    /// the classifier has to (`column_planes`).
+    ///
+    /// Configurations chosen to defeat the fold's own cutting: adjoining rooms share a
+    /// **coplanar** wall, and coplanar polygons do not split each other in a BSP.
+    #[test]
+    fn a_walls_bands_agree_with_its_air_column_everywhere() {
+        let cases: Vec<(&str, Vec<Brush>)> = vec![
+            (
+                "ledge mid-wall",
+                vec![
+                    Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 24.0, 20.0),
+                    Brush::new(2, Op::Add, 4.0, 8.0, 0.0, 12.0, 2.0, 6.0),
+                ],
+            ),
+            (
+                "ledge into a corner",
+                vec![
+                    Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 24.0, 20.0),
+                    Brush::new(2, Op::Add, 0.0, 8.0, 0.0, 12.0, 2.0, 6.0),
+                ],
+            ),
+            (
+                "ledge spanning two rooms' coplanar wall",
+                vec![
+                    Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 24.0, 20.0),
+                    Brush::new(2, Op::Subtract, 20.0, 0.0, 0.0, 20.0, 24.0, 20.0),
+                    Brush::new(3, Op::Add, 12.0, 8.0, 0.0, 16.0, 2.0, 6.0),
+                ],
+            ),
+            (
+                "two ledges at different heights",
+                vec![
+                    Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 30.0, 30.0, 20.0),
+                    Brush::new(2, Op::Add, 2.0, 6.0, 0.0, 10.0, 2.0, 5.0),
+                    Brush::new(3, Op::Add, 16.0, 14.0, 0.0, 10.0, 2.0, 5.0),
+                ],
+            ),
+            (
+                "stacked rooms plus a ledge",
+                vec![
+                    Brush::new(1, Op::Subtract, 0.0, -8.0, 0.0, 20.0, 8.0, 20.0),
+                    Brush::new(2, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 28.0, 20.0),
+                    Brush::new(3, Op::Add, 4.0, 6.0, 0.0, 12.0, 2.0, 6.0),
+                ],
+            ),
+        ];
+
+        for (label, brushes) in cases {
+            let mut region = Region::new(0);
+            region.brushes = brushes.clone();
+            let tex = region.evaluate_textured(&[]);
+            let infos = region.brush_infos();
+            let cols = ColumnInputs::new(&brushes, &[]);
+            let bad = band_violations(&tex, &infos, &cols);
+            assert!(
+                bad.is_empty(),
+                "{label}: {} wall triangle(s) draw a band their air column contradicts; \
+                 worst zone {} off by {:.1} WT at {:?}",
+                bad.len(),
+                bad[0].0,
+                bad[0].1,
+                bad[0].2
+            );
+        }
+    }
+
+    /// The same invariant over the **authored** levels, which is where it first broke:
+    /// the synthetic rooms above are far simpler than a real one, and three of the six
+    /// shipped levels had violations the simple cases did not reproduce.
+    ///
+    /// Ignored because it depends on `levels/*.json`, which are authored data rather
+    /// than fixtures. Run it after touching the classifier:
+    /// `cargo test --release -p engine --lib bands_agree_on_the_shipped_levels -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn bands_agree_on_the_shipped_levels() {
+        use crate::geometry::csg_runtime::StairDesc;
+        use crate::geometry::structures::Platform;
+
+        let mut checked = 0;
+        for name in ["facility_2", "aztec_level", "egyptian_level", "slot7", "slot8", "slot4"] {
+            let path = format!("{}/../../levels/{name}.json", env!("CARGO_MANIFEST_DIR"));
+            let Ok(raw) = std::fs::read_to_string(&path) else { continue };
+            let v: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            let plats: Vec<Platform> =
+                serde_json::from_value(v["platforms"].clone()).unwrap_or_default();
+            let mut all: Vec<Brush> = Vec::new();
+            let mut stairs: Vec<StairDesc> = Vec::new();
+            for rj in v["regions"].as_array().unwrap() {
+                all.extend(serde_json::from_value::<Vec<Brush>>(rj["brushes"].clone()).unwrap());
+                stairs.extend(
+                    serde_json::from_value::<Vec<StairDesc>>(rj["stairs"].clone())
+                        .unwrap_or_default(),
+                );
+            }
+            let mut region = Region::new(0);
+            region.brushes = all.clone();
+            // Stairs are deliberately left out. `append_zoned` emits their treads and
+            // risers with **explicit** zones and UVs rather than through the classifier,
+            // so they are not subject to the column rule and their vertical risers would
+            // otherwise be judged by it. The invariant is about `classify_soup`.
+            let _ = stairs;
+            let tex = region.evaluate_textured(&plats);
+            let infos = region.brush_infos();
+            let cols = ColumnInputs::new(&all, &plats);
+            let bad = band_violations(&tex, &infos, &cols);
+            println!(
+                "  {name}: {} tris, {} violation(s)",
+                tex.indices.len() / 3,
+                bad.len()
+            );
+            assert!(
+                bad.is_empty(),
+                "{name}: {} wall triangle(s) draw a band their air column contradicts; \
+                 worst zone {} off by {:.1} WT at {:?}",
+                bad.len(),
+                bad[0].0,
+                bad[0].1,
+                bad[0].2
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no level files found to check");
+    }
+
+    /// Classify a region's fold with an **injected** cornice table, so a cornice can be
+    /// tested without mutating the global theme registry (which every other test in this
+    /// binary shares, in parallel).
+    ///
+    /// The fold soup comes from `evaluate`, which for a stair-free region is the same
+    /// soup `evaluate_textured` classifies.
+    fn classify_with_cornice(region: &mut Region, cornice: &[Option<f32>]) -> TexturedMesh {
+        let collider = region.evaluate();
+        let pos: Vec<f32> = collider.vertices.iter().flat_map(|v| v.pos).collect();
+        let infos = region.brush_infos();
+        let cols = ColumnInputs::new(&region.brushes, &[]);
+        let mut b = ZonedBuilder::new();
+        classify_soup(
+            &mut b,
+            &pos,
+            &collider.indices,
+            &infos,
+            textures::default_scheme(),
+            &cols,
+            cornice,
+        );
+        b.finish()
+    }
+
+    /// A theme that defines no cornice must classify **exactly** as it did before the
+    /// band existed. This is the whole reason the band is opt-in rather than a default:
+    /// an undefined zone has no bind group and its draw group is skipped, so a cornice
+    /// forced on the 392 shipped themes would be a hole against every ceiling, not a
+    /// fallback to the upper wall.
+    #[test]
+    fn a_theme_without_a_cornice_classifies_exactly_as_before() {
+        let mut region = Region::new(0);
+        region
+            .brushes
+            .push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 24.0, 20.0));
+        region
+            .brushes
+            .push(Brush::new(2, Op::Add, 4.0, 8.0, 0.0, 12.0, 2.0, 6.0));
+
+        let plain = classify_with_cornice(&mut region, &[]);
+        assert!(
+            plain.groups.iter().all(|g| g.zone != textures::CORNICE_ZONE),
+            "no theme defines a cornice, so none may be emitted"
+        );
+
+        // An all-`None` table of the registry's real length must agree with an empty one.
+        let none_table = vec![None; textures::schemes().len()];
+        let same = classify_with_cornice(&mut region, &none_table);
+        assert_eq!(plain.indices.len(), same.indices.len());
+        assert_eq!(
+            plain.groups.iter().map(|g| (g.zone, g.count)).collect::<Vec<_>>(),
+            same.groups.iter().map(|g| (g.zone, g.count)).collect::<Vec<_>>(),
+        );
+    }
+
+    /// A theme that does define one gets a band flush against the ceiling, `depth` WT
+    /// tall, on top of the bands it already had — and anchored so its texture starts at
+    /// the band's own bottom edge rather than at the floor, or the trim would slide by
+    /// however tall the room is.
+    #[test]
+    fn a_cornice_sits_flush_against_the_ceiling_with_its_own_anchor() {
+        const CEIL: f32 = 24.0;
+        const DEPTH: f32 = 2.0;
+        let mut region = Region::new(0);
+        region
+            .brushes
+            .push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 20.0, CEIL, 20.0));
+
+        let table = vec![Some(DEPTH); textures::schemes().len()];
+        let tex = classify_with_cornice(&mut region, &table);
+
+        let mut lo = f32::MAX;
+        let mut hi = f32::MIN;
+        let mut seen = 0;
+        for g in tex.groups.iter().filter(|g| g.zone == textures::CORNICE_ZONE) {
+            for i in g.start..g.start + g.count {
+                let v = &tex.vertices[tex.indices[i as usize] as usize];
+                // Interior cavity walls only, not the shell's outer skin.
+                let (x, z) = (v.pos[0] / WORLD_SCALE, v.pos[2] / WORLD_SCALE);
+                let interior = [x, z].iter().any(|&c| c.abs() < 1e-3 || (c - 20.0).abs() < 1e-3)
+                    && x >= -1e-3
+                    && x <= 20.0 + 1e-3
+                    && z >= -1e-3
+                    && z <= 20.0 + 1e-3;
+                if !interior {
+                    continue;
+                }
+                let y = v.pos[1] / WORLD_SCALE;
+                lo = lo.min(y);
+                hi = hi.max(y);
+                // The band's own anchor: V is measured from its foot, so a vertex at
+                // the foot has V = 0 and one at the ceiling has V = DEPTH.
+                let want_v = y - (CEIL - DEPTH);
+                assert!(
+                    (v.uv[1] - want_v).abs() < 1e-3,
+                    "cornice vertex at y={y} has V={} , want {want_v} (anchored at the \
+                     band foot, not the floor)",
+                    v.uv[1]
+                );
+                seen += 1;
+            }
+        }
+        assert!(seen > 0, "the cornice band was emitted on the interior walls");
+        assert!(
+            (lo - (CEIL - DEPTH)).abs() < 1e-3 && (hi - CEIL).abs() < 1e-3,
+            "the band spans {lo}..{hi}, want {}..{CEIL}",
+            CEIL - DEPTH
+        );
+        // And the bands below it survive.
+        for z in [2u8, 3] {
+            assert!(
+                tex.groups.iter().any(|g| g.zone == z),
+                "zone {z} is still present under the cornice"
+            );
+        }
+    }
+
+    /// A room barely taller than its own trim gets no cornice: one honest band beats a
+    /// cornice sitting on the skirting.
+    #[test]
+    fn a_room_too_short_for_its_trim_gets_no_cornice() {
+        let mut region = Region::new(0);
+        // Floor 0, ceiling 6 — the lower band alone already reaches the ceiling.
+        region
+            .brushes
+            .push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 6.0, 20.0));
+        let table = vec![Some(6.0); textures::schemes().len()];
+        let tex = classify_with_cornice(&mut region, &table);
+        assert!(
+            tex.groups.iter().all(|g| g.zone != textures::CORNICE_ZONE),
+            "a 6 WT room with a 6 WT trim gets no cornice"
+        );
+    }
+
+    /// **The mezzanine report, end to end.** A partial-face pull with `-` builds a
+    /// solid `Op::Add` ledge protruding into the room; its top is a floor partway up
+    /// the wall, so the wall above it must carry a fresh lower band.
+    ///
+    /// The wall above the ledge and the wall beside it are the *same brush face*, which
+    /// is why the anchor is probed per triangle: no per-brush or per-face value can
+    /// give two answers for one face.
+    #[test]
+    fn a_pulled_ledge_starts_a_fresh_band_on_the_wall_above_it() {
+        const W: f32 = 20.0;
+        const LEDGE_TOP: f32 = 10.0;
+        let mut region = Region::new(0);
+        region
+            .brushes
+            .push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, W, 24.0, W));
+        // Against the Z-min wall, 8..10 WT up, spanning x 4..16 of the room's 20.
+        region
+            .brushes
+            .push(Brush::new(2, Op::Add, 4.0, 8.0, 0.0, 12.0, 2.0, 6.0));
+        let tex = region.evaluate_textured(&[]);
+
+        // Lower-band triangles on the Z-min wall plane (z = 0 in WT), split by whether
+        // they sit over the ledge in x.
+        let mut over_ledge: Vec<f32> = Vec::new();
+        let mut beside_ledge: Vec<f32> = Vec::new();
+        for g in tex.groups.iter().filter(|g| g.zone == 2) {
+            for t in (g.start..g.start + g.count).step_by(3) {
+                let tri: Vec<[f32; 3]> = (0..3)
+                    .map(|k| tex.vertices[tex.indices[t as usize + k] as usize].pos)
+                    .collect();
+                let on_wall = tri.iter().all(|v| (v[2] / WORLD_SCALE).abs() < 1e-3);
+                if !on_wall {
+                    continue;
+                }
+                let cx = tri.iter().map(|v| v[0] / WORLD_SCALE).sum::<f32>() / 3.0;
+                let top = tri.iter().map(|v| v[1] / WORLD_SCALE).fold(f32::MIN, f32::max);
+                if (5.0..15.0).contains(&cx) {
+                    over_ledge.push(top);
+                } else if cx < 3.0 || cx > 17.0 {
+                    beside_ledge.push(top);
+                }
+            }
+        }
+
+        assert!(
+            !over_ledge.is_empty(),
+            "the wall above the ledge has a lower band at all"
+        );
+        let highest = over_ledge.iter().copied().fold(f32::MIN, f32::max);
+        assert!(
+            highest > LEDGE_TOP,
+            "that band sits above the ledge top ({LEDGE_TOP} WT), not down at the room \
+             floor — highest lower-band triangle over the ledge reaches {highest} WT"
+        );
+        assert!(
+            (highest - (LEDGE_TOP + WALL_SPLIT_V)).abs() < 1e-3,
+            "and it ends exactly one band height above the ledge: want {}, got {highest}",
+            LEDGE_TOP + WALL_SPLIT_V
+        );
+
+        let beside_top = beside_ledge.iter().copied().fold(f32::MIN, f32::max);
+        assert!(
+            (beside_top - WALL_SPLIT_V).abs() < 1e-3,
+            "while the same face beside the ledge still bands from the room floor: \
+             want {WALL_SPLIT_V}, got {beside_top}"
+        );
+    }
+
+    /// An authored `floor_y` stands the probe down. The draw tool relies on this: it
+    /// gives every rect of one drawn shape a single anchor so they cannot texture-shift
+    /// against each other, and a probe that overrode it would reintroduce that seam.
+    #[test]
+    fn an_authored_floor_y_stands_the_probe_down() {
+        const W: f32 = 20.0;
+        let build = |pin: Option<f32>| {
+            let mut region = Region::new(0);
+            region
+                .brushes
+                .push(Brush::new(1, Op::Subtract, 0.0, -8.0, 0.0, W, 8.0, W));
+            let mut upper = Brush::new(2, Op::Subtract, 0.0, 0.0, 0.0, W, 28.0, W);
+            if let Some(v) = pin {
+                upper.floor_y = v;
+            }
+            region.brushes.push(upper);
+            let tex = region.evaluate_textured(&[]);
+            // Highest lower-band triangle on the x = W interior wall.
+            let mut top = f32::MIN;
+            for g in tex.groups.iter().filter(|g| g.zone == 2) {
+                for t in (g.start..g.start + g.count).step_by(3) {
+                    let tri: Vec<[f32; 3]> = (0..3)
+                        .map(|k| tex.vertices[tex.indices[t as usize + k] as usize].pos)
+                        .collect();
+                    if tri.iter().all(|v| (v[0] / WORLD_SCALE - W).abs() < 1e-3) {
+                        for v in &tri {
+                            top = top.max(v[1] / WORLD_SCALE);
+                        }
+                    }
+                }
+            }
+            top
+        };
+        // Unpinned: one column, so the only band is the lower storey's.
+        assert!(
+            (build(None) - (-8.0 + WALL_SPLIT_V)).abs() < 1e-3,
+            "probed: band ends at {}, want {}",
+            build(None),
+            -8.0 + WALL_SPLIT_V
+        );
+        // Pinned to 12: the author's anchor wins, band ends at 12 + WALL_SPLIT_V.
+        assert!(
+            (build(Some(12.0)) - (12.0 + WALL_SPLIT_V)).abs() < 1e-3,
+            "pinned: band ends at {}, want {}",
+            build(Some(12.0)),
+            12.0 + WALL_SPLIT_V
+        );
+    }
+
     #[test]
     fn a_lower_pit_anchors_its_walls_to_its_own_floor() {
         // Main room floor at y=0; a second subtract carved below (floor y=-6) with
@@ -1418,7 +2102,7 @@ mod tests {
         region.brushes.push(pit);
         // Just assert it evaluates with both floor and wall zones and doesn't panic
         // — the anchoring correctness is visual, but this guards the plumbing.
-        let tex = region.evaluate_textured();
+        let tex = region.evaluate_textured(&[]);
         let zones = zone_counts(&tex);
         assert!(zones.contains_key(&0) && zones.contains_key(&2));
     }

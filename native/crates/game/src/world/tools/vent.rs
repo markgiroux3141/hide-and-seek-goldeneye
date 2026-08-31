@@ -476,7 +476,7 @@ mod tests {
             duct.scheme = vent_scheme();
             region.brushes.push(duct);
 
-            let tex = region.evaluate_textured();
+            let tex = region.evaluate_textured(&[]);
             // Every triangle the duct owns must have UVs that, once scaled by `repeat`,
             // land inside a single 0..1 tile — i.e. one whole panel per face.
             let mut checked = 0;

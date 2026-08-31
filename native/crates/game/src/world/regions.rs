@@ -59,9 +59,21 @@ impl CsgCache {
 /// Hash a region's *authored* data (brushes + stairs) into a memo-cache key. The
 /// shell is derived from the brushes, so it isn't hashed. f32s go in by bit
 /// pattern; the small fieldless enums by discriminant.
-pub(crate) fn region_hash(region: &Region) -> u64 {
+pub(crate) fn region_hash(region: &Region, platforms: &[Platform]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    // Platforms are not region data, but the bake reads them: a deck is a floor, and
+    // a floor decides where a wall's texture bands start (`BrushInfo::wall_anchor`).
+    // Same reason `face_tex` is hashed below — without this the region hands back its
+    // pre-platform bake.
+    platforms.len().hash(&mut h);
+    for p in platforms {
+        p.id.hash(&mut h);
+        for f in [p.x, p.y, p.z, p.size_x, p.size_z, p.thickness] {
+            f.to_bits().hash(&mut h);
+        }
+        (p.grounded as u8).hash(&mut h);
+    }
     region.brushes.len().hash(&mut h);
     for b in &region.brushes {
         b.id.hash(&mut h);
@@ -72,6 +84,13 @@ pub(crate) fn region_hash(region: &Region) -> u64 {
         (b.door as u8).hash(&mut h);
         (b.frame as u8).hash(&mut h);
         b.scheme.hash(&mut h);
+        // A theme's cornice depth moves a band boundary, so the classified mesh depends
+        // on it as surely as on the scheme index. Same reason `face_tex` is hashed: the
+        // texture editor can change it without any brush changing, and without this the
+        // region hands back its pre-cornice bake.
+        engine::render::textures::cornice_of(b.scheme)
+            .map(f32::to_bits)
+            .hash(&mut h);
         // Painted face overrides change the classified mesh, so a repaint has to
         // miss the memo cache — without this the region returns its pre-paint bake.
         for ft in &b.face_tex {

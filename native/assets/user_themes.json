@@ -79,12 +79,21 @@
           "texture": "tempImgEd09A8"
         },
         "2": {
+          "offset_x": -0.00009999999747378752,
+          "offset_y": -0.6000000238418579,
           "repeat": 0.19349999725818634,
-          "texture": "tempImgEd00A1"
+          "texture": "tempImgEd00A3"
         },
         "3": {
           "repeat": 0.19439999759197235,
-          "texture": "tempImgEd00A4"
+          "texture": "tempImgEd00A1"
+        },
+        "4": {
+          "height": 3.0,
+          "offset_x": -0.550000011920929,
+          "offset_y": -0.3700000047683716,
+          "repeat": 0.20000000298023224,
+          "texture": "tempImgEd00A6"
         },
         "5": {
           "repeat": 1.0,

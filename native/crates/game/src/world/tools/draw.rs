@@ -1320,7 +1320,7 @@ mod tests {
         //   u ∈ (ou+2, ou+6) — EXTERNAL, the L's real step face. Must NOT be empty,
         //                      which is what proves the detector is looking in the
         //                      right place rather than passing vacuously.
-        let (collider, _) = world.regions[0].evaluate_both();
+        let (collider, _) = world.regions[0].evaluate_both(&[]);
         let seam_z = (ov + 2) as f32;
         let mut internal = 0;
         let mut external = 0;
@@ -1710,7 +1710,7 @@ mod tests {
         click_corner(&mut world, (ou, ov));
 
         // How far the extrusion's top surface reaches, as built: past the seam to ov + D.
-        let built_tris = world.regions[0].evaluate_both().0.indices.len() / 3;
+        let built_tris = world.regions[0].evaluate_both(&[]).0.indices.len() / 3;
         let built_reach = top_face_reach_z(&mut world, 2.0);
         let want = (ov + D) as f32;
         assert!(
@@ -1736,7 +1736,7 @@ mod tests {
              a short reach here is the second room brush re-folding out of order and \
              carving away everything past the seam at z = 24"
         );
-        let loaded_tris = loaded.regions[0].evaluate_both().0.indices.len() / 3;
+        let loaded_tris = loaded.regions[0].evaluate_both(&[]).0.indices.len() / 3;
         assert_eq!(
             loaded_tris, built_tris,
             "and the whole fold is identical, not merely reaching far enough"
@@ -1749,7 +1749,7 @@ mod tests {
     /// both its triangles have centroids well short of their own far edge — a centroid
     /// test reports the surface as absent while it is plainly there.
     fn top_face_reach_z(world: &mut World, y: f32) -> f32 {
-        let mesh = world.regions[0].evaluate_both().0;
+        let mesh = world.regions[0].evaluate_both(&[]).0;
         let mut reach = f32::NEG_INFINITY;
         for tri in mesh.indices.chunks_exact(3) {
             if mesh.vertices[tri[0] as usize].normal[1] <= 0.9 {
