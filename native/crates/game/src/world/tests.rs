@@ -57,12 +57,13 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         assert!(tris_before > 0, "room built geometry");
 
         // Camera spawns at (3,1.5,3) m looking −Z → crosshair hits the z=0 wall.
-        let rm = world.push(PUSH_PULL_STEP).expect("crosshair should hit a wall");
+        let rms = world.push(PUSH_PULL_STEP);
+        let rm = rms.first().expect("crosshair should hit a wall");
         assert_eq!(rm.id, 0);
         assert!(!rm.mesh.indices.is_empty(), "carved room still has geometry");
 
         // Pulling the same wall back should also resolve a hit (loop is stable).
-        assert!(world.pull(PUSH_PULL_STEP).is_some(), "pull resolves a face too");
+        assert!(!world.pull(PUSH_PULL_STEP).is_empty(), "pull resolves a face too");
     }
 
     /// Aiming at empty space (no collider along the ray) picks nothing — push is
@@ -74,7 +75,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         // Fly far outside the room and look away from it.
         world.camera.pos = Vec3::new(1000.0, 1000.0, 1000.0);
         world.camera.yaw = 0.0;
-        assert!(world.push(PUSH_PULL_STEP).is_none());
+        assert!(world.push(PUSH_PULL_STEP).is_empty());
     }
 
     /// Entering HUNT drops a capsule that gravity settles onto the room floor
@@ -3055,7 +3056,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         assert!(!world.is_full_face());
 
         let before = world.regions[0].brushes.len();
-        assert!(world.push(4.0).is_some(), "sub-face push rebuilds the region");
+        assert!(!world.push(4.0).is_empty(), "sub-face push rebuilds the region");
         assert_eq!(world.regions[0].brushes.len(), before + 1, "spawned one brush");
 
         let sub = world.regions[0].brushes.last().unwrap();
@@ -3143,7 +3144,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         world.select_at_crosshair();
         world.adjust_selection_size(-20.0, 0.0);
         world.adjust_selection_size(0.0, -10.0);
-        world.push(4.0).expect("sub-face push");
+        assert!(!world.push(4.0).is_empty(), "sub-face push");
 
         let carve = world.regions[0].brushes.last().unwrap();
         assert_eq!(carve.op, Op::Subtract, "a push carves");
@@ -3157,7 +3158,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         world.select_at_crosshair();
         world.adjust_selection_size(-20.0, 0.0);
         world.adjust_selection_size(0.0, -10.0);
-        world.pull(4.0).expect("sub-face pull");
+        assert!(!world.pull(4.0).is_empty(), "sub-face pull");
 
         let bump = world.regions[0].brushes.last().unwrap();
         assert_eq!(bump.op, Op::Add, "a pull protrudes");
@@ -3200,7 +3201,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         world.camera.yaw = 0.0;
         world.camera.pitch = 0.0;
         world.select_at_crosshair();
-        world.push(8.0).expect("push the protoroom out into a room");
+        assert!(!world.push(8.0).is_empty(), "push the protoroom out into a room");
 
         for b in &world.regions[0].brushes {
             assert_eq!(b.scheme, theme, "brush {} came out in the default theme", b.id);
@@ -4465,9 +4466,8 @@ fn arm_with(world: &mut World, name: &str) -> usize {
 
         let s0 = region0_sig(&world);
         // Author an edit through the same wrapper the app uses.
-        let rm = world
-            .with_undo(|w| w.push(PUSH_PULL_STEP))
-            .expect("crosshair hits the −Z wall");
+        let rms = world.with_undo_many(|w| w.push(PUSH_PULL_STEP));
+        let rm = rms.first().expect("crosshair hits the −Z wall");
         assert_eq!(rm.id, 0);
         let s1 = region0_sig(&world);
         assert!((s1 - s0).abs() > 0.01, "push changed the geometry");
@@ -4493,7 +4493,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         world.camera.pos = Vec3::new(1000.0, 1000.0, 1000.0);
         world.camera.yaw = 0.0;
 
-        assert!(world.with_undo(|w| w.push(PUSH_PULL_STEP)).is_none(), "push missed");
+        assert!(world.with_undo_many(|w| w.push(PUSH_PULL_STEP)).is_empty(), "push missed");
         assert!(world.undo().is_none(), "a no-op leaves the history empty");
     }
 
@@ -4503,9 +4503,12 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         let mut world = World::new();
         world.initial_meshes();
 
-        world.with_undo(|w| w.push(PUSH_PULL_STEP)).expect("edit 1");
+        assert!(!world.with_undo_many(|w| w.push(PUSH_PULL_STEP)).is_empty(), "edit 1");
         world.undo().expect("undo edit 1"); // redo now has one entry
-        world.with_undo(|w| w.push(PUSH_PULL_STEP)).expect("edit 2 forks history");
+        assert!(
+            !world.with_undo_many(|w| w.push(PUSH_PULL_STEP)).is_empty(),
+            "edit 2 forks history"
+        );
 
         assert!(world.redo().is_none(), "the divergent edit cleared the redo stack");
     }
@@ -4519,7 +4522,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         // Carve well past the cap; every full-face push mutates, so every one is
         // recorded (a subtract push has no thinness guard).
         for _ in 0..(history::MAX_HISTORY + 10) {
-            world.with_undo(|w| w.push(1.0));
+            world.with_undo_many(|w| w.push(1.0));
         }
         assert_eq!(
             world.undo_stack.len(),
@@ -5355,4 +5358,335 @@ fn a_carved_vent_does_not_halo_its_theme_onto_the_surrounding_wall() {
         }
     }
     assert_eq!(strays, 0, "{strays} duct-themed vertices sit outside the bore");
+}
+
+
+// ─── Face patches (`world::patch`) ───────────────────────────────────────────
+//
+// The fixture every one of these uses: a stepped hall, which is the shape the
+// feature exists for. One 40x16x20 room with a 4-unit-deep step carved beside it,
+// so the two carves share a CEILING plane (y = 16) but sit at different FLOOR
+// planes (y = 0 and y = -4). Real levels get here through the stair/draw tools;
+// building it by hand keeps the assertions about patches rather than about the
+// tool that made them.
+#[cfg(test)]
+fn stepped_hall() -> World {
+    let mut world = World::new();
+    world.regions[0].brushes.clear();
+    world.regions[0].stairs.clear();
+    let upper = Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 16.0, 20.0);
+    let mut lower = Brush::new(2, Op::Subtract, 20.0, -4.0, 0.0, 20.0, 20.0, 20.0);
+    lower.floor_y = -4.0;
+    world.regions[0].brushes.push(upper);
+    world.regions[0].brushes.push(lower);
+    world.next_brush_id = 3;
+    world.recluster_all();
+    world
+}
+
+/// Stand at a WT point and look up (`UP`) or down (`DOWN`), then select whatever the
+/// crosshair lands on.
+///
+/// Drives the real picker rather than poking `World::selected`, which is private for
+/// a reason: a hand-set selection can name a face the picker could never resolve, and
+/// a patch test that starts from an impossible selection proves nothing. Note the
+/// unit change — brush coordinates are WT, the camera lives in metres.
+#[cfg(test)]
+const UP: f32 = 1.4;
+#[cfg(test)]
+const DOWN: f32 = -1.4;
+
+#[cfg(test)]
+fn look_from(world: &mut World, wt: Vec3, pitch: f32) {
+    world.camera.pos = wt * WORLD_SCALE;
+    world.camera.yaw = 0.0;
+    world.camera.pitch = pitch;
+    assert!(world.select_at_crosshair(), "the crosshair must land on a face");
+}
+
+/// The core rule: coplanar + same room = one patch, and it is derived, not stored.
+///
+/// The ceiling is shared by both carves so it patches as one; the floors are at
+/// different heights so each is its own patch. That asymmetry is the whole reason
+/// coplanarity is the rule rather than "everything in the room" — raising a ceiling
+/// should take the hall with it, lowering a step should not.
+#[test]
+fn a_shared_ceiling_patches_but_two_floors_at_different_heights_do_not() {
+    let mut world = stepped_hall();
+    world.toggle_patch_scope();
+
+    // Look up at the ceiling from inside the upper half.
+    look_from(&mut world, Vec3::new(10.0, 8.0, 10.0), UP);
+    assert_eq!(world.patch_len(), 2, "both carves share the y=16 ceiling plane");
+
+    // Look down at the floor from the same spot.
+    look_from(&mut world, Vec3::new(10.0, 8.0, 10.0), DOWN);
+    assert_eq!(
+        world.patch_len(),
+        1,
+        "the step sits at a different floor plane, so it is not in this patch"
+    );
+}
+
+/// Scope off is the old editor, exactly. Every call site runs the patch path
+/// unconditionally, so this is the guard that says the path collapses to a single
+/// face when the toggle is off.
+#[test]
+fn with_scope_off_a_shared_ceiling_is_still_just_one_face() {
+    let mut world = stepped_hall();
+    assert!(!world.patch_scope(), "patch scope is off by default");
+    look_from(&mut world, Vec3::new(10.0, 8.0, 10.0), UP);
+    assert_eq!(world.patch_len(), 1);
+
+    let before: Vec<f32> = world.regions[0].brushes.iter().map(|b| b.y + b.h).collect();
+    world.push(4.0);
+    let after: Vec<f32> = world.regions[0].brushes.iter().map(|b| b.y + b.h).collect();
+    assert!((after[0] - before[0] - 4.0).abs() < 1e-3, "the aimed carve rose");
+    assert!((after[1] - before[1]).abs() < 1e-3, "the other one did not");
+}
+
+/// One press raises the whole hall's ceiling — the use case the feature was asked
+/// for — and the patch is **stable under its own operation**: re-deriving it after
+/// the push finds the same two faces, because moving every member the same distance
+/// along the shared normal preserves both coplanarity and in-plane adjacency. That
+/// invariant is what makes repeated presses safe; without it the patch would shed a
+/// member each press and silently tear the room along the seam.
+#[test]
+fn one_push_raises_every_coplanar_ceiling_and_the_patch_survives_it() {
+    let mut world = stepped_hall();
+    world.toggle_patch_scope();
+    look_from(&mut world, Vec3::new(10.0, 8.0, 10.0), UP);
+
+    let tops = |w: &World| -> Vec<f32> { w.regions[0].brushes.iter().map(|b| b.y + b.h).collect() };
+    let before = tops(&world);
+    assert!(!world.push(4.0).is_empty(), "the push rebuilt a region");
+    let after = tops(&world);
+    for (i, (a, b)) in after.iter().zip(&before).enumerate() {
+        assert!((a - b - 4.0).abs() < 1e-3, "carve {i} rose by 4: {b} -> {a}");
+    }
+    assert_eq!(world.patch_len(), 2, "the patch is still the same two faces");
+
+    // And again, to prove it does not drift.
+    world.push(4.0);
+    assert_eq!(world.patch_len(), 2);
+    for (a, b) in tops(&world).iter().zip(&before) {
+        assert!((a - b - 8.0).abs() < 1e-3, "two presses, eight units");
+    }
+}
+
+/// A patch pull is all-or-nothing. `pull_face` refuses a brush too thin to absorb
+/// the step; applying it to the members that *can* take it would leave the patch no
+/// longer coplanar — the room torn along the seam, and no longer selectable as one
+/// patch to repair it. One thin member refuses the whole edit.
+#[test]
+fn one_member_too_thin_refuses_the_whole_patch_pull() {
+    let mut world = stepped_hall();
+    // Squash the second carve to 3 units tall, keeping its ceiling on the shared
+    // plane so it stays in the patch.
+    world.regions[0].brushes[1].y = 13.0;
+    world.regions[0].brushes[1].h = 3.0;
+    world.recluster_all();
+    world.toggle_patch_scope();
+    look_from(&mut world, Vec3::new(10.0, 8.0, 10.0), UP);
+    assert_eq!(world.patch_len(), 2, "both still share the ceiling plane");
+
+    let before: Vec<(f32, f32)> =
+        world.regions[0].brushes.iter().map(|b| (b.y, b.h)).collect();
+    assert!(
+        world.pull(4.0).is_empty(),
+        "a 4-unit pull cannot fit in a 3-unit brush, so it is refused"
+    );
+    let after: Vec<(f32, f32)> =
+        world.regions[0].brushes.iter().map(|b| (b.y, b.h)).collect();
+    assert_eq!(before, after, "nothing moved — not even the member that could");
+
+    // The fine step fits everywhere, so the same patch does move.
+    assert!(!world.pull(1.0).is_empty(), "a 1-unit pull fits every member");
+}
+
+/// The other half of the feature: a sub-rect may be scrolled out to the patch's
+/// bounding rect, so a hole can be cut across the seam between two carves. The carve
+/// itself is still ONE box — the CSG never knew the seam was there — which is why
+/// this needed no new geometry code, only a wider clamp on the selection rect.
+#[test]
+fn a_hole_can_be_cut_across_the_seam_between_two_brushes() {
+    let mut world = stepped_hall();
+    world.toggle_patch_scope();
+    // Aim at the upper half's floor. Give the step the same floor height first, so
+    // the two floors share a plane and therefore patch together.
+    world.regions[0].brushes[1].y = 0.0;
+    world.regions[0].brushes[1].h = 16.0;
+    world.regions[0].brushes[1].floor_y = 0.0;
+    world.recluster_all();
+    look_from(&mut world, Vec3::new(10.0, 8.0, 10.0), DOWN);
+    assert_eq!(world.patch_len(), 2, "one shared floor plane across both carves");
+
+    // The extent the sub-rect is clamped against is now the patch bbox (40 across the
+    // seam), not the 20 of the one face aimed at.
+    let info = world.selected_patch_info().expect("a patch face is selected");
+    assert!(
+        info.u_size > 20.5 || info.v_size > 20.5,
+        "the extent spans both carves, not just the one aimed at: {}x{}",
+        info.u_size,
+        info.v_size
+    );
+
+    // Shrink it slightly off full so this is a sub-rect carve rather than a full-face
+    // resize, but leave it wider than either carve so the rect still crosses the seam.
+    world.adjust_selection_size(-5.0, -5.0);
+    assert!(!world.is_full_face(), "a scrolled-in rect carves rather than resizes");
+
+    let before = world.regions[0].brushes.len();
+    assert!(!world.push(4.0).is_empty(), "the carve rebuilt a region");
+    assert_eq!(world.regions[0].brushes.len(), before + 1, "exactly one box");
+    let hole = *world.regions[0].brushes.last().unwrap();
+    assert_eq!(hole.op, Op::Subtract, "a push carves");
+    assert!(
+        hole.w > 20.5 || hole.d > 20.5,
+        "the one box spans the seam: {}x{}",
+        hole.w,
+        hole.d
+    );
+}
+
+/// A frame bounds a room, so a patch stops at a doorway exactly as the retexture
+/// flood-fill does — the ceiling of the room beyond a door is a different ceiling.
+/// The frame carve itself is never swept in either: it is authored at a deliberate
+/// size and a room edit has no business resizing it.
+#[test]
+fn a_patch_does_not_cross_a_doorway() {
+    let mut world = World::new();
+    world.regions[0].brushes.clear();
+    world.regions[0].stairs.clear();
+    // Two rooms with a shared ceiling plane, joined only through a doorframe.
+    world.regions[0].brushes.push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 20.0, 16.0, 20.0));
+    let mut frame = Brush::new(2, Op::Subtract, 20.0, 0.0, 8.0, 2.0, 16.0, 4.0);
+    frame.frame = true;
+    frame.door = true;
+    world.regions[0].brushes.push(frame);
+    world.regions[0].brushes.push(Brush::new(3, Op::Subtract, 22.0, 0.0, 0.0, 20.0, 16.0, 20.0));
+    world.next_brush_id = 4;
+    world.recluster_all();
+    world.toggle_patch_scope();
+
+    look_from(&mut world, Vec3::new(10.0, 8.0, 10.0), UP);
+    assert_eq!(
+        world.patch_len(),
+        1,
+        "the doorway bounds the room, so the far ceiling is a separate patch"
+    );
+}
+
+/// What a patch costs to derive, printed rather than asserted.
+/// `cargo test --release -p game patch_derivation_cost -- --nocapture --ignored`.
+///
+/// A patch is recomputed rather than stored (that is the whole design), and the
+/// per-frame highlight path derives it two or three times a frame, so "is deriving it
+/// cheap enough to do that" is the question the design rests on. `find_room_brushes`
+/// is O(n^2) in a region's brush count, which sounds alarming until it is measured
+/// against a real level: **3.1 us/call over the 76-brush facility_2**, so three calls
+/// a frame is ~10 us — a rounding error against a 16 ms budget. No cache, and none
+/// wanted: a cached patch is a patch that can go stale.
+///
+/// Ignored for the same reason `bake_cost_of_the_levels_on_disk` is: it is a
+/// measurement, and a machine-speed threshold fails for reasons unrelated to the code.
+#[test]
+#[ignore]
+fn patch_derivation_cost() {
+    let mut world = World::new();
+    let dir = crate::world::persist::levels_dir();
+    let Ok(_) = world.load_level(&dir.join("facility_2.json")) else {
+        println!("facility_2.json is not on disk; skipping");
+        return;
+    };
+    world.toggle_patch_scope();
+    let n: usize = world.regions.iter().map(|r| r.brushes.len()).sum();
+    let brush_id = world.regions[0]
+        .brushes
+        .iter()
+        .find(|b| b.op == Op::Subtract)
+        .expect("the level has a carved room")
+        .id;
+    let region_id = world.regions[0].id;
+    world.selected = Some(Selection { region_id, brush_id, axis: Axis::Y, side: Side::Max });
+
+    const ITERS: usize = 1000;
+    let t0 = std::time::Instant::now();
+    let mut faces = 0usize;
+    for _ in 0..ITERS {
+        faces += world.patch_len();
+    }
+    let us = t0.elapsed().as_secs_f64() * 1_000_000.0 / ITERS as f64;
+    println!(
+        "patch derivation over {n} brushes: {us:.1} us/call ({} faces in the patch)",
+        faces / ITERS
+    );
+}
+
+
+/// The `H` hole tool is a *separate* path from the push/pull sub-rect carve — its own
+/// crosshair resolve with its own bounds math — and it had its own copy of "clamp to
+/// the face", so patch scope did nothing for it. Playtest caught this: the hole still
+/// capped at whichever carve you were standing on.
+///
+/// It also never touches `World::selected` (arming it clears the pick and it re-picks
+/// each frame), so this is the guard that patch scope reaches a tool that has no
+/// clicked selection at all.
+#[test]
+fn the_hole_tool_spans_the_whole_patch_not_one_brush() {
+    let mut world = stepped_hall();
+    // Flatten the step so both carves share one floor plane, and so patch together.
+    world.regions[0].brushes[1].y = 0.0;
+    world.regions[0].brushes[1].h = 16.0;
+    world.regions[0].brushes[1].floor_y = 0.0;
+    world.recluster_all();
+
+    // Aim down at the floor of the first carve (20 wide); the patch is 40 wide.
+    world.camera.pos = Vec3::new(10.0, 8.0, 10.0) * WORLD_SCALE;
+    world.camera.yaw = 0.0;
+    world.camera.pitch = DOWN;
+
+    // Scroll the hole far wider than either carve.
+    world.hole_tool_key();
+    assert!(world.is_hole_arming(), "H arms the hole tool");
+    for _ in 0..40 {
+        world.adjust_opening_size(1.0, 1.0);
+    }
+
+    // Scope off: still capped at the one carve it is aimed at.
+    let capped = world.resolve_opening_placement().expect("the crosshair is on a floor");
+    assert!(
+        capped.w <= 20.0 + 1e-3,
+        "with scope off the hole stops at the brush it is over: {}",
+        capped.w
+    );
+
+    // Scope on: the same aim, the same scroll, now bounded by the patch.
+    world.toggle_patch_scope();
+    let spanning = world.resolve_opening_placement().expect("the crosshair is on a floor");
+    assert!(
+        spanning.w > 20.0 + 1e-3,
+        "with scope on the hole spans both carves: {}",
+        spanning.w
+    );
+
+    // And it really cuts one box that crosses the seam at x = 20. The ghost has to be
+    // refreshed first, exactly as the app does each frame -- `confirm_opening` cuts at
+    // the last previewed placement, which is otherwise still the one `arm_opening`
+    // resolved before any of this scrolling happened.
+    world.update_opening_preview().expect("the ghost is on the floor");
+    let before = world.regions[0].brushes.len();
+    world.confirm_opening().expect("the cut rebuilt the region");
+    assert!(world.regions[0].brushes.len() > before, "the cut added geometry");
+    let frame = world.regions[0]
+        .brushes
+        .iter()
+        .find(|b| b.frame)
+        .expect("a hole cut leaves a frame brush");
+    assert!(
+        frame.x < 20.0 && frame.x + frame.w > 20.0,
+        "the one frame box straddles the seam: x={} w={}",
+        frame.x,
+        frame.w
+    );
 }

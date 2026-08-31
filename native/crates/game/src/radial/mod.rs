@@ -79,6 +79,9 @@ pub enum Tool {
 pub enum SelectionOp {
     Push,
     Pull,
+    /// Flip between acting on one face and on every coplanar face of the room
+    /// (`0`). See `world::patch`.
+    ToggleScope,
     Delete,
     Grounded,
     Railings,
@@ -233,6 +236,10 @@ pub struct RadialCtx {
     pub has_selection: bool,
     /// A stair op is pending confirmation.
     pub pending_stair: bool,
+    /// Patch scope is on, and how many faces the current selection therefore covers
+    /// — printed live on the Selection ring so the scope is never invisible.
+    pub patch_scope: bool,
+    pub patch_len: usize,
     /// Which modal tool is armed, if any (drawn with the "on" accent).
     pub armed: Option<Tool>,
     /// What the stair/platform tools build with, so the Platform ring can say so
@@ -334,6 +341,16 @@ pub fn menu(id: MenuId, ctx: &RadialCtx) -> Vec<Slot> {
                     "\u{23ce}",
                     ctx.pending_stair,
                 ),
+                Slot::act(
+                    match (ctx.patch_scope, ctx.patch_len) {
+                        (true, 0) => "Scope: patch".to_string(),
+                        (true, n) => format!("Scope: patch ({n})"),
+                        (false, _) => "Scope: face".to_string(),
+                    },
+                    "0",
+                    EditorAction::Selection(SelectionOp::ToggleScope),
+                )
+                .on(ctx.patch_scope),
             ]
         }
         MenuId::Objects => PanelTab::ALL

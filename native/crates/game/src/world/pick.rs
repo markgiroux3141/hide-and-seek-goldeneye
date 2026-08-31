@@ -63,8 +63,13 @@ impl World {
     /// Whether the current selection covers the whole face (JS `isFullFace`) —
     /// i.e. no sub-rect has been scrolled in. Push/pull then resize the brush
     /// directly instead of spawning a sub-face brush.
+    ///
+    /// With patch scope on this asks about the whole **patch**, whose extent is the
+    /// bounding rect of every coplanar member: unscrolled means "move all of them",
+    /// and any scrolled-in rect means "carve one box over that rect" exactly as it
+    /// always did.
     pub(crate) fn is_full_face(&self) -> bool {
-        match self.selected_face_info() {
+        match self.selected_patch_info() {
             None => true,
             Some(info) => {
                 (self.sel_size_u <= 0.0 || self.sel_size_u >= info.u_size)

@@ -35,6 +35,11 @@ impl World {
             self.clear_draw_state();
             self.opening_tool = Some(kind);
             self.selected = None;
+            // The face pick is gone, so the sub-face carve it was growing must go too.
+            // Beyond tidiness: a live `active` op makes `patch_ids` collapse to the
+            // anchor (an in-progress carve is deliberately not a room), which would
+            // quietly cap this tool back to one brush.
+            self.reset_subface();
             if kind == OpeningKind::Hole {
                 self.hole_w = HOLE_WIDTH;
                 self.hole_h = HOLE_HEIGHT;
@@ -121,9 +126,15 @@ impl World {
 
         // Face UV bounds (JS `getFaceUVInfo`): the two axes orthogonal to the face
         // normal. The opening must fit within them.
+        //
+        // With patch scope on these are the bounds of the whole coplanar **patch**, not
+        // of the one brush the crosshair happens to be over — which is what lets a hole
+        // span a floor built from several carves. A room is decomposed into boxes for
+        // reasons the author never sees, and before this the hole tool silently capped
+        // itself at whichever box you were standing on. The cut itself is unchanged: it
+        // was always a single frame box, and a box does not care that it crosses a seam.
         let (u_axis, v_axis) = sel.axis.orthogonals();
-        let (u_min, u_max) = (brush.min(u_axis), brush.min(u_axis) + brush.dim(u_axis));
-        let (v_min, v_max) = (brush.min(v_axis), brush.min(v_axis) + brush.dim(v_axis));
+        let [u_min, u_max, v_min, v_max] = self.patch_bounds(sel)?;
         let (face_w, face_h) = (u_max - u_min, v_max - v_min);
 
         let (w, h) = match kind {

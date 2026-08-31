@@ -967,6 +967,8 @@ impl App {
             c.wave = w.wave_size();
             c.has_selection = w.has_selection();
             c.pending_stair = w.has_pending_stair();
+            c.patch_scope = w.patch_scope();
+            c.patch_len = w.patch_len();
             c.armed = armed_tool(w);
             let bs = w.build_style();
             c.platform_style = bs.platform;
@@ -1151,22 +1153,43 @@ impl App {
             }
             return;
         }
+        // Scope is a selection *setting*, not an edit: no geometry changes, so no
+        // undo step — but the highlight has to be redrawn, since flipping scope is
+        // exactly the moment the author needs to see what is now selected.
+        if op == SelectionOp::ToggleScope {
+            if let Some(world) = self.world.as_mut() {
+                world.toggle_patch_scope();
+            }
+            self.refresh_highlight();
+            return;
+        }
         let fine =
             self.input.key_down(KeyCode::ShiftLeft) || self.input.key_down(KeyCode::ShiftRight);
         let step = if fine { 1.0 } else { PUSH_PULL_STEP };
-        let rm = self.world.as_mut().and_then(|w| {
-            w.with_undo(|w| match op {
-                SelectionOp::Push => w.push(step),
-                SelectionOp::Pull => w.pull(step),
-                SelectionOp::Delete => w.delete_selected(),
-                SelectionOp::Grounded => w.toggle_grounded_key(),
-                SelectionOp::Railings => w.toggle_railings_key(),
-                SelectionOp::ConfirmStairs => w.confirm_stairs(),
-                SelectionOp::StairUp | SelectionOp::StairDown => None,
+        // `with_undo_many`, because a patch push/pull can touch brushes in more than
+        // one region and every changed region has to be re-uploaded — returning only
+        // the first left the rest on screen as stale geometry.
+        let rms = self
+            .world
+            .as_mut()
+            .map(|w| {
+                w.with_undo_many(|w| match op {
+                    SelectionOp::Push => w.push(step),
+                    SelectionOp::Pull => w.pull(step),
+                    SelectionOp::Delete => w.delete_selected().into_iter().collect(),
+                    SelectionOp::Grounded => w.toggle_grounded_key().into_iter().collect(),
+                    SelectionOp::Railings => w.toggle_railings_key().into_iter().collect(),
+                    SelectionOp::ConfirmStairs => w.confirm_stairs().into_iter().collect(),
+                    SelectionOp::ToggleScope
+                    | SelectionOp::StairUp
+                    | SelectionOp::StairDown => Vec::new(),
+                })
             })
-        });
-        if let Some(rm) = rm {
-            self.upload(&rm);
+            .unwrap_or_default();
+        if !rms.is_empty() {
+            for rm in &rms {
+                self.upload(rm);
+            }
             // The selected face moved with the edit — redraw its highlight.
             self.refresh_highlight();
         }
@@ -6358,6 +6381,22 @@ impl App {
         }
         if code == KeyCode::KeyK {
             self.apply(EditorAction::ArmTool(Tool::BlockStairs));
+            return;
+        }
+        // `0` flips the selection between one face and the whole coplanar patch of the
+        // room it belongs to (`world::patch`). A toggle rather than a held modifier
+        // because the gesture it has to survive is scroll-a-sub-rect *then* push, which
+        // a held key cannot span; the highlight draws the live scope, so a persistent
+        // mode is still visible rather than modal.
+        //
+        // `0` and not the obvious `Tab`: egui-winit consumes Tab **unconditionally** to
+        // move widget focus ("hence Tab always consumes", its own comment), so a Tab
+        // binding here can never fire. `0` sits beside the `-`/`=` it belongs with, and
+        // is the one digit `digit_char` leaves free — 1-9 are the theme hotkeys.
+        if matches!(code, KeyCode::Digit0 | KeyCode::Numpad0)
+            && self.world.as_ref().map(|w| w.is_build()).unwrap_or(false)
+        {
+            self.apply(EditorAction::Selection(SelectionOp::ToggleScope));
             return;
         }
         if matches!(code, KeyCode::KeyF | KeyCode::KeyV | KeyCode::KeyX | KeyCode::Delete) {

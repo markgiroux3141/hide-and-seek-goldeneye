@@ -640,6 +640,11 @@ struct FaceCandidate {
 /// Every coplanar, co-facing, contiguous subtract face reachable from `start`'s, as
 /// in-plane integer rects `[u0, u1, v0, v1]`. Always contains at least `start`'s own.
 ///
+/// See also `world::patch`, which answers a near-identical question for push/pull and
+/// the opening tools and deliberately differs on frames (it stops at a doorway, this
+/// does not). That module's header lists all three differences; if the two are ever
+/// unified, the frame rule is the thing to reconcile first.
+///
 /// **This is the difference between a brush's face and the surface the author sees.** A
 /// room enlarged by pushing a wall out, or extended by carving an adjoining area, is two
 /// or more subtract brushes whose floors are one continuous plane with an invisible seam
