@@ -163,9 +163,21 @@ impl World {
             return None;
         }
         let Some((sel, hit_wt)) = self.pick_face_hit() else {
-            // Either the ray reached nothing, or it landed somewhere no *brush* face
-            // explains — the shell's own skin, most often, which is not authorable.
-            self.opening_refusal = Some("nothing under the crosshair".into());
+            // `pick_face_hit` already looks *through* surfaces no brush explains, so
+            // reaching here means either the ray found nothing at all or it ran out of
+            // skips. Name which, and where, because those want different answers from
+            // the author and are indistinguishable from an empty screen.
+            let raw = self.physics.raycast(self.camera.pos, self.camera.forward(), 100.0);
+            self.opening_refusal = Some(match raw {
+                None => "the crosshair is pointing at nothing".into(),
+                Some(h) => {
+                    let p = h.point / WORLD_SCALE;
+                    format!(
+                        "no editable face along that ray (nearest surface {:.0},{:.0},{:.0} WT)",
+                        p.x, p.y, p.z
+                    )
+                }
+            });
             return None;
         };
         if kind == OpeningKind::Door && sel.axis == Axis::Y {
@@ -374,7 +386,7 @@ mod refusal_tests {
     /// shell'''s own skin, which is no longer drawn and resolves to no brush face: it
     /// would otherwise be an invisible surface refusing for invisible reasons.
     #[test]
-    fn aiming_at_nothing_reports_nothing_under_the_crosshair() {
+    fn aiming_at_nothing_says_the_crosshair_is_on_nothing() {
         let mut w = World::new();
         w.initial_meshes();
         w.door_tool_key();
@@ -385,7 +397,7 @@ mod refusal_tests {
         assert!(w.update_door_preview().is_none(), "there is nothing out here");
         let status = w.build_status().expect("armed");
         assert!(
-            status.contains("nothing under the crosshair"),
+            status.contains("pointing at nothing"),
             "the strip names the empty aim: {status}"
         );
     }
