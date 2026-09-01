@@ -44,6 +44,23 @@ pub(crate) struct LevelSnapshot {
     next_brush_id: u32,
     next_platform_id: u32,
     next_run_id: u32,
+    // ── The level's identity ──
+    //
+    // Everything below is saved data that is **not** geometry, and it was missing from
+    // this snapshot until `New level` arrived. The gap was invisible while every
+    // undoable edit was a geometry edit: those five fields never changed, so never
+    // needing to be restored looked like not needing to be captured.
+    //
+    // Load broke that quietly — `load_level_file` snapshots and commits so that an
+    // accidental Load is one Ctrl+Z from being undone, and that undo brought the
+    // brushes back with the name blanked, the theme hotkeys gone and the ambient light
+    // reset to default. `New level` makes it routine rather than rare, which is what
+    // finally paid for the fix. Undo restores the level, not just its shape.
+    level_name: String,
+    ambient: crate::ecs::AmbientSettings,
+    theme_hotkeys: std::collections::BTreeMap<char, String>,
+    platforms_are_floors: bool,
+    play: PlayConfig,
 }
 
 impl World {
@@ -65,6 +82,11 @@ impl World {
             next_brush_id: self.next_brush_id,
             next_platform_id: self.next_platform_id,
             next_run_id: self.next_run_id,
+            level_name: self.level_name.clone(),
+            ambient: self.ambient,
+            theme_hotkeys: self.theme_hotkeys.clone(),
+            platforms_are_floors: self.platforms_are_floors,
+            play: self.play.clone(),
         }
     }
 
@@ -179,6 +201,14 @@ impl World {
         self.next_brush_id = snap.next_brush_id;
         self.next_platform_id = snap.next_platform_id;
         self.next_run_id = snap.next_run_id;
+        self.level_name = snap.level_name;
+        self.ambient = snap.ambient;
+        self.theme_hotkeys = snap.theme_hotkeys;
+        self.play = snap.play;
+        // **Before `rebuild_from_flat` below**, exactly as in `apply_level`: the wall
+        // band probe reads this during the bake, so restoring it afterwards would bake
+        // the walls against the *previous* level's answer.
+        self.platforms_are_floors = snap.platforms_are_floors;
 
         // Any selection / armed tool may point at geometry the snapshot lacks.
         self.reset_edit_state_for_load();

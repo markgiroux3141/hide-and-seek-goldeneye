@@ -7,6 +7,49 @@ use engine::geometry::structures::Edge;
 
 use super::builder::{BuiltLevel, LevelBuilder, RoomId};
 
+/// **The editor's opening room** — the seed behind `New level → Starter room`, and the
+/// room [`crate::world::World::new`] itself boots into.
+///
+/// This is the room the editor has always started in, lifted out of the `World`
+/// constructor so it can be laid down *again*, on demand, instead of existing once at
+/// boot and never being reachable afterwards. 24 × 24 WT footprint, 16 WT (4 m)
+/// interior, floor at 0, ingress marker at its centre — and that centre is exactly
+/// `world::SPAWN_MARKER_POS`, which a test in `world::tests` pins.
+///
+/// The scheme is set explicitly because the two ways of making a brush disagree about
+/// their default: [`LevelBuilder`] carves with `cur_scheme` (0), while `Brush::new`
+/// takes `textures::default_scheme()`, a *runtime* registry index. They happen to agree
+/// today, and a seed whose whole job is to reproduce a hand-built brush cannot rest on
+/// a coincidence.
+pub fn starter_room() -> BuiltLevel {
+    let mut b = LevelBuilder::new();
+    b.set_scheme(engine::render::textures::default_scheme());
+    b.room("start", 0.0, 0.0, 24.0, 24.0, 0.0, 16.0);
+    // 12 WT = 3 m: the room's horizontal centre, and `world::SPAWN_MARKER_POS`.
+    b.spawn_wt(12.0, 0.0, 12.0);
+    b.finish()
+}
+
+/// **Nothing at all** — the seed behind `New level → Empty`, for laying the first room
+/// out with the room plan tool instead of carving it from inside one that already
+/// exists.
+///
+/// A level with no brushes is already legal everywhere it matters: `rebuild_from_flat`
+/// clears the region list outright, the plan tool's `level_bounds_m` falls back to ±4 m
+/// and its drafting plane to y = 0, and `toggle_mode` refuses HUNT with no floor under
+/// the camera. So this is genuinely empty rather than nearly-empty — no marker brush,
+/// no floor plate, nothing to delete before you start.
+///
+/// It keeps the same ingress marker as [`starter_room`] rather than dropping it at the
+/// origin: it is the fallback the hunt uses when a level authored no spawn pads, and a
+/// first room drawn near where the plan tool frames is far more likely to contain 3 m
+/// in than 0.
+pub fn empty() -> BuiltLevel {
+    let mut b = LevelBuilder::new();
+    b.spawn_wt(12.0, 0.0, 12.0);
+    b.finish()
+}
+
 /// **PD simulant lab** — the arena for `PD_LAB=1` (see `world::pd_lab`).
 ///
 /// Deliberately boring geometry, because the point is to watch one behaviour in

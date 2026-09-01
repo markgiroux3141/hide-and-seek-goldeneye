@@ -29,6 +29,7 @@
 //!   or by opening the ring when the cursor was already free.
 
 use crate::app::PanelTab;
+use crate::world::persist::LevelSeed;
 use engine::geometry::csg_runtime::StairShell;
 use engine::geometry::structures::PlatformStyle;
 
@@ -113,6 +114,9 @@ pub enum EditorAction {
     /// Load / save a numbered quick-slot.
     LoadSlot(u8),
     SaveSlot(u8),
+    /// Throw the open level away and start a new one from the given seed. Undoable like
+    /// a load, and the level it replaces keeps its file — the new one has none.
+    NewLevel(LevelSeed),
     /// Save the open level back to its own file (`Ctrl+S`). A level that has never been
     /// written has no file to save to, and the panel says so instead of guessing a name.
     SaveCurrentLevel,
@@ -433,6 +437,23 @@ pub fn menu(id: MenuId, ctx: &RadialCtx) -> Vec<Slot> {
                     .enabled(ctx.ctrl || used)
                     .on(used)
             }));
+            // **Appended after the eight slots, and deliberately not a submenu.** A
+            // two-slot ring under `Level` would be the second nesting in the whole menu,
+            // and nesting here is rationed on purpose — `Root → Tools → Platform` is the
+            // one path that earns it (a five-entry system), which
+            // `nesting_stops_at_the_platform_ring` pins. Appending is also the rule the
+            // `Tools` ring already documents: a fixed layout is the value of a radial, so
+            // new entries go on the end where nothing already-learned has to move.
+            v.push(Slot::act(
+                format!("New: {}", LevelSeed::StarterRoom.label().to_lowercase()),
+                "Ctrl+N",
+                EditorAction::NewLevel(LevelSeed::StarterRoom),
+            ));
+            v.push(Slot::act(
+                format!("New: {}", LevelSeed::Empty.label().to_lowercase()),
+                "",
+                EditorAction::NewLevel(LevelSeed::Empty),
+            ));
             v
         }
         MenuId::View => vec![

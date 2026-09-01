@@ -24,6 +24,7 @@ use engine::render::renderer::{EguiFrame, Renderer};
 use crate::gamepad::N64Pad;
 use engine::render::camera::ViewAxis;
 use crate::radial::{EditorAction, LockRequest, Radial, RadialCtx, SelectionOp, Tool};
+use crate::world::persist::LevelSeed;
 use crate::world::{World, PUSH_PULL_STEP};
 use engine::geometry::csg_runtime::{Axis, FaceTex, Side};
 
@@ -807,6 +808,80 @@ impl App {
         true
     }
 
+    /// **Start a new level** from `seed`, throwing away whatever is open.
+    ///
+    /// Undoable, and deliberately with no "discard changes?" prompt in the way:
+    /// [`load_level_file`](Self::load_level_file) established that convention — snapshot,
+    /// replace, commit, so an accidental one is a single `Ctrl+Z` from being undone — and
+    /// a New is the same gesture carrying the same risk. A modal here would be the only
+    /// one in the editor.
+    ///
+    /// **Clearing `current_level` is the load-bearing line.** Without it the world is new
+    /// but the open-file pointer still names the level it replaced, and the very next
+    /// `Ctrl+S` writes the new empty level straight over that file. With it, the LEVELS
+    /// tab reads "never saved" and Save is disabled until Save As gives the level a file
+    /// of its own — which is the same state the editor boots into.
+    ///
+    /// The one thing `Ctrl+Z` does not bring back is that file identity: the level itself
+    /// returns whole (`LevelSnapshot` carries the name, ambient, theme keys, banding and
+    /// match setup), but it comes back with no file behind it, so `Ctrl+S` says so and
+    /// Save As is the way home. Putting `current_level` into the world's undo history
+    /// would mean the app's file bookkeeping riding inside the level's edit history — a
+    /// worse trade than one honest refusal.
+    fn new_level(&mut self, seed: LevelSeed) {
+        let meshes = match self.world.as_mut() {
+            Some(world) => {
+                // Committed only once it succeeds, exactly as a load is: a refusal (a
+                // live hunt) must not leave a dead step in the history.
+                let snap = world.snapshot();
+                match world.new_level(seed) {
+                    Ok(meshes) => {
+                        world.commit_snapshot(snap);
+                        meshes
+                    }
+                    Err(e) => {
+                        log::warn!("new level failed: {e}");
+                        self.level_status = format!("new level failed: {e}");
+                        return;
+                    }
+                }
+            }
+            None => return,
+        };
+        for rm in &meshes {
+            self.upload(rm);
+        }
+        // The selection was cleared by the replace — drop any lingering highlight.
+        self.refresh_highlight();
+        // No file, nothing selected on disk, and an empty name box to type into. The
+        // catalog row that *was* selected is dropped with it: Rename and Duplicate read
+        // the name field, and a cleared field against a still-selected row is a Rename
+        // that can only fail.
+        self.current_level = None;
+        self.level_sel = None;
+        self.level_confirm_delete = None;
+        self.level_name_draft.clear();
+        // Nothing has been authored *since* the New, so it is not unsaved-dirty yet —
+        // see `level_dirty`, which counts everything since the last save.
+        self.saved_revision = self.world.as_ref().map(|w| w.revision()).unwrap_or(0);
+        self.level_status = format!("new level — {}", seed.describe());
+        // Get out of the way. The panel is how a New is normally asked for (it is the
+        // editor's start screen), and leaving it covering the level you are about to
+        // build — or the empty plan you are about to draw on — is the wrong half of the
+        // screen to keep.
+        if self.props_open {
+            self.toggle_props();
+            // `toggle_props` hands the pointer lock back, which is wrong for a seed that
+            // armed the room plan tool: that tool needs a free cursor. `sync_room_cursor`
+            // reconciles once per *change*, and with the tool already armed before this
+            // New there is no change left for it to see — so re-arm the reconcile
+            // explicitly rather than relying on the transition.
+            if self.world.as_ref().is_some_and(|w| w.is_room_tool()) {
+                self.room_freed = false;
+            }
+        }
+    }
+
     /// Push the current selection's highlight quad to the renderer.
     fn refresh_highlight(&mut self) {
         if let (Some(world), Some(renderer)) = (self.world.as_ref(), self.renderer.as_mut()) {
@@ -1217,6 +1292,7 @@ impl App {
             EditorAction::LoadSlot(n) => self.load_slot(n),
             EditorAction::SaveSlot(n) => self.save_slot(n),
             EditorAction::SaveCurrentLevel => self.save_current_level(),
+            EditorAction::NewLevel(seed) => self.new_level(seed),
             EditorAction::ToggleGrid => {
                 if let Some(r) = self.renderer.as_mut() {
                     let grid = !r.is_grid_mode();
@@ -1861,6 +1937,7 @@ impl App {
         let mut level_select: Option<std::path::PathBuf> = None;
         let mut level_load: Option<std::path::PathBuf> = None;
         let mut level_delete_click: Option<std::path::PathBuf> = None;
+        let mut level_new: Option<LevelSeed> = None;
 
         let full_output = self.egui_ctx.run(raw_input, |ctx| {
             if shop_open {
@@ -2566,6 +2643,41 @@ impl App {
                                 );
                                 ui.add_space(6.0);
 
+                                // ── NEW. First row on the tab, because at boot there
+                                // is no open level and this is the only row that can
+                                // make one: this panel is the editor's start screen.
+                                ui.label(
+                                    egui::RichText::new("NEW")
+                                        .small()
+                                        .strong()
+                                        .color(SHOP_GOLD_DIM),
+                                );
+                                ui.horizontal(|ui| {
+                                    for seed in [LevelSeed::StarterRoom, LevelSeed::Empty] {
+                                        if ui
+                                            .add_sized(
+                                                [99.0, 26.0],
+                                                egui::Button::new(
+                                                    egui::RichText::new(seed.label()).strong(),
+                                                ),
+                                            )
+                                            .on_hover_text(seed.describe())
+                                            .clicked()
+                                        {
+                                            level_new = Some(seed);
+                                        }
+                                    }
+                                });
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Starts over \u{2014} no file, no name. What was \
+                                         open is one Ctrl+Z away.",
+                                    )
+                                    .small()
+                                    .color(SHOP_DIM),
+                                );
+                                ui.add_space(4.0);
+                                ui.separator();
                                 // ── What is open, and whether it is saved.
                                 ui.horizontal(|ui| {
                                     ui.label(
@@ -4119,6 +4231,11 @@ impl App {
                 self.level_status = "click Delete again to confirm".into();
             }
         }
+        // Last of the LEVELS operations, so nothing above can write back over the
+        // cleared name / selection / open-file pointer a New leaves behind.
+        if let Some(seed) = level_new {
+            self.new_level(seed);
+        }
         // Object panel: apply the selection (arms placement of that prop on the
         // World) + the close, after the `state` borrow ends.
         if let Some(sel) = new_prop_selected {
@@ -5266,21 +5383,10 @@ impl ApplicationHandler for App {
         // open level says. `set_play_config_default` rather than `set_play_config`: this
         // is what a level starts as, not an edit, so it must not raise the unsaved marker.
         //
-        // The difficulty is `HUNT_TIER`, not max: the dial selects a Perfect Dark zeroing
-        // tier rather than multiplying a hit probability, and max is DarkSim — no reaction
-        // delay, no aim error, kills on sight from across the room. The wave is a small
-        // pack, because the coordinated AI (flanking, squad suppression, cover) only reads
-        // with more than one hunter on the field; the code default stays at duel = 1 so
-        // the headless duel-mode tests are unaffected.
-        {
-            let mut play = world.play_config().clone();
-            play.difficulty = crate::world::pd_lab::dial_for_tier(
-                crate::world::pd_lab::HUNT_TIER,
-                crate::world::DIFFICULTY_MAX,
-            );
-            play.enemy_count = crate::world::PLAYTEST_WAVE_SIZE;
-            world.set_play_config_default(play);
-        }
+        // The numbers themselves moved out to `play_config::editor_default`, because
+        // `New level` needs exactly these: a new level that inherited the previous one's
+        // authored wave size and difficulty would not be new. One definition, two callers.
+        world.set_play_config_default(crate::world::play_config::editor_default());
         // `SCORE_LIMIT=n` — kills to win the round; `0` = endless, for an open-ended
         // observation run where you don't want the result screen interrupting.
         if let Ok(v) = std::env::var("SCORE_LIMIT") {
@@ -5298,6 +5404,11 @@ impl ApplicationHandler for App {
         for rm in world.initial_meshes() {
             renderer.set_region_textured(rm.id, &rm.mesh);
         }
+        // Whether the boot sequence opened a level of its own. Two env vars can, and
+        // when either does it outranks the start screen: you asked for that level, so
+        // landing on a panel over an empty world instead would be the same class of
+        // silent-override bug the roster flags fought below.
+        let mut booted_into_level = false;
         // PD simulant lab (`PD_LAB=1`): bake the bare lab room in-process, load it,
         // and switch every hunter onto the Perfect Dark bot model. See
         // `world::pd_lab` for what that swaps out. Press G to start the hunt.
@@ -5320,6 +5431,7 @@ impl ApplicationHandler for App {
                     // The tier is already the boot dial's (`HUNT_TIER`), so the lab
                     // inherits it and only `PD_LAB_DIFFICULTY=` changes it.
                     world.enable_pd_lab(cfg);
+                    booted_into_level = true;
                 }
                 Err(e) => log::error!("PD_LAB: could not build the lab room: {e}"),
             }
@@ -5401,6 +5513,7 @@ impl ApplicationHandler for App {
                     self.current_level = Some(crate::world::persist::slot_path(slot));
                     self.saved_revision = world.revision();
                     self.level_name_draft = world.level_name().to_string();
+                    booted_into_level = true;
                     log::info!("booted into level slot {slot}");
                 }
                 Err(e) => log::warn!("LOAD_SLOT {slot} failed: {e}"),
@@ -5510,13 +5623,44 @@ impl ApplicationHandler for App {
             world.attach_audio(audio);
         }
         log::info!(
-            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door(scroll=single/double)  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=block stairs[2 clicks, scroll=slide, Shift+scroll=width] F=ground V=rails X=del)  O\u{2192}TOOLS tab=platform/stair shell + stair slope  1-9=room texture  \\=grid/textured  Ctrl+S=save level  O=LEVELS panel(name/save as/load)  F1-F8=load slot  Ctrl+F1-F8=save slot  Y=proc-anim preview(Z=fire)  I=invincible  N=invisible  [/]=wave size  F10=hunter telemetry  J=hunters on/off  G=HUNT  M=shop menu (N64 Start)  [HUNT: click=fire  RMB=aim  B=use/open door  R=reload  Q=weapon  F=detonate mines]"
+            "click=grab/select  WASD+mouse=fly  scroll=size  +/-=carve/extend  B=door(scroll=single/double)  H=hole  P=pillar  R=brace  ↑/↓=stairs(Enter/Esc)  T=platform(select→drag gizmo to move/scale; C=connect K=block stairs[2 clicks, scroll=slide, Shift+scroll=width] F=ground V=rails X=del)  O\u{2192}TOOLS tab=platform/stair shell + stair slope  1-9=room texture  \\=grid/textured  Ctrl+S=save level  Ctrl+N=new level  O=LEVELS panel(new/name/save as/load)
+  F1-F8=load slot  Ctrl+F1-F8=save slot  Y=proc-anim preview(Z=fire)  I=invincible  N=invisible  [/]=wave size  F10=hunter telemetry  J=hunters on/off  G=HUNT  M=shop menu (N64 Start)  [HUNT: click=fire  RMB=aim  B=use/open door  R=reload  Q=weapon  F=detonate mines]"
         );
 
         window.request_redraw();
         self.window = Some(window);
         self.renderer = Some(renderer);
         self.world = Some(world);
+
+        // ── The start screen ──────────────────────────────────────────────────
+        //
+        // The editor used to open *inside* a room nobody asked for, with no way to get a
+        // clean level except deleting it. Now it opens on the question instead: an empty
+        // world, the room plan tool armed on its grid, and the LEVELS panel up — New from
+        // either seed, or double-click any level on disk.
+        //
+        // This runs the **same verb the button runs** (`new_level`, via `EditorAction`),
+        // deliberately: the launch path is then the feature's own path, exercised on every
+        // single run, which is the cheapest regression net it could have. It also means
+        // `World::new`'s starter room is built and immediately replaced — one bake of one
+        // brush, and the constructor keeps that room because 130-odd headless tests are
+        // written against it.
+        //
+        // Skipped when `LOAD_SLOT` / `PD_LAB` already opened a level (see
+        // `booted_into_level`).
+        if !booted_into_level {
+            self.new_level(LevelSeed::Empty);
+            self.apply(EditorAction::OpenPanel(PanelTab::Levels));
+            self.level_status = "new level — pick a start, or open one below".into();
+            // **Free cursor, stated outright.** Opening the panel already asks for one,
+            // but the start screen is a thing to *click*, and the editor's default
+            // posture is a grabbed pointer aiming a crosshair — so this is asserted here
+            // rather than inherited, and the boot sequence has one obvious line saying
+            // the session begins with a mouse rather than a reticle.
+            self.set_pointer_lock(false);
+        }
+
+
         // The FrameClock lazily initializes its timing on the first
         // `begin_frame`/`pace`, so there's nothing to seed here.
     }
@@ -6031,8 +6175,19 @@ impl ApplicationHandler for App {
                 }
                 if pad_actions.just_connected {
                     // Drop straight into gameplay — no mouse click needed to grab.
-                    self.set_pointer_lock(true);
+                    //
+                    // **Unless a panel owns the screen**, which is the same rule
+                    // `sync_room_cursor` follows: a panel took the cursor for itself and
+                    // is unclickable without it. This used to fire unconditionally, and
+                    // with a pad plugged in it fires on the *first frame of the session*
+                    // — which was invisible while the editor booted into a room with
+                    // nothing to click, and became "the start screen ignores my mouse
+                    // until I press Esc" the moment boot opened a panel.
+                    if !self.props_open && !self.shop_open {
+                        self.set_pointer_lock(true);
+                    }
                 }
+
                 if pad_actions.menu {
                     self.toggle_shop();
                 }
@@ -6609,6 +6764,21 @@ impl App {
                 EditorAction::LoadSlot(slot)
             });
             return;
+        }
+        // Ctrl+N starts a new level from the starter room — the direct verb, sitting with
+        // the other level-file keys rather than behind the panel, for the same reason
+        // Ctrl+S does. It is one seed and a key can only mean one thing: the *empty* seed
+        // is on the radial's NEW LEVEL ring and on the LEVELS tab, both of which can ask
+        // which. Checked ahead of the bare `N` (invisibility), which it falls through to
+        // with Ctrl up.
+        if code == KeyCode::KeyN {
+            let ctrl = self.input.key_down(KeyCode::ControlLeft)
+                || self.input.key_down(KeyCode::ControlRight);
+            let build = self.world.as_ref().map(|w| w.is_build()).unwrap_or(false);
+            if ctrl && build {
+                self.apply(EditorAction::NewLevel(LevelSeed::StarterRoom));
+                return;
+            }
         }
         // Ctrl+S saves the open level back to its own file. Sits with the other
         // save/load keys (works grabbed or not) rather than behind the panel, because

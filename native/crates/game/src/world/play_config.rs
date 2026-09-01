@@ -319,6 +319,33 @@ impl PlayConfig {
     }
 }
 
+/// **The match setup a level starts with when nothing has said otherwise** — the app's
+/// boot default, and what `New level` installs.
+///
+/// These two values used to be computed inline in `App::new` and pushed into the world
+/// as a pair of boot pins, which made them unreachable to anything else. `New level`
+/// needs exactly the same numbers: the previous level's authored config is still
+/// installed when you start a new one, and a new level that inherits the last one's
+/// wave size and difficulty is not new. So the boot default became a function, and both
+/// callers ask for it.
+///
+/// The difficulty is [`pd_lab::HUNT_TIER`], not the max: the dial selects a Perfect Dark
+/// zeroing tier rather than multiplying a hit probability, and max is DarkSim — no
+/// reaction delay, no aim error, kills on sight from across the room. The wave is a
+/// small pack, because the coordinated AI (flanking, squad suppression, cover) only
+/// reads with more than one hunter on the field. `PlayConfig::default`'s own duel of 1
+/// stays as it is, so the headless duel-mode tests are unaffected.
+pub fn editor_default() -> PlayConfig {
+    PlayConfig {
+        difficulty: crate::world::pd_lab::dial_for_tier(
+            crate::world::pd_lab::HUNT_TIER,
+            crate::world::DIFFICULTY_MAX,
+        ),
+        enemy_count: crate::world::PLAYTEST_WAVE_SIZE,
+        ..PlayConfig::default()
+    }
+}
+
 // ─── Applying it ──────────────────────────────────────────────────────────────
 
 impl World {

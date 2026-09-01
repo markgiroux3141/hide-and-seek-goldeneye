@@ -35,9 +35,17 @@ use engine::render::camera::{OrthoCamera, ViewAxis};
 use super::super::*;
 use super::draw::{axis_lock, overlap, rect_decompose, segment_self_intersects, Overlap};
 
-/// Default height of a fresh room, in WT. Matches the height of the level the editor
-/// boots into, which is the only "known good" room dimension in the codebase.
-const ROOM_DEFAULT_HEIGHT: f32 = 8.0;
+/// Default interior height of a fresh room, in WT — matching the starter room
+/// ([`crate::levelgen::designs::starter_room`]), which is the only "known good" room
+/// dimension in the codebase.
+///
+/// **This was 8.** The comment claimed it matched the room the editor boots into and it
+/// did not: that room is 16 WT (4 m) tall, and `room_height` is used as a full height,
+/// not a half-extent — so every plan-drawn room came out at 2 m, half the height of the
+/// one room the editor could show you for comparison. The two numbers only ever landed
+/// next to each other when the starter room was lifted out into a seed both the
+/// constructor and `New level` share.
+const ROOM_DEFAULT_HEIGHT: f32 = 16.0;
 
 /// Clamp on the extrude, in WT, in either direction — a runaway-scroll guard rather
 /// than a design limit (mirrors `draw::DRAW_DEPTH_MAX`).
@@ -984,6 +992,30 @@ mod tests {
         w.room_height = height;
         click(w, corners[0].0, corners[0].1); // commit
         added(w, first)
+    }
+
+    /// **The whole point of an empty level**: the plan tool has to work with no geometry
+    /// to frame, no floor to start the drafting plane on and no shell to draw against.
+    ///
+    /// It already did, which is what made `New level → Empty` cheap — `level_bounds_m`
+    /// falls back to ±4 m around the origin, `nearest_floor_y` to 0, and
+    /// `rebuild_from_flat` treats an empty brush list as "no regions" rather than a
+    /// degenerate one. This pins all three at once, from the seed the editor now boots
+    /// into: draw a rectangle on nothing and get the level's first room.
+    #[test]
+    fn a_room_can_be_drawn_on_a_level_with_no_geometry_at_all() {
+        let mut w = World::new();
+        w.new_level(crate::world::persist::LevelSeed::Empty)
+            .expect("new empty level");
+        assert!(w.regions.is_empty(), "nothing to start from");
+        assert!(w.is_room_tool(), "and the plan tool armed itself");
+
+        let built = build_room(&mut w, &[(0, 0), (16, 0), (16, 12), (0, 12)], 0.0, 16.0);
+
+        assert_eq!(built.len(), 1, "one rectangle carves one subtract brush");
+        assert_eq!(w.regions.len(), 1, "which clusters into the level's first region");
+        assert_eq!(built[0].op, Op::Subtract, "a room is carved air");
+        assert_eq!(built[0].h, ROOM_DEFAULT_HEIGHT, "at the starter room's height");
     }
 
     // ─── Outline validity ────────────────────────────────────────────────────

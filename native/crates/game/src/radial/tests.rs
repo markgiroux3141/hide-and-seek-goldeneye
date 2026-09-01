@@ -273,6 +273,54 @@ fn ctrl_turns_the_level_ring_from_load_into_save() {
     assert!(save[LEVEL_RING_HEAD + 1].label.contains("SAVE"));
 }
 
+/// The two `New level` seeds sit at the **end** of the LEVEL ring, and the eight quick
+/// slots have not moved to make room for them.
+///
+/// Both halves matter. Found by label rather than index, because a hard-coded slot
+/// number turns every future addition into a spurious failure; and asserted to be past
+/// `LEVEL_RING_HEAD + 8`, because a fixed layout is the whole value of a radial — an
+/// entry inserted mid-ring moves every slot after it under fingers that already know
+/// where they are.
+///
+/// They are also flat chips rather than a `New level ▸` submenu, which
+/// `nesting_stops_at_the_platform_ring` is the other half of: nesting here is rationed,
+/// and a two-entry ring does not earn the second one.
+#[test]
+fn the_level_ring_ends_with_the_two_new_level_seeds() {
+    let c = ctx();
+    let ring = menu(MenuId::Level, &c);
+    assert_eq!(ring.len(), LEVEL_RING_HEAD + 8 + 2, "head, eight slots, two seeds");
+
+    let seeds: Vec<&Slot> = ring
+        .iter()
+        .filter(|s| s.label.starts_with("New: "))
+        .collect();
+    assert_eq!(seeds.len(), 2, "one chip per seed");
+    assert_eq!(
+        seeds[0].target,
+        Target::Act(EditorAction::NewLevel(LevelSeed::StarterRoom))
+    );
+    assert_eq!(
+        seeds[1].target,
+        Target::Act(EditorAction::NewLevel(LevelSeed::Empty))
+    );
+    assert_eq!(seeds[0].hint, "Ctrl+N", "the key is on the seed it starts");
+
+    // Past the quick slots, so nothing already-learned moved.
+    let first_seed = ring.iter().position(|s| s.label.starts_with("New: ")).unwrap();
+    assert!(first_seed >= LEVEL_RING_HEAD + 8);
+
+    // And Ctrl (which flips the slots from load to save) leaves them alone.
+    let mut c = ctx();
+    c.ctrl = true;
+    let ring = menu(MenuId::Level, &c);
+    assert_eq!(
+        ring.iter().filter(|s| s.label.starts_with("New: ")).count(),
+        2,
+        "a New is a New with Ctrl held — Ctrl+N is the same verb"
+    );
+}
+
 /// The named level leads the LEVEL ring, and its Save is dead until the level has a
 /// file to save to — the ring must not offer a save that can only fail.
 #[test]
