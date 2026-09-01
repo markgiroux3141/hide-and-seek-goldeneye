@@ -2623,6 +2623,14 @@ pub struct World {
     // ─── Room plan tool (see `world::tools::room`) ─────────────────────────────
     /// The room tool's phase, or `None` when the tool is off. Mutually exclusive with
     /// every other modal tool — this one also takes the camera and the cursor.
+    /// Why the opening (door/hole) tool is showing no ghost right now, for the BUILD
+    /// status strip. `None` = it is placing fine, or is not armed.
+    ///
+    /// A tool that refuses in silence is indistinguishable from a broken one — which
+    /// is exactly how a doorway that would not preview got reported as a bug. Every
+    /// `None` path out of `resolve_opening_placement` now leaves its reason here.
+    opening_refusal: Option<String>,
+
     room_phase: Option<RoomPhase>,
     /// The footprint's corners, in **integer** world `(x, z)` WT.
     ///
@@ -3213,6 +3221,7 @@ impl World {
             draw_rects: Vec::new(),
             draw_candidate: 0,
             draw_depth: 0.0,
+            opening_refusal: None,
             room_phase: None,
             room_verts: Vec::new(),
             room_cursor: None,

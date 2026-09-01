@@ -1678,9 +1678,10 @@ impl App {
         // Object-placement panel snapshot + deferred outputs (same borrow discipline
         // as the shop: read state up front, collect the pick/close, apply after).
         let props_open = self.props_open;
-        // The room plan tool's read-out, snapshotted like everything else the egui
-        // closure shows (it can't also hold a `&World`). `None` unless it is armed.
-        let room_status = self.world.as_ref().and_then(|w| w.room_status());
+        // The armed tool's read-out, snapshotted like everything else the egui closure
+        // shows (it can't also hold a `&World`). `None` unless a tool has something to
+        // say.
+        let room_status = self.world.as_ref().and_then(|w| w.build_status());
         let prop_sel = self.props_selected;
         let prop_selected = self.world.as_ref().map(|w| w.selected_prop().is_some()).unwrap_or(false);
         let placing_prop = self.world.as_ref().map(|w| w.is_placing_prop()).unwrap_or(false);
@@ -2041,10 +2042,10 @@ impl App {
                 });
             } // end if shop_open
 
-            // The room plan tool's status strip. BUILD has no HUD of its own (the
-            // quad HUD is HUNT-only), and this tool has numeric state — which storey
-            // the drafting plane is on, how tall the room will be — that is guesswork
-            // without a read-out.
+            // The armed tool's status strip. BUILD has no HUD of its own (the quad HUD
+            // is HUNT-only), so this is the only place a tool can say what it is waiting
+            // for — the room tool's storey and height, or the reason the door tool is
+            // showing no ghost.
             //
             // `interactable(false)` is load-bearing: an ordinary egui window under the
             // pointer would swallow the clicks that place corners, and the strip sits

@@ -566,7 +566,16 @@ impl World {
 
     // ─── Read-out ────────────────────────────────────────────────────────────
 
-    /// One line describing what the tool is waiting for, for the HUD / logs.
+    /// The BUILD status strip's line: whichever armed tool has something to say.
+    ///
+    /// BUILD has no HUD of its own (the quad HUD is HUNT-only), so this one egui strip
+    /// is the whole channel — which is why it is worth sharing rather than letting each
+    /// tool grow its own.
+    pub fn build_status(&self) -> Option<String> {
+        self.room_status().or_else(|| self.opening_status())
+    }
+
+    /// One line describing what the room tool is waiting for.
     pub fn room_status(&self) -> Option<String> {
         let phase = self.room_phase?;
         let view = match self.room_view() {
@@ -1682,3 +1691,4 @@ mod merge_tests {
         assert_meshes_account_for_every_region(&w, &before, &meshes);
     }
 }
+
