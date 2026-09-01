@@ -885,6 +885,12 @@ pub(crate) const PD_TEMPLATE_CLIPS: &[&str] = &[
 ///
 /// Authored pads are the normal case; see `world::tools::spawn_point`.
 pub(crate) const SPAWN_MARKER_POS: Vec3 = Vec3::new(3.0, 0.0, 3.0);
+/// Where the fly camera stands in a **freshly seeded starter room** — its horizontal
+/// centre, eye height, looking toward −Z. Used by the constructor and by
+/// `New level → Starter room`, which has to put the camera *inside* the room it just
+/// laid down: the camera is not level data, so nothing else would move it, and a New
+/// from across a big level would otherwise leave you looking at solid rock.
+pub(crate) const STARTER_ROOM_CAM: Vec3 = Vec3::new(3.0, 1.5, 3.0);
 /// Radius (m) of the ring bodies cluster into when several draw the **same** pad, so
 /// they don't all stack on one cell. (With one pad in the pool this reproduces the old
 /// fixed-marker ring exactly.)
@@ -2750,15 +2756,20 @@ impl Default for World {
 impl World {
     /// One room to start with: a single subtractive brush inside an auto-shell —
     /// the editor's opening move. Camera spawns inside, facing the −Z wall.
+    ///
+    /// The room is [`crate::levelgen::designs::starter_room`], the **same seed** the
+    /// `New level → Starter room` verb lays down ([`World::new_level`]). One definition,
+    /// two callers: before that, the opening room existed only as these few lines inside
+    /// the constructor, so it could never be laid down a second time.
     pub fn new() -> Self {
+        let seed = crate::levelgen::designs::starter_room();
         let mut region = Region::new(0);
-        // Room cavity in WT: 24 × 16 × 24 → 6 × 4 × 6 m.
-        region
-            .brushes
-            .push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 24.0, 16.0, 24.0));
+        region.brushes.extend_from_slice(&seed.brushes);
+        let brush_to_region: std::collections::HashMap<u32, u32> =
+            seed.brushes.iter().map(|b| (b.id, 0u32)).collect();
 
         // Spawn at the room's horizontal center, ~1.5 m up, looking toward −Z.
-        let camera = FlyCamera::new(Vec3::new(3.0, 1.5, 3.0), 0.0, 0.0);
+        let camera = FlyCamera::new(STARTER_ROOM_CAM, 0.0, 0.0);
 
         // Load every character body in the catalog (a warning, not a panic, per body
         // if an asset is missing — the editor still runs without them). Index 0 is
@@ -3146,11 +3157,11 @@ impl World {
             pins: play_config::PlayPins::default(),
             player_respawn: 0.0,
             spawn_pads: Vec::new(),
-            spawn_point: SPAWN_MARKER_POS,
+            spawn_point: seed.spawn,
             search_points: Vec::new(),
             regions: vec![region],
-            // The opening room is region 0, owning brush 1.
-            brush_to_region: std::collections::HashMap::from([(1u32, 0u32)]),
+            // The opening room is region 0, owning every brush the seed carved.
+            brush_to_region,
             next_region_id: 1,
             csg_cache: regions::CsgCache::new(),
             selected: None,
@@ -3213,7 +3224,7 @@ impl World {
             sel_bounds: None,
             active: None,
             pending_stair: None,
-            next_brush_id: 2,
+            next_brush_id: seed.next_brush_id,
             draw_phase: None,
             draw_face: None,
             draw_verts: Vec::new(),

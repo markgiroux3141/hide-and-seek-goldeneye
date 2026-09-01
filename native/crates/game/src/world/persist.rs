@@ -427,6 +427,39 @@ fn delete_level_fenced(path: &Path, fence: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// What a **new level** starts as — the choice behind `New level`.
+///
+/// Two seeds, because they answer the only two questions a fresh level asks. A starter
+/// room is a place to stand and start carving, the way the editor has always opened. An
+/// empty level is a blank plan for the room plan tool to lay a footprint on, which is
+/// the whole reason this exists: before it, the only way to reach an empty level was to
+/// delete the room the editor booted into.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum LevelSeed {
+    /// [`crate::levelgen::designs::starter_room`] — the room the editor boots into.
+    StarterRoom,
+    /// [`crate::levelgen::designs::empty`] — no geometry, room plan tool armed.
+    Empty,
+}
+
+impl LevelSeed {
+    /// The seed's name, for a button and a log line.
+    pub fn label(self) -> &'static str {
+        match self {
+            LevelSeed::StarterRoom => "Starter room",
+            LevelSeed::Empty => "Empty",
+        }
+    }
+
+    /// What the seed leaves you looking at — the hover text, and the log line.
+    pub fn describe(self) -> &'static str {
+        match self {
+            LevelSeed::StarterRoom => "one 6 × 4 × 6 m room, camera inside it",
+            LevelSeed::Empty => "no geometry — the room plan tool, on an empty plan",
+        }
+    }
+}
+
 impl World {
     /// This level's display name ("Bunker Base"), or empty if it has never been named.
     pub fn level_name(&self) -> &str {
@@ -587,6 +620,60 @@ impl World {
             self.platforms.len(),
             self.stair_runs.len()
         );
+        Ok(meshes)
+    }
+
+    /// **Start a new level.** Replaces whatever is open with `seed`'s geometry and
+    /// resets everything that makes a level *that particular* level: its name, its
+    /// ambient light, its theme hotkeys, its wall banding, its props, and its match
+    /// setup.
+    ///
+    /// Routed through [`load_built_level`](Self::load_built_level), so a new level takes
+    /// the same path a loaded one does — one re-partition, one re-bake, and a mesh per
+    /// surviving region plus an empty clear for every region id that has just been
+    /// retired, which is what stops the previous level's geometry drawing on. It
+    /// inherits that path's BUILD-only refusal too.
+    ///
+    /// **The match setup has to be re-installed here.** `load_built_level` passes
+    /// `play: None` on purpose — a generated level says nothing about the match, so
+    /// whatever the caller configured stands, which is right for the PD lab and for the
+    /// headless harness. For a *new* level it is a leak: the previous level's authored
+    /// wave size and difficulty would still be installed, and a new level that plays
+    /// like the last one is not new. So the editor's own default goes back in
+    /// ([`play_config::editor_default`]), as a default rather than an edit — a level
+    /// nobody has touched yet must not read as unsaved.
+    ///
+    /// **The camera is not level data**, so nothing in the load path moves it, and each
+    /// seed needs it put somewhere it can work from:
+    ///   * a starter room puts the fly camera back inside the room it just laid down
+    ///     (otherwise a New from across a large level leaves you inside solid rock);
+    ///   * an empty level arms the room plan tool, because an empty level has no
+    ///     geometry, no shell skin and therefore *nothing to see or click* — the plan
+    ///     tool's grid and drafting views are the only usable interface to one. Already
+    ///     armed is left alone rather than toggled off.
+    ///
+    /// The caller still owns the *file* identity: this leaves no path behind it, so the
+    /// app must clear the open-file pointer or the next `Ctrl+S` writes a brand-new
+    /// level over the file of the one it replaced. See `App::new_level`.
+    pub fn new_level(&mut self, seed: LevelSeed) -> io::Result<Vec<RegionMesh>> {
+        let built = match seed {
+            LevelSeed::StarterRoom => crate::levelgen::designs::starter_room(),
+            LevelSeed::Empty => crate::levelgen::designs::empty(),
+        };
+        let meshes = self.load_built_level(&built)?;
+        self.set_play_config_default(play_config::editor_default());
+        match seed {
+            LevelSeed::StarterRoom => {
+                self.clear_room_state();
+                self.camera = FlyCamera::new(STARTER_ROOM_CAM, 0.0, 0.0);
+            }
+            LevelSeed::Empty => {
+                if !self.is_room_tool() {
+                    self.room_tool_key();
+                }
+            }
+        }
+        log::info!("new level — {}", seed.describe());
         Ok(meshes)
     }
 
@@ -1519,5 +1606,171 @@ mod tests {
         let before_undo = world.revision();
         world.undo().expect("undo the recorded edit");
         assert!(world.revision() > before_undo);
+    }
+
+    // ─── New level ────────────────────────────────────────────────────────────
+    //
+    // `New level` is a load with a generated file, so most of what it does is already
+    // under test above. What is new — and what these pin — is that it resets the
+    // level's *identity* as well as its geometry, and that the two seeds each leave the
+    // editor somewhere usable.
+
+    /// The seed and the constructor have to agree about the ingress marker, because the
+    /// hunt falls back to it when a level authored no spawn pads. Cheap enough to check
+    /// without building a `World`.
+    #[test]
+    fn the_starter_seed_marks_ingress_where_the_hunt_falls_back_to() {
+        let seed = crate::levelgen::designs::starter_room();
+        assert_eq!(seed.spawn, SPAWN_MARKER_POS, "seed spawn == the fallback marker");
+        assert_eq!(
+            crate::levelgen::designs::empty().spawn,
+            SPAWN_MARKER_POS,
+            "and an empty level keeps the same fallback"
+        );
+    }
+
+    /// `New level → Starter room` lays down exactly the room the editor boots into, and
+    /// puts the camera back inside it — the camera is not level data, so nothing in the
+    /// load path would otherwise move it, and a New from the far side of a big level
+    /// would leave you standing in solid rock.
+    #[test]
+    fn a_new_starter_room_level_is_the_room_the_editor_boots_into() {
+        let boot: Vec<(u32, f32, f32, f32, f32, f32, f32, usize)> = World::new()
+            .regions
+            .iter()
+            .flat_map(|r| r.brushes.iter())
+            .map(|b| (b.id, b.x, b.y, b.z, b.w, b.h, b.d, b.scheme))
+            .collect();
+        assert_eq!(boot.len(), 1, "the opening room is one brush");
+
+        let mut w = World::new();
+        // Wander off and change things, the way a session does.
+        w.camera.pos = Vec3::new(40.0, 9.0, -12.0);
+        w.set_level_name("Bunker Base");
+        let _ = w.set_platforms_are_floors(true);
+
+        w.new_level(LevelSeed::StarterRoom).expect("new level");
+
+        let after: Vec<(u32, f32, f32, f32, f32, f32, f32, usize)> = w
+            .regions
+            .iter()
+            .flat_map(|r| r.brushes.iter())
+            .map(|b| (b.id, b.x, b.y, b.z, b.w, b.h, b.d, b.scheme))
+            .collect();
+        assert_eq!(after, boot, "same brush, same scheme, same id");
+        assert_eq!(w.camera.pos, STARTER_ROOM_CAM, "camera back inside the room");
+        assert!(!w.is_room_tool(), "a room to stand in needs no drafting view");
+        assert_eq!(w.next_brush_id, 2, "and the allocator starts over with it");
+        assert!(!w.platforms_are_floors(), "banding is back to a new level's default");
+    }
+
+    /// `New level → Empty` really is empty — no marker brush, no floor plate — and it
+    /// hands over to the room plan tool, because an empty level has no geometry and no
+    /// shell skin, so the plan grid is the only thing there is to see or click.
+    #[test]
+    fn a_new_empty_level_has_no_geometry_and_hands_over_the_plan_tool() {
+        let mut w = World::new();
+        w.new_level(LevelSeed::Empty).expect("new level");
+
+        assert!(w.regions.is_empty(), "no regions at all");
+        assert!(w.brush_to_region.is_empty(), "and nothing mapped to one");
+        assert!(w.is_room_tool(), "the plan tool is armed");
+        assert!(w.room_view().is_some(), "in an orthographic drafting view");
+        assert_eq!(w.room_base, 0.0, "drafting at y = 0 with no floor to sit on");
+
+        // Arming again must not toggle it back off: the seed checks first.
+        w.new_level(LevelSeed::Empty).expect("second new level");
+        assert!(w.is_room_tool(), "still armed, not toggled off");
+    }
+
+    /// **The match setup must not survive a New.** `load_built_level` leaves it alone on
+    /// purpose (`play: None` — a generated level says nothing about the match, so the PD
+    /// lab and the headless harness keep what they configured), which for a *new* level
+    /// is a leak: it would open playing like the level it just replaced.
+    #[test]
+    fn a_new_level_does_not_inherit_the_open_levels_match_setup() {
+        let mut w = World::new();
+        let mut authored = play_config::editor_default();
+        authored.enemy_count = 1;
+        authored.difficulty = 0;
+        authored.health = 40.0;
+        w.set_play_config(authored.clone());
+        assert_eq!(w.play_config(), &authored, "the open level's own setup");
+
+        w.new_level(LevelSeed::StarterRoom).expect("new level");
+        assert_eq!(
+            w.play_config(),
+            &play_config::editor_default(),
+            "a new level plays by the editor's default, not the last level's"
+        );
+    }
+
+    /// Everything else that makes a level *that* level goes too: its name, its ambient
+    /// light, its theme hotkeys.
+    #[test]
+    fn a_new_level_clears_the_name_the_theme_keys_and_the_ambient_light() {
+        let mut w = World::new();
+        w.set_level_name("Bunker Base");
+        w.set_ambient(crate::ecs::AmbientSettings { color: [1.0, 0.2, 0.2], level: 0.9 });
+        w.set_theme_hotkey('4', Some(engine::render::textures::default_scheme()));
+        assert!(!w.theme_hotkeys().is_empty());
+
+        w.new_level(LevelSeed::Empty).expect("new level");
+
+        assert_eq!(w.level_name(), "", "unnamed until Save As names it");
+        assert_eq!(w.ambient(), crate::ecs::AmbientSettings::default());
+        assert!(w.theme_hotkeys().is_empty(), "the digits fall back to the manifest");
+    }
+
+    /// **Undo after a New brings the level back whole**, not just its brushes.
+    ///
+    /// `LevelSnapshot` carried only geometry until this landed, which was invisible
+    /// while every undoable edit *was* a geometry edit. `New level` is the first edit
+    /// that changes the level's name, ambient, theme keys, banding and match setup all
+    /// at once, so it is the first one that could come back wrong.
+    ///
+    /// Mirrors what `App::new_level` does: snapshot, replace, commit.
+    #[test]
+    fn undo_after_a_new_level_brings_the_level_back_whole() {
+        let mut w = World::new();
+        w.set_level_name("Bunker Base");
+        w.set_ambient(crate::ecs::AmbientSettings { color: [0.1, 0.9, 0.4], level: 0.75 });
+        w.set_theme_hotkey('7', Some(engine::render::textures::default_scheme()));
+        let _ = w.set_platforms_are_floors(true);
+        let mut authored = play_config::editor_default();
+        authored.enemy_count = 2;
+        w.set_play_config(authored.clone());
+        let before = w.theme_hotkeys().clone();
+        let brushes_before: Vec<u32> =
+            w.regions.iter().flat_map(|r| r.brushes.iter().map(|b| b.id)).collect();
+
+        let snap = w.snapshot();
+        w.new_level(LevelSeed::Empty).expect("new level");
+        w.commit_snapshot(snap);
+        assert!(w.regions.is_empty(), "the new level is in place");
+
+        w.undo().expect("the New is one step back");
+
+        let brushes_after: Vec<u32> =
+            w.regions.iter().flat_map(|r| r.brushes.iter().map(|b| b.id)).collect();
+        assert_eq!(brushes_after, brushes_before, "geometry");
+        assert_eq!(w.level_name(), "Bunker Base", "name");
+        assert_eq!(w.ambient().level, 0.75, "ambient light");
+        assert_eq!(w.theme_hotkeys(), &before, "theme hotkeys");
+        assert!(w.platforms_are_floors(), "wall banding");
+        assert_eq!(w.play_config(), &authored, "match setup");
+    }
+
+    /// An empty level cannot be hunted in, and says so by staying in BUILD rather than
+    /// dropping the player into the void. This guard predates the feature — the fly-cam
+    /// floor probe is what a hunt needs to place the player — and `New level → Empty` is
+    /// the first thing that makes it reachable in one keypress.
+    #[test]
+    fn an_empty_level_refuses_the_hunt_instead_of_dropping_the_player_into_the_void() {
+        let mut w = World::new();
+        w.new_level(LevelSeed::Empty).expect("new level");
+        w.toggle_mode();
+        assert!(w.is_build(), "still in BUILD — there is no floor to stand on");
+        assert!(w.player_pos().is_none(), "and no player was placed");
     }
 }
