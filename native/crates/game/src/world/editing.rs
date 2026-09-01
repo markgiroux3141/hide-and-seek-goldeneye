@@ -100,6 +100,10 @@ impl World {
             engine::render::textures::scheme_name(scheme),
             room_ids.len()
         );
+        // Narrowing to one mesh is safe *here* and nowhere it looks like it: this
+        // passes an already-mapped brush id and changes no geometry, so
+        // `rebuild_affected_regions` never reaches `assign_brush_to_region` and can
+        // never recluster. Anything that adds a brush must take the whole `Vec`.
         self.rebuild_affected_regions(&[sel.brush_id]).into_iter().next()
     }
 

@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use glam::{EulerRot, Mat4, Quat, Vec2, Vec3};
 
-use engine::render::camera::FlyCamera;
+use engine::render::camera::{FlyCamera, OrthoCamera, ViewAxis};
 use crate::character::CharacterController;
 // NB: `crate::combat` (the subsystem) vs `world::combat` (the `mod combat;` wiring
 // submodule below) share a name — import only the types, and reach the crate
@@ -29,6 +29,8 @@ use crate::enemy::{AiState, Enemy};
 use rapier3d::prelude::ColliderHandle;
 use engine::platform::input::InputState;
 use engine::render::mesh::{ColorVertex, ColoredMesh, CpuMesh, TexVertex, TexturedMesh};
+use engine::render::textures;
+use tools::room::RoomPhase;
 use engine::sim::avoidance;
 use engine::sim::nav::{self, NavWorld};
 use engine::sim::physics::PhysicsWorld;
@@ -2618,6 +2620,50 @@ pub struct World {
     /// (`Op::Subtract`). Scroll-adjusted in ±1 WT steps.
     draw_depth: f32,
 
+    // ─── Room plan tool (see `world::tools::room`) ─────────────────────────────
+    /// The room tool's phase, or `None` when the tool is off. Mutually exclusive with
+    /// every other modal tool — this one also takes the camera and the cursor.
+    /// Why the opening (door/hole) tool is showing no ghost right now, for the BUILD
+    /// status strip. `None` = it is placing fine, or is not armed.
+    ///
+    /// A tool that refuses in silence is indistinguishable from a broken one — which
+    /// is exactly how a doorway that would not preview got reported as a bug. Every
+    /// `None` path out of `resolve_opening_placement` now leaves its reason here.
+    opening_refusal: Option<String>,
+
+    room_phase: Option<RoomPhase>,
+    /// The footprint's corners, in **integer** world `(x, z)` WT.
+    ///
+    /// Integer for the same reason `draw_verts` is: every corner is grid-snapped
+    /// anyway, and exact arithmetic is what makes the self-intersection test and the
+    /// rasterizing decomposition epsilon-free.
+    room_verts: Vec<(i32, i32)>,
+    /// The axis-locked corner the pointer is currently over — what the next click
+    /// would commit. Recomputed on every pointer move.
+    room_cursor: Option<(i32, i32)>,
+    /// The rectangles the closed footprint decomposed into, `(x0, z0, w, d)` in
+    /// integer WT. Recomputed on close and on every corner drag, then shared by the
+    /// ghost and the commit so the two cannot disagree.
+    room_rects: Vec<(i32, i32, i32, i32)>,
+    /// Height (WT) of the drafting plane the footprint is drawn on — and, for an
+    /// upward extrude, the new room's floor.
+    room_base: f32,
+    /// Signed room height in WT: positive extrudes up from the drafting plane,
+    /// negative hangs the room below it. Runs through 0, which builds nothing.
+    room_height: f32,
+    /// The corner index being dragged, if any.
+    room_drag: Option<usize>,
+    /// The theme new rooms are built with. Held here because an orthographic view has
+    /// no crosshair for the usual `1`–`9` retexture to read.
+    room_scheme: usize,
+
+    /// The orthographic drafting camera, or `None` for the perspective fly view.
+    /// Only ever `Some` while the room tool is armed: every other tool aims with the
+    /// camera crosshair, which an orthographic view does not have.
+    ortho: Option<OrthoCamera>,
+    /// Which orthographic view numpad `5` flips back to.
+    ortho_last: ViewAxis,
+
     // ─── Free-standing platform + stair-run system (JS `Platform`/`StairRun`) ──
     /// The platform tool's phase, or `None` when the tool is off. Mutually
     /// exclusive with the opening/placement tools.
@@ -3175,6 +3221,17 @@ impl World {
             draw_rects: Vec::new(),
             draw_candidate: 0,
             draw_depth: 0.0,
+            opening_refusal: None,
+            room_phase: None,
+            room_verts: Vec::new(),
+            room_cursor: None,
+            room_rects: Vec::new(),
+            room_base: 0.0,
+            room_height: 8.0,
+            room_drag: None,
+            room_scheme: textures::default_scheme(),
+            ortho: None,
+            ortho_last: ViewAxis::Top,
             platform_phase: None,
             platforms: Vec::new(),
             stair_runs: Vec::new(),

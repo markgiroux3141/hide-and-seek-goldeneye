@@ -2923,7 +2923,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         assert!(!world.regions[0].brushes.iter().any(|b| b.door), "no door yet");
 
         // Left-click (confirm_door) cuts.
-        assert!(world.confirm_door().is_some(), "click cuts the door");
+        assert!(!world.confirm_door().is_empty(), "click cuts the door");
         assert!(!world.is_door_arming(), "cutting disarms");
         assert!(
             world.regions[0].brushes.iter().any(|b| b.door),
@@ -2962,7 +2962,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         world.initial_meshes();
         world.door_tool_key();
         world.update_door_preview();
-        world.confirm_door().expect("door cut");
+        world.confirm_door().into_iter().next().expect("door cut");
 
         let tex = world.regions[0].evaluate_textured(&[]);
         let zones: std::collections::BTreeSet<u8> = tex.groups.iter().map(|g| g.zone).collect();
@@ -2994,7 +2994,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         world.camera.yaw = std::f32::consts::FRAC_PI_2; // face the −X wall
         world.door_tool_key(); // arm
         assert!(world.update_door_preview().is_some(), "previews on the −X wall");
-        assert!(world.confirm_door().is_some(), "cuts the door");
+        assert!(!world.confirm_door().is_empty(), "cuts the door");
 
         let frame = world
             .regions[0]
@@ -3176,7 +3176,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         let before = world.regions[0].brushes.len();
         world.door_tool_key();
         world.update_door_preview();
-        world.confirm_door().expect("door cut");
+        world.confirm_door().into_iter().next().expect("door cut");
 
         let new: Vec<&Brush> = world.regions[0].brushes[before..].iter().collect();
         assert_eq!(new.len(), 2, "a doorway is a frame + a protoroom");
@@ -3193,7 +3193,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         let (mut world, theme) = themed_room();
         world.door_tool_key();
         world.update_door_preview();
-        world.confirm_door().expect("door cut");
+        world.confirm_door().into_iter().next().expect("door cut");
 
         // Aim through the doorway at the protoroom's far face and push it out.
         let proto = *world.regions[0].brushes.last().unwrap();
@@ -3217,7 +3217,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         let floor_y = world.regions[0].brushes[0].floor_y;
         world.camera.pitch = -1.4; // look at the floor
         world.pillar_tool_key();
-        world.confirm_place().expect("pillar placed");
+        world.confirm_place().into_iter().next().expect("pillar placed");
 
         let pillar = world.regions[0].brushes.last().unwrap();
         assert_eq!(pillar.op, Op::Add);
@@ -3232,7 +3232,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         let floor_y = world.regions[0].brushes[0].floor_y;
         let before = world.regions[0].brushes.len();
         world.brace_tool_key();
-        world.confirm_place().expect("brace placed");
+        world.confirm_place().into_iter().next().expect("brace placed");
 
         let new: Vec<&Brush> = world.regions[0].brushes[before..].iter().collect();
         assert_eq!(new.len(), 3, "an arch is wall + ceiling + wall");
@@ -3263,7 +3263,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         assert!(world.update_opening_preview().is_some(), "ghost previews on the wall");
 
         let before = world.regions[0].brushes.len();
-        assert!(world.confirm_opening().is_some(), "click cuts the hole");
+        assert!(!world.confirm_opening().is_empty(), "click cuts the hole");
         assert!(!world.is_opening_arming(), "cutting disarms");
         // Frame + protoroom subtracts added, and NO brush is door-marked.
         assert_eq!(world.regions[0].brushes.len(), before + 2, "frame + protoroom");
@@ -3285,7 +3285,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         let p = world.resolve_opening_placement().expect("floor is a valid hole face");
         assert_eq!(p.axis, Axis::Y, "the crosshair resolved the floor");
         let before = world.regions[0].brushes.len();
-        assert!(world.confirm_opening().is_some(), "cuts a floor hole");
+        assert!(!world.confirm_opening().is_empty(), "cuts a floor hole");
         assert_eq!(world.regions[0].brushes.len(), before + 2);
     }
 
@@ -3298,7 +3298,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         world.camera.pitch = -1.4; // look down at the floor
         world.door_tool_key(); // arm door
         assert!(world.update_opening_preview().is_none(), "no door ghost on the floor");
-        assert!(world.confirm_opening().is_none(), "no door cut into the floor");
+        assert!(world.confirm_opening().is_empty(), "no door cut into the floor");
         assert!(!world.regions[0].brushes.iter().any(|b| b.door));
     }
 
@@ -3315,13 +3315,13 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         world.pillar_tool_key();
         assert!(world.is_placing());
         assert!(world.update_place_preview().is_none(), "no pillar ghost on a wall");
-        assert!(world.confirm_place().is_none(), "no pillar placed on a wall");
+        assert!(world.confirm_place().is_empty(), "no pillar placed on a wall");
 
         // Look down at the floor → a ghost appears and a click adds one Add brush.
         world.camera.pitch = -1.4;
         assert!(world.update_place_preview().is_some(), "pillar ghost on the floor");
         let before = world.regions[0].brushes.len();
-        assert!(world.confirm_place().is_some(), "pillar placed");
+        assert!(!world.confirm_place().is_empty(), "pillar placed");
         assert_eq!(world.regions[0].brushes.len(), before + 1, "one additive column");
         let col = world.regions[0].brushes.last().unwrap();
         assert_eq!(col.op, Op::Add);
@@ -3338,7 +3338,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         world.camera.pitch = -1.4;
         world.pillar_tool_key();
         world.adjust_place_size(2.0, 0.0); // 2 → 4
-        world.confirm_place().unwrap();
+        world.confirm_place().into_iter().next().unwrap();
         let col = world.regions[0].brushes.last().unwrap();
         assert_eq!(col.w, 4.0, "pillar grew to the scrolled size");
     }
@@ -3354,13 +3354,13 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         world.camera.pitch = -1.4;
         world.brace_tool_key();
         assert!(world.update_place_preview().is_none(), "no brace ghost on the floor");
-        assert!(world.confirm_place().is_none(), "no brace on the floor");
+        assert!(world.confirm_place().is_empty(), "no brace on the floor");
 
         // −Z wall → three additive brushes.
         world.camera.pitch = 0.0;
         assert!(world.update_place_preview().is_some(), "brace ghost on the wall");
         let before = world.regions[0].brushes.len();
-        assert!(world.confirm_place().is_some(), "brace placed");
+        assert!(!world.confirm_place().is_empty(), "brace placed");
         assert_eq!(world.regions[0].brushes.len(), before + 3, "wall + ceiling + wall");
         assert!(
             world.regions[0].brushes.iter().rev().take(3).all(|b| b.op == Op::Add),
@@ -3420,7 +3420,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         assert_eq!(pending.shell, StairShell::Ramp, "the ghost is a ramp already");
         assert_eq!(pending.total_run(), 4.0, "2 steps at 2x run");
 
-        assert!(world.confirm_stairs().is_some(), "confirmed");
+        assert!(!world.confirm_stairs().is_empty(), "confirmed");
         let desc = world.regions[0].stairs[0];
         assert_eq!(desc.shell, StairShell::Ramp);
         assert_eq!(desc.run_per_step, 2.0);
@@ -3463,7 +3463,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         assert_eq!(world.pending_stair().unwrap().0, 2, "opposite arrow shrank the op");
 
         let brushes_before = world.regions[0].brushes.len();
-        let rm = world.confirm_stairs().expect("confirm rebuilds the region");
+        let rm = world.confirm_stairs().into_iter().next().expect("confirm rebuilds the region");
         assert!(!world.has_pending_stair(), "confirm clears the pending op");
         assert_eq!(
             world.regions[0].brushes.len(),
@@ -3503,7 +3503,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         world.update_selection_preview();
 
         assert_eq!(world.pending_stair().unwrap().0, 2, "two steps pending");
-        assert!(world.confirm_stairs().is_some(), "Enter confirms after previews");
+        assert!(!world.confirm_stairs().is_empty(), "Enter confirms after previews");
         assert_eq!(world.regions[0].stairs.len(), 1);
     }
 
@@ -3584,7 +3584,7 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         for _ in 0..4 {
             world.push_stairs(StairDir::Down); // 4 steps down (−1 m at the bottom)
         }
-        let rm = world.confirm_stairs().expect("confirm");
+        let rm = world.confirm_stairs().into_iter().next().expect("confirm");
         // Sanity: the tread mesh made it into the region collider.
         assert!(!rm.mesh.indices.is_empty());
 
@@ -5321,7 +5321,7 @@ fn a_carved_vent_does_not_halo_its_theme_onto_the_surrounding_wall() {
     world.initial_meshes();
     world.vent_tool_key(); // arms only — it carves nothing, so it returns no mesh
     assert!(world.is_vent_tool(), "the vent tool is armed");
-    let rm = world.vent_click().expect("the crosshair is on a wall, so a duct carves");
+    let rm = world.vent_click().into_iter().next().expect("the crosshair is on a wall, so a duct carves");
 
     let duct_scheme = world
         .regions
@@ -5676,7 +5676,7 @@ fn the_hole_tool_spans_the_whole_patch_not_one_brush() {
     // resolved before any of this scrolling happened.
     world.update_opening_preview().expect("the ghost is on the floor");
     let before = world.regions[0].brushes.len();
-    world.confirm_opening().expect("the cut rebuilt the region");
+    world.confirm_opening().into_iter().next().expect("the cut rebuilt the region");
     assert!(world.regions[0].brushes.len() > before, "the cut added geometry");
     let frame = world.regions[0]
         .brushes

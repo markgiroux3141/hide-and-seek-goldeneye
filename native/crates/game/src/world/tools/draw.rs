@@ -720,7 +720,7 @@ fn rects_overlap_or_touch(a: [i32; 4], b: [i32; 4]) -> bool {
 /// travelled further along. This is the tool's 90° lock: no segment can be diagonal,
 /// which is precisely what keeps [`rect_decompose`] exact and the emitted brushes
 /// axis-aligned.
-fn axis_lock(from: (i32, i32), to: (i32, i32)) -> (i32, i32) {
+pub(crate) fn axis_lock(from: (i32, i32), to: (i32, i32)) -> (i32, i32) {
     if (to.0 - from.0).abs() >= (to.1 - from.1).abs() {
         (to.0, from.1)
     } else {
@@ -739,7 +739,7 @@ fn axis_lock(from: (i32, i32), to: (i32, i32)) -> (i32, i32) {
 /// degenerate box and intersecting reduces the whole question to "is the overlap empty,
 /// a single point, or longer?". A single-point overlap is a legal shared corner only at
 /// the two joins the outline is allowed to have; anything longer is collinear backtrack.
-fn segment_self_intersects(verts: &[(i32, i32)], cand: (i32, i32), closing: bool) -> bool {
+pub(crate) fn segment_self_intersects(verts: &[(i32, i32)], cand: (i32, i32), closing: bool) -> bool {
     if verts.len() < 2 {
         return false;
     }
@@ -762,14 +762,14 @@ fn segment_self_intersects(verts: &[(i32, i32)], cand: (i32, i32), closing: bool
 }
 
 /// How two axis-aligned integer segments overlap.
-enum Overlap {
+pub(crate) enum Overlap {
     None,
     Point((i32, i32)),
     Segment,
 }
 
 /// Intersect two axis-aligned integer segments as degenerate boxes.
-fn overlap(a1: (i32, i32), a2: (i32, i32), b1: (i32, i32), b2: (i32, i32)) -> Overlap {
+pub(crate) fn overlap(a1: (i32, i32), a2: (i32, i32), b1: (i32, i32), b2: (i32, i32)) -> Overlap {
     let u0 = a1.0.min(a2.0).max(b1.0.min(b2.0));
     let u1 = a1.0.max(a2.0).min(b1.0.max(b2.0));
     let v0 = a1.1.min(a2.1).max(b1.1.min(b2.1));

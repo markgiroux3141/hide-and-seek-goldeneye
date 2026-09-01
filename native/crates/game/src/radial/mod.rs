@@ -63,6 +63,9 @@ pub const SENSITIVITY: f32 = 0.55;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tool {
     Draw,
+    /// The room plan tool. Radial-only — there is no key left to give it, and it
+    /// wants none: it takes the camera and the cursor over.
+    Room,
     Door,
     Hole,
     Vent,
@@ -293,6 +296,11 @@ pub fn menu(id: MenuId, ctx: &RadialCtx) -> Vec<Slot> {
                     ctx.armed,
                     Some(Tool::Platform | Tool::BlockStairs | Tool::Connect)
                 )),
+                // **Appended, not inserted next to Draw where it belongs by kind.**
+                // A fixed layout is the whole value of a radial, and every tool after
+                // an inserted slot would move under fingers that already know where it
+                // is. New entries go on the end.
+                t(Tool::Room, "Room plan", ""),
             ]
         }
         MenuId::Platform => {

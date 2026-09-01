@@ -49,6 +49,34 @@ impl World {
         None
     }
 
+    /// What the armed opening tool is doing, for the BUILD status strip — either
+    /// "ready" or the reason it is refusing.
+    ///
+    /// The refusal half is the point. This tool previews by re-picking the crosshair
+    /// face every frame, so when it declines it simply draws nothing, and every reason
+    /// it might decline for looks identical from the outside: a floor under the
+    /// crosshair, a face too small for the opening, a ray that reached no authorable
+    /// surface. Naming them turns "the ghost is broken" into "you are aiming at the
+    /// floor".
+    pub fn opening_status(&self) -> Option<String> {
+        let kind = self.opening_tool?;
+        let name = match kind {
+            OpeningKind::Door => {
+                if self.door_double {
+                    "DOOR (double)"
+                } else {
+                    "DOOR"
+                }
+            }
+            OpeningKind::Hole => "HOLE",
+        };
+        Some(match (self.opening_preview.is_some(), self.opening_refusal.as_deref()) {
+            (true, _) => format!("{name}  click to cut"),
+            (false, Some(why)) => format!("{name}  {why}"),
+            (false, None) => format!("{name}  aim at a wall"),
+        })
+    }
+
     /// Door tool key (`B`): arm/toggle the fixed breakable door.
     pub fn door_tool_key(&mut self) -> Option<RegionMesh> {
         self.arm_opening(OpeningKind::Door)
@@ -61,11 +89,28 @@ impl World {
 
     /// Confirm the armed opening (left-click). Cuts at the previewed placement,
     /// falling back to a fresh crosshair resolve.
-    pub fn confirm_opening(&mut self) -> Option<RegionMesh> {
-        self.opening_tool?;
+    ///
+    /// Returns **every** rebuilt region mesh, not one.
+    ///
+    /// This used to hand back a single `Option<RegionMesh>` via
+    /// `rebuild_affected_regions(..).into_iter().next()`, which is lossless only while
+    /// the edit stays inside one region. It doesn't: a carve that touches two regions
+    /// **merges** them, `assign_brush_to_region` bails, and the whole level reclusters
+    /// into fresh ids — so the result is one mesh per surviving region *plus an empty
+    /// mesh for every id that just stopped existing*, and those empties are how the
+    /// renderer is told to drop the old geometry. Keeping only the first left the dead
+    /// regions on screen: the pre-cut rooms kept drawing (no opening visible from
+    /// either side) with the new merged region painted over them.
+    pub fn confirm_opening(&mut self) -> Vec<RegionMesh> {
+        if self.opening_tool.is_none() {
+            return Vec::new();
+        }
         self.opening_tool = None;
         let placement = self.opening_preview.take().or_else(|| self.resolve_opening_placement());
-        placement.and_then(|p| self.cut_opening(p))
+        match placement {
+            Some(p) => self.cut_opening(p),
+            None => Vec::new(),
+        }
     }
 
     /// Cancel an armed opening without cutting (Esc / pointer release / mode switch).
@@ -112,16 +157,46 @@ impl World {
     /// (clamped to the face), any face incl. floor/ceiling. `None` if the face is
     /// unsuitable or too small.
     pub(crate) fn resolve_opening_placement(&mut self) -> Option<OpeningPlacement> {
+        self.opening_refusal = None;
         let kind = self.opening_tool?;
         if self.mode != Mode::Build {
             return None;
         }
-        let (sel, hit_wt) = self.pick_face_hit()?;
+        let Some((sel, hit_wt)) = self.pick_face_hit() else {
+            // `pick_face_hit` already looks *through* surfaces no brush explains, so
+            // reaching here means either the ray found nothing at all or it ran out of
+            // skips. Name which, and where, because those want different answers from
+            // the author and are indistinguishable from an empty screen.
+            let raw = self.physics.raycast(self.camera.pos, self.camera.forward(), 100.0);
+            self.opening_refusal = Some(match raw {
+                None => "the crosshair is pointing at nothing".into(),
+                Some(h) => {
+                    let p = h.point / WORLD_SCALE;
+                    format!(
+                        "no editable face along that ray (nearest surface {:.0},{:.0},{:.0} WT)",
+                        p.x, p.y, p.z
+                    )
+                }
+            });
+            return None;
+        };
         if kind == OpeningKind::Door && sel.axis == Axis::Y {
-            return None; // doors go in walls only (JS rejects axis 'y')
+            // Doors go in walls only (JS rejects axis 'y'). Worth saying out loud: aim
+            // low at a wall from far enough back and the ray clips the **floor** first,
+            // so the ghost vanishes as you retreat and returns as you close in — which
+            // reads as a distance bug rather than as "you are pointing at the floor".
+            self.opening_refusal =
+                Some("that is a floor/ceiling - doors go in walls only".into());
+            return None;
         }
-        let region = self.regions.iter().find(|r| r.id == sel.region_id)?;
-        let brush = *region.brushes.iter().find(|b| b.id == sel.brush_id)?;
+        let Some(region) = self.regions.iter().find(|r| r.id == sel.region_id) else {
+            self.opening_refusal = Some("that surface's region is gone".into());
+            return None;
+        };
+        let Some(brush) = region.brushes.iter().find(|b| b.id == sel.brush_id).copied() else {
+            self.opening_refusal = Some("that surface's brush is gone".into());
+            return None;
+        };
         let position = brush.face_pos(sel.axis, sel.side);
 
         // Face UV bounds (JS `getFaceUVInfo`): the two axes orthogonal to the face
@@ -134,7 +209,10 @@ impl World {
         // itself at whichever box you were standing on. The cut itself is unchanged: it
         // was always a single frame box, and a box does not care that it crosses a seam.
         let (u_axis, v_axis) = sel.axis.orthogonals();
-        let [u_min, u_max, v_min, v_max] = self.patch_bounds(sel)?;
+        let Some([u_min, u_max, v_min, v_max]) = self.patch_bounds(sel) else {
+            self.opening_refusal = Some("could not measure that face".into());
+            return None;
+        };
         let (face_w, face_h) = (u_max - u_min, v_max - v_min);
 
         let (w, h) = match kind {
@@ -145,6 +223,9 @@ impl World {
             OpeningKind::Hole => (self.hole_w.min(face_w), self.hole_h.min(face_h)),
         };
         if face_w < w || face_h < h || w < 1.0 || h < 1.0 {
+            self.opening_refusal = Some(format!(
+                "that face is {face_w:.0}x{face_h:.0} WT - this opening needs {w:.0}x{h:.0}"
+            ));
             return None;
         }
 
@@ -179,7 +260,7 @@ impl World {
     /// protoroom is the seed the next push grows the room beyond into. Cutting a
     /// doorway out of a themed room and pushing it out therefore produced a
     /// default-themed room every time.
-    pub(crate) fn cut_opening(&mut self, p: OpeningPlacement) -> Option<RegionMesh> {
+    pub(crate) fn cut_opening(&mut self, p: OpeningPlacement) -> Vec<RegionMesh> {
         let t = WALL_THICKNESS;
         // Frame carve: 1 WT deep along the face normal, at the face plane.
         let frame_a = if p.side == Side::Max { p.position } else { p.position - t };
@@ -201,12 +282,17 @@ impl World {
 
         let frame_id = frame.id;
         let proto_id = proto.id;
-        let region = self.regions.iter_mut().find(|r| r.id == p.region_id)?;
+        let Some(region) = self.regions.iter_mut().find(|r| r.id == p.region_id) else {
+            return Vec::new();
+        };
         region.brushes.push(frame);
         region.brushes.push(proto);
         log::info!("{:?} cut in region {} at {:?} {:?}", p.kind, p.region_id, p.axis, p.side);
-        // Incremental: assign the new carves + re-bake only their region.
-        self.rebuild_affected_regions(&[frame_id, proto_id]).into_iter().next()
+        // Incremental where it can be — but a doorway cut between two *separate*
+        // regions (two rooms drawn apart by the room plan tool, say) merges them, and
+        // that path reclusters the level and returns a mesh per region plus a clear
+        // per dead id. All of them have to reach the renderer.
+        self.rebuild_affected_regions(&[frame_id, proto_id])
     }
 
     /// The ghost preview quad (meters) for an opening placement — the opening rect
@@ -225,7 +311,7 @@ impl World {
     }
 
     /// Confirm the armed door (delegates to the generic opening confirm).
-    pub fn confirm_door(&mut self) -> Option<RegionMesh> {
+    pub fn confirm_door(&mut self) -> Vec<RegionMesh> {
         self.confirm_opening()
     }
 
@@ -237,5 +323,112 @@ impl World {
     /// Recompute the door ghost (delegates to the generic opening preview).
     pub fn update_door_preview(&mut self) -> Option<CpuMesh> {
         self.update_opening_preview()
+    }
+}
+
+/// The opening tool's **refusal reasons**.
+///
+/// This tool previews by re-picking the crosshair face every frame, so when it
+/// declines it simply draws nothing — and every reason it might decline for looks
+/// identical from the outside. The floor case in particular reads as a *distance*
+/// bug: aim low at a wall and back away, and past some distance the ray clips the
+/// floor first, so the ghost vanishes as you retreat and returns as you close in.
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    /// The booted room, with the door tool armed and the camera in the middle of it.
+    fn armed_in_room() -> World {
+        let mut w = World::new();
+        w.initial_meshes();
+        w.door_tool_key();
+        w.camera.pos = Vec3::new(12.0, 8.0, 12.0) * WORLD_SCALE;
+        w.camera.yaw = std::f32::consts::PI; // +Z
+        w.camera.pitch = 0.0;
+        w
+    }
+
+    /// Aiming level at a wall places a door and says so.
+    #[test]
+    fn a_wall_in_the_crosshair_reports_ready() {
+        let mut w = armed_in_room();
+        assert!(w.update_door_preview().is_some(), "the ghost is drawn");
+        let status = w.build_status().expect("the strip has a line");
+        assert!(status.starts_with("DOOR"), "names the tool: {status}");
+        assert!(status.contains("click to cut"), "and says it is ready: {status}");
+    }
+
+    /// **The distance illusion.** Steep enough and far enough back, the crosshair ray
+    /// reaches the floor before the wall — so the ghost disappears as you retreat. The
+    /// tool must name that, because "no ghost at 20 WT, ghost at 4 WT" on one wall is
+    /// otherwise indistinguishable from that wall being broken.
+    #[test]
+    fn aiming_down_from_far_back_hits_the_floor_and_says_so() {
+        let mut w = armed_in_room();
+        w.camera.pitch = -30f32.to_radians();
+
+        // Close to the wall: the ray still reaches it.
+        w.camera.pos = Vec3::new(12.0, 8.0, 22.0) * WORLD_SCALE;
+        assert!(w.update_door_preview().is_some(), "up close the wall is still in reach");
+
+        // Backed off: the same aim now lands on the floor first.
+        w.camera.pos = Vec3::new(12.0, 8.0, 4.0) * WORLD_SCALE;
+        assert!(w.update_door_preview().is_none(), "from back here the ray clips the floor");
+        let status = w.build_status().expect("armed, so the strip has a line");
+        assert!(
+            status.contains("floor/ceiling") && status.contains("walls only"),
+            "the strip explains the floor, rather than leaving a silent gap: {status}"
+        );
+    }
+
+    /// Aimed at nothing — outside the level, pointing away — the strip says so rather
+    /// than leaving the author to wonder. This also covers a ray that lands on the
+    /// shell'''s own skin, which is no longer drawn and resolves to no brush face: it
+    /// would otherwise be an invisible surface refusing for invisible reasons.
+    #[test]
+    fn aiming_at_nothing_says_the_crosshair_is_on_nothing() {
+        let mut w = World::new();
+        w.initial_meshes();
+        w.door_tool_key();
+        // Well outside the level, looking further out.
+        w.camera.pos = Vec3::new(12.0, 8.0, -60.0) * WORLD_SCALE;
+        w.camera.yaw = 0.0; // -Z, away from the room
+        w.camera.pitch = 0.0;
+        assert!(w.update_door_preview().is_none(), "there is nothing out here");
+        let status = w.build_status().expect("armed");
+        assert!(
+            status.contains("pointing at nothing"),
+            "the strip names the empty aim: {status}"
+        );
+    }
+
+    /// The strip is silent when no tool is armed — it must not become permanent chrome.
+    #[test]
+    fn the_strip_says_nothing_when_no_tool_is_armed() {
+        let mut w = World::new();
+        w.initial_meshes();
+        assert!(w.build_status().is_none(), "nothing armed, nothing to say");
+        w.door_tool_key();
+        assert!(w.build_status().is_some(), "armed");
+        w.cancel_door();
+        assert!(w.build_status().is_none(), "disarmed again");
+    }
+
+    /// A refusal must not outlive the thing it was refusing about, or the strip ends up
+    /// reporting a stale reason while the ghost is plainly on screen.
+    #[test]
+    fn a_refusal_clears_as_soon_as_the_aim_is_good_again() {
+        let mut w = armed_in_room();
+        w.camera.pitch = -30f32.to_radians();
+        w.camera.pos = Vec3::new(12.0, 8.0, 4.0) * WORLD_SCALE;
+        assert!(w.update_door_preview().is_none());
+        assert!(w.build_status().unwrap().contains("floor/ceiling"));
+
+        w.camera.pitch = 0.0;
+        assert!(w.update_door_preview().is_some(), "level again, so the wall is back");
+        assert!(
+            w.build_status().unwrap().contains("click to cut"),
+            "and the stale reason is gone"
+        );
     }
 }

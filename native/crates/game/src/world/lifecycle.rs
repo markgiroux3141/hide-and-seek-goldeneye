@@ -674,7 +674,18 @@ impl World {
     }
 
     /// View-projection for whichever controller is active.
+    ///
+    /// The orthographic drafting view is checked first and in BUILD only. Routing it
+    /// through this one seam is what makes the room tool's plan views cost nothing
+    /// elsewhere: the renderer, the prop/HUD transforms and — crucially —
+    /// `App::mouse_world_ray`, which unprojects the cursor through *this* matrix's
+    /// inverse, all pick up an orthographic view with no branch of their own.
     pub fn view_proj(&self, aspect: f32) -> Mat4 {
+        if self.mode == Mode::Build {
+            if let Some(o) = self.ortho.as_ref() {
+                return o.view_proj(aspect);
+            }
+        }
         match (self.mode, self.character.as_ref()) {
             (Mode::Hunt, Some(c)) => c.view_proj(aspect),
             _ => self.camera.view_proj(aspect),
@@ -691,6 +702,7 @@ impl World {
         self.opening_preview = None;
         self.place_tool = None;
         self.clear_platform_state();
+        self.clear_room_state();
         self.reset_subface();
         // Reset the free-aim crosshair (centered, disengaged) on any mode switch.
         self.aim_x = 0.0;

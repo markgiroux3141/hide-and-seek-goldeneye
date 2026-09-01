@@ -90,19 +90,39 @@ impl World {
     }
 
     /// Confirm the armed placement (left-click): add the pillar's single brush or
-    /// the brace's three brushes to the region and re-evaluate. Returns the
-    /// changed region's mesh, or `None`.
-    pub fn confirm_place(&mut self) -> Option<RegionMesh> {
-        match self.place_tool? {
+    /// the brace's three brushes to the region and re-evaluate.
+    ///
+    /// Returns **every** rebuilt region mesh, not one.
+    ///
+    /// This used to hand back a single `Option<RegionMesh>` via
+    /// `rebuild_affected_regions(..).into_iter().next()`, which is lossless only while
+    /// the edit stays inside one region. It doesn't: a carve that touches two regions
+    /// **merges** them, `assign_brush_to_region` bails, and the whole level reclusters
+    /// into fresh ids — so the result is one mesh per surviving region *plus an empty
+    /// mesh for every id that just stopped existing*, and those empties are how the
+    /// renderer is told to drop the old geometry. Keeping only the first left the dead
+    /// regions on screen: the pre-cut rooms kept drawing (no opening visible from
+    /// either side) with the new merged region painted over them.
+    pub fn confirm_place(&mut self) -> Vec<RegionMesh> {
+        let Some(kind) = self.place_tool else {
+            return Vec::new();
+        };
+        match kind {
             PlaceKind::Pillar => {
-                let (region_id, look, b) = self.resolve_pillar_placed()?;
+                let Some((region_id, look, b)) = self.resolve_pillar_placed() else {
+                    return Vec::new();
+                };
                 self.place_tool = None;
-                let brush = self.push_add_brush(region_id, look, b)?;
+                let Some(brush) = self.push_add_brush(region_id, look, b) else {
+                    return Vec::new();
+                };
                 log::info!("pillar placed in region {region_id} (brush {brush})");
-                self.rebuild_affected_regions(&[brush]).into_iter().next()
+                self.rebuild_affected_regions(&[brush])
             }
             PlaceKind::Brace => {
-                let (region_id, look, boxes) = self.resolve_brace_placed()?;
+                let Some((region_id, look, boxes)) = self.resolve_brace_placed() else {
+                    return Vec::new();
+                };
                 self.place_tool = None;
                 let mut ids = Vec::new();
                 for b in boxes {
@@ -111,7 +131,7 @@ impl World {
                     }
                 }
                 log::info!("brace placed in region {region_id}");
-                self.rebuild_affected_regions(&ids).into_iter().next()
+                self.rebuild_affected_regions(&ids)
             }
         }
     }
@@ -291,7 +311,7 @@ mod tests {
         );
         // The ghost and the placement both go through the same resolver.
         assert!(world.update_place_preview().is_none(), "and no ghost is drawn");
-        assert!(world.confirm_place().is_none(), "and nothing is placed");
+        assert!(world.confirm_place().is_empty(), "and nothing is placed");
     }
 
     /// Same guard for the pillar, whose footprint has to fit the floor it stands on in
@@ -313,7 +333,7 @@ mod tests {
             "a 2 WT pillar does not fit a 1 WT wide floor — refuse, don't panic"
         );
         assert!(world.update_place_preview().is_none());
-        assert!(world.confirm_place().is_none());
+        assert!(world.confirm_place().is_empty());
     }
 
     /// The guards must not have made the tools useless: both still place on a normal room
@@ -326,13 +346,13 @@ mod tests {
         world.camera.pitch = -1.4; // the default room's floor
         world.pillar_tool_key();
         assert!(world.resolve_pillar().is_some(), "pillar fits a 24×24 floor");
-        assert!(world.confirm_place().is_some(), "and places");
+        assert!(!world.confirm_place().is_empty(), "and places");
 
         let mut world = World::new();
         world.initial_meshes();
         world.camera.pitch = 0.0; // the −Z wall
         world.brace_tool_key();
         assert!(world.resolve_brace().is_some(), "brace fits a 24-wide wall");
-        assert!(world.confirm_place().is_some(), "and places");
+        assert!(!world.confirm_place().is_empty(), "and places");
     }
 }

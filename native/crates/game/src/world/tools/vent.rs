@@ -324,8 +324,10 @@ impl World {
     /// does not read as more ducting. It takes **the level's first theme** (`scheme_for_key('1')`,
     /// which prefers this level's own binding and falls back to the manifest's), which is
     /// the same theme a fresh room here would get.
-    pub fn vent_exit_room(&mut self) -> Option<RegionMesh> {
-        let run = self.vent_run?;
+    pub fn vent_exit_room(&mut self) -> Vec<RegionMesh> {
+        let Some(run) = self.vent_run else {
+            return Vec::new();
+        };
         // A bore-sized box one WT deep, immediately past the duct's open end.
         let a = segment_aabb(run.cursor, run.dir, WALL_THICKNESS);
         let id = self.next_brush_id;
@@ -334,7 +336,9 @@ impl World {
         brush.scheme = self.scheme_for_key('1').unwrap_or_else(default_scheme);
         brush.floor_y = a[1];
         let region_id = run.region_id;
-        let region = self.regions.iter_mut().find(|r| r.id == region_id)?;
+        let Some(region) = self.regions.iter_mut().find(|r| r.id == region_id) else {
+            return Vec::new();
+        };
         region.brushes.push(brush);
         log::info!(
             "vent: opened an exit protoroom at the duct end in region {region_id} - \
@@ -343,17 +347,31 @@ impl World {
         // The duct now ends in open space, so finishing it reports two mouths.
         self.vent_run = Some(VentRun { cursor: run.cursor + run.dir * WALL_THICKNESS, ..run });
         self.cancel_vent();
-        self.rebuild_affected_regions(&[id]).into_iter().next()
+        self.rebuild_affected_regions(&[id])
     }
 
     /// Commit the previewed segment (left-click): carve it and advance the open end.
-    pub(crate) fn vent_click(&mut self) -> Option<RegionMesh> {
+    ///
+    /// Returns **every** rebuilt region mesh, not one.
+    ///
+    /// This used to hand back a single `Option<RegionMesh>` via
+    /// `rebuild_affected_regions(..).into_iter().next()`, which is lossless only while
+    /// the edit stays inside one region. It doesn't: a carve that touches two regions
+    /// **merges** them, `assign_brush_to_region` bails, and the whole level reclusters
+    /// into fresh ids — so the result is one mesh per surviving region *plus an empty
+    /// mesh for every id that just stopped existing*, and those empties are how the
+    /// renderer is told to drop the old geometry. Keeping only the first left the dead
+    /// regions on screen: the pre-cut rooms kept drawing (no opening visible from
+    /// either side) with the new merged region painted over them.
+    pub(crate) fn vent_click(&mut self) -> Vec<RegionMesh> {
         if !self.vent_tool {
-            return None;
+            return Vec::new();
         }
-        let seg = self.vent_preview.take().or_else(|| self.resolve_vent_segment())?;
+        let Some(seg) = self.vent_preview.take().or_else(|| self.resolve_vent_segment()) else {
+            return Vec::new();
+        };
         if !self.regions.iter().any(|r| r.id == seg.region_id) {
-            return None;
+            return Vec::new();
         }
         let id = self.next_brush_id;
         self.next_brush_id += 1;
@@ -370,7 +388,9 @@ impl World {
         brush.scheme = self.vent_scheme();
         brush.floor_y = a[1];
 
-        let region = self.regions.iter_mut().find(|r| r.id == seg.region_id)?;
+        let Some(region) = self.regions.iter_mut().find(|r| r.id == seg.region_id) else {
+            return Vec::new();
+        };
         region.brushes.push(brush);
 
         self.vent_run = Some(VentRun {
@@ -388,7 +408,7 @@ impl World {
             self.vent_len,
             seg.dir,
         );
-        self.rebuild_affected_regions(&[id]).into_iter().next()
+        self.rebuild_affected_regions(&[id])
     }
 }
 
@@ -515,11 +535,11 @@ mod tests {
         world.camera.pitch = 0.0;
         world.vent_tool_key();
         world.update_vent_preview();
-        world.vent_click().expect("duct carved");
+        world.vent_click().into_iter().next().expect("duct carved");
         assert!(world.is_vent_running(), "a run is open");
 
         let before = world.regions.iter().flat_map(|r| r.brushes.iter()).count();
-        world.vent_exit_room().expect("the protoroom rebuilds a region");
+        world.vent_exit_room().into_iter().next().expect("the protoroom rebuilds a region");
         let after: Vec<_> =
             world.regions.iter().flat_map(|r| r.brushes.iter()).copied().collect();
         assert_eq!(after.len(), before + 1, "exactly one protoroom brush was added");
@@ -577,7 +597,7 @@ mod tests {
         assert!(world.is_vent_tool(), "the tool armed");
         assert!(world.update_vent_preview().is_some(), "it previews on the -X wall");
         let seg = world.resolve_vent_segment().expect("a segment resolves");
-        world.vent_click().expect("the carve rebuilds a region");
+        world.vent_click().into_iter().next().expect("the carve rebuilds a region");
         assert!(world.is_vent_running(), "the run is now open at the far end");
 
         let carved: Vec<_> =
@@ -635,7 +655,7 @@ mod tests {
         world.vent_tool_key();
         assert_eq!(world.vent_len(), VENT_BORE, "a fresh segment is one bore long");
         world.update_vent_preview();
-        world.vent_click().expect("carved");
+        world.vent_click().into_iter().next().expect("carved");
         let b = world
             .regions
             .iter()
@@ -666,7 +686,7 @@ mod tests {
         // A short run stops inside the wall/void rather than breaking out.
         world.adjust_vent_len(-100.0); // clamps to VENT_LEN_MIN
         world.update_vent_preview();
-        world.vent_click().expect("carved");
+        world.vent_click().into_iter().next().expect("carved");
         let run = world.vent_run.expect("a run is open");
         assert_eq!(run.segments, 1);
         // The open-end test is what `cancel_vent` reports on; assert it directly so the
