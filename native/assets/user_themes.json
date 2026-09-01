@@ -10,8 +10,8 @@
         "1": {
           "offset_x": 0.10000000149011612,
           "offset_y": -0.10000000149011612,
-          "repeat": 0.17000000178813934,
-          "texture": "tempImgEd05F4"
+          "repeat": 0.44999998807907104,
+          "texture": "tempImgEd0278"
         },
         "2": {
           "repeat": 0.16670000553131104,
@@ -81,7 +81,7 @@
         "2": {
           "offset_x": -0.00009999999747378752,
           "offset_y": -0.6000000238418579,
-          "repeat": 0.19349999725818634,
+          "repeat": 0.1934999972581863,
           "texture": "tempImgEd00A3"
         },
         "3": {
@@ -94,6 +94,35 @@
           "offset_y": -0.3700000047683716,
           "repeat": 0.20000000298023224,
           "texture": "tempImgEd00A6"
+        },
+        "5": {
+          "repeat": 1.0,
+          "texture": "stair_gradient"
+        },
+        "6": {
+          "repeat": 0.3499999940395355,
+          "texture": "floor_doorframe"
+        }
+      }
+    },
+    "custom_04": {
+      "label": "Rusty metal",
+      "zones": {
+        "0": {
+          "repeat": 0.20000000298023224,
+          "texture": "tempImgEd0487"
+        },
+        "1": {
+          "repeat": 0.25,
+          "texture": "tempImgEd011E"
+        },
+        "2": {
+          "repeat": 0.30000001192092896,
+          "texture": "tempImgEd0480"
+        },
+        "3": {
+          "repeat": 0.1599999964237213,
+          "texture": "tempImgEd0123"
         },
         "5": {
           "repeat": 1.0,
