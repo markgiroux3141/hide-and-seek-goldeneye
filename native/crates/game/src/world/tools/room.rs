@@ -99,7 +99,115 @@ pub(crate) enum RoomPhase {
     Height,
 }
 
+/// A restorable copy of the **in-progress footprint** — the room tool's own undo unit.
+///
+/// The sketch is not authored level data: it is a handful of grid corners that only
+/// become geometry when the room is committed, so it is deliberately absent from the
+/// level snapshot `world::history` takes. That is the right split for the level file
+/// and the wrong one for Ctrl+Z, which the author reads as "take
+/// back what I just did" — and while this tool is armed, what they just did is place a
+/// corner. Without this, Ctrl+Z mid-plan skipped over every corner on screen and
+/// started dismantling the rooms carved before the tool was ever armed.
+///
+/// Same shape of answer as the level's own history: snapshot the little bit of state
+/// rather than write an inverse per action. It is five fields; a drag alone would
+/// otherwise need one.
+#[derive(Clone, PartialEq)]
+pub(crate) struct RoomSketch {
+    phase: RoomPhase,
+    verts: Vec<(i32, i32)>,
+    rects: Vec<(i32, i32, i32, i32)>,
+    base: f32,
+    height: f32,
+}
+
 impl World {
+    // ─── Sketch history ──────────────────────────────────────────────────────
+
+    /// The sketch as it stands, or `None` when the tool is off.
+    fn room_sketch(&self) -> Option<RoomSketch> {
+        Some(RoomSketch {
+            phase: self.room_phase?,
+            verts: self.room_verts.clone(),
+            rects: self.room_rects.clone(),
+            base: self.room_base,
+            height: self.room_height,
+        })
+    }
+
+    /// Checkpoint the sketch before a step that changes it (a corner placed, a loop
+    /// closed or reopened, a phase advanced, a corner dragged). Forks the redo stack
+    /// exactly as [`World::commit_snapshot`] does.
+    ///
+    /// The wheel is **not** a step. Scrolling the drafting plane or the extrude moves
+    /// in 1 WT notches, so checkpointing it would bury every corner under a hundred
+    /// one-unit entries; the base and height ride along in whichever checkpoint the
+    /// next real step takes instead.
+    fn push_room_sketch(&mut self) {
+        let Some(snap) = self.room_sketch() else { return };
+        self.room_undo.push(snap);
+        if self.room_undo.len() > super::super::history::MAX_HISTORY {
+            self.room_undo.remove(0);
+        }
+        self.room_redo.clear();
+    }
+
+    /// Ctrl+Z while the tool is armed: step back one sketch action. `false` when there
+    /// is nothing left to take back, which is the app's signal to fall through to the
+    /// level's own undo — so a committed room, and the carving before it, are still
+    /// one Ctrl+Z away once the plan on screen is empty.
+    pub fn room_undo(&mut self) -> bool {
+        let Some(current) = self.room_sketch() else {
+            return false;
+        };
+        let Some(prev) = self.room_undo.pop() else {
+            return false;
+        };
+        self.room_redo.push(current);
+        self.apply_room_sketch(prev);
+        true
+    }
+
+    /// Ctrl+R while the tool is armed — symmetric with [`room_undo`](Self::room_undo),
+    /// and `false` falls through to the level's redo the same way.
+    pub fn room_redo(&mut self) -> bool {
+        let Some(current) = self.room_sketch() else {
+            return false;
+        };
+        let Some(next) = self.room_redo.pop() else {
+            return false;
+        };
+        self.room_undo.push(current);
+        self.apply_room_sketch(next);
+        true
+    }
+
+    /// Restore a checkpointed sketch. Any live drag is dropped — its corner index may
+    /// not exist in the restored outline — and the previewed corner is stale until the
+    /// next pointer move, which recomputes it.
+    fn apply_room_sketch(&mut self, s: RoomSketch) {
+        self.room_phase = Some(s.phase);
+        self.room_verts = s.verts;
+        self.room_rects = s.rects;
+        self.room_base = s.base;
+        self.room_height = s.height;
+        self.room_drag = None;
+        log::info!(
+            "room: undo/redo — {} corner(s), phase {:?}",
+            self.room_verts.len(),
+            s.phase
+        );
+    }
+
+    /// Drop the sketch history. Called wherever the sketch stops being the thing Ctrl+Z
+    /// should act on: arming, disarming, and committing a room — after a commit the last
+    /// thing the author did is a *geometry* edit, so Ctrl+Z has to reach the level's
+    /// history, not the empty outline the tool left behind.
+    fn clear_room_history(&mut self) {
+        self.room_undo.clear();
+        self.room_redo.clear();
+    }
+
     // ─── Arming / teardown ───────────────────────────────────────────────────
 
     /// Whether the room tool is armed, so the app frees the cursor, routes clicks and
@@ -135,6 +243,7 @@ impl World {
         self.selected = None;
 
         self.room_phase = Some(RoomPhase::Drawing);
+        self.clear_room_history();
         self.room_verts.clear();
         self.room_cursor = None;
         self.room_rects.clear();
@@ -159,6 +268,7 @@ impl World {
 
     /// Clear every scrap of room-tool state, including the drafting camera.
     pub(crate) fn clear_room_state(&mut self) {
+        self.clear_room_history();
         self.room_phase = None;
         self.room_verts.clear();
         self.room_cursor = None;
@@ -172,8 +282,11 @@ impl World {
     /// the outline, outline → drop the last corner, empty outline → `false`, which
     /// lets the app disarm the tool wholesale.
     pub fn room_escape(&mut self) -> bool {
+        // Each rung down is a real step, so checkpoint it — Esc and Ctrl+Z walk the
+        // same ladder, and taking a rung back has to be possible in both directions.
         match self.room_phase {
             Some(RoomPhase::Height) => {
+                self.push_room_sketch();
                 self.room_phase = Some(RoomPhase::Base);
                 log::info!("room: back to the base height — scroll to slide the plan up/down");
                 true
@@ -181,6 +294,7 @@ impl World {
             Some(RoomPhase::Base) => {
                 // Reopen the loop. The closing click never pushed a duplicate of the
                 // first corner, so re-closing is one click.
+                self.push_room_sketch();
                 self.room_rects.clear();
                 self.room_drag = None;
                 self.room_phase = Some(RoomPhase::Drawing);
@@ -191,6 +305,7 @@ impl World {
                 if self.room_verts.is_empty() {
                     return false;
                 }
+                self.push_room_sketch();
                 self.room_verts.pop();
                 true
             }
@@ -360,6 +475,10 @@ impl World {
             }
         }
         let Some((i, _)) = best else { return false };
+        // Checkpoint on the grab rather than the release: the drag mutates through
+        // `room_hover`, so by the time the button comes up the pre-drag outline is
+        // gone. A grab that moves nothing pops it again in `end_room_drag`.
+        self.push_room_sketch();
         self.room_drag = Some(i);
         true
     }
@@ -367,6 +486,11 @@ impl World {
     /// Release a corner drag.
     pub fn end_room_drag(&mut self) {
         if self.room_drag.take().is_some() {
+            // A grab that never moved the outline is not an edit — drop its checkpoint
+            // instead of leaving a Ctrl+Z that visibly does nothing.
+            if self.room_undo.last().map(|s| s.verts == self.room_verts).unwrap_or(false) {
+                self.room_undo.pop();
+            }
             log::info!(
                 "room: footprint is {} corner(s) → {} rect(s)",
                 self.room_verts.len(),
@@ -428,6 +552,7 @@ impl World {
             Some(RoomPhase::Base) => {
                 // Confirming the base height moves on to the extrude. Corner drags are
                 // grabbed before this ever runs (see `start_room_drag`).
+                self.push_room_sketch();
                 self.room_phase = Some(RoomPhase::Height);
                 log::info!(
                     "room: base y={} WT — scroll to set the height (down extrudes below the plane), click to build",
@@ -447,6 +572,7 @@ impl World {
             return;
         };
         let Some(&last) = self.room_verts.last() else {
+            self.push_room_sketch();
             self.room_verts.push(hit);
             self.room_cursor = Some(hit);
             log::info!("room: corner at ({}, {}) WT", hit.0, hit.1);
@@ -464,6 +590,7 @@ impl World {
             return;
         }
         if !closing {
+            self.push_room_sketch();
             self.room_verts.push(cand);
             return;
         }
@@ -472,6 +599,7 @@ impl World {
             log::info!("room: that outline encloses no area — nothing to build");
             return;
         }
+        self.push_room_sketch();
         self.room_rects = rects;
         self.room_phase = Some(RoomPhase::Base);
         self.room_cursor = None;
@@ -526,6 +654,9 @@ impl World {
         self.room_cursor = None;
         self.room_drag = None;
         self.room_phase = Some(RoomPhase::Drawing);
+        // The room is authored geometry now and the level's own history owns it, so the
+        // sketch steps that drew it are spent: the next Ctrl+Z takes the room away.
+        self.clear_room_history();
         self.recluster_all()
     }
 
@@ -1365,6 +1496,139 @@ mod tests {
             "an empty outline is the bottom — the app disarms the tool from here"
         );
         assert!(w.is_room_tool(), "and Esc itself never disarms it");
+    }
+
+    // ─── Sketch undo ─────────────────────────────────────────────────────────
+
+    /// **The bug this exists for.** Carve a level, arm the plan tool, drop a few
+    /// corners, press Ctrl+Z — and watch it reach straight past every corner on screen
+    /// to start dismantling the carving. The sketch isn't authored geometry, so it was
+    /// never in the level snapshot, so undo couldn't see it.
+    ///
+    /// Ctrl+Z now takes the corners back one at a time and leaves the level alone.
+    #[test]
+    fn undo_takes_back_plan_corners_before_it_touches_the_level() {
+        let mut w = armed();
+        let carved = w.undo_stack.len();
+        let brushes: usize = w.regions.iter().map(|r| r.brushes.len()).sum();
+
+        click(&mut w, 40, 40);
+        click(&mut w, 52, 40);
+        click(&mut w, 52, 52);
+        assert_eq!(w.room_verts.len(), 3);
+
+        for want in [2, 1, 0] {
+            assert!(w.room_undo(), "the sketch had a step to take back");
+            assert_eq!(w.room_verts.len(), want, "one corner per Ctrl+Z");
+        }
+        assert_eq!(w.undo_stack.len(), carved, "and the level's history was never touched");
+        assert_eq!(
+            w.regions.iter().map(|r| r.brushes.len()).sum::<usize>(),
+            brushes,
+            "no carving was undone out from under the plan"
+        );
+        assert!(
+            !w.room_undo(),
+            "an empty plan hands the key on — Ctrl+Z reaches the level from here"
+        );
+    }
+
+    /// Undo walks back **up** the phase ladder too, and redo walks back down it: a
+    /// closed loop reopens with its corners intact, and one Ctrl+R re-closes it.
+    #[test]
+    fn undo_reopens_a_closed_loop_and_redo_closes_it_again() {
+        let mut w = armed();
+        footprint(&mut w, &[(40, 40), (48, 40), (48, 48), (40, 48)]);
+        click(&mut w, 40, 40); // Base → Height
+        assert_eq!(w.room_phase, Some(RoomPhase::Height));
+
+        assert!(w.room_undo());
+        assert_eq!(w.room_phase, Some(RoomPhase::Base), "height → base");
+        assert!(w.room_undo());
+        assert_eq!(w.room_phase, Some(RoomPhase::Drawing), "base → the outline reopens");
+        assert_eq!(w.room_verts.len(), 4, "with every corner still there");
+        assert!(w.room_rects.is_empty(), "and no decomposition");
+
+        assert!(w.room_redo());
+        assert_eq!(w.room_phase, Some(RoomPhase::Base), "redo re-closes the loop");
+        assert_eq!(w.room_rects.len(), 1, "decomposition and all");
+    }
+
+    /// A corner drag is one step. It mutates through `room_hover`, so the checkpoint
+    /// has to be taken on the grab — and a grab that never moved anything must not
+    /// leave a Ctrl+Z that visibly does nothing.
+    #[test]
+    fn a_corner_drag_undoes_as_one_step_and_a_still_grab_leaves_none() {
+        let mut w = armed();
+        footprint(&mut w, &[(40, 40), (52, 40), (52, 50), (40, 50)]);
+        let before = w.room_verts.clone();
+        let steps = w.room_undo.len();
+
+        let (o, d) = down_at(52.0, 40.0);
+        assert!(w.start_room_drag(o, d));
+        let (o, d) = down_at(58.0, 36.0);
+        w.room_hover(o, d);
+        let (o, d) = down_at(60.0, 34.0); // same drag, several moves
+        w.room_hover(o, d);
+        w.end_room_drag();
+        assert_ne!(w.room_verts, before, "the drag moved the outline");
+        assert_eq!(w.room_undo.len(), steps + 1, "however many pointer moves it took");
+
+        assert!(w.room_undo());
+        assert_eq!(w.room_verts, before, "one Ctrl+Z puts the corner back");
+        assert_eq!(w.room_rects.len(), 1, "and the decomposition with it");
+
+        // Grab and release without moving: nothing to take back.
+        let steps = w.room_undo.len();
+        let (o, d) = down_at(52.0, 40.0);
+        assert!(w.start_room_drag(o, d));
+        w.end_room_drag();
+        assert_eq!(w.room_undo.len(), steps, "a still grab is not an edit");
+    }
+
+    /// Esc and Ctrl+Z walk the same ladder, so a rung taken by Esc is one Ctrl+Z from
+    /// coming back — otherwise the two ways of stepping back fight each other.
+    #[test]
+    fn a_corner_dropped_by_escape_comes_back_with_undo() {
+        let mut w = armed();
+        click(&mut w, 40, 40);
+        click(&mut w, 52, 40);
+        assert!(w.room_escape());
+        assert_eq!(w.room_verts.len(), 1, "Esc dropped the last corner");
+        assert!(w.room_undo());
+        assert_eq!(w.room_verts, vec![(40, 40), (52, 40)], "undo brought it back");
+    }
+
+    /// Committing hands ownership back: the room is geometry now, the level's own
+    /// history holds it, and the sketch steps that drew it are spent — so the very next
+    /// Ctrl+Z takes the *room* away rather than replaying its corners.
+    #[test]
+    fn committing_a_room_hands_ctrl_z_back_to_the_level() {
+        let mut w = armed();
+        let before = w.regions.iter().map(|r| r.brushes.len()).sum::<usize>();
+        build_room(&mut w, &[(40, 40), (52, 40), (52, 52), (40, 52)], 0.0, 8.0);
+        assert!(w.room_undo.is_empty(), "the sketch history was spent by the commit");
+        assert!(!w.room_undo(), "so the key falls through");
+        assert!(w.undo().is_some());
+        assert_eq!(
+            w.regions.iter().map(|r| r.brushes.len()).sum::<usize>(),
+            before,
+            "and the level's undo takes the room away"
+        );
+    }
+
+    /// Arming and disarming both start from a clean slate: a plan from a previous
+    /// session of the tool must not be reachable by Ctrl+Z in the next one.
+    #[test]
+    fn the_sketch_history_does_not_outlive_the_tool() {
+        let mut w = armed();
+        click(&mut w, 40, 40);
+        click(&mut w, 52, 40);
+        assert!(!w.room_undo.is_empty());
+        w.room_tool_key(); // off
+        assert!(w.room_undo.is_empty() && w.room_redo.is_empty());
+        w.room_tool_key(); // on again
+        assert!(!w.room_undo(), "a fresh plan has nothing to take back");
     }
 
     /// A closing click needs four corners: anything shorter landing on the first one

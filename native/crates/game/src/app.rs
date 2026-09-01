@@ -6803,6 +6803,17 @@ impl App {
                 || self.input.key_down(KeyCode::ControlRight);
             let build = self.world.as_ref().map(|w| w.is_build()).unwrap_or(false);
             if ctrl && build {
+                // The room plan tool's sketch is not authored geometry, so it is not in
+                // the level snapshot — but while it is on screen it *is* the last thing
+                // the author did. Give it the key first: it steps back a corner at a
+                // time and hands the key on (returns `false`) once the plan is empty, so
+                // Ctrl+Z still reaches the committed rooms and the carving behind them.
+                if let Some(w) = self.world.as_mut() {
+                    let stepped = if code == KeyCode::KeyZ { w.room_undo() } else { w.room_redo() };
+                    if stepped {
+                        return;
+                    }
+                }
                 let meshes = if code == KeyCode::KeyZ {
                     self.world.as_mut().and_then(|w| w.undo())
                 } else {

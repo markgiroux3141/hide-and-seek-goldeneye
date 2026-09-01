@@ -30,7 +30,7 @@ use rapier3d::prelude::ColliderHandle;
 use engine::platform::input::InputState;
 use engine::render::mesh::{ColorVertex, ColoredMesh, CpuMesh, TexVertex, TexturedMesh};
 use engine::render::textures;
-use tools::room::RoomPhase;
+use tools::room::{RoomPhase, RoomSketch};
 use engine::sim::avoidance;
 use engine::sim::nav::{self, NavWorld};
 use engine::sim::physics::PhysicsWorld;
@@ -2662,6 +2662,12 @@ pub struct World {
     /// The theme new rooms are built with. Held here because an orthographic view has
     /// no crosshair for the usual `1`–`9` retexture to read.
     room_scheme: usize,
+    /// Undo / redo for the **in-progress plan** — the corners on screen, which are not
+    /// authored geometry and so are not in `undo_stack`. While the tool is armed with a
+    /// sketch going, Ctrl+Z steps back through these first and only reaches the level's
+    /// own history once the plan is empty. See [`RoomSketch`].
+    room_undo: Vec<RoomSketch>,
+    room_redo: Vec<RoomSketch>,
 
     /// The orthographic drafting camera, or `None` for the perspective fly view.
     /// Only ever `Some` while the room tool is armed: every other tool aims with the
@@ -3241,6 +3247,8 @@ impl World {
             room_height: 8.0,
             room_drag: None,
             room_scheme: textures::default_scheme(),
+            room_undo: Vec::new(),
+            room_redo: Vec::new(),
             ortho: None,
             ortho_last: ViewAxis::Top,
             platform_phase: None,
