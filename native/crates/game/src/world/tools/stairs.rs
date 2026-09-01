@@ -180,14 +180,27 @@ impl World {
     /// Confirm the pending stair (Enter, JS `confirmStairOp`): create the two
     /// `subtract` void brushes (stairwell + far corridor), register a [`StairDesc`]
     /// on the region (whose treads [`Region::evaluate`] folds into the mesh), and
-    /// re-evaluate. Returns the changed region's mesh, or `None` if nothing pending.
-    pub fn confirm_stairs(&mut self) -> Option<RegionMesh> {
+    /// re-evaluate.
+    ///
+    /// Returns **every** rebuilt region mesh, not one.
+    ///
+    /// This used to hand back a single `Option<RegionMesh>` via
+    /// `rebuild_affected_regions(..).into_iter().next()`, which is lossless only while
+    /// the edit stays inside one region. It doesn't: a carve that touches two regions
+    /// **merges** them, `assign_brush_to_region` bails, and the whole level reclusters
+    /// into fresh ids — so the result is one mesh per surviving region *plus an empty
+    /// mesh for every id that just stopped existing*, and those empties are how the
+    /// renderer is told to drop the old geometry. Keeping only the first left the dead
+    /// regions on screen: the pre-cut rooms kept drawing (no opening visible from
+    /// either side) with the new merged region painted over them.
+    pub fn confirm_stairs(&mut self) -> Vec<RegionMesh> {
         if self.pending_stair.is_none() {
             log::info!("confirm_stairs: nothing pending (press ↑/↓ on a floor-touching wall first)");
-            return None;
+            return Vec::new();
         }
-        let desc = self.pending_desc()?;
-        let op = self.pending_stair.take()?;
+        let (Some(desc), Some(op)) = (self.pending_desc(), self.pending_stair.take()) else {
+            return Vec::new();
+        };
         let sc = op.step_count as f32;
         let dir = if op.side == Side::Max { 1.0 } else { -1.0 };
         // How far out the flight reaches. The rise is always `sc`; the slope dial
@@ -232,7 +245,9 @@ impl World {
         let mut desc = desc;
         desc.void_ids = [brush1.id, brush2.id];
         let (b1_id, b2_id) = (brush1.id, brush2.id);
-        let region = self.regions.iter_mut().find(|r| r.id == op.region_id)?;
+        let Some(region) = self.regions.iter_mut().find(|r| r.id == op.region_id) else {
+            return Vec::new();
+        };
         region.brushes.push(brush1);
         region.brushes.push(brush2);
         region.stairs.push(desc);
@@ -240,6 +255,6 @@ impl World {
             "stairs confirmed: {} step(s) {:?} in region {}",
             op.step_count, op.direction, op.region_id
         );
-        self.rebuild_affected_regions(&[b1_id, b2_id]).into_iter().next()
+        self.rebuild_affected_regions(&[b1_id, b2_id])
     }
 }

@@ -1368,7 +1368,7 @@ impl App {
                     SelectionOp::Delete => w.delete_selected().into_iter().collect(),
                     SelectionOp::Grounded => w.toggle_grounded_key().into_iter().collect(),
                     SelectionOp::Railings => w.toggle_railings_key().into_iter().collect(),
-                    SelectionOp::ConfirmStairs => w.confirm_stairs().into_iter().collect(),
+                    SelectionOp::ConfirmStairs => w.confirm_stairs(),
                     SelectionOp::ToggleScope
                     | SelectionOp::StairUp
                     | SelectionOp::StairDown => Vec::new(),
@@ -5775,9 +5775,13 @@ impl ApplicationHandler for App {
                 // Grabbed + BUILD, vent tool armed: a click carves the previewed duct
                 // segment and re-anchors the run to its far end.
                 if self.world.as_ref().map(|w| w.is_vent_tool()).unwrap_or(false) {
-                    let rm = self.world.as_mut().and_then(|w| w.with_undo(|w| w.vent_click()));
-                    if let Some(rm) = rm {
-                        self.upload(&rm);
+                    let rm = self
+                        .world
+                        .as_mut()
+                        .map(|w| w.with_undo_many(|w| w.vent_click()))
+                        .unwrap_or_default();
+                    for rm in &rm {
+                        self.upload(rm);
                     }
                     self.refresh_highlight();
                     return;
@@ -5787,23 +5791,38 @@ impl ApplicationHandler for App {
                 let opening = self.world.as_ref().map(|w| w.is_opening_arming()).unwrap_or(false);
                 let placing = self.world.as_ref().map(|w| w.is_placing()).unwrap_or(false);
                 let platform = self.world.as_ref().map(|w| w.is_platform_tool()).unwrap_or(false);
-                let rm = if opening {
-                    self.world.as_mut().and_then(|w| w.with_undo(|w| w.confirm_opening()))
+                // A `Vec`, because an opening cut between two regions merges them and
+                // reclusters the level — one mesh per surviving region plus a clear per
+                // dead id, and dropping any of those leaves stale geometry on screen.
+                let meshes = if opening {
+                    self.world
+                        .as_mut()
+                        .map(|w| w.with_undo_many(|w| w.confirm_opening()))
+                        .unwrap_or_default()
                 } else if placing {
-                    self.world.as_mut().and_then(|w| w.with_undo(|w| w.confirm_place()))
+                    self.world
+                        .as_mut()
+                        .map(|w| w.with_undo_many(|w| w.confirm_place()))
+                        .unwrap_or_default()
                 } else if platform {
                     // `platform_click` may start a gizmo drag (records its own undo
                     // in `gizmo_start`) or place/connect a structure; `with_undo`
-                    // only commits when it actually returns a rebuilt mesh.
-                    self.world.as_mut().and_then(|w| w.with_undo(|w| w.platform_click()))
+                    // only commits when it actually returns a rebuilt mesh. It builds
+                    // free-standing platforms, which never merge regions, so one mesh
+                    // is the whole story here.
+                    self.world
+                        .as_mut()
+                        .and_then(|w| w.with_undo(|w| w.platform_click()))
+                        .into_iter()
+                        .collect()
                 } else {
                     if let Some(world) = self.world.as_mut() {
                         world.select_at_crosshair();
                     }
-                    None
+                    Vec::new()
                 };
-                if let Some(rm) = rm {
-                    self.upload(&rm);
+                for rm in &meshes {
+                    self.upload(rm);
                 }
                 self.refresh_highlight();
             }
@@ -6889,9 +6908,13 @@ impl App {
             // open end and finishes the duct - the vent counterpart of the protoroom
             // `cut_opening` seeds beyond every doorway. Otherwise Enter confirms stairs.
             if self.world.as_ref().map(|w| w.is_vent_running()).unwrap_or(false) {
-                let rm = self.world.as_mut().and_then(|w| w.with_undo(|w| w.vent_exit_room()));
-                if let Some(rm) = rm {
-                    self.upload(&rm);
+                let rm = self
+                    .world
+                    .as_mut()
+                    .map(|w| w.with_undo_many(|w| w.vent_exit_room()))
+                    .unwrap_or_default();
+                for rm in &rm {
+                    self.upload(rm);
                 }
                 self.refresh_highlight();
                 return;

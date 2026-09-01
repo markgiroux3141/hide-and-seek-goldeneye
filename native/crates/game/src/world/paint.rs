@@ -260,6 +260,8 @@ impl World {
             ),
             None => log::info!("face paint: brush {brush_id} {axis:?}/{side:?} cleared"),
         }
+        // Safe to narrow: an already-mapped brush id, and a repaint moves no
+        // geometry, so this cannot recluster. See the note in `editing::set_scheme_at`.
         self.rebuild_affected_regions(&[brush_id]).into_iter().next()
     }
 

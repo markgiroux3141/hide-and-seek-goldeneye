@@ -1497,3 +1497,188 @@ mod tests {
         }
     }
 }
+
+
+/// Regression tests for the **mesh-loss** defect the room plan tool exposed.
+///
+/// Rooms drawn apart are separate regions, so connecting two of them is the first
+/// edit in the editor's life that routinely *merges* regions. A merge reclusters the
+/// level into fresh ids, and the result the tool hands back is one mesh per surviving
+/// region **plus an empty mesh for every id that just stopped existing** — the empties
+/// being how the renderer is told to drop the old geometry.
+///
+/// Every tool used to narrow that to `Option<RegionMesh>` with
+/// `rebuild_affected_regions(..).into_iter().next()`, which is lossless only while the
+/// edit stays inside one region. Cutting a door between two rooms therefore left both
+/// pre-cut rooms on screen (no opening visible from either side) with the merged
+/// region painted over them in the gap.
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Two rooms with a 2 WT wall between them: the booted 24×16×24 room, and one
+    /// drawn past its +Z wall by the room tool. They do not touch, so they cluster
+    /// into **separate regions** — which is the precondition for everything below.
+    fn two_rooms_apart() -> World {
+        let mut w = World::new();
+        w.initial_meshes();
+        w.room_tool_key();
+        let ray = |x: i32, z: i32| {
+            (
+                Vec3::new(x as f32 * WORLD_SCALE, 64.0 * WORLD_SCALE, z as f32 * WORLD_SCALE),
+                Vec3::NEG_Y,
+            )
+        };
+        // The booted room spans z 0..24; this one starts at 26.
+        for (x, z) in [(4, 26), (20, 26), (20, 38), (4, 38), (4, 26)] {
+            let (o, d) = ray(x, z);
+            w.with_undo_many(|w| w.room_click(o, d));
+        }
+        w.room_base = 0.0;
+        let (o, d) = ray(4, 26);
+        w.with_undo_many(|w| w.room_click(o, d)); // base → height
+        w.room_height = 16.0;
+        w.with_undo_many(|w| w.room_click(o, d)); // build
+        w.cancel_room();
+        assert_eq!(w.regions.len(), 2, "two rooms with a gap are two regions");
+        w
+    }
+
+    /// Aim from inside the booted room at its +Z wall, where the other room is.
+    fn aim_at_the_shared_wall(w: &mut World) {
+        w.camera.pos = Vec3::new(12.0, 8.0, 12.0) * WORLD_SCALE;
+        w.camera.yaw = std::f32::consts::PI; // +Z
+        w.camera.pitch = 0.0;
+    }
+
+    /// **The invariant.** Given the region ids that existed before an edit and the
+    /// meshes it handed back, every region that exists now must have been uploaded and
+    /// every id that vanished must have been cleared. Anything missing is geometry the
+    /// renderer is still drawing from before the edit.
+    fn assert_meshes_account_for_every_region(
+        w: &World,
+        before: &[u32],
+        meshes: &[RegionMesh],
+    ) {
+        let sent: HashSet<u32> = meshes.iter().map(|m| m.id).collect();
+        let live: HashSet<u32> = w.regions.iter().map(|r| r.id).collect();
+        for id in &live {
+            assert!(
+                sent.contains(id),
+                "region {id} exists but was never uploaded — it renders as whatever \
+                 was in that slot before (sent {sent:?}, live {live:?})"
+            );
+        }
+        for id in before {
+            assert!(
+                live.contains(id) || sent.contains(id),
+                "region {id} stopped existing and was never cleared — the renderer \
+                 still holds its pre-edit mesh (sent {sent:?}, live {live:?})"
+            );
+        }
+    }
+
+    /// The reported bug, end to end: a doorway cut between two separately-drawn rooms.
+    #[test]
+    fn a_doorway_between_two_rooms_hands_back_every_mesh_the_merge_produced() {
+        let mut w = two_rooms_apart();
+        aim_at_the_shared_wall(&mut w);
+        let before: Vec<u32> = w.regions.iter().map(|r| r.id).collect();
+
+        w.door_tool_key();
+        w.update_door_preview();
+        let meshes = w.with_undo_many(|w| w.confirm_door());
+
+        assert!(!meshes.is_empty(), "the cut rebuilt something");
+        assert_eq!(w.regions.len(), 1, "the doorway merged the two rooms into one region");
+        assert!(
+            !before.iter().all(|id| w.regions.iter().any(|r| r.id == *id)),
+            "the merge really did retire the old ids — otherwise this test proves nothing"
+        );
+        assert_meshes_account_for_every_region(&w, &before, &meshes);
+    }
+
+    /// The doorway is real geometry, not just bookkeeping: the wall between the rooms
+    /// is actually pierced. Guards against a "fix" that uploads the right ids while
+    /// the carve lands somewhere useless.
+    #[test]
+    fn the_doorway_actually_pierces_the_wall_between_the_two_rooms() {
+        let mut w = two_rooms_apart();
+        aim_at_the_shared_wall(&mut w);
+        w.door_tool_key();
+        w.update_door_preview();
+        w.with_undo_many(|w| w.confirm_door());
+
+        let brushes: Vec<Brush> =
+            w.regions.iter().flat_map(|r| r.brushes.iter().copied()).collect();
+        // Frame carve at the wall (z 24..25), protoroom just past it (z 25..26): together
+        // they span the whole 2 WT gap, which is what connects the two voids.
+        assert!(
+            brushes.iter().any(|b| b.frame && b.door && b.z <= 24.0 && b.z + b.d >= 25.0),
+            "a door-marked frame pierces the z=24 wall (got {:?})",
+            brushes.iter().map(|b| (b.id, b.z, b.d, b.frame)).collect::<Vec<_>>()
+        );
+        assert!(
+            brushes
+                .iter()
+                .any(|b| b.op == Op::Subtract && !b.frame && b.z >= 25.0 && b.z + b.d <= 26.0),
+            "and the protoroom carries the opening the rest of the way to the far room"
+        );
+    }
+
+    /// A hole cut the same way merges just as hard — the door tool is not special, and
+    /// `confirm_opening` is the shared path both go through.
+    #[test]
+    fn a_hole_between_two_rooms_hands_back_every_mesh_too() {
+        let mut w = two_rooms_apart();
+        aim_at_the_shared_wall(&mut w);
+        let before: Vec<u32> = w.regions.iter().map(|r| r.id).collect();
+
+        w.hole_tool_key();
+        w.update_opening_preview();
+        let meshes = w.with_undo_many(|w| w.confirm_opening());
+
+        assert!(!meshes.is_empty(), "the cut rebuilt something");
+        assert_eq!(w.regions.len(), 1, "the hole merged the two rooms");
+        assert_meshes_account_for_every_region(&w, &before, &meshes);
+    }
+
+    /// Undo has to put both regions back — and hand back the meshes to redraw them
+    /// with. The restore path reclusters too, so it has exactly the same exposure.
+    #[test]
+    fn undoing_the_doorway_restores_both_regions_and_reports_them_all() {
+        let mut w = two_rooms_apart();
+        aim_at_the_shared_wall(&mut w);
+        w.door_tool_key();
+        w.update_door_preview();
+        w.with_undo_many(|w| w.confirm_door());
+        assert_eq!(w.regions.len(), 1);
+
+        let before: Vec<u32> = w.regions.iter().map(|r| r.id).collect();
+        let meshes = w.undo().expect("the cut left an undo step");
+        assert_eq!(w.regions.len(), 2, "undo splits the merged region back in two");
+        assert_meshes_account_for_every_region(&w, &before, &meshes);
+    }
+
+    /// A doorway cut *inside* one region must not have regressed into a full
+    /// recluster — the incremental path is what keeps editing a large base fast, and
+    /// the fix must not have bought correctness by giving that up.
+    #[test]
+    fn a_doorway_inside_one_region_still_takes_the_incremental_path() {
+        let mut w = World::new();
+        w.initial_meshes();
+        let before: Vec<u32> = w.regions.iter().map(|r| r.id).collect();
+        w.door_tool_key();
+        w.update_door_preview();
+        let meshes = w.with_undo_many(|w| w.confirm_door());
+
+        assert_eq!(meshes.len(), 1, "one region touched, one mesh — no recluster");
+        assert_eq!(
+            w.regions.iter().map(|r| r.id).collect::<Vec<_>>(),
+            before,
+            "and the region kept its id, which a recluster would not have"
+        );
+        assert_meshes_account_for_every_region(&w, &before, &meshes);
+    }
+}

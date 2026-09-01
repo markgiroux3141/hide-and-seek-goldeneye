@@ -1033,7 +1033,10 @@ mod tests {
         let p = world
             .resolve_opening_placement()
             .expect("crosshair should resolve a wall opening");
-        world.cut_opening(p).expect("the carve should rebuild a region");
+        assert!(
+            !world.cut_opening(p).is_empty(),
+            "the carve should rebuild a region"
+        );
         world.cancel_opening();
         let ways = world.doorways();
         assert_eq!(ways.len(), 1, "exactly one doorway was cut");

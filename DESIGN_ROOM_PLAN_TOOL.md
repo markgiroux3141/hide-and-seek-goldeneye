@@ -1,7 +1,7 @@
 # Room plan tool
 
-**Status:** BUILT, green (24 new tests, 805 total), release built — awaiting playtest.
-Branch `feat/room-plan-tool`.
+**Status:** BUILT, green (29 new tests, 810 total), release built. Playtest 1 found one
+defect (see below), now fixed with a regression test. Branch `feat/room-plan-tool`.
 
 ## The problem
 
@@ -127,6 +127,59 @@ the wheel. Whichever the phase needs wins; Ctrl+wheel always zooms.
    `uv_zones::face_owner` reads the owning brush's `floor_y` as the wall-UV origin, so a
    decomposed L-shaped room left on the per-brush default bands against itself along an
    internal boundary the author never drew.
+
+## Playtest 1: the doorway that cut nothing
+
+**Symptom.** Cut a doorway between the booted room and a newly drawn one: no opening
+appeared on either side, but flying outside the level showed the doorframe geometry
+sitting in the gap between them.
+
+**Not the shell.** The obvious suspect — the auto-scaling brush that contains
+everything — is innocent: `Region::evaluate` calls `update_shell()` on every fold, so
+the shell always encloses its region's subtract brushes. (Worth knowing anyway:
+`SHELL_PAD` is only **1 WT**, so the solid around a room is one cell thick, and two
+rooms drawn 2 WT apart look like a solid wall because their two pads meet in the
+middle.)
+
+**The cause: dropped meshes.** Rooms drawn apart are separate regions, so connecting
+two of them is the first edit in this editor's life that routinely **merges** regions.
+A merge makes `assign_brush_to_region` bail, the level reclusters into fresh ids, and
+`rebuild_affected_regions` returns one mesh per surviving region **plus an empty mesh
+for every id that just stopped existing** — the empties being how the renderer is told
+to drop the old geometry.
+
+Every tool narrowed that to a single `Option<RegionMesh>` with
+`rebuild_affected_regions(..).into_iter().next()`. Lossless while an edit stays inside
+one region; wrong the moment one doesn't. The repro printed it plainly:
+
+```
+regions before the cut:  [2, 3]
+confirm_door returned:   Some(4)
+regions after the cut:   [4]
+```
+
+Regions 2 and 3 were never cleared, so the renderer kept drawing both **pre-cut** rooms
+— hence no opening from either side — with the new merged region painted over them in
+the gap, hence the frame visible from outside.
+
+**The fix.** The five functions that add brushes now return `Vec<RegionMesh>`:
+`cut_opening` / `confirm_opening` / `confirm_door`, `confirm_place`, `confirm_stairs`,
+`vent_click` and `vent_exit_room` — with their app callers moved onto `with_undo_many`
+and a loop, the way `draw` and `room` already worked. `editing::set_scheme_at` and
+`paint::paint_face` keep the single-mesh narrowing and now carry a comment saying why:
+both pass an **already-mapped** brush id and move no geometry, so neither can ever
+reach `assign_brush_to_region`, let alone the recluster.
+
+The invariant is a test now, not a convention. `room::merge_tests` asserts that after
+an edit every live region was uploaded and every retired id was cleared; it fails on
+the old behaviour with the message that describes the bug ("region 2 stopped existing
+and was never cleared"). One of the five is a control: a doorway cut *inside* one
+region must still take the incremental path and keep its region id, so the fix can't
+have bought correctness by reclustering everything.
+
+**This was latent from long before the room tool** — just unreachable. Every previous
+tool built off an existing face, so a level stayed one connected region and no edit
+ever merged two. Disjoint regions are now an everyday thing.
 
 ## Not built
 

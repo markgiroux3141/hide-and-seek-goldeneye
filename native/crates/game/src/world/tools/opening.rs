@@ -61,11 +61,28 @@ impl World {
 
     /// Confirm the armed opening (left-click). Cuts at the previewed placement,
     /// falling back to a fresh crosshair resolve.
-    pub fn confirm_opening(&mut self) -> Option<RegionMesh> {
-        self.opening_tool?;
+    ///
+    /// Returns **every** rebuilt region mesh, not one.
+    ///
+    /// This used to hand back a single `Option<RegionMesh>` via
+    /// `rebuild_affected_regions(..).into_iter().next()`, which is lossless only while
+    /// the edit stays inside one region. It doesn't: a carve that touches two regions
+    /// **merges** them, `assign_brush_to_region` bails, and the whole level reclusters
+    /// into fresh ids — so the result is one mesh per surviving region *plus an empty
+    /// mesh for every id that just stopped existing*, and those empties are how the
+    /// renderer is told to drop the old geometry. Keeping only the first left the dead
+    /// regions on screen: the pre-cut rooms kept drawing (no opening visible from
+    /// either side) with the new merged region painted over them.
+    pub fn confirm_opening(&mut self) -> Vec<RegionMesh> {
+        if self.opening_tool.is_none() {
+            return Vec::new();
+        }
         self.opening_tool = None;
         let placement = self.opening_preview.take().or_else(|| self.resolve_opening_placement());
-        placement.and_then(|p| self.cut_opening(p))
+        match placement {
+            Some(p) => self.cut_opening(p),
+            None => Vec::new(),
+        }
     }
 
     /// Cancel an armed opening without cutting (Esc / pointer release / mode switch).
@@ -179,7 +196,7 @@ impl World {
     /// protoroom is the seed the next push grows the room beyond into. Cutting a
     /// doorway out of a themed room and pushing it out therefore produced a
     /// default-themed room every time.
-    pub(crate) fn cut_opening(&mut self, p: OpeningPlacement) -> Option<RegionMesh> {
+    pub(crate) fn cut_opening(&mut self, p: OpeningPlacement) -> Vec<RegionMesh> {
         let t = WALL_THICKNESS;
         // Frame carve: 1 WT deep along the face normal, at the face plane.
         let frame_a = if p.side == Side::Max { p.position } else { p.position - t };
@@ -201,12 +218,17 @@ impl World {
 
         let frame_id = frame.id;
         let proto_id = proto.id;
-        let region = self.regions.iter_mut().find(|r| r.id == p.region_id)?;
+        let Some(region) = self.regions.iter_mut().find(|r| r.id == p.region_id) else {
+            return Vec::new();
+        };
         region.brushes.push(frame);
         region.brushes.push(proto);
         log::info!("{:?} cut in region {} at {:?} {:?}", p.kind, p.region_id, p.axis, p.side);
-        // Incremental: assign the new carves + re-bake only their region.
-        self.rebuild_affected_regions(&[frame_id, proto_id]).into_iter().next()
+        // Incremental where it can be — but a doorway cut between two *separate*
+        // regions (two rooms drawn apart by the room plan tool, say) merges them, and
+        // that path reclusters the level and returns a mesh per region plus a clear
+        // per dead id. All of them have to reach the renderer.
+        self.rebuild_affected_regions(&[frame_id, proto_id])
     }
 
     /// The ghost preview quad (meters) for an opening placement — the opening rect
@@ -225,7 +247,7 @@ impl World {
     }
 
     /// Confirm the armed door (delegates to the generic opening confirm).
-    pub fn confirm_door(&mut self) -> Option<RegionMesh> {
+    pub fn confirm_door(&mut self) -> Vec<RegionMesh> {
         self.confirm_opening()
     }
 
