@@ -1364,6 +1364,51 @@ pub struct Region {
 /// 1-tile margin so walls have thickness).
 const SHELL_PAD: f32 = 1.0;
 
+/// Drop the triangles lying on the shell's own six faces — the level's **outer skin**.
+///
+/// The shell is scaffolding. [`Region::update_shell`] sizes it to enclose every
+/// subtractive brush with [`SHELL_PAD`] to spare, and its whole job is to be the solid
+/// that rooms are carved out of. Its outer faces are geometry nobody is meant to look
+/// at: from inside a room you see the *subtract brush's* faces, and the only way to
+/// meet the skin is to fly outside the level — where it is a featureless box wrapped
+/// around the thing you were trying to see. It is worst in the room plan tool's
+/// top-down view, where it is simply a lid over the level.
+///
+/// Identifying it is **exact, not heuristic**: the pad guarantees nothing else comes
+/// within 1 WT of a shell plane, so "all three vertices on one shell plane" can only
+/// be the skin. (An `Op::Add` brush that pokes out past the shell keeps its faces —
+/// they are not on a shell plane — which is right: that is real authored geometry.)
+///
+/// **Render only.** The collider is built from the unfiltered soup, so nothing about
+/// physics, hitscan, nav or picking changes, and a stray shot still stops at the world
+/// bound rather than running to its full length. Picking never saw the skin anyway:
+/// `pick_face_hit_from` resolves a hit to a *brush* face, and the shell is not one of
+/// the region's brushes.
+fn strip_shell_skin(shell: &Brush, pos: &[f32], idx: &[u32], ws: f32) -> Vec<u32> {
+    // Metres. Generous by three orders of magnitude next to the 1 WT (0.25 m) pad that
+    // separates the skin from everything else, and far above any BSP round-off.
+    const EPS: f32 = 1.0e-3;
+    let planes = [
+        (0usize, shell.x * ws),
+        (0, (shell.x + shell.w) * ws),
+        (1, shell.y * ws),
+        (1, (shell.y + shell.h) * ws),
+        (2, shell.z * ws),
+        (2, (shell.z + shell.d) * ws),
+    ];
+    let mut out = Vec::with_capacity(idx.len());
+    for tri in idx.chunks_exact(3) {
+        let on_skin = planes.iter().any(|&(axis, plane)| {
+            tri.iter()
+                .all(|&i| (pos[i as usize * 3 + axis] - plane).abs() <= EPS)
+        });
+        if !on_skin {
+            out.extend_from_slice(tri);
+        }
+    }
+    out
+}
+
 impl Region {
     pub fn new(id: u32) -> Self {
         // Placeholder shell; update_shell() resizes it before every evaluate.
@@ -1449,6 +1494,8 @@ impl Region {
         self.update_shell();
         let polys = evaluate(&self.shell, &self.brushes, WORLD_SCALE);
         let (pos, _norm, idx) = polygons_to_mesh(&polys);
+        // The outer skin is never drawn — see `strip_shell_skin`.
+        let idx = strip_shell_skin(&self.shell, &pos, &idx, WORLD_SCALE);
 
         // Per-brush attributes drive per-triangle scheme + wall-UV floor anchor
         // (the face-map recovers the owner inside `classify_soup`).
@@ -1494,12 +1541,14 @@ impl Region {
         };
 
         // Textured render mesh: classify the same soup into per-zone groups, then
-        // append the stepped stair geometry with explicit zones/UVs.
+        // append the stepped stair geometry with explicit zones/UVs. Minus the outer
+        // skin, which the collider above deliberately keeps - see strip_shell_skin.
+        let tex_idx = strip_shell_skin(&self.shell, &pos, &idx, WORLD_SCALE);
         let brush_infos = self.brush_infos();
         let mut zb = ZonedBuilder::new();
         let cols = ColumnInputs::new(&self.brushes, platforms);
         let cornice = textures::cornice_table();
-        uv_zones::classify_soup(&mut zb, &pos, &idx, &brush_infos, default_scheme(), &cols, &cornice);
+        uv_zones::classify_soup(&mut zb, &pos, &tex_idx, &brush_infos, default_scheme(), &cols, &cornice);
         for s in &self.stairs {
             s.append_zoned(&mut zb);
         }
@@ -1822,5 +1871,142 @@ mod tests {
         brush.push_face(Axis::X, Side::Min, 4.0);
         assert_eq!(brush.x, 1.0);
         assert_eq!(brush.face_pos(Axis::X, Side::Max), max_before, "max face fixed");
+    }
+
+    // ─── The shell's outer skin ──────────────────────────────────────────────
+
+    /// A one-room region: the 24×16×24 box the editor boots into.
+    fn skin_region() -> Region {
+        let mut r = Region::new(1);
+        r.brushes.push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 24.0, 16.0, 24.0));
+        r.refresh_shell();
+        r
+    }
+
+    /// Which of the shell's six planes (if any) a triangle lies flat on, given the
+    /// mesh's flat position array and a triangle's three indices.
+    fn skin_plane_of(shell: &Brush, pos: &[f32], tri: [usize; 3]) -> Option<(usize, f32)> {
+        let ws = WORLD_SCALE;
+        let planes = [
+            (0usize, shell.x * ws),
+            (0, (shell.x + shell.w) * ws),
+            (1, shell.y * ws),
+            (1, (shell.y + shell.h) * ws),
+            (2, shell.z * ws),
+            (2, (shell.z + shell.d) * ws),
+        ];
+        planes
+            .into_iter()
+            .find(|&(axis, plane)| tri.iter().all(|&i| (pos[i * 3 + axis] - plane).abs() <= 1.0e-3))
+    }
+
+    /// The headline: the level's outer skin is **not drawn**, but it is **still
+    /// solid**. Flying outside a level used to put a featureless box between the
+    /// camera and everything in it — worst of all in the room plan tool's top-down
+    /// view, where it was simply a lid.
+    ///
+    /// The collider half matters as much as the render half: nothing about physics,
+    /// hitscan or nav may change, and a stray shot must still stop at the world bound.
+    #[test]
+    fn the_shells_outer_skin_is_not_drawn_but_is_still_solid() {
+        let mut r = skin_region();
+        let (collider, tex) = r.evaluate_both(&[]);
+        let shell = r.shell;
+
+        let drawn_skin = tex
+            .indices
+            .chunks_exact(3)
+            .filter(|t| {
+                let pos: Vec<f32> =
+                    t.iter().flat_map(|&i| tex.vertices[i as usize].pos).collect();
+                skin_plane_of(&shell, &pos, [0, 1, 2]).is_some()
+            })
+            .count();
+        assert_eq!(drawn_skin, 0, "not one triangle of the outer skin reaches the render mesh");
+
+        // The collider keeps all six faces — every axis, both sides.
+        let mut solid_planes = std::collections::HashSet::new();
+        for t in collider.indices.chunks_exact(3) {
+            let pos: Vec<f32> = t
+                .iter()
+                .flat_map(|&i| collider.vertices[i as usize].pos)
+                .collect();
+            if let Some((axis, plane)) = skin_plane_of(&shell, &pos, [0, 1, 2]) {
+                solid_planes.insert((axis, plane.to_bits()));
+            }
+        }
+        assert_eq!(
+            solid_planes.len(),
+            6,
+            "the collider still has all six shell faces — the world is still closed"
+        );
+    }
+
+    /// The stripper must take the skin and *only* the skin. A room's own six inner
+    /// faces sit exactly `SHELL_PAD` inside the shell planes, which is the nearest
+    /// anything ever gets to one — so an over-generous epsilon would eat the room
+    /// itself, and the level would render as nothing at all.
+    #[test]
+    fn the_room_a_shell_wraps_keeps_every_one_of_its_own_faces() {
+        let mut r = skin_region();
+        let tex = r.evaluate_textured(&[]);
+        let room = r.brushes[0];
+        let ws = WORLD_SCALE;
+
+        // Every inner face of the room, as (dominant axis, plane in metres).
+        let want = [
+            (0usize, room.x * ws),
+            (0, (room.x + room.w) * ws),
+            (1, room.y * ws),
+            (1, (room.y + room.h) * ws),
+            (2, room.z * ws),
+            (2, (room.z + room.d) * ws),
+        ];
+        for (axis, plane) in want {
+            let found = tex.indices.chunks_exact(3).any(|t| {
+                t.iter()
+                    .all(|&i| (tex.vertices[i as usize].pos[axis] - plane).abs() <= 1.0e-3)
+            });
+            assert!(
+                found,
+                "the room's face on axis {axis} at {plane} m was stripped along with the skin"
+            );
+        }
+        assert!(
+            !tex.indices.is_empty(),
+            "and the room is drawn at all"
+        );
+    }
+
+    /// Two rooms inside one shell: the skin is one box around both, and *both* rooms
+    /// survive it. Guards against a stripper that keys off the region's bounds rather
+    /// than the shell's planes — the two coincide for one room and diverge here.
+    #[test]
+    fn two_rooms_under_one_shell_both_survive_the_strip() {
+        let mut r = Region::new(1);
+        r.brushes.push(Brush::new(1, Op::Subtract, 0.0, 0.0, 0.0, 10.0, 8.0, 10.0));
+        r.brushes.push(Brush::new(2, Op::Subtract, 30.0, 0.0, 0.0, 10.0, 8.0, 10.0));
+        r.refresh_shell();
+        let tex = r.evaluate_textured(&[]);
+        let ws = WORLD_SCALE;
+
+        for (label, x) in [("first", 0.0f32), ("second", 30.0)] {
+            let found = tex.indices.chunks_exact(3).any(|t| {
+                t.iter().all(|&i| (tex.vertices[i as usize].pos[0] - x * ws).abs() <= 1.0e-3)
+            });
+            assert!(found, "the {label} room's near wall survived the strip");
+        }
+        // And the skin around the pair is gone.
+        let shell = r.shell;
+        let drawn_skin = tex
+            .indices
+            .chunks_exact(3)
+            .filter(|t| {
+                let pos: Vec<f32> =
+                    t.iter().flat_map(|&i| tex.vertices[i as usize].pos).collect();
+                skin_plane_of(&shell, &pos, [0, 1, 2]).is_some()
+            })
+            .count();
+        assert_eq!(drawn_skin, 0, "one skin around both rooms, and it is not drawn");
     }
 }
