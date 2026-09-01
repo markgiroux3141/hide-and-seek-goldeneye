@@ -1,7 +1,10 @@
 //! Armed authoring tools — one submodule permodal tool. Each adds its
 //! `impl World` methods (arm / query / preview / scroll / confirm / cancel).
 
-mod draw;
+/// `pub(crate)` so the room plan tool can reuse the 90° outline machinery — the
+/// axis lock, the self-intersection test and the rectangle decomposition are the same
+/// problem in world XZ as they are in face UV.
+pub(crate) mod draw;
 /// `pub(crate)` so the ECS door system can reach the shared panel-transform helpers —
 /// the draw list, the collider pose and the tick all go through the same matrix.
 pub(crate) mod door;
@@ -16,6 +19,8 @@ mod placement;
 mod platform;
 mod prop;
 mod prop_gizmo;
+/// `pub(crate)` so `World` can name the room tool's phase type.
+pub(crate) mod room;
 // `pub(crate)` only so the respawn/scoreboard test modules can reuse its `place_pad` /
 // `big_room` fixtures — a level with authored pads is the precondition for both.
 pub(crate) mod spawn_point;

@@ -184,6 +184,15 @@ impl World {
         // Always-visible point-light markers (small colour-tinted cubes), so lights
         // can be seen + clicked in BUILD even when not selected.
         self.push_light_markers(&mut vertices, &mut indices);
+        // The room tool owns the overlay outright while it is armed: it takes the
+        // camera over, so there is no crosshair for a prop/platform gizmo to belong to
+        // and nothing else can be selected underneath it.
+        if let Some(m) = self.room_overlay_mesh() {
+            let base = vertices.len() as u32;
+            vertices.extend(m.vertices);
+            indices.extend(m.indices.into_iter().map(|i| i + base));
+            return Some(ColoredMesh { vertices, indices });
+        }
         // Object mode: a selected prop's (or light's) gizmo handles overlay the rest.
         if let Some(m) = self.prop_gizmo_mesh() {
             let base = vertices.len() as u32;

@@ -22,6 +22,7 @@ use engine::platform::frame::FrameClock;
 use engine::platform::input::InputState;
 use engine::render::renderer::{EguiFrame, Renderer};
 use crate::gamepad::N64Pad;
+use engine::render::camera::ViewAxis;
 use crate::radial::{EditorAction, LockRequest, Radial, RadialCtx, SelectionOp, Tool};
 use crate::world::{World, PUSH_PULL_STEP};
 use engine::geometry::csg_runtime::{Axis, FaceTex, Side};
@@ -259,6 +260,17 @@ struct App {
     /// `CursorMoved`. Used to unproject a world pick ray for prop placement while the
     /// object panel has the cursor free.
     cursor_pos: (f32, f32),
+    /// Whether *we* freed the cursor for the room plan tool, plus the lock state to
+    /// hand back when it disarms.
+    ///
+    /// Reconciled once per frame from `World::is_room_tool` rather than at each arm
+    /// site: the tool is disarmed from six places (Esc, a mode switch, arming any
+    /// other tool, the radial, its own key, the cursor release) and a cursor left
+    /// grabbed by a missed one is unrecoverable without knowing why.
+    room_freed: bool,
+    lock_before_room: bool,
+    /// Whether RMB is currently dragging the orthographic drafting view.
+    room_panning: bool,
     /// BUILD-mode preference: show real point lighting (`true`) vs the legacy flat
     /// look (`false`). Toggled by the **L** key / the OBJECTS panel checkbox. HUNT
     /// ignores this — it forces real lighting whenever the level has any light.
@@ -382,6 +394,9 @@ impl App {
             props_preview_angle: 0.0,
             lock_before_props: false,
             cursor_pos: (0.0, 0.0),
+            room_freed: false,
+            lock_before_room: true,
+            room_panning: false,
             build_real_lighting: true,
             panel_tab: PanelTab::Objects,
             theme_armed: None,
@@ -800,6 +815,94 @@ impl App {
         }
     }
 
+    /// Room-tool keys: the numpad view presets and the new-room theme.
+    ///
+    /// Blender's layout, because it is the one every 3D package's users already have
+    /// in their fingers: `7`/`1`/`3` are top/front/right, Ctrl gives the opposite
+    /// face, `5` flips between the drafting views and the perspective fly view, and
+    /// `0` goes straight to perspective.
+    ///
+    /// The number *row* stays live and picks the theme new rooms are built with.
+    /// `digit_char` normally aliases the numpad to the row for the crosshair
+    /// retexture, which is why that has to be bypassed here — and why bypassing it
+    /// costs nothing: retexture needs a crosshair, and an orthographic view has none.
+    ///
+    /// Returns whether the key was consumed.
+    fn room_key(&mut self, code: KeyCode) -> bool {
+        let ctrl = self.input.key_down(KeyCode::ControlLeft)
+            || self.input.key_down(KeyCode::ControlRight);
+        let axis = match (code, ctrl) {
+            (KeyCode::Numpad7, false) => Some(ViewAxis::Top),
+            (KeyCode::Numpad7, true) => Some(ViewAxis::Bottom),
+            (KeyCode::Numpad1, false) => Some(ViewAxis::Front),
+            (KeyCode::Numpad1, true) => Some(ViewAxis::Back),
+            (KeyCode::Numpad3, false) => Some(ViewAxis::Right),
+            (KeyCode::Numpad3, true) => Some(ViewAxis::Left),
+            _ => None,
+        };
+        if let Some(axis) = axis {
+            if let Some(w) = self.world.as_mut() {
+                w.enter_room_view(axis);
+            }
+            return true;
+        }
+        match code {
+            KeyCode::Numpad5 => {
+                if let Some(w) = self.world.as_mut() {
+                    w.toggle_room_view();
+                }
+                true
+            }
+            KeyCode::Numpad0 => {
+                if let Some(w) = self.world.as_mut() {
+                    w.leave_room_view();
+                }
+                true
+            }
+            // Every other numpad key is swallowed rather than falling through to its
+            // number-row twin: the numpad belongs to the views while this is armed,
+            // and a stray `Numpad2` silently retexturing something would be baffling.
+            KeyCode::Numpad2
+            | KeyCode::Numpad4
+            | KeyCode::Numpad6
+            | KeyCode::Numpad8
+            | KeyCode::Numpad9 => true,
+            _ => {
+                let Some(key) = row_digit_char(code) else {
+                    return false;
+                };
+                let scheme = self.world.as_ref().and_then(|w| w.scheme_for_key(key));
+                if let (Some(scheme), Some(w)) = (scheme, self.world.as_mut()) {
+                    w.set_room_scheme(scheme);
+                }
+                true
+            }
+        }
+    }
+
+    /// Give the room plan tool the free cursor it needs, and hand the lock back when
+    /// it disarms. Called once per frame — see the `room_freed` field for why this is
+    /// a reconcile rather than a call at each arm site.
+    fn sync_room_cursor(&mut self) {
+        let armed = self.world.as_ref().map(|w| w.is_room_tool()).unwrap_or(false);
+        if armed == self.room_freed {
+            return;
+        }
+        if armed {
+            self.lock_before_room = self.input.pointer_locked;
+            self.room_freed = true;
+            self.set_pointer_lock_keep_tools(false);
+        } else {
+            self.room_freed = false;
+            self.room_panning = false;
+            // A panel that took the cursor for itself keeps it; restoring the lock
+            // under an open panel would leave it unclickable.
+            if !self.props_open && !self.shop_open {
+                self.set_pointer_lock_keep_tools(self.lock_before_room);
+            }
+        }
+    }
+
     fn set_pointer_lock(&mut self, locked: bool) {
         self.set_pointer_lock_inner(locked, true);
     }
@@ -839,6 +942,7 @@ impl App {
                 world.cancel_place();
                 world.cancel_platform_tool();
                 world.cancel_draw();
+                world.cancel_room();
             }
             self.refresh_highlight();
         }
@@ -1170,6 +1274,7 @@ impl App {
         if let Some(world) = self.world.as_mut() {
             match tool {
                 Tool::Draw => world.draw_tool_key(),
+                Tool::Room => world.room_tool_key(),
                 Tool::Door => {
                     world.door_tool_key();
                 }
@@ -1191,6 +1296,8 @@ impl App {
         }
         let stale = match tool {
             Tool::Draw => self.world.as_ref().map(|w| !w.is_draw_tool()).unwrap_or(true),
+            // Owns the selection and the camera outright, so it always refreshes.
+            Tool::Room => true,
             Tool::Door | Tool::Hole => self
                 .world
                 .as_ref()
@@ -1571,6 +1678,9 @@ impl App {
         // Object-placement panel snapshot + deferred outputs (same borrow discipline
         // as the shop: read state up front, collect the pick/close, apply after).
         let props_open = self.props_open;
+        // The room plan tool's read-out, snapshotted like everything else the egui
+        // closure shows (it can't also hold a `&World`). `None` unless it is armed.
+        let room_status = self.world.as_ref().and_then(|w| w.room_status());
         let prop_sel = self.props_selected;
         let prop_selected = self.world.as_ref().map(|w| w.selected_prop().is_some()).unwrap_or(false);
         let placing_prop = self.world.as_ref().map(|w| w.is_placing_prop()).unwrap_or(false);
@@ -1930,6 +2040,32 @@ impl App {
                     });
                 });
             } // end if shop_open
+
+            // The room plan tool's status strip. BUILD has no HUD of its own (the
+            // quad HUD is HUNT-only), and this tool has numeric state — which storey
+            // the drafting plane is on, how tall the room will be — that is guesswork
+            // without a read-out.
+            //
+            // `interactable(false)` is load-bearing: an ordinary egui window under the
+            // pointer would swallow the clicks that place corners, and the strip sits
+            // at the top of the screen where the author is drawing.
+            if let Some(text) = room_status.as_deref() {
+                egui::Area::new(egui::Id::new("room_status"))
+                    .order(egui::Order::Foreground)
+                    .interactable(false)
+                    .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 10.0))
+                    .show(ctx, |ui| {
+                        egui::Frame::NONE
+                            .fill(egui::Color32::from_rgba_unmultiplied(0, 0, 0, 190))
+                            .inner_margin(egui::Margin::symmetric(10, 5))
+                            .corner_radius(4.0)
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(text).color(SHOP_GOLD).monospace(),
+                                );
+                            });
+                    });
+            }
 
             if props_open {
                 egui::SidePanel::left("objects_panel")
@@ -5027,6 +5163,24 @@ fn armed_tool(w: &crate::world::World) -> Option<Tool> {
     }
 }
 
+/// [`digit_char`] restricted to the **number row**. The room plan tool binds the
+/// numpad to its view presets, so it needs the half of that mapping that does not
+/// collide.
+fn row_digit_char(code: KeyCode) -> Option<char> {
+    Some(match code {
+        KeyCode::Digit1 => '1',
+        KeyCode::Digit2 => '2',
+        KeyCode::Digit3 => '3',
+        KeyCode::Digit4 => '4',
+        KeyCode::Digit5 => '5',
+        KeyCode::Digit6 => '6',
+        KeyCode::Digit7 => '7',
+        KeyCode::Digit8 => '8',
+        KeyCode::Digit9 => '9',
+        _ => return None,
+    })
+}
+
 /// Map a number-row / numpad digit key to its '1'..'9' char (for scheme keys).
 fn digit_char(code: KeyCode) -> Option<char> {
     Some(match code {
@@ -5407,7 +5561,23 @@ impl ApplicationHandler for App {
             // Track the cursor (physical pixels) for prop mouse-picking. egui already
             // saw this event above; we just record the latest position.
             WindowEvent::CursorMoved { position, .. } => {
-                self.cursor_pos = (position.x as f32, position.y as f32);
+                let (px, py) = (position.x as f32, position.y as f32);
+                let (dx, dy) = (px - self.cursor_pos.0, py - self.cursor_pos.1);
+                self.cursor_pos = (px, py);
+                // RMB drags the orthographic drafting view. Absolute-position deltas
+                // rather than the raw device motion `device_event` collects, because
+                // panning deliberately does *not* grab the cursor -- the author has to
+                // keep it where they put it.
+                if self.room_panning {
+                    let h = self
+                        .window
+                        .as_ref()
+                        .map(|w| w.inner_size().height as f32)
+                        .unwrap_or(0.0);
+                    if let Some(w) = self.world.as_mut() {
+                        w.pan_room_view(dx, dy, h);
+                    }
+                }
                 // A sticky ring is driven by the real pointer. `cursor_pos` is
                 // physical pixels and the ring lives in egui points.
                 if self.radial.is_sticky() {
@@ -5441,9 +5611,35 @@ impl ApplicationHandler for App {
                 let pressed = state == ElementState::Pressed;
                 self.input.set_mouse_left(pressed);
                 if !pressed {
-                    // Release ends any in-progress prop gizmo drag.
+                    // Release ends any in-progress prop gizmo / room-corner drag.
                     if let Some(w) = self.world.as_mut() {
                         w.end_prop_gizmo_drag();
+                        w.end_room_drag();
+                    }
+                    return;
+                }
+                // Room plan tool: it owns the pointer outright while armed. A click
+                // grabs a corner handle if one is under the cursor, and otherwise drops
+                // a corner / advances the phase / builds the room. Ahead of everything
+                // else because the tool has taken the camera over -- there is no
+                // crosshair left for the other branches to mean anything with.
+                if self.world.as_ref().map(|w| w.is_room_tool()).unwrap_or(false) {
+                    if let Some((o, d)) = self.mouse_world_ray() {
+                        let grabbed = self
+                            .world
+                            .as_mut()
+                            .map(|w| w.start_room_drag(o, d))
+                            .unwrap_or(false);
+                        if !grabbed {
+                            let meshes = self
+                                .world
+                                .as_mut()
+                                .map(|w| w.with_undo_many(|w| w.room_click(o, d)))
+                                .unwrap_or_default();
+                            for rm in &meshes {
+                                self.upload(rm);
+                            }
+                        }
                     }
                     return;
                 }
@@ -5629,6 +5825,17 @@ impl ApplicationHandler for App {
                 }
                 let pressed = state == ElementState::Pressed;
                 self.input.set_mouse_right(pressed);
+                // Room plan tool: in an orthographic view RMB pans (never grabs -- the
+                // cursor is the drafting pointer and must stay put); in the perspective
+                // view it is mouse-look, exactly as object mode does it.
+                if self.world.as_ref().map(|w| w.is_room_tool()).unwrap_or(false) {
+                    if self.world.as_ref().and_then(|w| w.room_view()).is_some() {
+                        self.room_panning = pressed;
+                    } else {
+                        self.set_pointer_lock_keep_tools(pressed);
+                    }
+                    return;
+                }
                 // Object mode (BUILD, panel open): hold RMB to mouse-look. Grabbing
                 // hides+centres the cursor and enables the raw-motion camera look
                 // (the free cursor otherwise drives the panel + gizmo); releasing
@@ -5678,6 +5885,26 @@ impl ApplicationHandler for App {
                 }
                 // Don't let a scroll resize the armed tool from behind the ring.
                 if self.radial.is_open() {
+                    return;
+                }
+                // Room plan tool: the wheel does the *current phase's* job -- zoom while
+                // the outline is open, then the floor height, then the extrude -- with
+                // Ctrl forcing zoom, which is the only way to reach it once the loop
+                // closes. Ahead of the pointer-lock gate below because this is the one
+                // editor tool that deliberately runs with a free cursor.
+                if self.world.as_ref().map(|w| w.is_room_tool()).unwrap_or(false) {
+                    let dy = match delta {
+                        winit::event::MouseScrollDelta::LineDelta(_, y) => y,
+                        winit::event::MouseScrollDelta::PixelDelta(p) => p.y as f32,
+                    };
+                    if dy != 0.0 {
+                        let ctrl = self.input.key_down(KeyCode::ControlLeft)
+                            || self.input.key_down(KeyCode::ControlRight);
+                        let step = if dy > 0.0 { 1.0 } else { -1.0 };
+                        if let Some(w) = self.world.as_mut() {
+                            w.room_scroll(step, ctrl);
+                        }
+                    }
                     return;
                 }
                 // Scroll sizes the selection sub-rect: plain = U (width),
@@ -5864,6 +6091,20 @@ impl ApplicationHandler for App {
                 // not the cursor is grabbed (the panel frees it), so you can aim a
                 // placement while picking from the list. Takes priority over the
                 // grabbed-only editor highlights.
+                // The room plan tool needs the cursor free; reconcile that first so
+                // the branches below see the settled state.
+                self.sync_room_cursor();
+                let room_armed = self.world.as_ref().map(|w| w.is_room_tool()).unwrap_or(false);
+                if room_armed {
+                    // Re-cast the pointer every frame rather than only on motion: the
+                    // drafting plane moves under a stationary cursor whenever the wheel
+                    // changes the base height, and the previewed corner has to follow.
+                    if let Some((o, d)) = self.mouse_world_ray() {
+                        if let Some(w) = self.world.as_mut() {
+                            w.room_hover(o, d);
+                        }
+                    }
+                }
                 let prop_placing = self
                     .world
                     .as_ref()
@@ -5879,7 +6120,15 @@ impl ApplicationHandler for App {
                     .as_ref()
                     .map(|w| w.is_build() && w.is_placing_spawn_point())
                     .unwrap_or(false);
-                if spawn_placing {
+                if room_armed {
+                    // The plan overlay (drawn through the gizmo channel) is the only
+                    // feedback this tool has; a stale crosshair face highlight from
+                    // before it was armed would just be a bright rectangle nobody
+                    // selected.
+                    if let Some(r) = self.renderer.as_mut() {
+                        r.set_highlight(None);
+                    }
+                } else if spawn_placing {
                     // Spawn-pad ghost: the marker square at the cursor's floor pick.
                     let ray = self.mouse_world_ray();
                     let mesh = ray.and_then(|(o, d)| {
@@ -6231,6 +6480,11 @@ impl App {
                     // pending to throw away, and this is where the one-mouth check runs.
                     w.cancel_vent();
                     handled = true;
+                } else if w.room_escape() {
+                    // Back out one rung of the room ladder (height -> base -> reopen
+                    // the outline -> one corner at a time). An empty outline returns
+                    // false and falls through to the cursor release, which disarms it.
+                    handled = true;
                 } else if w.draw_escape() {
                     // Back out one rung of the draw ladder (depth step → outline →
                     // one corner at a time). Idle returns false and falls through to
@@ -6261,6 +6515,12 @@ impl App {
         // the shop, so it works whether the cursor is grabbed or free.
         if code == KeyCode::KeyO {
             self.toggle_props();
+            return;
+        }
+        // The room plan tool owns the numpad while it is armed. Handled up here,
+        // above the pointer-lock gate further down, because the tool runs with a
+        // free cursor by design.
+        if self.world.as_ref().map(|w| w.is_room_tool()).unwrap_or(false) && self.room_key(code) {
             return;
         }
         // Object-mode edit keys (only while the panel is open):
