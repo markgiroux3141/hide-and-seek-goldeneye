@@ -8,9 +8,10 @@
 //! Every bone gets one dynamic body placed at that bone's world transform at the
 //! instant of death. A bone with a child gets a **capsule** spanning to its (farthest)
 //! child; a leaf bone (head / hands / feet) gets a **ball**. Each non-root body is
-//! pinned to its parent body by a **spherical joint** at the shared bone origin —
-//! translations locked, rotations free — so the skeleton holds together while the
-//! limbs swing. Ragdoll bodies don't collide with one another (see `GROUP_RAGDOLL`),
+//! pinned to its parent body by a **ball joint** at the shared bone origin —
+//! translations locked, rotations cone-limited (`RAGDOLL_JOINT_CONE` in
+//! `physics.rs`, so a corpse cannot fold through itself) — so the skeleton holds
+//! together while the limbs swing. Ragdoll bodies don't collide with one another (see `GROUP_RAGDOLL`),
 //! only the static level, so a corpse's own limbs never fight.
 //!
 //! # The scale bookkeeping (why read-back is exact)

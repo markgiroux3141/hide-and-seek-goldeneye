@@ -22,7 +22,7 @@
 //! | Shot | `rand() < accuracy * (1 - dist/range)` | real hitscan down the barrel, no roll |
 //! | Fire gate | FSM entered `Attack` | reaction served + target within 45° of the barrel |
 //! | Reaction | one `AiTuning::alert` constant | `shootdelaytimer` that decays rather than resets |
-//! | Speed | difficulty multiplier | difficulty tier, or a personality override |
+//! | Speed | difficulty multiplier | **unchanged** — still the dial's multiplier. The simulant computes a tier/personality speed (`SimOutput::speed_mult`) but only the overlay reads it (`RETRO_ENEMIES.md` §3a) |
 //! | Lethality ceiling | `MAX_HIT_RATE`, a global 4 hits/s cap | PD's burst gap, on the cadence |
 //! | Body + clips | GoldenEye | Perfect Dark, with the directional fire table |
 //!

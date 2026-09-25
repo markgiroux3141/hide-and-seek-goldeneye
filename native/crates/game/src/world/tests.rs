@@ -2430,6 +2430,26 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         assert_eq!(world.credits(), crate::economy::KILL_BOUNTY, "one kill = one bounty");
     }
 
+    /// A hunter killed by a **packmate** pays the player nothing. Every death goes
+    /// through `start_death`, and before the killer gate the pack shooting itself was
+    /// income: the player earned a bounty for standing back and watching.
+    #[test]
+    fn a_packmate_kill_pays_no_bounty() {
+        let mut world = World::new();
+        world.set_wave_size(2);
+        world.initial_meshes();
+        world.toggle_mode();
+        assert!(world.enemies.len() >= 2, "need a victim and a shooter");
+        let at = world.enemies[0].enemy.pos + Vec3::Y * 0.8;
+        world.hit_enemy_with(0, at, at - Vec3::Z, 1e6, Killer::Hunter(1));
+        assert!(world.enemies[0].enemy.is_dead(), "the packmate's round was lethal");
+        assert_eq!(world.credits(), 0, "the player was paid for a kill they did not make");
+        // The same death at the player's hand still pays.
+        let at = world.enemies[1].enemy.pos + Vec3::Y * 0.8;
+        world.hit_enemy_with(1, at, at - Vec3::Z, 1e6, Killer::Player);
+        assert_eq!(world.credits(), crate::economy::KILL_BOUNTY, "the player's own kill pays");
+    }
+
     /// Shop: an affordable weapon buy deducts its price, marks it owned (so it joins
     /// the cycle), can't be repeated, and an ammo buy tops up the reserve.
     #[test]
@@ -5722,4 +5742,61 @@ fn the_hole_tool_spans_the_whole_patch_not_one_brush() {
         frame.x,
         frame.w
     );
+}
+
+/// **A hunter on the floor below still finds you** — the facility-2 playtest report
+/// ("I had to go find him"), reproduced on the real level rather than a toy arena.
+///
+/// The player stands on the ground floor at a spawn pad (3.4, 0, 3.1); the pack comes up
+/// from the storeys below. Before the fix `chase_aim_point` built its flank point at the
+/// *hunter's* height, so every hunter below aimed at a spot on its own floor under the
+/// player and flip-flopped there — 60 s of Chase, never a sightline. Measured after the
+/// fix: first sightline ~13 s (`AI=ours`) / ~9 s (`AI=pd`), most of it the fetch for a
+/// gun at the start. Both modes run, because a pursuit bug in either is the same report.
+#[test]
+fn hunters_below_the_player_climb_to_find_them_on_facility_2() {
+    for pd in [false, true] {
+        let mut world = World::new();
+        world.register_catalog_prop_bounds();
+        let dir = crate::world::persist::levels_dir();
+        let Ok(_) = world.load_level(&dir.join("facility_2.json")) else {
+            println!("facility_2.json is not on disk; skipping");
+            return;
+        };
+        let mut cfg = world.play_config().clone();
+        cfg.ai = if pd { crate::enemy::AiMode::Pd } else { crate::enemy::AiMode::Ours };
+        world.set_play_config(cfg);
+        world.set_wave_size(4);
+        let spot = Vec3::new(3.4, 0.0, 3.1);
+        world.camera.pos = spot + Vec3::Y * 1.5;
+        world.toggle_mode();
+        world.player_invulnerable = true;
+        let dt = 1.0 / 60.0;
+        let input = InputState::default();
+        let mut found = None;
+        for f in 0..(30.0 / dt) as usize {
+            if let Some(c) = world.character.as_mut() {
+                c.pos = spot; // the player holds still: the pack must come to them
+            }
+            world.fixed_step(dt, &input);
+            world.enemy_combat_step(dt);
+            let ppos = world.player_pos().unwrap_or(spot);
+            let seen = (0..world.enemies.len()).any(|i| {
+                let e = world.enemies[i].enemy.pos;
+                !world.enemies[i].enemy.is_dead()
+                    && e.distance(ppos) < 20.0
+                    && crate::enemy::perception_los(&mut world.physics, e, ppos)
+            });
+            if seen {
+                found = Some(f as f32 * dt);
+                break;
+            }
+        }
+        let mode = if pd { "AI=pd" } else { "AI=ours" };
+        let t = found.unwrap_or_else(|| {
+            panic!("{mode}: no hunter reached a sightline in 30 s
+{}", world.hunter_report())
+        });
+        println!("{mode}: first sightline after {t:.1} s");
+    }
 }

@@ -252,6 +252,31 @@ Read `gailists.c:2020-2060` and `:2733-2860`, and `chraicommands.c:6472`.
 
 ## 5. Suggested plan
 
+> **Re-scoped 2026-09-25 (user decision).** There will be two enemy archetypes: the **PD
+> combat-simulator bot** (deathmatch, omniscient, no stagger) and the **mission guard**
+> (GoldenEye / PD solo: perception, stagger, patrols, morale). GoldenEye and PD guards are one
+> system; the ge-decomp has the same `ACT_*` set. **The simulator bot comes first and gets
+> finished before the guard is started.** So the plan below is now "Track A: the simulant".
+> The stages are unchanged, minus anything guard-only. The knowledge-policy half of Stage 1
+> is parked with the guard.
+>
+> **Track A order:**
+> - **A1 simulant reactions:** PD's procedural flinch plus shove, no stun, keep firing; this
+>   also unlocks friendly fire at the real impact point.
+> - **A2 animation foundation:** crossfade from the on-screen pose; measured gait speeds.
+> - **A3 PD locomotion:** velocity smoothing and arrival slowdown; face the target only when
+>   about to attack; leg/torso twist plus reversed-run backpedal.
+> - **A4 combat readability:** windup, positional gunfire, per-weapon damage.
+> - **A5 structure**, alongside the others.
+>
+> **Found in the first playtest (facility 2, "I had to go find him"): FIXED.**
+> `chase_aim_point` built its flank point at the *hunter's* height. Every hunter on a lower
+> floor therefore aimed at a spot on its own floor under the player, and flip-flopped there for
+> the whole round. Measured: 3 of the 10 pads were never found in 60 s. After the fix all 10
+> are found; the regression test is `hunters_below_the_player_climb_to_find_them_on_facility_2`.
+> This was `AI=ours` only, since `pd_step` doesn't flank; facility 2 has no PLAY config, so it
+> runs `ours`.
+
 The stages are ordered like the levelgen retro. The user playtests after each stage before the next one starts.
 
 **Stage 0: tell the truth (bugs plus docs; almost no change to feel)**
@@ -268,6 +293,27 @@ The stages are ordered like the levelgen retro. The user playtests after each st
 - Fix every stale doc in §3d. Update `DESIGN_AI_PD_VS_OURS.md` and the `pd_lab.rs` header.
 - Delete `breach_tick`, `advance_facing`/`TURN_RATE`, the `is_fire_clip` guard and `AnimPlayer::fire_window`.
 - Make `pdsim` non-optional, which removes three `is_some()` branches.
+
+> **Stage 0 status (2026-09-25, branch `feat/enemy-overhaul`): built, green, awaiting playtest.**
+> - Done: hit part + blood read the on-screen pose; no bounty for hunter-on-hunter kills
+>   (an unowned blast still pays, since only the player's explosives exist in play); knockback
+>   comes from whoever fired; a blast clears the bullet's hit part; hunters skip weapons they
+>   can't fire (launchers, grenades, mines: pickups, the fixed-weapon policy, the PLAY-tab
+>   list); `breach_tick` + `DOOR_HP` deleted; the stale docs above fixed.
+> - **Deferred: friendly fire's real impact point.** Measured: the moment a packmate's round
+>   could hit an arm, the AI lab's `a_pack_still_engages_despite_self_occlusion` failed. The
+>   front rank was stun-locked by the rank behind it, because PD's arm injury row is a 3 s
+>   stun. It moves once Stage 1 decides the reaction style.
+> - Deferred to Stage 2: `AnimPlayer::fire_window` and the `is_fire_clip` guard (the mixer
+>   gets reworked there anyway); making `pdsim` non-optional (goes with Stage 1's knowledge
+>   policy).
+>
+> **Measured stun per PD injury row** (full clip ÷ speed, what `hit_enemy_with` stuns for):
+> torso / head / pelvis 0.5–0.67 s; bicep 1.8–3.1 s; forearm 2.4 s; hand 3.7–4.7 s;
+> leg 3.7–**5.1 s**. PD guards really do play these whole: every level script sets
+> `set_recovery_speed(0)` (149/149 calls), so `chr_get_ranged_argh_speed` leaves the end
+> frame at the last frame. That's the GoldenEye "juggle", and it's why a limb hit takes a
+> hunter out of the fight for seconds.
 
 **Stage 1: settle two decisions (you need to make these)**
 

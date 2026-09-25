@@ -504,8 +504,8 @@ pub(crate) const ZONE_HEAD_MULT: f32 = 4.0;
 pub(crate) const ZONE_TORSO_MULT: f32 = 1.0;
 pub(crate) const ZONE_LEG_MULT: f32 = 0.6;
 
-// ─── Enemies fire back (A3) — data-driven arsenal + probabilistic hit ────────
-// Per-weapon damage / accuracy / range / fire-rate now live on the equipped
+// ─── Enemies fire back (A3) — data-driven arsenal ───────────────────────────
+// Per-weapon damage / spread / range / fire-rate now live on the equipped
 // [`EnemyWeaponDef`] (see `combat::enemy_weapons`); only the shared feedback
 // timings stay here.
 /// The muzzle-flash countdown (s) after each enemy shot; >0 → the enemy muzzle
@@ -764,8 +764,8 @@ pub enum BodySet {
     PerfectDark,
 }
 
-/// The **Perfect Dark hunter clip set** — the same 36 slots as the GoldenEye
-/// template, in the same order, so [`FIRE_RIFLE_IDX`], [`CHAR_HIT_START`] and the
+/// The **Perfect Dark hunter clip set** — the GoldenEye template's 36 slots in the
+/// same order (plus PD-only slots after them, 51 in all), so [`FIRE_RIFLE_IDX`], [`CHAR_HIT_START`] and the
 /// death block at `CHAR_HIT_START + HIT_CLIPS.len()` address a PD hunter with the
 /// arithmetic they already use. The filenames are numbered because that order is
 /// load-bearing: slot `n` is file `n`.
@@ -1214,11 +1214,6 @@ const BRACE_MAX: f32 = 8.0;
 /// triangles at the seam (JS `E = WALL_THICKNESS / 2`).
 const BURY_EPS: f32 = WALL_THICKNESS / 2.0;
 
-/// Seconds of sustained breaching to break a door (JS `door.js` `DOOR_HP`).
-/// Unused while breakable doors stay disabled; kept for re-enable.
-#[allow(dead_code)]
-const DOOR_HP: f32 = 2.5;
-
 /// Reserved renderer/physics id for the combined free-standing structures mesh
 /// (all platforms + stair-runs). CSG region ids count up from 0, so `u32::MAX`
 /// never collides — the structures live in the same mesh + trimesh-collider
@@ -1277,17 +1272,14 @@ pub(crate) struct Selection {
     side: Side,
 }
 
-/// A breakable door, live only during the HUNT (JS `door.js`). The panel is a
-/// standalone cuboid collider that blocks the player; the nav overlay adds a
-/// cost the hunter reads live. Breaching drains `hp`, then removes the collider
-/// and flips the nav flag — **no re-voxelization, no CSG re-eval** (the thesis).
-/// `aabb` is the doorframe carve in WT (min corner + dims), used to draw the panel.
+/// The JS port's breakable spawn door (`door.js`). **Vestigial:** nothing builds one
+/// any more — the spawn is a floor marker, hunters never breach, and the doors the
+/// player places are ECS entities (`crate::ecs::Door`). `World::doors` is always
+/// empty; this and [`World::door_mesh`] remain only until that pass is removed.
+/// `aabb` is the doorframe carve in WT (min corner + dims).
 pub(crate) struct Door {
     aabb: Brush,
-    hp: f32,
     broken: bool,
-    /// The panel collider's index in [`PhysicsWorld`], removed on breach.
-    panel: usize,
 }
 
 /// A live hit spark (Player Combat P2): a bright marker at a shot's impact point,
@@ -2113,7 +2105,7 @@ pub struct World {
     /// call site). `None` if any clip failed to load.
     char_anim_template: Option<AnimPlayer>,
     /// The **Perfect Dark** counterpart of [`Self::char_anim_template`], filling the
-    /// same 36 slots in the same order with PD's own animations (see
+    /// same slots in the same order with PD's own animations (see
     /// [`PD_TEMPLATE_CLIPS`]). A hunter wearing a PD body clones this one instead.
     ///
     /// It has to be a separate template rather than a retarget: a clip stores each
@@ -2230,12 +2222,14 @@ pub struct World {
     /// baseline: when off, each hunter runs the legacy FSM (`Enemy::update`'s match).
     /// Reuses every tuned movement/perception primitive — only the *decision* changes.
     utility_ai: bool,
-    /// Whether **PD-lab hunters are omniscient** — Perfect Dark's knowledge rule: they
-    /// always know where the player is and navigate to the live position instead of a
-    /// last-known one, so breaking line-of-sight no longer sends them fan-out searching.
-    /// **On by default**, and PD-lab-only (a GoldenEye hunter is never affected, so the
-    /// normal game is unchanged). A kill-switch / A-B baseline; see
-    /// [`crate::enemy::Enemy::known_player_pos`] for what it does and does *not* change.
+    /// Whether **hunters with a simulant are omniscient** — Perfect Dark's knowledge
+    /// rule: they always know where the player is and navigate to the live position
+    /// instead of a last-known one, so breaking line-of-sight no longer sends them
+    /// fan-out searching. **On by default, and every hunter has a simulant** — so in
+    /// the shipping game this covers the whole pack in both AI modes, and Search /
+    /// Investigate / hearing never run (`RETRO_ENEMIES.md` §1.1). A kill-switch / A-B
+    /// baseline; see [`crate::enemy::Enemy::known_target_pos`] for what it does and
+    /// does *not* change.
     pd_omniscience: bool,
     /// **Which engagement model the hunters run** (`AI=pd|ours`, default ours). Unlike
     /// the flags above this is not a kill-switch but a full A/B: `ours` is everything

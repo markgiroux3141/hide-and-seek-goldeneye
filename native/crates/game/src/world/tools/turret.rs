@@ -123,7 +123,7 @@ impl World {
 
         let listener = self.player_pos().unwrap_or(Vec3::ZERO);
         // (roster index, impact point) per round that connected, applied after the loop.
-        let mut hits: Vec<(usize, Vec3)> = Vec::new();
+        let mut hits: Vec<(usize, Vec3, Vec3)> = Vec::new();
         let mut reports: Vec<Vec3> = Vec::new();
 
         for (e, place, mut g) in turrets {
@@ -203,7 +203,7 @@ impl World {
                             .iter()
                             .position(|x| x.collider == hit.collider && !x.enemy.is_dead())
                         {
-                            hits.push((i, hit.point));
+                            hits.push((i, hit.point, muzzle));
                         }
                     }
                     // Anything else the round meets — wall, prop, the turret's own
@@ -232,8 +232,8 @@ impl World {
                 }
             }
         }
-        for (i, at) in hits {
-            self.hit_enemy_with(i, at, gun().damage, Killer::Turret);
+        for (i, at, muzzle) in hits {
+            self.hit_enemy_with(i, at, muzzle, gun().damage, Killer::Turret);
         }
     }
 

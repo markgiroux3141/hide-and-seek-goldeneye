@@ -17,20 +17,25 @@
 //!   and ignore the player entirely until armed. Outscores every other behaviour,
 //!   because a hunter with nothing to shoot has no better option.
 //!
-//! Movement/perception constants are ported from `EnemyAI.ts`; the probabilistic
-//! shot roll + the fire-animation cadence live in the `World` combat layer (which
-//! owns the animation mixer + the player), driven by [`EnemyStep::want_fire`]. Search
+//! Movement/perception constants are ported from `EnemyAI.ts`; the shot (a real round
+//! down the barrel, `World::emit_pd_shot`) + the burst cadence live in the `World`
+//! combat layer (which owns the animation mixer + the player). The trigger itself is
+//! the PD simulant's (`crate::pdsim`) — [`EnemyStep::want_fire`] only decides it in a
+//! headless test with no simulant attached. Search
 //! coordination (which point each hunter gets) lives in `World` too — this file just
 //! walks to whatever [`Self::assign_search_target`] set and reports when it needs a
 //! fresh one via [`EnemyStep::needs_search_target`].
 //!
-//! Scope note (2026-07-16): door **breach/blocking is disabled** — doors are open
-//! passages during the hunt — so the FSM has no door-blocking branch.
+//! Doors: a shut door is a real obstacle — the movement commit holds a hunter at one
+//! while it opens (see `door_gate` and the `DOOR_*` constants). The older idea of
+//! hunters *breaching* doors was abandoned.
 //!
 //! Scope note (2026-08-17): a hunter can be flagged [`Enemy::set_omniscient`], which
 //! swaps the *knowledge* rule (not the perception one) for Perfect Dark's — it always
 //! knows where the player is and walks to the live position instead of a last-known
-//! spot. See [`Enemy::known_target_pos`].
+//! spot. See [`Enemy::known_target_pos`]. **In the shipping game every hunter is
+//! flagged** (the `World` sets it whenever a simulant is attached, which is always),
+//! so Search, Investigate and hearing do not run in play — `RETRO_ENEMIES.md` §1.1.
 
 use glam::Vec3;
 use rapier3d::prelude::ColliderHandle;
@@ -486,6 +491,13 @@ const UTIL_INERTIA: f32 = 0.2;
 /// A flank aim point nearer than this (m) is discarded for the believed position — it is
 /// either inside geometry or effectively underfoot, and chasing it stalls the pursuit.
 const FLANK_MIN_OFFSET: f32 = 1.0;
+
+/// Largest height difference (m) between a hunter and its chase target at which it
+/// still flanks. Above it the two are on different floors and the hunter chases the
+/// target itself, so A* routes the floor change (see [`Enemy::chase_aim_point`]). Two
+/// stair risers: a gentle ramp or a step still counts as the same floor, a storey
+/// (2 m+) never does.
+const FLANK_SAME_FLOOR: f32 = 0.5;
 
 // ─── Going shopping ([`AiState::Fetch`]) ─────────────────────────────────────
 /// The utility score of fetching. Deliberately **dominant** — clear of every other
@@ -2785,17 +2797,18 @@ impl Enemy {
     /// Where a chasing hunter should actually walk: the flank-offset approach bearing if
     /// that lands on real ground, and the believed target position otherwise.
     ///
-    /// The offset is a heuristic and it is computed **flat, on this hunter's own floor**
-    /// ([`flank_point`] takes `pos.y`), so swinging it by an angle can put it inside a
-    /// wall — and when the player is on another storey the point is on the wrong floor
-    /// entirely. Nav then snaps such a goal to the nearest standable cell within ~6 m,
-    /// which can be *the one under our own feet*: A\* returns a one-cell path, the mover
-    /// requests nothing, and the pursuit dies where it stands.
+    /// The offset is a heuristic computed flat, so swinging it by an angle can put it
+    /// inside a wall. Nav then snaps such a goal to the nearest standable cell within
+    /// ~6 m, which can be *the one under our own feet*: A\* returns a one-cell path, the
+    /// mover requests nothing, and the pursuit dies where it stands. The believed
+    /// position is the safe fallback — by construction it is somewhere a body was
+    /// standing.
     ///
-    /// Measured before this existed: a hunter 14 m from the player, on the floor below,
-    /// held Chase for 82 seconds without moving, aiming at a point 5.5 m away on its own
-    /// floor. The believed position is the safe fallback — by construction it is
-    /// somewhere a body was standing.
+    /// It is only ever computed on the target's own floor ([`FLANK_SAME_FLOOR`]). It used
+    /// to be built at the hunter's height, so a target one storey up produced a point on
+    /// the storey below — measured twice: a hunter 14 m off holding Chase for 82 s, and
+    /// (after the one-cell fallback above) hunters on facility 2 flip-flopping 4.5 m
+    /// under the player for a whole minute.
     fn chase_aim_point(&self, base: Vec3, flank_angle: f32, nav: &NavWorld) -> Vec3 {
         // A target inside a vent duct is a special case that must not be flanked.
         //
@@ -2810,6 +2823,18 @@ impl Enemy {
         // standoff band through solid wall.
         if let Some(mouth) = nav.nearest_vent_mouth(base) {
             return mouth;
+        }
+        // **Flanking is a same-floor manoeuvre.** Swinging wide to surround someone only
+        // means anything on open ground you share with them. With the target on another
+        // floor the aim point used to be built at the *hunter's* height — so a hunter on
+        // the storey below got a point on its own floor, under the player, walked to it,
+        // and stood there: close enough that the next step's flank offset fell under
+        // `FLANK_MIN_OFFSET` and it aimed at the player again, far enough that the step
+        // after swung it back. Measured on facility 2: hunters 4.5 m from the player,
+        // 2 m below, flip-flopping for a whole minute. A floor change is A*'s job, so
+        // hand it the real target and let the path find the stairs.
+        if (base.y - self.pos.y).abs() > FLANK_SAME_FLOOR {
+            return base;
         }
         let flanked = flank_point(base, self.pos, flank_angle);
         match nav.nearest_standable(flanked.x, flanked.y + 0.1, flanked.z, 4) {
@@ -2833,8 +2858,8 @@ impl Enemy {
         // ── Staking out a vent duct ──
         //
         // Placed here, at the one function every AI path funnels through, rather than in
-        // a state arm. There are **three** movement brains — `pd_step` (the shipped
-        // default, `AI=pd`), the utility scorer, and the FSM kill-switch — and a fix in
+        // a state arm. There are **three** movement brains — `pd_step` (`AI=pd`), the
+        // utility scorer (the shipped default, `AI=ours`), and the FSM kill-switch — and a fix in
         // any one of them would leave the other two walking into a wall. This is their
         // only shared chokepoint.
         //
@@ -3132,7 +3157,9 @@ fn flank_point(target: Vec3, pos: Vec3, angle: f32) -> Vec3 {
     }
     let ang = to.z.atan2(to.x) + angle;
     let nr = r * FLANK_CLOSE_FRAC;
-    Vec3::new(target.x + ang.cos() * nr, pos.y, target.z + ang.sin() * nr)
+    // At the target's height, not the hunter's: the point is on the approach to the
+    // target, and the caller snaps it to the nearest floor from there.
+    Vec3::new(target.x + ang.cos() * nr, target.y, target.z + ang.sin() * nr)
 }
 
 /// **Perception** line-of-sight from `from_feet` to `to_feet`, cast between chest

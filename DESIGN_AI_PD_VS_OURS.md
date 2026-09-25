@@ -185,6 +185,13 @@ AI=pd               omniscient, no search, four-mode distance-band combat, none 
                     above evasive/tactical movement, PD's reload rule
 ```
 
+> **Correction (2026-09-25, `RETRO_ENEMIES.md` §1.1):** in the shipping game `AI=ours` is
+> omniscient too. `lifecycle.rs` flags a hunter omniscient whenever `pd_omniscience` is on
+> (default) *and* it has a simulant, and every hunter has one. So under both modes
+> `Search`, `Investigate`, hearing and the squad alert do not run in play; the difference
+> between the modes is the combat movement row above, not "perception, search". Turning
+> perception back on is a per-level knowledge policy, planned in the enemy overhaul.
+
 Resolved from the environment in `World::new` and **re-applied last at boot** (`app.rs`,
 after the `PD_LAB` and `BODIES` blocks) so an explicit `AI=` cannot lose to a mode default,
 and logged unconditionally. `an_explicit_ai_mode_outranks_the_lab` pins it.

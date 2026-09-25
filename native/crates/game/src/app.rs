@@ -1798,6 +1798,18 @@ impl App {
                     .collect()
             })
             .unwrap_or_default();
+        // The guns the PLAY tab can hand the whole pack: only what a hunter can fire.
+        let hunter_weapons: Vec<&'static str> = self
+            .world
+            .as_ref()
+            .map(|w| {
+                w.arsenal_weapons()
+                    .iter()
+                    .filter(|c| c.hunter_usable())
+                    .map(|c| c.name)
+                    .collect()
+            })
+            .unwrap_or_default();
         let mut arm_weapon_pickup: Option<&'static str> = None;
         let armed_weapon = self.world.as_ref().and_then(|w| w.armed_pickup_weapon());
 
@@ -2375,6 +2387,7 @@ impl App {
                                     pins: play_ctx_pins,
                                     pads: spawn_pad_count,
                                     weapons: &pickup_weapons,
+                                    hunter_weapons: &hunter_weapons,
                                     in_hunt: play_in_hunt,
                                 };
                                 let (ch, st) = play_tab_ui(ui, &mut play_ui, &ctx);
@@ -4685,7 +4698,7 @@ fn play_tab_ui(
                     }
                 }
                 ui.separator();
-                for name in ctx.weapons.iter().copied() {
+                for name in ctx.hunter_weapons.iter().copied() {
                     let sel =
                         matches!(&cfg.hunter_weapon, HunterWeapon::Fixed(n) if n.as_str() == name);
                     if ui.selectable_label(sel, format!("all carry the {name}")).clicked() && !sel {
@@ -4795,8 +4808,11 @@ struct PlayTabCtx<'a> {
     pins: crate::world::play_config::PlayPins,
     /// Authored spawn pads, so the entry section can warn about a pad-entry level with none.
     pads: usize,
-    /// The live arsenal's gun names (no empty-handed slot).
+    /// The live arsenal's gun names (no empty-handed slot) — the player's loadout list.
     weapons: &'a [&'static str],
+    /// The subset a hunter can fire (no launchers, grenades or mines — see
+    /// `WeaponStats::hunter_usable`) — the "all carry the …" list.
+    hunter_weapons: &'a [&'static str],
     in_hunt: bool,
 }
 

@@ -65,15 +65,16 @@ pub struct EnemyWeaponDef {
     pub muzzle_path: &'static str,
     /// Fire SFX, relative under `native/assets/audio/`.
     pub fire_sound: &'static str,
-    /// Damage per hit (JS `EnemyManager` uniform override — all hunters deal this).
+    /// Damage per hit (JS `EnemyManager` uniform override — every primary deals
+    /// [`ENEMY_DAMAGE`], whatever the gun; see `RETRO_ENEMIES.md` §3b).
     pub damage: f32,
     // `accuracy` (base hit chance 0–1, JS `accuracy`) lived here and is **retired** with
     // the hit roll that read it (`DESIGN_PD_SIMULANT_AI.md` §17). How well a hunter
     // shoots is a property of the shooter now — its Perfect Dark difficulty tier and how
     // far its zeroing has converged — not of the gun. What the gun still contributes is
     // [`Self::spread`], PD's own per-weapon cone, which is a different and real thing.
-    /// Effective range in metres (the hit roll goes to 0 beyond it, and the FSM
-    /// [`Self::standoff`] is derived from it).
+    /// Effective range in metres: how far a round travels (`emit_pd_shot` tests the
+    /// shot line only this far), and what [`Self::standoff`] is derived from.
     pub range: f32,
     /// Shots per second while inside the fire-animation window.
     pub fire_rate: f32,
@@ -90,8 +91,9 @@ pub struct EnemyWeaponDef {
     /// [`dist_config_for`]).
     pub dist_cfg: u8,
     /// Rounds in a magazine, straight off the player [`WeaponStats::magazine_size`].
-    /// Feeds PD's reload rule (`bot.c:2470`), which is the only thing that reads it —
-    /// a hunter has unlimited magazines, just like a PD bot.
+    /// Feeds the reload (`World::enemy_reload_step`, after PD's `bot.c:2470` rule).
+    /// Unlike a PD bot's, a hunter's spare magazines are **finite** — the reserve is
+    /// drawn down per reload, so a dry hunter has a reason to fetch ammo.
     pub clip: u32,
     /// Seconds a reload takes ([`WeaponStats::reload_time`]); the hunter holds fire
     /// for this long once PD's rule schedules one.
@@ -169,11 +171,11 @@ const PISTOL_NAMES: &[&str] = &[
     "PP7 (Silenced)",
 ];
 
-// ─── Engagement range (drives standoff + accuracy falloff) ───────────────────────
+// ─── Engagement range (drives standoff + shot reach) ──────────────────────────────
 // The class default `range` (pistol 8 / rifle 12) doesn't distinguish a shotgun from
 // a sniper — both are class Rifle. These name bands give the CQC and long-reach guns
 // an engagement range that matches how they actually fight, so the derived standoff
-// (and the accuracy falloff) reads right: a shotgunner charges in, a sniper hangs back.
+// reads right: a shotgunner charges in, a sniper hangs back.
 
 /// Close-quarters weapons — the hunter closes right in (short range → short standoff).
 /// Shotguns and SMGs are murderous up close and fall off fast at distance.
@@ -350,7 +352,7 @@ pub fn enemy_def_for(w: &WeaponStats) -> EnemyWeaponDef {
     };
 
     // Effective engagement range — CQC guns close in, snipers hang back (drives both
-    // the standoff and the accuracy falloff).
+    // the standoff and how far a round reaches).
     let range = engagement_range(w, class_range);
     // Enemy fire cadence. A pump shotgun / sniper / single-shot is class `Rifle`, so
     // the 8/s class default turns it full-auto. Clamp NON-automatic weapons to their

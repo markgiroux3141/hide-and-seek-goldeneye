@@ -335,7 +335,7 @@ mod tests {
         // One lethal shot through the real damage funnel, so `start_death` runs (and with
         // it the scoreboard credit + the respawn clock).
         let at = world.enemies[1].enemy.pos + Vec3::Y * 0.8;
-        world.hit_enemy_with(1, at, 1e6, Killer::Player);
+        world.hit_enemy_with(1, at, at - Vec3::Z, 1e6, Killer::Player);
         assert!(world.enemies[1].enemy.is_dead(), "slot 1 is down");
         assert_eq!(world.enemies.len(), 3, "a death does not shrink the roster");
         assert!(world.enemies[1].respawn_timer.is_some(), "its clock is armed");
@@ -425,7 +425,7 @@ mod tests {
 
         for expected in 1..=3u32 {
             let at = world.enemies[0].enemy.pos + Vec3::Y * 0.8;
-            world.hit_enemy_with(0, at, 1e6, Killer::Player);
+            world.hit_enemy_with(0, at, at - Vec3::Z, 1e6, Killer::Player);
             assert!(world.enemies[0].enemy.is_dead(), "down on pass {expected}");
             assert_eq!(
                 world.hunter_scores()[0].deaths, expected,

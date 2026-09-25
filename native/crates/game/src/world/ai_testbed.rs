@@ -399,7 +399,7 @@ fn extended_wander_run_n(wave: usize) -> JankMonitor {
 
 /// The invariants the extended run must ALWAYS hold: no hunter ever ends up in an
 /// illegal (clipped/fallen) position, and none thrashes its FSM. (The walk-in-place
-/// defect the run also exposes is tracked separately — see `repro_chase_walk_in_place`.)
+/// defect this run once also exposed has since been fixed.)
 #[test]
 fn extended_run_holds_the_hard_invariants() {
     let mon = extended_wander_run();

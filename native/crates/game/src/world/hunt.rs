@@ -900,9 +900,8 @@ impl World {
     /// flooding its wave in at the old fixed marker rather than going quiet. Perfect
     /// Dark guards identically — `if (g_NumSpawnPoints > 0)` (`playerreset.c:398`).
     ///
-    /// (Breakable-door breach/blocking stays disabled — user call 2026-07-16 — so
-    /// `self.doors` stays empty; the `Door` / `breach_tick` machinery is left intact
-    /// for a re-enable.)
+    /// (Breakable-door breach was abandoned — `self.doors` stays empty; see
+    /// [`super::Door`].)
     pub(crate) fn prepare_spawn(&mut self, nav: &NavWorld) {
         self.doors.clear();
         // Snap each pad to a standable cell (in case it sits a hair off the floor, or
@@ -1253,39 +1252,6 @@ impl World {
             }
         }
         None // hemmed in on every side — spawn on the pad and let the sim sort it out
-    }
-
-    /// Drain a breaching door's hp; on break, remove its panel collider and flip
-    /// the live nav flag. Currently unused (breakable doors stay disabled; the spawn
-    /// is a marked floor point, not a door) but retained for the re-enable. **The
-    /// thesis in code:**
-    /// a built element is destroyed and both collision and nav react instantly —
-    /// one collider gone, one bool flipped — with **no re-voxel/CSG re-eval**.
-    #[allow(dead_code)]
-    pub(crate) fn breach_tick(&mut self, di: usize, dt: f32) {
-        let broke = {
-            let Some(door) = self.doors.get_mut(di) else { return };
-            if door.broken {
-                return;
-            }
-            door.hp -= dt;
-            if door.hp <= 0.0 {
-                door.broken = true;
-                Some(door.panel)
-            } else {
-                None
-            }
-        };
-        if let Some(panel) = broke {
-            self.physics.remove_door_collider(panel);
-            if let Some(nav) = self.nav.as_mut() {
-                // A breached panel is gone for good — permanently open to pathing.
-                nav.set_door_open(di, true);
-            }
-            log::info!(
-                "DOOR {di} BREACHED — panel collider removed + nav flag flipped, no re-bake"
-            );
-        }
     }
 
     /// A combined mesh of every intact door panel (meters), for the renderer's

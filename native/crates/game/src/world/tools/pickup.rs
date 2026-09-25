@@ -533,7 +533,7 @@ impl World {
                 continue;
             }
             let useful = match (want, p.kind) {
-                (_, PickupKind::Weapon) => true,
+                (_, PickupKind::Weapon) => self.hunter_usable(p.weapon),
                 (HunterWant::Ammo, PickupKind::Ammo) => p.weapon == holding,
                 (HunterWant::Weapon, PickupKind::Ammo) => false,
             };
@@ -549,6 +549,17 @@ impl World {
             }
         }
         best.map(|(e, pos, _)| (e, pos))
+    }
+
+    /// Whether a hunter could use the weapon `name` — see
+    /// [`crate::combat::WeaponStats::hunter_usable`]. A name outside this session's
+    /// arsenal is not usable either (there is nothing to equip it from).
+    fn hunter_usable(&self, name: &str) -> bool {
+        self.arsenal
+            .weapons()
+            .iter()
+            .find(|w| w.name == name)
+            .is_some_and(|w| w.hunter_usable())
     }
 
     /// Let the hunters collect whatever they are standing on. Called from
@@ -1316,6 +1327,26 @@ pub(crate) mod tests {
         world.camera.pos = Vec3::new(20.0, 2.0, 20.0);
         world.toggle_mode();
         world
+    }
+
+    /// A hunter walks **past** a weapon it cannot fire to reach one it can. A hunter's
+    /// trigger is hitscan-only, so a rocket launcher in its hands was an 8-damage
+    /// rifle that never reloaded — worse than leaving it on the floor for the player.
+    #[test]
+    fn a_hunter_passes_over_a_launcher_for_a_gun_it_can_fire() {
+        let gun = Vec3::new(20.0, 0.0, 20.0);
+        let mut world = hunter_arena(1, gun);
+        // A launcher right at the hunter's feet: nearest by far, and useless to it.
+        let at_feet = world.enemies[0].enemy.pos + Vec3::new(0.5, 0.0, 0.0);
+        place_pickup(&mut world, MeshId::WeaponPickup, at_feet, Pickup::weapon("Rocket Launcher"));
+        assert_eq!(
+            world.hunter_fetch_target(&world.enemies[0]),
+            Some(gun),
+            "the hunter should want the AR33, not the launcher at its feet"
+        );
+        // And standing on it does not arm it with it either.
+        world.hunter_pickup_step();
+        assert!(world.enemies[0].weapon.is_unarmed(), "the hunter picked up the launcher");
     }
 
     /// Hunters spawn **empty-handed** too, and an empty-handed hunter cannot shoot —

@@ -473,10 +473,19 @@ impl World {
         }
     }
 
-    /// Grant the kill bounty for a defeated hunter. The single funnel for combat
-    /// income, so future bounty scaling (by archetype / difficulty) stays in one
-    /// place. Called from [`Self::start_death`] — the one death choke-point.
-    fn award_kill(&mut self) {
+    /// Grant the kill bounty for a defeated hunter — unless another hunter made the
+    /// kill. A packmate's stray round is not the player's work, and before this gate
+    /// the pack shooting itself paid out. An [`Killer::Unattributed`] splash still
+    /// pays: explosives carry no owner, but with hunter grenades off
+    /// ([`World::grenades`]) every blast in play is the player's own. If hunters ever
+    /// throw again, thread an owner through `combat::explosives` and tighten this.
+    /// The single funnel for combat income, so future bounty scaling (by archetype /
+    /// difficulty) stays in one place. Called from [`Self::start_death`] — the one
+    /// death choke-point.
+    fn award_kill(&mut self, killer: Killer) {
+        if matches!(killer, Killer::Hunter(_)) {
+            return;
+        }
         self.economy.earn(crate::economy::KILL_BOUNTY);
         log::info!(
             "+{} credits (hunter down) — balance {}",
@@ -1339,7 +1348,14 @@ impl World {
     /// feedback).
     fn blast_hit_enemy(&mut self, idx: usize, dmg: f32, at: Vec3, blast_center: Vec3) {
         let (died, collider) = match self.enemies.get_mut(idx) {
-            Some(inst) if !inst.enemy.is_dead() => (inst.enemy.take_damage(dmg), inst.collider),
+            Some(inst) if !inst.enemy.is_dead() => {
+                // A blast hits the whole body, not a part: forget the part the last
+                // *bullet* landed on, or the death table below plays that bullet's
+                // animation (a headshot death for a grenade at the feet). `None` is
+                // PD's `HITPART_GENERAL`, which `pd_reaction` maps to the torso.
+                inst.hit_part = None;
+                (inst.enemy.take_damage(dmg), inst.collider)
+            }
             _ => return,
         };
 
@@ -1392,10 +1408,6 @@ impl World {
         }
     }
 
-    /// Begin a hunter's death: drop its hitscan capsule, then either spawn a physics
-    /// ragdoll (the [`World::ragdoll`] flag, default on) seeded from its current pose +
-    /// the killing `impulse` at `impact`, or fall back to the canned death clip. Shared
-    /// by the bullet ([`Self::hit_enemy`]) and blast ([`Self::blast_hit_enemy`]) paths.
     /// A Perfect Dark reaction row for hunter `idx`: the death or injury table for
     /// the body part its last shot landed on, random-picked exactly as
     /// `chraction.c:3271` / `:3516` do. `None` for a GoldenEye hunter (whose clips
@@ -1421,6 +1433,13 @@ impl World {
         Some(rows[self.rand_below(rows.len())])
     }
 
+    /// Begin a hunter's death: pay the bounty, credit the scoreboard, arm the respawn,
+    /// drop its hitscan capsule — then the body. A Perfect Dark hunter (every hunter,
+    /// unless `GE_CLIPS=1`) plays its authored death row for the part last hit
+    /// ([`Self::pd_reaction`]); otherwise a physics ragdoll (the [`World::ragdoll`]
+    /// flag, default on) seeded from its current pose + the killing `impulse` at
+    /// `impact`; otherwise the canned death clip. Shared by the bullet
+    /// ([`Self::hit_enemy`]) and blast ([`Self::blast_hit_enemy`]) paths.
     fn start_death(
         &mut self,
         idx: usize,
@@ -1429,10 +1448,10 @@ impl World {
         impulse: Vec3,
         killer: Killer,
     ) {
-        // A hunter just went down — pay the kill bounty. Every enemy death funnels
-        // through here (bullet + blast paths both call it), so this is the one place
-        // combat income is granted.
-        self.award_kill();
+        // A hunter just went down — pay the kill bounty (if the player's side earned
+        // it). Every enemy death funnels through here (bullet + blast paths both call
+        // it), so this is the one place combat income is granted.
+        self.award_kill(killer);
         // …which makes it also the one place the scoreboard is credited and the respawn
         // clock is armed. Both belong here for exactly that reason.
         self.record_hunter_death(idx, killer);
@@ -1539,42 +1558,53 @@ impl World {
     /// `onHit`). The death fade begins later, once the death animation finishes.
     pub(crate) fn hit_enemy(&mut self, idx: usize, hit_point: Vec3) {
         let base = self.weapon().active_damage();
-        self.hit_enemy_with(idx, hit_point, base, Killer::Player);
+        // The round came from the player's eye; with no character (a headless test
+        // poking the funnel) it came from straight above, which is what the old
+        // `unwrap_or(Vec3::Y)` knock direction amounted to.
+        let from = self
+            .character
+            .as_ref()
+            .map(|c| c.eye())
+            .unwrap_or(hit_point - Vec3::Y);
+        self.hit_enemy_with(idx, hit_point, from, base, Killer::Player);
     }
 
     /// [`Self::hit_enemy`] with the damage + attacker supplied rather than assumed to be
     /// the player — the entry point for a shot that did not come from the player, i.e. one
-    /// hunter hitting another (see `emit_pd_shot`). Everything downstream is shared, so a
-    /// hunter shot by a packmate bleeds, flinches and dies identically; `killer` only
-    /// decides who the scoreboard credits.
+    /// hunter hitting another (see `emit_pd_shot`) or a turret round. Everything
+    /// downstream is shared, so a hunter shot by a packmate bleeds, flinches and dies
+    /// identically; `killer` decides who the scoreboard credits, and `from` (where the
+    /// round was fired from) decides which way the body is knocked.
     pub(crate) fn hit_enemy_with(
         &mut self,
         idx: usize,
         hit_point: Vec3,
+        from: Vec3,
         base: f32,
         killer: Killer,
     ) {
         // Paint blood at the impact (before damage, so it shows even on the kill
         // shot). Needs this hunter's body model (immut) + its pose/blood (mut) —
         // disjoint fields, split-borrowed. Body id + its feet offset read out first.
+        let char_mat = self
+            .enemies
+            .get(idx)
+            .map(|i| self.char_transform(i.enemy.pos, i.yaw(), i.body, i.pd_anims));
         let body = self.enemies.get(idx).map(|i| i.body).unwrap_or(0);
-        let pd_clips = self.enemies.get(idx).is_some_and(|i| i.pd_anims);
-        let feet_offset = self.body_feet_offset(body, pd_clips);
         // The bone the shot actually landed on, for Perfect Dark's per-hit-part
         // reaction tables. Resolved from the SAME posed skeleton the blood painting
-        // uses, so the part and the stain agree by construction.
+        // uses, so the part and the stain agree by construction — and that skeleton is
+        // the one on screen (`final_pose`: aim overlay + IK), not the mixer's hidden
+        // locomotion pose, or a shot to a raised gun arm is judged against an arm
+        // hanging at the hunter's side.
         let mut hit_part = None;
-        if let Some(model) = self.char_models.get(body) {
+        if let (Some(model), Some(char_mat)) = (self.char_models.get(body), char_mat) {
             if let Some(inst) = self.enemies.get_mut(idx) {
                 if !inst.enemy.is_dead() {
-                    let joints = inst.anim.skinning_matrices(&model.skeleton);
-                    let feet = inst.enemy.pos;
-                    let char_mat = Mat4::from_translation(Vec3::new(
-                        feet.x,
-                        feet.y + feet_offset,
-                        feet.z,
-                    )) * Mat4::from_rotation_y(inst.yaw())
-                        * Mat4::from_scale(Vec3::splat(CHAR_SCALE));
+                    let joints = match inst.final_pose.as_ref() {
+                        Some(p) => p.skinning_matrices(&model.skeleton),
+                        None => inst.anim.skinning_matrices(&model.skeleton),
+                    };
                     hit_part = nearest_hit_part(model, char_mat, &joints, hit_point)
                         .map(|p| p.with_gun_in_hand(inst.dual));
                     paint_blood(&mut inst.blood, model, char_mat, &joints, hit_point);
@@ -1604,15 +1634,14 @@ impl World {
             audio.play("sounds/enemies/bullet-hit.wav", BULLET_HIT_VOL);
         }
 
+        // Along the shot line, from whoever fired it — not always from the player's
+        // eye, or a hunter felled by a packmate behind it pitches toward the player.
+        let dir = (hit_point - from).normalize_or_zero();
         if died {
-            // The killing shot's knockback: from the player's eye toward the impact
-            // (with a slight lift so the corpse arcs rather than slides). `start_death`
-            // drops the capsule and spawns a physics ragdoll (flag on) or the canned
-            // death clip (off).
-            let eye = self.character.as_ref().map(|c| c.eye());
-            let dir = eye
-                .map(|e| (hit_point - e).normalize_or_zero())
-                .unwrap_or(Vec3::Y);
+            // The killing shot's knockback: from the shooter toward the impact (with a
+            // slight lift so the corpse arcs rather than slides). `start_death` drops
+            // the capsule and spawns a physics ragdoll (flag on) or the canned death
+            // clip (off).
             let knock = (dir + Vec3::Y * 0.25).normalize_or_zero() * RAGDOLL_BULLET_IMPULSE;
             self.start_death(idx, collider, hit_point, knock, killer);
             log::info!("HUNTER DOWN ({zone:?}, {dmg:.0} dmg)");
@@ -1620,10 +1649,14 @@ impl World {
             // Perfect Dark's injury table for the part that was hit — usually the
             // opening frames of a death animation rather than a purpose-made flinch
             // (`chr_begin_argh`, chraction.c:3409). This runs ahead of the ragdoll
-            // stagger for a PD hunter, and does not consult `hit_reactions`: PD chrs
-            // *do* enter `ACT_ARGH` when they survive a hit — there is no aibot
-            // exemption in `chraction.c:3600` — so "no flinch" was never the Perfect
-            // Dark behaviour that flag's name claimed.
+            // stagger for a PD hunter, and does not consult `hit_reactions`.
+            //
+            // This is Perfect Dark's **guard** reaction, not its simulant's:
+            // `chr_begin_argh` returns early for `chr->aibot` (chraction.c:3426), so a
+            // PD bot never plays an injury clip and never stops firing — it gets a
+            // procedural flinch and a shove instead. Our hunters take the simulant's
+            // aim and the guard's flinch; `RETRO_ENEMIES.md` §1.2 is the plan to split
+            // the two into per-archetype reaction styles.
             let Some(inst) = self.enemies.get_mut(idx) else { return };
             let band = band_for_speed(inst.enemy.speed());
             let dur = r
@@ -1640,10 +1673,6 @@ impl World {
             // Phase 3 default: a brief physics-ragdoll stagger blended into the run-and-
             // gun animation + a short stun, then the hunter resumes fighting. Flat across
             // difficulties (the `ragdoll` flag is the kill-switch). Knock from the shot line.
-            let eye = self.character.as_ref().map(|c| c.eye());
-            let dir = eye
-                .map(|e| (hit_point - e).normalize_or_zero())
-                .unwrap_or(Vec3::Y);
             let knock = (dir + Vec3::Y * 0.2).normalize_or_zero() * REACTION_IMPULSE;
             self.spawn_reaction(idx, hit_point, knock);
             if let Some(inst) = self.enemies.get_mut(idx) {
@@ -1770,8 +1799,8 @@ impl World {
         }
         // Neither can a hunter that is mid hit-reaction. `stop_enemy_fire` kills the
         // burst that was in flight when the shot landed, but nothing stopped the AI
-        // starting a *new* one the very next step — and under `AI=pd` (the default)
-        // the trigger belongs to the simulant, which has no idea the body it drives
+        // starting a *new* one the very next step — and the trigger belongs to the
+        // simulant (every hunter has one, in both AI modes), which has no idea the body it drives
         // is flinching. So a wounded hunter played its injury animation while still
         // emitting muzzle flashes and damage. PD's own `ACT_ARGH` cannot fire at all:
         // leaving `actiontype` is what stops `chr_tick_attack`.
@@ -1933,7 +1962,8 @@ impl World {
         // (the FIRE_TIMING mapping), spaced by 1/fireRate. Collect the shot events
         // first (emitting needs `&mut self`, which would clash with the iterator).
         // The visual cadence is the weapon's own fire rate (difficulty no longer scales
-        // it — the damage that lands is capped by MAX_HIT_RATE in `emit_enemy_shot`).
+        // it). What lands is decided by where the barrel points (`emit_pd_shot`), with
+        // no cap — the burst gap is the lethality limiter.
         let mut shots: Vec<usize> = Vec::new();
         // Hunters whose burst just ended on a sideways attack animation, to be handed
         // back to their stance's forward one (see the loop after the shots).
@@ -2040,9 +2070,9 @@ impl World {
     }
 
     /// One shot from hunter `idx` (JS `EnemyCharacter.onShotFired` + the AI damage
-    /// callback): muzzle flash + the weapon's gun report always; then, when LOS is
-    /// clear, roll `accuracy·(1−dist/range)` and apply the weapon's damage to the
-    /// player on a hit. Uses the equipped weapon's stats.
+    /// callback): muzzle flash + the weapon's gun report always; then a real round
+    /// down the barrel ([`Self::emit_pd_shot`]) — whoever is on the line takes the
+    /// weapon's damage. Uses the equipped weapon's stats.
     fn emit_enemy_shot(&mut self, idx: usize) {
         let (epos, collider, weapon) = match self.enemies.get(idx) {
             Some(inst) if !inst.enemy.is_dead() => (inst.enemy.pos, inst.collider, inst.weapon),
@@ -2204,7 +2234,7 @@ impl World {
         // above has already decided which. `collider` is unused for the same reason.
         let _ = collider;
         hits.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let Some(&(_, victim)) = hits.first() else { return };
+        let Some(&(along, victim)) = hits.first() else { return };
         let victim_pos = match victim {
             None => ppos,
             Some(j) => match self.enemies.get(j) {
@@ -2237,6 +2267,17 @@ impl World {
                 // shots do, so the victim gets a hit part, blood, a pain vocal and an
                 // authored reaction exactly as it would from the player — one damage
                 // path, not two.
+                //
+                // The impact is a fixed chest height, not where the round crossed the
+                // body — deliberately, for now. The real point (`muzzle + shot_dir *
+                // along`) lets a packmate's round take an arm, and PD's arm injury row
+                // is the full ANIM_000F at half speed: a **3 s stun** (PD guards play it
+                // whole — every setup sets `set_recovery_speed(0)`). A pack firing
+                // through its own front rank then stun-locks it (measured: the
+                // `a_pack_still_engages_despite_self_occlusion` lab run). That is the
+                // simulant-vs-guard reaction question in `RETRO_ENEMIES.md` §1.2, and
+                // this moves to the real point once simulants stop stunning.
+                let _ = along;
                 log::info!("hunter {idx} shot hunter {j}");
                 let chest = self
                     .enemies
@@ -2246,6 +2287,7 @@ impl World {
                 self.hit_enemy_with(
                     j,
                     victim_pos + Vec3::Y * chest,
+                    muzzle,
                     weapon.damage,
                     Killer::Hunter(idx),
                 );
@@ -2283,8 +2325,8 @@ impl World {
         }
     }
 
-    /// xorshift64 → a float in `[0, 1)` (reuses the character RNG state) for the
-    /// probabilistic hit roll.
+    /// xorshift64 → a float in `[0, 1)` (reuses the character RNG state) — the
+    /// per-round spread draws.
     fn rand_float(&mut self) -> f32 {
         (self.rand_below(1 << 24) as f32) / ((1u32 << 24) as f32)
     }
@@ -2578,5 +2620,29 @@ mod tests {
             world.player_health() < PLAYER_MAX_HEALTH,
             "…but it should certainly hurt"
         );
+    }
+
+    /// A blast **forgets the part the last bullet hit**. It hits the whole body, so a
+    /// hunter shot in the head and then caught by a grenade must not die on the
+    /// headshot animation — which it did, because `hit_part` outlived the bullet.
+    #[test]
+    fn a_blast_forgets_the_last_bullets_body_part() {
+        let mut world = World::new();
+        world.initial_meshes();
+        world.toggle_mode();
+        assert!(!world.enemies.is_empty(), "a hunter to hit");
+        let feet = world.enemies[0].enemy.pos;
+        // A light bullet to the head records a part (when the body model is loaded)…
+        let head = feet + Vec3::Y * 1.45;
+        world.hit_enemy_with(0, head, head - Vec3::Z, 1.0, Killer::Player);
+        if world.char_models.is_empty() {
+            println!("no body models in this build — part recording not exercised");
+        } else {
+            assert!(world.enemies[0].hit_part.is_some(), "the bullet recorded no part");
+        }
+        // …which a non-lethal blast then clears.
+        world.blast_hit_enemy(0, 1.0, feet + Vec3::Y * 0.9, feet + Vec3::X * 2.0);
+        assert!(!world.enemies[0].enemy.is_dead(), "the blast was meant to be survivable");
+        assert_eq!(world.enemies[0].hit_part, None, "the blast kept the bullet's body part");
     }
 }

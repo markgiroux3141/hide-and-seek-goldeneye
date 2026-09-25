@@ -338,7 +338,8 @@ impl World {
                     // Select the decision layer (utility vs legacy FSM) for this step.
                     inst.enemy.set_utility(utility_on);
                     // Perfect Dark hunters always know where the player is (movement
-                    // only — perception is untouched, see `Enemy::known_player_pos`).
+                    // only — perception is untouched, see `Enemy::known_target_pos`).
+                    // Every hunter has a simulant, so today this is every hunter.
                     inst.enemy.set_omniscient(
                         !shopping && (pd_mode || (omniscient_on && inst.pdsim.is_some())),
                     );
@@ -409,7 +410,7 @@ impl World {
                         ),
                         None => crate::enemy::EnemyStep::default(),
                     };
-                    // ── PD simulant layer (PD_LAB only) ──
+                    // ── PD simulant layer (every hunter) ──
                     // Runs AFTER the FSM so the FSM still owns movement, and the
                     // simulant only overrides where the weapon points and whether
                     // it fires. The sight check is a raw LOS ray of its own rather
@@ -1113,6 +1114,9 @@ impl World {
         // silently arming the pack with something else.
         if let crate::world::HunterWeapon::Fixed(name) = self.hunter_weapon_policy().clone() {
             match self.arsenal.weapons().iter().find(|w| w.name == name) {
+                Some(w) if !w.hunter_usable() => log::warn!(
+                    "the level asks every hunter to carry the {name}, which a hunter                      cannot fire (hunters are hitscan-only) — keeping the roster mix"
+                ),
                 Some(w) => {
                     log::info!("every hunter carries the {name}");
                     roster = vec![(*w, false)];
@@ -1346,7 +1350,7 @@ impl World {
                 ragdoll: None,
                 ragdoll_time: 0.0,
                 reaction: None,
-                // PD lab only: attach the simulant model. Each gets a distinct seed
+                // Attach the simulant model (every hunter). Each gets a distinct seed
                 // so same-tier simulants still wander their aim individually —
                 // that per-bot variation is the point of randomising the
                 // convergence rate rather than the shot outcome.
