@@ -1,7 +1,12 @@
 # Procedural floor-plan generation — HouseBuilder port notes
 
-Status: **idea parked** (not built). Captured 2026-07-25 after reviewing an old
-Unity project so we can pick it up later.
+Status: **superseded 2026-09-25** by `native/crates/game/src/levelgen/generate.rs`,
+which kept this note's two main ideas — grow rooms outward from a first one, and
+reject/prune by collision — but places each room with the relational builder
+(`room_beside`) so a wall always survives, closes loops in a post-pass (this
+note's "missing for hide-and-seek" #1), and chooses the best of many seeds by the
+levelgen report (its #2). Kept as the record of where the idea came from.
+Originally captured 2026-07-25 after reviewing an old Unity project.
 
 ## Source
 

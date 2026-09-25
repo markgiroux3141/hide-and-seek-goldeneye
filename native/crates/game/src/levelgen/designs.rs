@@ -582,6 +582,13 @@ pub fn compound() -> BuiltLevel {
     b.finish()
 }
 
+/// **One generated level, pinned** — the generator's output for seed 7 at the default
+/// size, so the golden test notices any change to what the generator builds. (The
+/// harness's `LEVELGEN_DESIGN=gen` picks the best of many seeds instead.)
+pub fn generated() -> BuiltLevel {
+    super::generate::build(7, &super::generate::GenParams::default())
+}
+
 /// A 3×3 grid of rooms (center = a tall hall) wired into a grid graph for dense,
 /// multi-route flow, plus a balcony perch over the hall reached by a stair — the
 /// multiplayer target: many rooms, loops everywhere, verticality, an overlook.

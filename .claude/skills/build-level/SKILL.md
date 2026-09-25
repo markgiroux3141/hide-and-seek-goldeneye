@@ -69,6 +69,17 @@ eleaseuild-and-hide.exe
    **The game window locks the exe** — if a release build finishes in <1s or says
    "Access is denied," the user's game is open; ask them to close it.
 
+## Generating instead of authoring
+`LEVELGEN_DESIGN=gen` runs the **generator** (`levelgen/generate.rs`): it builds
+`LEVELGEN_TRIES` seeds (default 32) from `LEVELGEN_SEED` (default 1), analyzes each,
+drops any with a FAIL, ranks the rest (loops, few dead-ends, clean rules, variety,
+size) and puts the winner through the normal report as `levelgen gen-<seed>`. Size
+with `LEVELGEN_ROOMS` (default 9) and `LEVELGEN_LOOPS` (default 3). A seed always
+rebuilds the same level, so `LEVELGEN_TRIES=1 LEVELGEN_SEED=<winner>` reproduces one.
+It is **single-floor for now** (stage 6a); stairs, stacked rooms and balconies are
+next. Treat a winner as a starting point: generate, walk it, then sculpt it in the
+editor or copy its structure into a hand-written design.
+
 Headless diagnostics take any level too — a slot number, a level name, or a path —
 and now bake **with** placed props, exactly as in-game:
 `./target/release/profile_hunt.exe "facility 2" 1` (nav findings + step timing) and

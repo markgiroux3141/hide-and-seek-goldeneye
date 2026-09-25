@@ -41,6 +41,11 @@ const OPENING_INSET: f32 = 1.0;
 /// Default door / corridor / stairwell height, WT (2.5 m): clear of the 8 WT headroom
 /// lint with room to spare.
 pub const DOOR_HEIGHT: f32 = 10.0;
+/// The shortest shared wall a `width`-wide opening fits in (it keeps
+/// `OPENING_INSET` clear of both corners).
+pub(crate) fn wall_needed(width: f32) -> f32 {
+    width + 2.0 * OPENING_INSET
+}
 
 /// A compass direction on the plan. **North is −z**, which is *up* in the report's
 /// floorplans (they print z increasing downwards); east is +x.
@@ -77,17 +82,17 @@ fn span(a: [f32; 6], k: usize) -> (f32, f32) {
 /// How two rooms sit on the plan: separated along `axis` by a wall `gap` WT thick,
 /// with `a`'s face toward `b` at `a_face` and `b`'s at `b_face` (`sign` +1 when `b` is
 /// on the larger side), overlapping over `[o0, o1)` on the other horizontal axis.
-struct Facing {
+pub(crate) struct Facing {
     axis: Axis,
     sign: f32,
     a_face: f32,
     b_face: f32,
-    gap: f32,
+    pub(crate) gap: f32,
     o0: f32,
     o1: f32,
 }
 
-fn facing(a: [f32; 6], b: [f32; 6]) -> Result<Facing, String> {
+pub(crate) fn facing(a: [f32; 6], b: [f32; 6]) -> Result<Facing, String> {
     let mut found = Vec::new();
     for (k, axis) in [(0usize, Axis::X), (2usize, Axis::Z)] {
         let ((a0, a1), (b0, b1)) = (span(a, k), span(b, k));
@@ -146,6 +151,116 @@ impl Facing {
         let q = self.b_face + self.sign * into_b;
         (p.min(q), p.max(q))
     }
+}
+
+// ─── Relational geometry, as free functions over label boxes ──────────────────
+//
+// The builder's relational calls and the generator (`levelgen::generate`) both need
+// these: the builder to carve, the generator to ask *before* carving whether an opening
+// would cut through a third room. One definition, so the two can never disagree about
+// where a door goes.
+
+/// One box a relational call carves: a span along `axis`, a span along the other
+/// horizontal axis, and a vertical span (all WT).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CarveBox {
+    pub axis: Axis,
+    pub along: (f32, f32),
+    pub across: (f32, f32),
+    pub y: (f32, f32),
+}
+
+impl CarveBox {
+    /// Its plan-view footprint as `[x0, x1, z0, z1]`.
+    pub fn plan(&self) -> [f32; 4] {
+        match self.axis {
+            Axis::X => [self.along.0, self.along.1, self.across.0, self.across.1],
+            _ => [self.across.0, self.across.1, self.along.0, self.along.1],
+        }
+    }
+}
+
+/// Where a `w` × `d` room placed beside `of` (a label box) across a `wall` on its `dir`
+/// side, `along` from `of`'s min corner on the shared side, has its min corner.
+pub(crate) fn beside_origin(of: [f32; 6], dir: Dir, wall: f32, along: f32, w: f32, d: f32) -> (f32, f32) {
+    let a = of;
+    match dir {
+        Dir::East => (a[0] + a[3] + wall, a[2] + along),
+        Dir::West => (a[0] - wall - w, a[2] + along),
+        Dir::South => (a[0] + along, a[2] + a[5] + wall),
+        Dir::North => (a[0] + along, a[2] - wall - d),
+    }
+}
+
+/// The box of a walkable doorway between two label boxes. See [`LevelBuilder::door_at`].
+pub(crate) fn door_box(la: [f32; 6], lb: [f32; 6], t: f32, width: f32, height: f32) -> Result<CarveBox, String> {
+    let f = facing(la, lb)?;
+    let (fa, fb) = (la[1], lb[1]);
+    let (ca, cb) = (fa + la[4], fb + lb[4]);
+    let floor = if (fa - fb).abs() <= 1.0 {
+        fa.max(fb)
+    } else {
+        let hi = fa.max(fb);
+        // The lower room must reach up past the higher floor by the door's height.
+        let low_ceiling = if fa < fb { ca } else { cb };
+        if low_ceiling < hi + height {
+            return Err(format!(
+                "floors differ by {} WT ({fa} vs {fb}) — use `stair_between`",
+                (fa - fb).abs()
+            ));
+        }
+        hi
+    };
+    let top = (floor + height).min(ca).min(cb);
+    if top - floor < 6.0 {
+        return Err(format!(
+            "only {} WT of headroom fits under the lower ceiling; a hunter needs 6",
+            top - floor
+        ));
+    }
+    Ok(CarveBox {
+        axis: f.axis,
+        along: f.through(OPENING_OVERLAP, OPENING_OVERLAP),
+        across: f.opening(t, width)?,
+        y: (floor, top),
+    })
+}
+
+/// The boxes of a `width`-wide corridor between two label boxes on one floor: the door
+/// box if they face each other, else the two legs of an L — out of `a` along x on its
+/// centre line past `b`'s centre, then along z down `b`'s centre line into it.
+pub(crate) fn corridor_boxes(la: [f32; 6], lb: [f32; 6], width: f32) -> Result<Vec<CarveBox>, String> {
+    if facing(la, lb).is_ok() {
+        return door_box(la, lb, 0.5, width, DOOR_HEIGHT).map(|b| vec![b]);
+    }
+    let (fa, fb) = (la[1], lb[1]);
+    if (fa - fb).abs() > 1.0 {
+        return Err(format!("floors differ ({fa} vs {fb}) — use `stair_between`"));
+    }
+    let floor = fa.max(fb);
+    let top = (floor + DOOR_HEIGHT).min(fa + la[4]).min(fb + lb[4]);
+    let (acz, bcx) = (la[2] + la[5] * 0.5, lb[0] + lb[3] * 0.5);
+    let hw = width * 0.5;
+    let east = lb[0] >= la[0] + la[3];
+    let south = lb[2] >= la[2] + la[5];
+    let x_from = if east { la[0] + la[3] - OPENING_OVERLAP } else { la[0] + OPENING_OVERLAP };
+    let x_to = if east { bcx + hw } else { bcx - hw };
+    let z_from = if south { acz - hw } else { acz + hw };
+    let z_to = if south { lb[2] + OPENING_OVERLAP } else { lb[2] + lb[5] - OPENING_OVERLAP };
+    Ok(vec![
+        CarveBox {
+            axis: Axis::X,
+            along: (x_from.min(x_to), x_from.max(x_to)),
+            across: (acz - hw, acz + hw),
+            y: (floor, top),
+        },
+        CarveBox {
+            axis: Axis::Z,
+            along: (z_from.min(z_to), z_from.max(z_to)),
+            across: (bcx - hw, bcx + hw),
+            y: (floor, top),
+        },
+    ])
 }
 
 /// The horizontal in-plane axis for a wall whose normal is `axis` (Z for an
@@ -773,13 +888,7 @@ impl LevelBuilder {
         floor: f32,
         height: f32,
     ) -> RoomId {
-        let a = self.label(of);
-        let (x, z) = match dir {
-            Dir::East => (a[0] + a[3] + wall, a[2] + along),
-            Dir::West => (a[0] - wall - w, a[2] + along),
-            Dir::South => (a[0] + along, a[2] + a[5] + wall),
-            Dir::North => (a[0] + along, a[2] - wall - d),
-        };
+        let (x, z) = beside_origin(self.label(of), dir, wall, along, w, d);
         if wall < 1.0 {
             let n = self.name(of).to_string();
             self.problem(
@@ -805,53 +914,17 @@ impl LevelBuilder {
     /// floor — a door off a mezzanine into an upper room. Anything else is a stair.
     pub fn door_at(&mut self, a: RoomId, b: RoomId, t: f32, width: f32, height: f32) {
         let call = format!("door({}, {})", self.name(a), self.name(b));
-        match self.opening_between(a, b, t, width, height) {
-            Ok((f, along, across, y)) => {
-                self.carve_spans(f.axis, along, across, y);
+        match door_box(self.label(a), self.label(b), t, width, height) {
+            Ok(bx) => {
+                self.carve_box(bx);
                 self.edges.push((a, b));
             }
             Err(why) => self.problem(call, why),
         }
     }
 
-    /// The box of a walkable opening between two rooms: `(facing, along, across, y)`.
-    #[allow(clippy::type_complexity)]
-    fn opening_between(
-        &self,
-        a: RoomId,
-        b: RoomId,
-        t: f32,
-        width: f32,
-        height: f32,
-    ) -> Result<(Facing, (f32, f32), (f32, f32), (f32, f32)), String> {
-        let (la, lb) = (self.label(a), self.label(b));
-        let f = facing(la, lb)?;
-        let (fa, fb) = (la[1], lb[1]);
-        let (ca, cb) = (fa + la[4], fb + lb[4]);
-        let floor = if (fa - fb).abs() <= 1.0 {
-            fa.max(fb)
-        } else {
-            let hi = fa.max(fb);
-            // The lower room must reach up past the higher floor by the door's height.
-            let low_ceiling = if fa < fb { ca } else { cb };
-            if low_ceiling < hi + height {
-                return Err(format!(
-                    "floors differ by {} WT ({fa} vs {fb}) — use `stair_between`",
-                    (fa - fb).abs()
-                ));
-            }
-            hi
-        };
-        let top = (floor + height).min(ca).min(cb);
-        if top - floor < 6.0 {
-            return Err(format!(
-                "only {} WT of headroom fits under the lower ceiling; a hunter needs 6",
-                top - floor
-            ));
-        }
-        let across = f.opening(t, width)?;
-        let along = f.through(OPENING_OVERLAP, OPENING_OVERLAP);
-        Ok((f, along, across, (floor, top)))
+    fn carve_box(&mut self, b: CarveBox) -> u32 {
+        self.carve_spans(b.axis, b.along, b.across, b.y)
     }
 
     /// Connect two rooms on the same floor with a `width`-wide corridor: straight if
@@ -860,31 +933,15 @@ impl LevelBuilder {
     /// might cross — the report lists any connection it made that was never declared.
     pub fn corridor(&mut self, a: RoomId, b: RoomId, width: f32) {
         let call = format!("corridor({}, {})", self.name(a), self.name(b));
-        let (la, lb) = (self.label(a), self.label(b));
-        if facing(la, lb).is_ok() {
-            self.door_at(a, b, 0.5, width, DOOR_HEIGHT);
-            return;
+        match corridor_boxes(self.label(a), self.label(b), width) {
+            Ok(boxes) => {
+                for bx in boxes {
+                    self.carve_box(bx);
+                }
+                self.edges.push((a, b));
+            }
+            Err(why) => self.problem(call, why),
         }
-        let (fa, fb) = (la[1], lb[1]);
-        if (fa - fb).abs() > 1.0 {
-            self.problem(call, format!("floors differ ({fa} vs {fb}) — use `stair_between`"));
-            return;
-        }
-        let floor = fa.max(fb);
-        let top = (floor + DOOR_HEIGHT).min(fa + la[4]).min(fb + lb[4]);
-        let (acz, bcx) = (la[2] + la[5] * 0.5, lb[0] + lb[3] * 0.5);
-        let hw = width * 0.5;
-        let east = lb[0] >= la[0] + la[3];
-        let south = lb[2] >= la[2] + la[5];
-        // Leg 1 leaves `a` along x at its centre line and runs past `b`'s centre.
-        let x_from = if east { la[0] + la[3] - OPENING_OVERLAP } else { la[0] + OPENING_OVERLAP };
-        let x_to = if east { bcx + hw } else { bcx - hw };
-        self.carve_spans(Axis::X, (x_from.min(x_to), x_from.max(x_to)), (acz - hw, acz + hw), (floor, top));
-        // Leg 2 turns down `b`'s centre line into it.
-        let z_from = if south { acz - hw } else { acz + hw };
-        let z_to = if south { lb[2] + OPENING_OVERLAP } else { lb[2] + lb[5] - OPENING_OVERLAP };
-        self.carve_spans(Axis::Z, (z_from.min(z_to), z_from.max(z_to)), (bcx - hw, bcx + hw), (floor, top));
-        self.edges.push((a, b));
     }
 
     /// Cut a see- and shoot-through window in the wall `a` and `b` share, at fraction `t`
@@ -1056,9 +1113,11 @@ impl LevelBuilder {
         self.pickup(PickupKind::Weapon, MeshId::WeaponPickup, name, x, y, z);
     }
 
-    /// An ammo crate for weapon `name` at WT `(x, y, z)`.
+    /// An ammo crate for weapon `name` at WT `(x, y, z)`. The tan *pickup* crate —
+    /// walk-through, like the editor's — not the `AmmoCrate` scenery prop, which is solid
+    /// to nav (the first version used that one and every crate became a 1 WT block).
     pub fn ammo(&mut self, name: &str, x: f32, y: f32, z: f32) {
-        self.pickup(PickupKind::Ammo, MeshId::AmmoCrate, name, x, y, z);
+        self.pickup(PickupKind::Ammo, MeshId::AmmoPickupTan, name, x, y, z);
     }
 
     fn pickup(&mut self, kind: PickupKind, mesh: MeshId, name: &str, x: f32, y: f32, z: f32) {

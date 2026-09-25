@@ -35,6 +35,9 @@ const EXPECTED: &[(&str, &[usize])] = &[
     // 12 WT ceiling rule (the undercroft's floor dropped to keep its slab).
     ("grand", &[7896]),
     ("compound", &[3019]),
+    // The generator's seed 7. A change to room sizing, placement, loop-closing or
+    // furnishing moves this — deliberately, if the change was meant to.
+    ("generated", &[4733]),
     ("pd_lab", &[3952]),
 ];
 
@@ -61,7 +64,7 @@ macro_rules! golden {
         }
     };
 }
-golden!(smoke, arena, varied, sprawl, facility, linear, showcase, grand, compound, pd_lab);
+golden!(smoke, arena, varied, sprawl, facility, linear, showcase, grand, compound, generated, pd_lab);
 
 #[test]
 fn every_design_has_a_golden_test() {
@@ -405,4 +408,48 @@ fn stair_through_floor_needs_a_slab() {
     let built = b.finish();
     assert_eq!(built.problems.len(), 1);
     assert!(built.problems[0].contains("slab"), "{}", built.problems[0]);
+}
+
+// ─── The generator ─────────────────────────────────────────────────────────────
+
+use super::generate::{self, GenParams};
+
+fn json<T: serde::Serialize>(v: &T) -> serde_json::Value {
+    serde_json::to_value(v).unwrap()
+}
+
+/// A seed is a level: the same seed always rebuilds the same one — which is what lets
+/// `LEVELGEN_TRIES=1 LEVELGEN_SEED=<winner>` reproduce a best-of run's winner.
+#[test]
+fn the_generator_is_deterministic_in_its_seed() {
+    let p = GenParams::default();
+    let (a, b, c) = (generate::build(7, &p), generate::build(7, &p), generate::build(8, &p));
+    assert_eq!(json(&a.brushes), json(&b.brushes));
+    assert_eq!(json(&a.entities), json(&b.entities));
+    assert_ne!(json(&a.brushes), json(&c.brushes), "a different seed is a different level");
+}
+
+/// The generator places rooms and openings through the relational builder's own
+/// geometry, so what it asks for must always be buildable — and, by construction, a run
+/// of ordinary seeds comes out FAIL-free with rooms that never merge.
+#[test]
+fn generated_levels_are_buildable_and_fail_free() {
+    for seed in 1..=6 {
+        let built = generate::build(seed, &GenParams::default());
+        assert!(built.problems.is_empty(), "seed {seed}: {:?}", built.problems);
+        let d = analyze_built("t", &built).expect("has floor");
+        assert_ne!(d.verdict, analyze::Status::Fail, "seed {seed}: {:?}", d.checks);
+        assert!(d.merged.is_empty(), "seed {seed}: merged {:?}", d.merged);
+        assert!(d.rooms.len() >= 7, "seed {seed}: only {} of 9 rooms placed", d.rooms.len());
+    }
+}
+
+/// Best-of ranks scored candidates first, best first.
+#[test]
+fn best_of_ranks_best_first() {
+    let ranked = generate::best_of(1, 4, &GenParams::default());
+    assert_eq!(ranked.len(), 4);
+    let scores: Vec<f32> = ranked.iter().filter_map(|c| c.score).collect();
+    assert!(!scores.is_empty(), "at least one of four seeds passes");
+    assert!(scores.windows(2).all(|w| w[0] >= w[1]), "{scores:?}");
 }

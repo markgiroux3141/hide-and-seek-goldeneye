@@ -19,6 +19,7 @@
 pub mod analyze;
 pub mod builder;
 pub mod designs;
+pub mod generate;
 
 #[cfg(test)]
 mod tests;
@@ -41,6 +42,7 @@ pub const DESIGNS: &[(&str, fn() -> BuiltLevel)] = &[
     ("showcase", designs::showcase),
     ("grand", designs::grand),
     ("compound", designs::compound),
+    ("generated", designs::generated),
     ("pd_lab", designs::pd_lab),
 ];
 
@@ -59,6 +61,9 @@ pub fn generated_name(design: &str) -> String {
 /// `LEVELGEN_SLOT`. Exits non-zero on any failure so a scripted caller notices.
 pub fn run() {
     let name = std::env::var("LEVELGEN_DESIGN").unwrap_or_else(|_| "grand".to_string());
+    if name == "gen" {
+        return run_generator();
+    }
     let Some(built) = design(&name) else {
         let names: Vec<&str> = DESIGNS.iter().map(|(n, _)| *n).collect();
         eprintln!("unknown LEVELGEN_DESIGN='{name}' — known designs: {}", names.join(", "));
@@ -87,6 +92,96 @@ pub fn run() {
             std::process::exit(1);
         }
     }
+}
+
+/// `LEVELGEN_DESIGN=gen`: generate `LEVELGEN_TRIES` seeds from `LEVELGEN_SEED`, rank
+/// them, and put the winner through the same save → reload → report as any design.
+/// `LEVELGEN_ROOMS` / `LEVELGEN_LOOPS` set the size.
+fn run_generator() {
+    let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(d);
+    let seed = env("LEVELGEN_SEED", 1);
+    let tries = env("LEVELGEN_TRIES", 32) as usize;
+    let defaults = generate::GenParams::default();
+    let params = generate::GenParams {
+        rooms: env("LEVELGEN_ROOMS", defaults.rooms as u64) as usize,
+        loops: env("LEVELGEN_LOOPS", defaults.loops as u64) as usize,
+    };
+    let json = std::env::var("LEVELGEN_REPORT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
+    let t0 = std::time::Instant::now();
+    let ranked = generate::best_of(seed, tries, &params);
+    let board: Vec<serde_json::Value> = ranked
+        .iter()
+        .take(5)
+        .map(|c| {
+            let r = c.report.as_ref();
+            serde_json::json!({
+                "seed": c.seed,
+                "score": c.score,
+                "verdict": r.map(|r| format!("{:?}", r.verdict)),
+                "rooms": r.map(|r| r.rooms.len()),
+                "loops": r.map(|r| r.loops),
+                "dead_ends": r.map(|r| r.dead_ends.len()),
+            })
+        })
+        .collect();
+    let failed = ranked.iter().filter(|c| c.score.is_none()).count();
+    if !json {
+        println!(
+            "=== levelgen: generated {tries} seed(s) from {seed} ({} rooms, {} loops asked) in {:.1} s — {failed} failed ===",
+            params.rooms,
+            params.loops,
+            t0.elapsed().as_secs_f32()
+        );
+        println!("  rank  seed   score  verdict  rooms  loops  dead-ends");
+        for (i, c) in ranked.iter().take(5).enumerate() {
+            let r = c.report.as_ref();
+            println!(
+                "  {:>4}  {:>4}  {:>6}  {:<7}  {:>5}  {:>5}  {:>9}",
+                i + 1,
+                c.seed,
+                c.score.map(|s| format!("{s:.1}")).unwrap_or_else(|| "—".into()),
+                r.map(|r| format!("{:?}", r.verdict)).unwrap_or_else(|| "no floor".into()),
+                r.map(|r| r.rooms.len()).unwrap_or(0),
+                r.map(|r| r.loops).unwrap_or(0),
+                r.map(|r| r.dead_ends.len()).unwrap_or(0),
+            );
+        }
+        println!();
+    }
+    let Some(win) = ranked.first().filter(|c| c.score.is_some()) else {
+        eprintln!("[!] every generated seed failed its report — try another LEVELGEN_SEED");
+        std::process::exit(1);
+    };
+    let dname = format!("gen-{}", win.seed);
+    let slot: Option<u8> = std::env::var("LEVELGEN_SLOT").ok().and_then(|s| s.trim().parse().ok());
+    let path = match slot {
+        Some(n) => persist::slot_path(n),
+        None => persist::path_for_name(&generated_name(&dname)).expect("generated names slug"),
+    };
+    match generate(&dname, &win.built, &path) {
+        Ok(mut out) if json => {
+            if let Some(o) = out.json.as_object_mut() {
+                o.insert("leaderboard".into(), board.into());
+            }
+            println!("{}", serde_json::to_string_pretty(&out.json).unwrap_or_default());
+        }
+        Ok(out) => println!("{}", out.text),
+        Err(e) => {
+            eprintln!("[!] levelgen failed: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Analyze a built level headlessly without writing a file — the generator's judge.
+/// `None` when it has no walkable floor at all.
+pub(crate) fn analyze_built(name: &str, built: &BuiltLevel) -> Option<analyze::ReportData> {
+    let mut w = World::new();
+    w.load_built_level(built).ok()?;
+    let nav = w.bake_level_nav()?;
+    w.calculate_nav_issues();
+    let issues = w.nav_issues()?;
+    Some(analyze::Analysis::new(name, &nav, &w, built, issues).data())
 }
 
 /// A finished run: the text report and the same content as JSON.

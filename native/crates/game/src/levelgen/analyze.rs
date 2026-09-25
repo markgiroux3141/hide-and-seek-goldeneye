@@ -188,6 +188,9 @@ pub struct ReportData {
     pub problems: Vec<String>,
     /// Walkable component sizes, largest first (the main one first).
     pub components: Vec<usize>,
+    /// Spread of room footprint areas (coefficient of variation) — the `variety` rule's
+    /// number, exposed so a scorer need not parse prose.
+    pub area_spread: f32,
     pub nav: Vec<NavLineRow>,
     pub rooms: Vec<RoomRow>,
     pub declared: Vec<DeclaredEdge>,
@@ -921,6 +924,7 @@ impl<'a> Analysis<'a> {
             checks,
             lints,
             problems,
+            area_spread: self.area_spread(),
             components: comps,
             nav,
             rooms: room_rows,
@@ -938,6 +942,22 @@ impl<'a> Analysis<'a> {
     }
 
     // ─── Design rules ───────────────────────────────────────────────────────
+
+    /// Coefficient of variation of the carved rooms' footprint areas.
+    fn area_spread(&self) -> f32 {
+        let areas: Vec<f32> = (0..self.level.rooms.len())
+            .filter(|&i| !self.platform[i])
+            .map(|i| self.level.rooms[i].aabb[3] * self.level.rooms[i].aabb[5])
+            .collect();
+        let n = areas.len().max(1) as f32;
+        let mean = areas.iter().sum::<f32>() / n;
+        let sd = (areas.iter().map(|a| (a - mean).powi(2)).sum::<f32>() / n).sqrt();
+        if mean > 0.0 {
+            sd / mean
+        } else {
+            0.0
+        }
+    }
 
     /// The heuristics log as lints. Each check's detail names its rule.
     fn lints(&self, rows: &[RoomRow], perches: &[PerchRow]) -> Vec<Check> {
@@ -961,10 +981,7 @@ impl<'a> Analysis<'a> {
             format!("under {MIN_CEILING} WT (\"never an 8-WT ceiling\"): {}", names(&low)),
         );
 
-        let areas: Vec<f32> = rooms.iter().map(|&i| labels[i].aabb[3] * labels[i].aabb[5]).collect();
-        let mean = areas.iter().sum::<f32>() / areas.len().max(1) as f32;
-        let sd = (areas.iter().map(|a| (a - mean).powi(2)).sum::<f32>() / areas.len().max(1) as f32).sqrt();
-        let cv = if mean > 0.0 { sd / mean } else { 0.0 };
+        let cv = self.area_spread();
         let skinny = rooms
             .iter()
             .filter(|&&i| {
