@@ -1,6 +1,8 @@
-//! Headless step profiler — `cargo run --release --bin profile_hunt -- <slot> [seconds]`.
+//! Headless step profiler — `cargo run --release --bin profile_hunt -- <level> [seconds]`.
 //!
-//! Loads a real authored level from its quick-slot, enters HUNT, and times the fixed
+//! `<level>` is a quick-slot number, a level name (`"facility 2"`) or a path. Loads a
+//! real authored level, with prop bounds registered the way the app registers them (so
+//! placed props block nav here exactly as they do in-game), enters HUNT, and times the fixed
 //! step. Exists because "the frame rate is terrible after G" is a claim about a per-step
 //! cost, and the only honest way to find one is to measure the step rather than reason
 //! about it.
@@ -17,20 +19,26 @@ use game::world::World;
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn")).init();
     let mut args = std::env::args().skip(1);
-    let slot: u8 = args.next().and_then(|s| s.parse().ok()).unwrap_or(1);
+    let level = args.next().unwrap_or_else(|| "1".to_string());
     let secs: f32 = args.next().and_then(|s| s.parse().ok()).unwrap_or(5.0);
+    let Some(path) = game::world::resolve_level_arg(&level) else {
+        eprintln!("no level called {level:?} (a slot number, a level name, or a path)");
+        std::process::exit(1);
+    };
 
     let mut world = World::new();
+    world.register_catalog_prop_bounds();
     let t0 = Instant::now();
-    match world.load_slot(slot) {
+    match world.load_level(&path) {
         Ok(meshes) => println!(
-            "loaded slot{slot} in {:.0} ms — {} region mesh(es), {} spawn pad(s)",
+            "loaded {} in {:.0} ms — {} region mesh(es), {} spawn pad(s)",
+            path.display(),
             t0.elapsed().as_secs_f32() * 1000.0,
             meshes.len(),
             world.spawn_pad_count(),
         ),
         Err(e) => {
-            eprintln!("could not load slot{slot}: {e}");
+            eprintln!("could not load {}: {e}", path.display());
             std::process::exit(1);
         }
     }

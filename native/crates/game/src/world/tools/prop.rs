@@ -59,6 +59,21 @@ impl World {
         self.prop_bounds.insert(mesh, (min, max));
     }
 
+    /// Register every prop's bounds **without a renderer** — for the headless tools
+    /// (`profile_hunt`, `probe_hunt`, the levelgen harness), which would otherwise bake
+    /// nav with every placed prop missing and disagree with the NAV tab about the same
+    /// level. Loads the catalog from disk, so it costs what app startup's prop load does.
+    /// Call before loading a level, as the app does, so load-time migrations that read
+    /// bounds (`migrate_legacy_turrets`) see them.
+    pub fn register_catalog_prop_bounds(&mut self) {
+        for lp in crate::props::load_catalog() {
+            let (min, max) = lp.bounds();
+            self.register_prop_bounds(lp.def.mesh, min, max);
+        }
+        let (min, max) = crate::world::weapon_pickup_bounds();
+        self.register_prop_bounds(MeshId::WeaponPickup, min, max);
+    }
+
     /// A prop's model-space anchor: horizontal centre + vertical base. The render +
     /// ghost matrices place this point at the prop's translation, so a prop authored
     /// on the floor rests its base there, centred. Zero if bounds weren't registered.

@@ -1,15 +1,16 @@
 ---
 name: build-level
-description: Author a playable level for the native BUILD & HIDE (GoldenEye-style hide-and-seek) game using the headless levelgen harness. Use when the user asks to build, design, generate, extend, or iterate on a level/map for the Rust game in native/, or mentions rooms/halls/stairs/pits/the level generator. Drives the build → headless report → iterate → ship-to-slot loop.
+description: Author a playable level for the native BUILD & HIDE (GoldenEye-style hide-and-seek) game using the headless levelgen harness. Use when the user asks to build, design, generate, extend, or iterate on a level/map for the Rust game in native/, or mentions rooms/halls/stairs/pits/the level generator. Drives the build → headless report → iterate → ship loop.
 ---
 
 # Build a level for BUILD & HIDE
 
 You author levels **as code** with the `levelgen` builder, then a **headless
-harness** bakes the nav grid and prints an LLM-readable report (ASCII floorplans
-+ reachability + flow/headroom metrics). You iterate against that report until
-it's clean, then write a playable `levels/slotN.json` and rebuild the release
-binary so the user can walk it.
+harness** puts the level through the game's own pipeline — load into a real
+`World`, save with the real level writer, reload the file, bake nav with the same
+function `G` uses — and prints an LLM-readable report (ASCII floorplans +
+reachability + flow/headroom metrics + the NAV tab's own findings). You iterate
+against that report until it's clean; the file it writes is already playable.
 
 **Read [LEVEL_DESIGN_HEURISTICS.md](../../../LEVEL_DESIGN_HEURISTICS.md) first** —
 it's the running log of playtest feedback and hard-won gotchas. This skill is the
@@ -24,42 +25,51 @@ solid.
 - Builder API: `native/crates/game/src/levelgen/builder.rs`
 - Designs (author here): `native/crates/game/src/levelgen/designs.rs` — one `fn`
   per level, returning `b.finish()`.
-- Register a new design in `native/crates/game/src/levelgen/mod.rs` (the `match`
-  + the default).
-- Analyzer/report: `native/crates/game/src/levelgen/analyze.rs`
-- Serializer (writes the slot) + `verify_loads`: `serialize.rs` / `mod.rs`
-- Nav (why descents fail): `native/crates/engine/src/sim/nav.rs`
+- Register a new design in **three** places, all enforced by a test: the `DESIGNS`
+  table in `levelgen/mod.rs`, the `golden!(…)` list in `levelgen/tests.rs`, and its
+  expected component sizes in `EXPECTED` there.
+- Analyzer/report: `levelgen/analyze.rs`; the NAV findings are
+  `world/nav_issues.rs` (the same code as O → NAV → Calculate).
+- Nav: `native/crates/engine/src/sim/nav.rs`; stair/platform solids:
+  `engine/src/geometry/structures.rs`.
 
 ## The loop (do this every time)
 1. **Plan** the level as a room graph (spaces + how they connect + verticality),
-   then write/edit a `fn` in `designs.rs` using the builder API below. Register it
-   in `mod.rs` and make it the default design.
-2. **Build + report** (from `native/`, debug is fine for iterating):
+   then write/edit a `fn` in `designs.rs` using the builder API below and register
+   it (above).
+2. **Build + report** (from `native/`):
    ```
-   LEVELGEN=1 LEVELGEN_DESIGN=<name> LEVELGEN_SLOT=7 cargo run -p game
+   LEVELGEN=1 LEVELGEN_DESIGN=<name> cargo run --release -p game
    ```
-   Grep the sections you care about (`=> all`, `y=<n> `, `OK — every`,
-   `density:`, `SNIPER`, `### floor y=`). The floorplans are `step=2` on big
-   levels, which **hides 1-WT-wide features** (thin stairs/pillars) — don't
-   diagnose those from the plan; use the reachability + headroom numbers.
-3. **Iterate** until: every room reachable; `HEADROOM` says OK; loops > 0 and few
-   dead-ends (terminal closets/vaults are fine); at least one working perch; no
-   accidental unreachable levels (a lone unreachable floor level is usually a
-   **pillar top** — that's correct).
-4. **Ship**: build release + regenerate the slot, then verify it loads:
-   ```
-   cargo build --release -p game
-   LEVELGEN=1 LEVELGEN_DESIGN=<name> LEVELGEN_SLOT=7 ./target/release/build-and-hide.exe
-   ```
-   Confirm `wrote playable level` + `verify: slot 7 loads in-engine OK`. Default
-   to **slot 7** (F-keys load 1–8; `LOAD_SLOT=7` boots straight in).
-   **The game window locks the exe** — if a release build finishes in <1s or says
-   "Access is denied," the user's game is open; ask them to close it.
-5. Give the user the launch line and ask for a walk-through:
+   Writes `levels/levelgen_<name>.json` (listed in the LEVELS tab as
+   "levelgen <name>"). It will overwrite its own earlier output but **refuses** to
+   overwrite a level an author saved. `LEVELGEN_SLOT=N` writes `levels/slotN.json`
+   instead (F-key / `LOAD_SLOT`). Exit code is non-zero on failure.
+   Read the NAV section first (it is what the author will see in-game), then grep
+   the rest (`=> all`, `OK — every`, `density:`, `SNIPER`, `### floor y=`). The
+   floorplans are `step=2` on big levels, which **hides 1-WT-wide features** —
+   don't diagnose thin stairs/pillars from the plan.
+3. **Iterate** until: the NAV section says `1 walkable component` (or every island
+   is one you intend, e.g. a pillar top); `HEADROOM` says OK; loops > 0 and few
+   dead-ends (terminal closets/vaults are fine); at least one working perch; and
+   `round trip: OK`.
+4. **Test**: `cargo test -p game levelgen` — the golden test pins every design's
+   walkable components cell for cell. If you changed a design on purpose, update
+   its `EXPECTED` row in the same change and say why in its comment.
+5. **Ship**: `cargo build --release -p game`, rerun step 2 with the release exe
+   (`./target/release/build-and-hide.exe`), then give the user the launch line:
    ```powershell
-   cd "d:\Claude Code Projects\Hide and Seek Level Builder\native"; $env:LOAD_SLOT=7; .\target\release\build-and-hide.exe
+   cd "d:\Claude Code Projects\Hide and Seek Level Builder\native"; $env:LOAD_LEVEL="levelgen <name>"; .\target\release\build-and-hide.exe
+eleaseuild-and-hide.exe
    ```
    (Click to grab the mouse; WASD+mouse to fly; `G` = on-foot HUNT, `I` = invincible.)
+   **The game window locks the exe** — if a release build finishes in <1s or says
+   "Access is denied," the user's game is open; ask them to close it.
+
+Headless diagnostics take any level too — a slot number, a level name, or a path —
+and now bake **with** placed props, exactly as in-game:
+`./target/release/profile_hunt.exe "facility 2" 1` (nav findings + step timing) and
+`./target/release/probe_hunt.exe "facility 2"` (drives real hunters between pads).
 
 ## Builder API cheat-sheet (`LevelBuilder`)
 All positions min-corner WT. `let mut b = LevelBuilder::new();` … `b.finish()`.

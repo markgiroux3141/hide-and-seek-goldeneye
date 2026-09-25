@@ -1,4 +1,5 @@
-//! Headless hunter navigation probe — `cargo run --release --bin probe_hunt -- <slot> [opts]`
+//! Headless hunter navigation probe — `cargo run --release --bin probe_hunt -- <level> [opts]`
+//! (`<level>`: a quick-slot number, a level name, or a path)
 //!
 //! Answers the question a connectivity report cannot: **can a hunter actually walk from
 //! A to B in this level, and if not, which gate refused the step it died on.**
@@ -34,11 +35,16 @@ fn main() {
             .and_then(|i| args.get(i + 1))
             .cloned()
     };
-    let slot: u8 = args
+    let level: String = args
         .first()
         .filter(|a| !a.starts_with("--"))
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1);
+        .cloned()
+        .unwrap_or_else(|| "1".to_string());
+    let Some(path) = game::world::resolve_level_arg(&level) else {
+        eprintln!("no level called {level:?} (a slot number, a level name, or a path)");
+        std::process::exit(1);
+    };
+    let shown = path.display();
     let secs: f32 = flag("--secs").and_then(|s| s.parse().ok()).unwrap_or(30.0);
     let log_path = flag("--log").unwrap_or_else(|| "probe_hunt.log".into());
     let from = flag("--from").and_then(|s| parse_point(&s));
@@ -53,14 +59,17 @@ fn main() {
     let no_avoid = args.iter().any(|a| a == "--no-avoidance");
 
     let mut world = World::new();
-    match world.load_slot(slot) {
+    // Prop bounds the way the app registers them, so placed props block nav here
+    // exactly as they do in-game.
+    world.register_catalog_prop_bounds();
+    match world.load_level(&path) {
         Ok(m) => println!(
-            "loaded slot{slot} — {} region mesh(es), {} spawn pad(s)",
+            "loaded {shown} — {} region mesh(es), {} spawn pad(s)",
             m.len(),
             world.spawn_pad_count()
         ),
         Err(e) => {
-            eprintln!("could not load slot{slot}: {e}");
+            eprintln!("could not load {shown}: {e}");
             std::process::exit(1);
         }
     }
@@ -100,7 +109,7 @@ fn main() {
             let pts = world.probe_points();
             if pts.len() < 2 {
                 eprintln!(
-                    "slot{slot} has {} spawn pad(s) — a sweep needs at least 2, or pass \
+                    "{shown} has {} spawn pad(s) — a sweep needs at least 2, or pass \
                      --from/--to",
                     pts.len()
                 );

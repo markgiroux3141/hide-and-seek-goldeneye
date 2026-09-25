@@ -738,21 +738,10 @@ impl World {
                 // Bake the nav grid from the frozen geometry (once), build the spawn
                 // pool from it, then enter the player and flood the wave in.
                 let t0 = Instant::now();
-                let mut structure_solids = self.structure_solid_boxes();
-                // Placed props are solid to grid-navving enemies too: block their
-                // footprint cells so hunters path around crates/furniture (enemies
-                // ignore physics colliders — see the nav-vs-physics split).
-                structure_solids.extend(self.prop_solid_boxes());
-                // Which of those boxes are stairs — the grid allows a taller step inside
-                // them, so a flight with sub-cell treads stays walkable.
-                let stair_volumes = self.stair_run_solid_boxes();
-                // Ramp-style flights are baked as steps like any other, then handed
-                // their real sloped surface as an overlay so hunters walk the slope they
-                // can see instead of the invisible treads under it.
-                let ramp_planes = self.ramp_planes();
-                match nav::bake(&mut self.regions, &structure_solids, &stair_volumes) {
-                    Some(mut nav) => {
-                        nav.set_ramps(&ramp_planes);
+                // The one bake shared with the NAV tab and the levelgen harness — see
+                // `World::bake_level_nav` for what goes into it.
+                match self.bake_level_nav() {
+                    Some(nav) => {
                         let bake_ms = t0.elapsed().as_secs_f32() * 1000.0;
                         log::info!(
                             "nav baked in {bake_ms:.2} ms ({} cells)",

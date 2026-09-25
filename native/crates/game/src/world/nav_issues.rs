@@ -199,6 +199,28 @@ pub(crate) fn partition_pads(pads: &[spawn::SpawnPad], nav: &NavWorld) -> (Optio
 }
 
 impl World {
+    /// Bake the level's nav grid from the current geometry — **the** bake, the one
+    /// `G` hands the hunters, the NAV tab reports on, and the levelgen harness analyzes.
+    ///
+    /// One function because there used to be three copies (G's, the NAV tab's, and a
+    /// hand-mirrored one in the harness), and the harness copy had drifted: it baked
+    /// without props or ramp planes, so its verdicts described a level nobody plays.
+    ///
+    /// The solid set: CSG regions, free-standing structures, and placed props (which
+    /// block hunters even though they are not CSG). Stair volumes are passed apart so
+    /// the grid relaxes its step limit inside them (`nav::STAIR_STEP`); ramp-style
+    /// flights get their visible slope as an overlay. **Doors are not in here** — they
+    /// ride the frozen grid as a live overlay, attached at `G` after the bake.
+    pub(crate) fn bake_level_nav(&mut self) -> Option<NavWorld> {
+        let mut solids = self.structure_solid_boxes();
+        solids.extend(self.prop_solid_boxes());
+        let stair_volumes = self.stair_run_solid_boxes();
+        let ramp_planes = self.ramp_planes();
+        let mut nav = nav::bake(&mut self.regions, &solids, &stair_volumes)?;
+        nav.set_ramps(&ramp_planes);
+        Some(nav)
+    }
+
     /// Run the whole validation pass and cache it (the NAV tab's **Calculate**).
     ///
     /// Bakes its own grid in BUILD — that is the ~0.5 s this button exists to keep off
@@ -212,21 +234,10 @@ impl World {
                 self.nav = Some(nav);
                 out
             }
-            None => {
-                // The same solid set G bakes from: free-standing structures plus placed
-                // props, which block hunters even though they are not CSG.
-                let mut solids = self.structure_solid_boxes();
-                solids.extend(self.prop_solid_boxes());
-                let stair_volumes = self.stair_run_solid_boxes();
-                let ramp_planes = self.ramp_planes();
-                match nav::bake(&mut self.regions, &solids, &stair_volumes) {
-                    Some(mut nav) => {
-                        nav.set_ramps(&ramp_planes);
-                        self.nav_pass(&nav)
-                    }
-                    None => (NavIssues::empty(), ColoredMesh::default()),
-                }
-            }
+            None => match self.bake_level_nav() {
+                Some(nav) => self.nav_pass(&nav),
+                None => (NavIssues::empty(), ColoredMesh::default()),
+            },
         };
         issues.calc_ms = t0.elapsed().as_secs_f32() * 1000.0;
         // The full report at info, one line at warn. "The panel is for fixing; the log is

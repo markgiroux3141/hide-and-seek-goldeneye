@@ -4863,24 +4863,6 @@ fn pickup_settings_ui(
     changed
 }
 
-/// Model-space AABB `(min, max)` of a textured model, from its raw vertices — used
-/// to anchor/ground a placed prop (and, later, to size its collider). Zero box for
-/// an empty model.
-fn model_aabb(model: &engine::assets::textured_model::TexturedModel) -> (glam::Vec3, glam::Vec3) {
-    let mut min = glam::Vec3::splat(f32::INFINITY);
-    let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
-    for v in &model.vertices {
-        let p = glam::Vec3::from_array(v.pos);
-        min = min.min(p);
-        max = max.max(p);
-    }
-    if model.vertices.is_empty() {
-        (glam::Vec3::ZERO, glam::Vec3::ZERO)
-    } else {
-        (min, max)
-    }
-}
-
 /// Draw the **PD simulant lab** telemetry panel (`PD_LAB=1` only).
 ///
 /// The zeroing model is invisible without this: from outside, a simulant that is
@@ -5496,27 +5478,38 @@ impl ApplicationHandler for App {
         // is exactly the question a boot flag silently losing a fight makes unanswerable.
         log::info!("HUNTERS: {}", world.roster_summary());
         log::info!("{}", world.ai_mode().summary());
-        // Optional: boot straight into a saved level slot (`LOAD_SLOT=N`), so a
-        // generated level can be explored immediately without pressing F-keys.
+        // Optional: boot straight into a saved level — `LOAD_LEVEL=<name|path|slot>`
+        // (e.g. `LOAD_LEVEL="levelgen grand"`) or the older `LOAD_SLOT=N` — so a
+        // generated level can be explored immediately without the LEVELS panel.
         // Starts in BUILD (fly) mode; press G for HUNT (FPS), I for invincible.
-        if let Some(slot) = std::env::var("LOAD_SLOT")
-            .ok()
-            .and_then(|s| s.trim().parse::<u8>().ok())
-        {
-            match world.load_slot(slot) {
+        let boot_level = match std::env::var("LOAD_LEVEL") {
+            Ok(arg) => {
+                let found = crate::world::persist::resolve_level_arg(&arg);
+                if found.is_none() {
+                    log::warn!("LOAD_LEVEL {arg:?}: no slot, file or level by that name");
+                }
+                found
+            }
+            Err(_) => std::env::var("LOAD_SLOT")
+                .ok()
+                .and_then(|s| s.trim().parse::<u8>().ok())
+                .map(crate::world::persist::slot_path),
+        };
+        if let Some(path) = boot_level {
+            match world.load_level(&path) {
                 Ok(meshes) => {
                     for rm in &meshes {
                         renderer.set_region_textured(rm.id, &rm.mesh);
                     }
-                    // Booting into a slot opens that level like any other load would, so
-                    // Ctrl+S saves straight back to it instead of reporting no file.
-                    self.current_level = Some(crate::world::persist::slot_path(slot));
+                    // Booting into a level opens it like any other load would, so Ctrl+S
+                    // saves straight back to it instead of reporting no file.
+                    self.current_level = Some(path.clone());
                     self.saved_revision = world.revision();
                     self.level_name_draft = world.level_name().to_string();
                     booted_into_level = true;
-                    log::info!("booted into level slot {slot}");
+                    log::info!("booted into level {}", path.display());
                 }
-                Err(e) => log::warn!("LOAD_SLOT {slot} failed: {e}"),
+                Err(e) => log::warn!("boot level {} failed: {e}", path.display()),
             }
         }
         // B1: upload every skinned character body once (geometry + textures) — one GPU
@@ -5546,59 +5539,28 @@ impl ApplicationHandler for App {
         // channel (keyed by catalog key) and register its model-space AABB on the
         // World (drives the placement ghost + ground/centre anchor). Textured static
         // meshes load through the same path as the guns.
-        for def in crate::props::CATALOG {
-            let path = format!("{}/../../assets/props/{}", env!("CARGO_MANIFEST_DIR"), def.glb);
-            // The sentry gun is an articulated prop, not a static one: its export is a
-            // parts sheet, so it loads split into its six pieces and uploads one mesh
-            // per piece under its own key. The turret then draws as six matrices off
-            // one entity (see `crate::turret`), which is what lets the head track and
-            // the barrels spin. Its registered AABB is the *assembled* rig, not the
-            // sheet's, so placement measures the turret rather than the exploded parts.
-            if def.mesh == crate::ecs::MeshId::SentryGun {
-                match engine::assets::obj_model::load_obj_components(&path) {
-                    Ok(parts) if parts.len() == crate::turret::PARTS.len() => {
-                        for (part, model) in crate::turret::PARTS.iter().zip(&parts) {
-                            renderer.upload_prop(part.key, model);
-                        }
-                        let (min, max) = crate::turret::assembled_bounds(&parts);
-                        world.register_prop_bounds(def.mesh, min, max);
-                        log::info!(
-                            "loaded prop {} as {} rigged parts ({} verts)",
-                            def.name,
-                            parts.len(),
-                            parts.iter().map(|p| p.vertices.len()).sum::<usize>()
-                        );
+        for lp in crate::props::load_catalog() {
+            let (min, max) = lp.bounds();
+            world.register_prop_bounds(lp.def.mesh, min, max);
+            match &lp.model {
+                // The sentry gun is an articulated prop: one mesh per piece under its own
+                // key, drawn as six matrices off one entity (see `crate::turret`), which is
+                // what lets the head track and the barrels spin.
+                crate::props::CatalogModel::Rig(parts) => {
+                    for (part, model) in crate::turret::PARTS.iter().zip(parts) {
+                        renderer.upload_prop(part.key, model);
                     }
-                    Ok(parts) => log::warn!(
-                        "prop '{}' split into {} pieces, rig expects {} — turret disabled",
-                        def.name,
+                    log::info!(
+                        "loaded prop {} as {} rigged parts ({} verts)",
+                        lp.def.name,
                         parts.len(),
-                        crate::turret::PARTS.len()
-                    ),
-                    Err(e) => log::warn!("prop '{}' load failed: {e}", def.name),
+                        parts.iter().map(|p| p.vertices.len()).sum::<usize>()
+                    );
                 }
-                continue;
-            }
-            match crate::props::load_prop_model(&path) {
-                Ok(mut model) => {
-                    // Consolidate the alpha-cutout "secondary" half (glass/chain-link/
-                    // grates) onto the opaque primary, so the prop is one merged mesh.
-                    if let Some(sec) = crate::props::secondary_glb(def.mesh) {
-                        let spath =
-                            format!("{}/../../assets/props/{}", env!("CARGO_MANIFEST_DIR"), sec);
-                        match crate::props::load_prop_model(&spath) {
-                            Ok(secondary) => model.append(secondary),
-                            Err(e) => {
-                                log::warn!("prop '{}' secondary '{sec}' load failed: {e}", def.name)
-                            }
-                        }
-                    }
-                    let (min, max) = model_aabb(&model);
-                    world.register_prop_bounds(def.mesh, min, max);
-                    renderer.upload_prop(def.key, &model);
-                    log::info!("loaded prop {} ({} verts)", def.name, model.vertices.len());
+                crate::props::CatalogModel::Static(model) => {
+                    renderer.upload_prop(lp.def.key, model);
+                    log::info!("loaded prop {} ({} verts)", lp.def.name, model.vertices.len());
                 }
-                Err(e) => log::warn!("prop '{}' load failed: {e}", def.name),
             }
         }
         // A weapon pickup has no prop mesh of its own — it draws whichever gun the
