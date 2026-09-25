@@ -103,28 +103,28 @@ All positions min-corner WT. `let mut b = LevelBuilder::new();` … `b.finish()`
 - **Additive-after-subtractive:** anything solid you add (pillars) must come after
   carves — the builder already defers pillars; keep this in mind for custom Adds.
 
-## Verticality — the critical gotcha
-- **UP is easy and clean:** `csg_stair(... Up ...)` (wall-cut) or
-  `stair_to_platform` (ascending) both bake walkable for player AND enemy nav.
-  Prefer these. (mezzanine→door→loft→up-stair→attic is a proven pattern.)
-- **DOWN is the hard problem:**
-  - **Free-standing stairs down** render clean and the **player walks them**, but
-    **enemy grid-nav can't reach the lower floor** (it reaches the treads, not the
-    carved floor below). Confirmed across every config. Result: a player-only area
-    (fine as a hiding spot; the report flags it "not reachable by ENEMY grid-nav").
-  - **CSG down-stair** IS enemy-walkable, but a Down stair renders a closing "fill"
-    wall (`ceil-sc`..`ceil`) that **floats in any open space** (pit / stacked
-    room). Keep `ceil` low (~1) to sink it, or only use CSG-down where it's cut
-    into a **real wall** so the fill hides in solid.
-  - **A stair-run's lowest tread lands one step ABOVE its ground anchor** — anchor
-    one lower to land flush.
-- **Floor hole + downstair** (if you do it): the hole must be **wide enough to
-  walk through and fit the whole stair**, the **stair top must meet the hole rim**
-  at the upper floor, and there must be **≥8 WT headroom** the whole way down.
+## Verticality
+- **Up and down both work** for player AND enemy nav: `csg_stair` (wall-cut, either
+  direction), `stair_to_platform`, and `stair_ground` (free-standing, either
+  direction — including down into a pit or a room below y=0).
+  - *History:* until 2026-09-24 free-standing stairs **down** baked no enemy nav,
+    and this section called that a law. It was a bug — `find_floor_y_at`'s 0.0
+    default culled every step of any flight below y=0 (fixed in
+    `structures::resolve_run`, regression test
+    `a_platform_stair_down_into_a_pit_bakes_walkable_nav`). If a descent is
+    unreachable now, it is the geometry: read the NAV findings, don't route around it.
+- **CSG down-stair** renders a closing "fill" wall (`ceil-sc`..`ceil`) that **floats
+  in any open space** (pit / stacked room). Use a free-standing stair into open
+  spaces; use CSG-down where it's cut into a **real wall** so the fill hides in solid.
+- **A stair-run's lowest tread lands one step ABOVE its ground anchor** — anchor
+  one lower to land flush.
+- **Floor hole + downstair:** the hole must be **wide enough to walk through and
+  cover the whole stair footprint**, the **stair top must meet the hole rim** at the
+  upper floor, and there must be **≥8 WT headroom** over every tread. A flight that
+  runs on under the slab past the hole's edge has no headroom and severs the room
+  below (this is what's wrong with `grand`'s undercroft).
 - **Headroom everywhere ≥ 8 WT.** Corridors/stairwells at 7 WT cause head-bump.
   The analyzer's HEADROOM lint flags anything under 8 — keep it green.
-- **Open backlog bug:** the free-standing-descending-stair → carved-floor nav hop
-  in `sim/nav.rs`. Fixing it makes open pits/holes work for enemies too.
 
 ## Reading the report
 `overview` (bounds/counts) · `FLOORPLANS` (per-floor ASCII: `.`floor `#`solid

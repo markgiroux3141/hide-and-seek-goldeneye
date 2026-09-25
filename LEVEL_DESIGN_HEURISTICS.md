@@ -230,6 +230,7 @@ Pushed the two queued items: go bigger, and add sunken pits.
   within one room).
 
 ### Hard-won stair learnings (cost several iterations)
+> **⚠ SUPERSEDED 2026-09-24** — this was a bug, not a nav limit; see the 2026-09-24 entry below.
 - **Free-standing ground-to-ground `stair_ground` does NOT bake walkable nav** in
   my tests — the pit floor came back 0/246 cells reachable no matter the depth or
   grounding. Every stair that *works* in my levels is either a `csg_stair` or a
@@ -251,8 +252,8 @@ Pushed the two queued items: go bigger, and add sunken pits.
   the pit was disconnected).
 
 ### Still open
-- Debug `stair_ground` (ground-to-ground) so open pits can use a free-standing
-  stair instead of a CSG cut.
+- ~~Debug `stair_ground` (ground-to-ground) so open pits can use a free-standing
+  stair instead of a CSG cut.~~ Fixed 2026-09-24.
 - Perch-over-own-room: a big edge-hugging mezzanine overlooks *adjacent rooms*
   well but not the floor beneath it; cantilever a narrower deck out over the room
   for a true floor overlook.
@@ -274,6 +275,8 @@ Playtest of the `grand` pit exposed a real split between **player physics** and
 - **Decision:** shipped the free-standing stair — it's what reads clean, the
   player traverses it, and for hide-and-seek a pit the seekers can't fully search
   is a legit hiding spot. The pit floor being off the nav grid is accepted.
+
+> **⚠ SUPERSEDED 2026-09-24** — this was a bug, not a nav limit; see the 2026-09-24 entry below.
 
 Follow-ups:
 - **Open bug to fix:** free-standing descending-stair → carved-floor nav hop. Fix
@@ -302,12 +305,37 @@ Follow-ups:
      down-stair is currently the only nav-clean option.
 
 ### Rule for a floor-hole + downstair (until the nav hop is fixed)
+> **⚠ SUPERSEDED 2026-09-24** — the last bullet's "accept player-only" was a bug; the geometry rules still hold; see the 2026-09-24 entry below.
 - Make the hole ≥ the stair width + 2 WT on each side, and long enough for the
   full run.
 - Put the stair's top tread flush with the hole rim at the upper floor.
 - Give ≥ 8 WT vertical clearance the whole way down.
 - Accept enemy-nav-unreachable (player-only) OR use a CSG down-stair cut into a
   real wall of the lower room so the closing-wall hides.
+
+## 2026-09-24 — "stairs down don't bake for enemies" was a bug
+
+The rule above (07-25/07-26: free-standing stairs down are player-only, "confirmed
+across ~6 configs", blamed on a nav "last hop") was wrong. **Cause:** a grounded
+platform-style stair-run floors its steps with `structures::find_floor_y_at`, which
+looks for a floor *strictly below* the foot and **falls back to 0.0**. For any
+flight whose foot is below y=0, that 0.0 is *above* every step, every step came out
+with negative height, and `stair_run_boxes` returned **nothing** — no nav boxes at
+all. The player walked it anyway because their collider is the ramp quad, which
+never reads the floor. The six configs all shared the one input that mattered.
+
+- **Fixed** in `structures::resolve_run` (clamp the floor to the flight's foot; runs
+  that baked before bake identically). Regression test:
+  `a_platform_stair_down_into_a_pit_bakes_walkable_nav`.
+- `grand`'s pit is now enemy-reachable. The **undercroft is still cut off — that
+  one is real geometry**: the stair runs on past the floor hole under the armory
+  slab with ~0.5 m of headroom (the 07-26 "botched hole" diagnosis, items 1–3).
+- It had also silently broken a hand-built level: `aztec_level` run 3 (platform at
+  y=0 down to y=−20) was hunter-proof; it now joins two islands into one.
+
+**Lesson for this log:** a limitation found by black-box trial and error is a
+hypothesis, not a rule. Before writing one down, read the code that produces the
+geometry (here, five lines of `stair_run_boxes`) or probe it directly.
 
 ## Toward a Claude skill
 Eventually package the above as a `level-design` skill: the checklist + the WT
