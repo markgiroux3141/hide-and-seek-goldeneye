@@ -8,6 +8,43 @@ agent follows to author coherent, fun levels, verified by the headless report
 
 Units: **WT** = world tile = 0.25 m. So 4 WT = 1 m, a "2 m ceiling" = 8 WT.
 
+## Rules at a glance
+
+The log below is append-only history; this table is the current state of every rule
+in it. **Enforced** rules are checked by the levelgen report (`levelgen/analyze.rs`):
+a *check* can fail the verdict, a *lint* (the report's "design rules" block) can only
+warn. **Advice** rules are not machine-checkable yet. **Superseded** rules turned out
+to be wrong — the entry that overturned them says why. When you add a rule, add its
+row here; when the report starts enforcing one, name the check.
+
+| Rule | From | Status |
+| --- | --- | --- |
+| Ceilings ≥ 12 WT; never 8 | 07-25 arena walk | Enforced — lint `ceilings` |
+| Mix room sizes; no uniform grid | 07-25 arena walk | Enforced — lint `variety` |
+| One or two hero rooms, 40–60 WT across, 24–30 WT tall | 07-25 slot-1 study | Enforced — lint `hero room` |
+| Platforms ≥ 4 WT deep | 07-25 arena walk | Enforced — lint `decks` |
+| Platforms lead somewhere (or are a perch with a view) | 07-25 arena walk | Enforced — lint `decks` |
+| Stairs in large rooms, never small ones | 07-25 varied | Enforced — lint `stair space` |
+| A texture scheme per room | 07-25 slot-1 study | Enforced — lint `textures` |
+| Every room reachable; no accidental islands | 07-25 | Enforced — checks `walkable`, `reachable` |
+| Loops, not spokes; few dead-ends (terminal vaults are fine) | 07-25 | Enforced — check `loops` (warns only at 0 loops) |
+| ≥ 1 perch with a real overlook | 07-25 | Enforced — check `perches` |
+| Headroom ≥ 8 WT on every walkable cell | 07-25 slot-1 study | Enforced — check `headroom` |
+| A wall between rooms meant to be separate (≥ 1 WT) | 09-24 | Enforced — check `merged rooms` |
+| Pillars ≥ 3 WT from walls, stairs and doors (or flush) | 09-25 compound | Enforced — check `pinches` |
+| Passages overlap both rooms by ≥ 2 WT | 07-25 varied | Built in — `door`, `corridor` |
+| Anything solid added after the carves | 07-25 varied | Built in — the builder defers pillars |
+| A floor hole covers its whole stair, with headroom | 07-26 | Built in — `stair_through_floor` |
+| A stair must lead somewhere at its far level | 07-25 sprawl | Built in — `stair_between` |
+| Split levels (pits, mezzanines, catwalks) read as handcrafted | 07-25 slot-1 study | Advice |
+| Cover pillars to break long sightlines | 07-25 | Advice |
+| Route a perch's stair along a wall so it keeps its view | 07-25 varied | Advice |
+| Sprawl as chains branching off each other, not a hub | 07-25 2nd walk | Advice |
+| A second route up/down each vertical, for flanking | 07-25 | Built in — the generator's `second_route` (most levels); advice for hand designs |
+| Pillars ≥ 4 WT (1 m) from flights, holes, decks and each other | 09-25 generator | Built in — generator `PILLAR_GAP`; enforced — check `pinches` |
+| Free-standing stairs down are player-only | 07-25 / 07-26 | **Superseded 09-24** — a bug (`find_floor_y_at`), fixed |
+| Cantilever perches; don't hug the wall | 07-25 | **Superseded 09-24** — a perch-metric artefact |
+
 ---
 
 ## Player feedback log (chronological — the source of truth)
@@ -164,7 +201,7 @@ learned and create a full level." → built the `facility` design.
   truth; treat the degree/dead-end count as *intended-topology* shorthand, and
   prefer `passage(a,b,…)` / `link(a,b)` over `void()` when you want the edge
   counted.
-- **A high central perch overlooks corridors better than the floor below it.**
+- *(⚠ SUPERSEDED 2026-09-24: a perch-metric artefact — see "the report was measuring the wrong things".)* **A high central perch overlooks corridors better than the floor below it.**
   The mezzanine saw only ~14/255 atrium-floor cells (its own slab + pillars block
   straight-down LOS) but strongly covered the barracks/mess/bunk approaches
   *through the hallways* at eye height. Perches are corridor-watchers; for a true
@@ -230,6 +267,7 @@ Pushed the two queued items: go bigger, and add sunken pits.
   within one room).
 
 ### Hard-won stair learnings (cost several iterations)
+> **⚠ SUPERSEDED 2026-09-24** — this was a bug, not a nav limit; see the 2026-09-24 entry below.
 - **Free-standing ground-to-ground `stair_ground` does NOT bake walkable nav** in
   my tests — the pit floor came back 0/246 cells reachable no matter the depth or
   grounding. Every stair that *works* in my levels is either a `csg_stair` or a
@@ -251,9 +289,9 @@ Pushed the two queued items: go bigger, and add sunken pits.
   the pit was disconnected).
 
 ### Still open
-- Debug `stair_ground` (ground-to-ground) so open pits can use a free-standing
-  stair instead of a CSG cut.
-- Perch-over-own-room: a big edge-hugging mezzanine overlooks *adjacent rooms*
+- ~~Debug `stair_ground` (ground-to-ground) so open pits can use a free-standing
+  stair instead of a CSG cut.~~ Fixed 2026-09-24.
+- *(⚠ SUPERSEDED 2026-09-24: a perch-metric artefact — see "the report was measuring the wrong things".)* Perch-over-own-room: a big edge-hugging mezzanine overlooks *adjacent rooms*
   well but not the floor beneath it; cantilever a narrower deck out over the room
   for a true floor overlook.
 
@@ -274,6 +312,8 @@ Playtest of the `grand` pit exposed a real split between **player physics** and
 - **Decision:** shipped the free-standing stair — it's what reads clean, the
   player traverses it, and for hide-and-seek a pit the seekers can't fully search
   is a legit hiding spot. The pit floor being off the nav grid is accepted.
+
+> **⚠ SUPERSEDED 2026-09-24** — this was a bug, not a nav limit; see the 2026-09-24 entry below.
 
 Follow-ups:
 - **Open bug to fix:** free-standing descending-stair → carved-floor nav hop. Fix
@@ -302,12 +342,73 @@ Follow-ups:
      down-stair is currently the only nav-clean option.
 
 ### Rule for a floor-hole + downstair (until the nav hop is fixed)
+> **⚠ SUPERSEDED 2026-09-24** — the last bullet's "accept player-only" was a bug; the geometry rules still hold; see the 2026-09-24 entry below.
 - Make the hole ≥ the stair width + 2 WT on each side, and long enough for the
   full run.
 - Put the stair's top tread flush with the hole rim at the upper floor.
 - Give ≥ 8 WT vertical clearance the whole way down.
 - Accept enemy-nav-unreachable (player-only) OR use a CSG down-stair cut into a
   real wall of the lower room so the closing-wall hides.
+
+## 2026-09-24 — "stairs down don't bake for enemies" was a bug
+
+The rule above (07-25/07-26: free-standing stairs down are player-only, "confirmed
+across ~6 configs", blamed on a nav "last hop") was wrong. **Cause:** a grounded
+platform-style stair-run floors its steps with `structures::find_floor_y_at`, which
+looks for a floor *strictly below* the foot and **falls back to 0.0**. For any
+flight whose foot is below y=0, that 0.0 is *above* every step, every step came out
+with negative height, and `stair_run_boxes` returned **nothing** — no nav boxes at
+all. The player walked it anyway because their collider is the ramp quad, which
+never reads the floor. The six configs all shared the one input that mattered.
+
+- **Fixed** in `structures::resolve_run` (clamp the floor to the flight's foot; runs
+  that baked before bake identically). Regression test:
+  `a_platform_stair_down_into_a_pit_bakes_walkable_nav`.
+- `grand`'s pit is now enemy-reachable. The **undercroft is still cut off — that
+  one is real geometry**: the stair runs on past the floor hole under the armory
+  slab with ~0.5 m of headroom (the 07-26 "botched hole" diagnosis, items 1–3).
+- It had also silently broken a hand-built level: `aztec_level` run 3 (platform at
+  y=0 down to y=−20) was hunter-proof; it now joins two islands into one.
+
+**Lesson for this log:** a limitation found by black-box trial and error is a
+hypothesis, not a rule. Before writing one down, read the code that produces the
+geometry (here, five lines of `stair_run_boxes`) or probe it directly.
+
+## 2026-09-24 — the report was measuring the wrong things (analyzer rewrite)
+
+The levelgen report was rebuilt (summary first, JSON, a derived room graph). Three of
+its old numbers had been steering the rules above:
+
+- **Perches.** The old check sighted from 0.4 m above the *centre* of the deck — a
+  metre under the player's eye, from the one spot its own slab hides the floor below
+  best. That is why a wide mezzanine "saw only 14 atrium cells" and why the log
+  concluded perches must be cantilevered and must not hug the wall. From the edge at
+  eye height, `grand`'s wall-hugging 56×12 mezzanine sees **69%** of the hall and
+  `facility`'s sees 83% of the atrium. **Superseded:** "a high central perch
+  overlooks corridors better than the floor below it" and "cantilever the platform
+  out over the room" (07-25) — hugging the wall is fine; what matters is an edge.
+- **Loops.** Counted from declared edges, and then (briefly) from a room-to-room graph
+  that collapsed parallel halls into one edge. Counted now on the walkable graph with
+  corridors as their own nodes, `sprawl` has the 2 loops it was designed with.
+- **Floorless decks look "reachable".** `smoke`'s perch sits 5 WT up in an 8 WT room
+  — 3 WT of headroom, so not one standable cell — and the old check passed it by
+  snapping to a stair tread nearby. It is now its own finding ("no standable floor").
+
+New check, first catch: **merged rooms**. `grand`'s north_loft is carved flush against
+the hall (its air starts at z=0 where the hall's ends), so there is no wall between
+them — the 6-wide "door off the deck" the design declared is actually the whole wall.
+**Rule:** keep ≥ 1 WT of solid between rooms that should be separate; connect them
+with a `passage`.
+
+## 2026-09-25 — first walks of generated levels (gen-10, gen-125, gen-28, gen-212)
+
+- ✅ Single-floor and three-floor generated levels play: "a good start". The balcony →
+  door → upper floor → flight back down loop, and the basement's two ways in, work for
+  the player and for hunters.
+- ✋ **Textures need work.** The generator gives each room an independent random scheme
+  (0..8), with no theming by role, wing or floor. Not a priority yet. When it is, the
+  obvious next rule is *per-wing or per-floor theming* rather than per-room noise —
+  and a lint to go with it.
 
 ## Toward a Claude skill
 Eventually package the above as a `level-design` skill: the checklist + the WT

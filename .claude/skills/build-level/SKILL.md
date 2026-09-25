@@ -1,15 +1,16 @@
 ---
 name: build-level
-description: Author a playable level for the native BUILD & HIDE (GoldenEye-style hide-and-seek) game using the headless levelgen harness. Use when the user asks to build, design, generate, extend, or iterate on a level/map for the Rust game in native/, or mentions rooms/halls/stairs/pits/the level generator. Drives the build → headless report → iterate → ship-to-slot loop.
+description: Author a playable level for the native BUILD & HIDE (GoldenEye-style hide-and-seek) game using the headless levelgen harness. Use when the user asks to build, design, generate, extend, or iterate on a level/map for the Rust game in native/, or mentions rooms/halls/stairs/pits/the level generator. Drives the build → headless report → iterate → ship loop.
 ---
 
 # Build a level for BUILD & HIDE
 
 You author levels **as code** with the `levelgen` builder, then a **headless
-harness** bakes the nav grid and prints an LLM-readable report (ASCII floorplans
-+ reachability + flow/headroom metrics). You iterate against that report until
-it's clean, then write a playable `levels/slotN.json` and rebuild the release
-binary so the user can walk it.
+harness** puts the level through the game's own pipeline — load into a real
+`World`, save with the real level writer, reload the file, bake nav with the same
+function `G` uses — and prints an LLM-readable report (ASCII floorplans +
+reachability + flow/headroom metrics + the NAV tab's own findings). You iterate
+against that report until it's clean; the file it writes is already playable.
 
 **Read [LEVEL_DESIGN_HEURISTICS.md](../../../LEVEL_DESIGN_HEURISTICS.md) first** —
 it's the running log of playtest feedback and hard-won gotchas. This skill is the
@@ -24,45 +25,101 @@ solid.
 - Builder API: `native/crates/game/src/levelgen/builder.rs`
 - Designs (author here): `native/crates/game/src/levelgen/designs.rs` — one `fn`
   per level, returning `b.finish()`.
-- Register a new design in `native/crates/game/src/levelgen/mod.rs` (the `match`
-  + the default).
-- Analyzer/report: `native/crates/game/src/levelgen/analyze.rs`
-- Serializer (writes the slot) + `verify_loads`: `serialize.rs` / `mod.rs`
-- Nav (why descents fail): `native/crates/engine/src/sim/nav.rs`
+- Register a new design in **three** places, all enforced by a test: the `DESIGNS`
+  table in `levelgen/mod.rs`, the `golden!(…)` list in `levelgen/tests.rs`, and its
+  expected component sizes in `EXPECTED` there.
+- Analyzer/report: `levelgen/analyze.rs`; the NAV findings are
+  `world/nav_issues.rs` (the same code as O → NAV → Calculate).
+- Nav: `native/crates/engine/src/sim/nav.rs`; stair/platform solids:
+  `engine/src/geometry/structures.rs`.
 
 ## The loop (do this every time)
 1. **Plan** the level as a room graph (spaces + how they connect + verticality),
-   then write/edit a `fn` in `designs.rs` using the builder API below. Register it
-   in `mod.rs` and make it the default design.
-2. **Build + report** (from `native/`, debug is fine for iterating):
+   then write/edit a `fn` in `designs.rs` using the builder API below and register
+   it (above).
+2. **Build + report** (from `native/`):
    ```
-   LEVELGEN=1 LEVELGEN_DESIGN=<name> LEVELGEN_SLOT=7 cargo run -p game
+   LEVELGEN=1 LEVELGEN_DESIGN=<name> cargo run --release -p game
    ```
-   Grep the sections you care about (`=> all`, `y=<n> `, `OK — every`,
-   `density:`, `SNIPER`, `### floor y=`). The floorplans are `step=2` on big
-   levels, which **hides 1-WT-wide features** (thin stairs/pillars) — don't
-   diagnose those from the plan; use the reachability + headroom numbers.
-3. **Iterate** until: every room reachable; `HEADROOM` says OK; loops > 0 and few
-   dead-ends (terminal closets/vaults are fine); at least one working perch; no
-   accidental unreachable levels (a lone unreachable floor level is usually a
-   **pillar top** — that's correct).
-4. **Ship**: build release + regenerate the slot, then verify it loads:
-   ```
-   cargo build --release -p game
-   LEVELGEN=1 LEVELGEN_DESIGN=<name> LEVELGEN_SLOT=7 ./target/release/build-and-hide.exe
-   ```
-   Confirm `wrote playable level` + `verify: slot 7 loads in-engine OK`. Default
-   to **slot 7** (F-keys load 1–8; `LOAD_SLOT=7` boots straight in).
-   **The game window locks the exe** — if a release build finishes in <1s or says
-   "Access is denied," the user's game is open; ask them to close it.
-5. Give the user the launch line and ask for a walk-through:
+   Writes `levels/levelgen_<name>.json` (listed in the LEVELS tab as
+   "levelgen <name>"). It will overwrite its own earlier output but **refuses** to
+   overwrite a level an author saved. `LEVELGEN_SLOT=N` writes `levels/slotN.json`
+   instead (F-key / `LOAD_SLOT`). Exit code is non-zero on failure.
+   The report opens with a `VERDICT` and one `[PASS|WARN|FAIL]` line per check —
+   read that first; everything below it is the detail behind a line. For scripting,
+   `LEVELGEN_REPORT=json` prints the same report as one JSON document (`verdict`,
+   `checks`, `rooms`, `declared`, `merged`, `perches`, …) — assert on that rather
+   than grepping prose.
+3. **Iterate** until the verdict has no `FAIL`, and every `WARN` is one you mean
+   (a pillar-top island, a deliberate terminal vault). `round trip: OK` must hold.
+   The summary's **design rules** block is the heuristics log enforced as lints
+   (ceilings, variety, hero room, decks, stair space, textures) — each warning quotes
+   the rule it comes from. The table at the top of LEVEL_DESIGN_HEURISTICS.md says
+   which rules are enforced, which are still advice, and which were superseded.
+4. **Test**: `cargo test -p game levelgen` — the golden test pins every design's
+   walkable components cell for cell. If you changed a design on purpose, update
+   its `EXPECTED` row in the same change and say why in its comment.
+5. **Ship**: `cargo build --release -p game`, rerun step 2 with the release exe
+   (`./target/release/build-and-hide.exe`), then give the user the launch line:
    ```powershell
-   cd "d:\Claude Code Projects\Hide and Seek Level Builder\native"; $env:LOAD_SLOT=7; .\target\release\build-and-hide.exe
+   cd "d:\Claude Code Projects\Hide and Seek Level Builder\native"; $env:LOAD_LEVEL="levelgen <name>"; .\target\release\build-and-hide.exe
+eleaseuild-and-hide.exe
    ```
    (Click to grab the mouse; WASD+mouse to fly; `G` = on-foot HUNT, `I` = invincible.)
+   **The game window locks the exe** — if a release build finishes in <1s or says
+   "Access is denied," the user's game is open; ask them to close it.
+
+## Generating instead of authoring
+`LEVELGEN_DESIGN=gen` runs the **generator** (`levelgen/generate.rs`): it builds
+`LEVELGEN_TRIES` seeds (default 32) from `LEVELGEN_SEED` (default 1), analyzes each,
+drops any with a FAIL, ranks the rest (loops, few dead-ends, clean rules, variety,
+size, floors) and puts the winner through the normal report as `levelgen gen-<seed>`.
+Size with `LEVELGEN_ROOMS` (default 10) and `LEVELGEN_LOOPS` (default 3); of those
+rooms, `LEVELGEN_UPPER` (default 2) go on an upper floor at y=16 — entered from a
+balcony in the hero hall, with a second flight down through an upper room's floor in
+most levels — and `LEVELGEN_LOWER` (default 2) in a basement at y=−14, entered through
+a big ground room's floor. `0` / `0` gives a single floor. A seed always rebuilds the
+same level, so `LEVELGEN_TRIES=1 LEVELGEN_SEED=<n>` reproduces one — and reports it
+even if it fails, which is how to see *why* a seed fails. Treat a winner as a starting
+point: generate, walk it, then sculpt it in the editor or copy its structure into a
+hand-written design.
+
+Headless diagnostics take any level too — a slot number, a level name, or a path —
+and now bake **with** placed props, exactly as in-game:
+`./target/release/profile_hunt.exe "facility 2" 1` (nav findings + step timing) and
+`./target/release/probe_hunt.exe "facility 2"` (drives real hunters between pads).
 
 ## Builder API cheat-sheet (`LevelBuilder`)
 All positions min-corner WT. `let mut b = LevelBuilder::new();` … `b.finish()`.
+`designs::compound` is a whole level written this way — read it first.
+
+### Relational layer — prefer this
+These take **rooms** and work out the boxes themselves (which wall two rooms share,
+where the opening centres, how far it overlaps each room, how many steps a stair
+needs). A call that can't be built records a **builder problem** — the report's
+`builder` check fails and says what to change — rather than carving something wrong.
+Compass: **North = −z** (up in the floorplans), East = +x.
+- `room_beside(name, of, Dir, wall, w, d, floor, height) -> RoomId` — carve a room
+  across a `wall`-thick wall on `of`'s side, centred. `room_beside_at(…, along, …)`
+  sets the offset from `of`'s min corner instead. A wall of ≥ 1 WT keeps them apart.
+- `door(a, b, width)` / `door_at(a, b, t, width, height)` — open the shared wall
+  (at fraction `t` along it), overlapping both rooms by 2 WT; records the edge. Any
+  wall thickness, so it is also a straight corridor. Floors must match (within 1 WT)
+  — except a door *off a mezzanine*: if the lower room's ceiling clears the upper
+  floor by the door's height, it opens at the upper floor.
+- `corridor(a, b, width)` — straight if they face each other, else an L.
+- `window_between(a, b, t, sill, width, height)` — see/shoot-through, not walkable.
+  Keep `t` off the door's (`door` uses 0.5).
+- `stair_between(a, b, width)` — rooms on different floors across a shared wall; the
+  wall must be ≥ steps + 1 WT (it tells you how much to move them if not).
+- `stair_through_floor(upper, lower, x, z, Dir, width)` — rooms stacked one over the
+  other: a free-standing flight from `(x, z)` on the upper floor descending toward
+  `Dir`, with the floor hole cut over the whole flight so every tread has headroom.
+- `spawn_pad(x, y, z, yaw_deg)`, `weapon(name, x, y, z)`, `ammo(name, x, y, z)` — the
+  match. Players and hunters start unarmed, so put weapons down. A misspelt weapon is a
+  builder problem. (Doors as props are not in the builder yet.)
+
+### Coordinate layer
 - `set_scheme(n: 0..=8)` — texture for subsequent carves/pillars. **Vary per room/
   wing** (9 is reserved for platforms). Set before each room.
 - `room(name, x, z, w, d, floor, height) -> RoomId` — carve a room (air box).
@@ -97,42 +154,59 @@ All positions min-corner WT. `let mut b = LevelBuilder::new();` … `b.finish()`
 - **Split-levels read as handcrafted:** sunken pits, raised catwalks/mezzanines,
   balconies. Layer three heights in one hero room when you can.
 - **Textures per room** via `set_scheme` — visual identity, not all-white.
-- **Cover:** thin full-height pillars (`pillar_in`) to break sightlines.
-- **Perch:** cantilever a wide deck out over a room (don't hug the wall) so it
-  actually overlooks the floor; verify with the SNIPER metric.
+- **Cover:** thin full-height pillars (`pillar_in`) to break sightlines — **≥ 3 WT
+  from any wall, stair or door**, or flush against it: a 2 WT gap is a 0.5 m slot a
+  hunter's body cannot pass (the `pinches` check flags it).
+- **Perch:** a deck overlooks whatever its **edge** can see at eye height — a wide
+  mezzanine along a wall works (the old "cantilever it, don't hug the wall" rule was
+  mostly an artefact of a perch check that sighted from the deck's centre, 1 m below
+  eye height). Verify with PERCHES.
 - **Additive-after-subtractive:** anything solid you add (pillars) must come after
   carves — the builder already defers pillars; keep this in mind for custom Adds.
 
-## Verticality — the critical gotcha
-- **UP is easy and clean:** `csg_stair(... Up ...)` (wall-cut) or
-  `stair_to_platform` (ascending) both bake walkable for player AND enemy nav.
-  Prefer these. (mezzanine→door→loft→up-stair→attic is a proven pattern.)
-- **DOWN is the hard problem:**
-  - **Free-standing stairs down** render clean and the **player walks them**, but
-    **enemy grid-nav can't reach the lower floor** (it reaches the treads, not the
-    carved floor below). Confirmed across every config. Result: a player-only area
-    (fine as a hiding spot; the report flags it "not reachable by ENEMY grid-nav").
-  - **CSG down-stair** IS enemy-walkable, but a Down stair renders a closing "fill"
-    wall (`ceil-sc`..`ceil`) that **floats in any open space** (pit / stacked
-    room). Keep `ceil` low (~1) to sink it, or only use CSG-down where it's cut
-    into a **real wall** so the fill hides in solid.
-  - **A stair-run's lowest tread lands one step ABOVE its ground anchor** — anchor
-    one lower to land flush.
-- **Floor hole + downstair** (if you do it): the hole must be **wide enough to
-  walk through and fit the whole stair**, the **stair top must meet the hole rim**
-  at the upper floor, and there must be **≥8 WT headroom** the whole way down.
+## Verticality
+- **Up and down both work** for player AND enemy nav: `csg_stair` (wall-cut, either
+  direction), `stair_to_platform`, and `stair_ground` (free-standing, either
+  direction — including down into a pit or a room below y=0).
+  - *History:* until 2026-09-24 free-standing stairs **down** baked no enemy nav,
+    and this section called that a law. It was a bug — `find_floor_y_at`'s 0.0
+    default culled every step of any flight below y=0 (fixed in
+    `structures::resolve_run`, regression test
+    `a_platform_stair_down_into_a_pit_bakes_walkable_nav`). If a descent is
+    unreachable now, it is the geometry: read the NAV findings, don't route around it.
+- **CSG down-stair** renders a closing "fill" wall (`ceil-sc`..`ceil`) that **floats
+  in any open space** (pit / stacked room). Use a free-standing stair into open
+  spaces; use CSG-down where it's cut into a **real wall** so the fill hides in solid.
+- **A stair-run's lowest tread lands one step ABOVE its ground anchor** — anchor
+  one lower to land flush.
+- **Floor hole + downstair:** use `stair_through_floor` — it sizes the hole to the
+  flight. By hand, the hole must **cover the whole stair footprint**, the stair top
+  must meet the hole rim, and every tread needs ≥ 8 WT of headroom; a flight that runs
+  on under the slab past the hole is what cut `grand`'s undercroft off until 2026-09.
 - **Headroom everywhere ≥ 8 WT.** Corridors/stairwells at 7 WT cause head-bump.
   The analyzer's HEADROOM lint flags anything under 8 — keep it green.
-- **Open backlog bug:** the free-standing-descending-stair → carved-floor nav hop
-  in `sim/nav.rs`. Fixing it makes open pits/holes work for enemies too.
 
 ## Reading the report
-`overview` (bounds/counts) · `FLOORPLANS` (per-floor ASCII: `.`floor `#`solid
-` `air/void `S`spawn, letters=rooms) · `CONNECTIVITY` (reachability + edges +
-loops/dead-ends) · `VERTICALITY` (each floor level reachable? samples many cells)
-· `SNIPER PERCHES` (LOS from platforms into lower rooms) · `HEADROOM` (clearance
-lint) · `CAMP NOOKS` (alcoves). Green = all rooms reachable, HEADROOM OK,
-loops>0, ≥1 perch.
+- **Summary** — `VERDICT` plus one line per check: `walkable` (components; an island
+  over 16 cells fails), `reachable` (cut off vs *no standable floor*, which means
+  under 6 WT of headroom or buried), `declared links` (every `passage`/`link` you
+  declared is walkable), `merged rooms` (two carved rooms share air with no wall
+  and you never declared them connected — usually a missing wall), `loops` (counted
+  on the real walkable graph, corridors as nodes, so parallel halls count),
+  `perches`, `headroom`, `floors`.
+- **NAV** — verbatim what O → NAV → Calculate shows in-game: islands with the gap to
+  the nearest neighbour, orphaned objects, player-only climbs.
+- **ROOMS** — per room: cells, reachable, links in the *derived* graph; then the
+  declared connections (`!!` = not walkable), connections that exist but were never
+  declared, and merged pairs.
+- **FLOORS** — one plan per real floor (a level with ≥ 16 flat cells); treads and
+  steps are drawn on the floor they rise from. `.` floor · `/` stairs & steps · `!`
+  cut off from the main area · `#` wall · `S` spawn · letters = rooms. Wide plans
+  downsample but keep the most important glyph per block, so thin stairs and islands
+  stay visible.
+- **PERCHES** — per deck, the share of each lower room visible from somewhere on its
+  edge at eye height. **HEADROOM** — cramped cells, clustered. **CAMP CORNERS** —
+  flat corner cells clear of stairs.
 
 When done, **append any new playtest feedback / lessons to
 LEVEL_DESIGN_HEURISTICS.md** so the next session inherits them.

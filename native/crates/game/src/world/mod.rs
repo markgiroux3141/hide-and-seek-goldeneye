@@ -65,6 +65,8 @@ pub mod pd_lab;
 /// `pub(crate)` so the app can ask whether a quick-slot has a file — the radial's
 /// Level ring says "Load 3" vs "Slot 3", which needs the path.
 pub(crate) mod persist;
+/// For the headless tools (separate binaries), which take a level on the command line.
+pub use persist::resolve_level_arg;
 /// The authored per-level match setup the `G` transition reads (the PLAY panel tab).
 pub mod play_config;
 pub use play_config::{EntryMode, HunterWeapon, LoadoutMode, LoadoutSlot, PlayConfig};

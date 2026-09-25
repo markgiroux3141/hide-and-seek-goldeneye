@@ -1,116 +1,327 @@
 //! Headless procedural level generation + analysis harness.
 //!
 //! Runs entirely without a window: an author (the LLM) writes a level with the
-//! [`builder`] intent API, this module bakes the nav grid the same way the hunt
-//! does, prints an LLM-friendly text [`analyze`]sis, and writes a **playable**
-//! `levels/slotN.json` the real game can load. The loop is: build → bake →
-//! read the report → fix → repeat, then open the slot in-game to confirm.
+//! [`builder`] intent API, and this module puts it through **the game's own
+//! pipeline** — load into a real [`World`], save with the real level writer, load the
+//! file back, bake nav with the same function `G` and the NAV tab use — then prints an
+//! LLM-friendly text [`analyze`]sis plus the NAV tab's own report. The loop is: build →
+//! report → fix → repeat, then open the level in-game to confirm.
 //!
-//! Entry: set `LEVELGEN=1` (optionally `LEVELGEN_SLOT=N`, `LEVELGEN_DESIGN=name`)
-//! and launch the binary; `main` calls [`run`] instead of opening the window.
+//! **Why it goes through `World` rather than around it.** Until 2026-09 this module
+//! hand-mirrored the nav bake and the file format, and both had drifted — the bake had
+//! no props or ramp planes, the file was written as v2 while the game was on v4 — so
+//! the report described a level slightly different from the one the author then opened.
+//! Owning no copy of either is what keeps it honest.
+//!
+//! Entry: set `LEVELGEN=1` (optionally `LEVELGEN_DESIGN=name`, `LEVELGEN_SLOT=N`) and
+//! launch the binary; `main` calls [`run`] instead of opening the window.
 
 pub mod analyze;
 pub mod builder;
 pub mod designs;
-pub mod serialize;
+pub mod generate;
 
-use engine::geometry::csg_runtime::Region;
-use engine::geometry::structures;
-use engine::sim::nav;
+#[cfg(test)]
+mod tests;
+
+use std::path::Path;
 
 use builder::BuiltLevel;
 
-/// Headless entry point. Reads `LEVELGEN_DESIGN` (default `arena`) and
-/// `LEVELGEN_SLOT` (default `9`), builds + analyzes + writes the slot.
-pub fn run() {
-    let design = std::env::var("LEVELGEN_DESIGN").unwrap_or_else(|_| "grand".to_string());
-    // Default to slot 7 so it's loadable in-game with F7 (F-keys map to 1–8).
-    let slot: u8 = std::env::var("LEVELGEN_SLOT")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(7);
+use crate::world::{persist, World};
 
-    let built = match design.as_str() {
-        "smoke" => designs::smoke(),
-        "arena" => designs::arena(),
-        "varied" => designs::varied(),
-        "sprawl" => designs::sprawl(),
-        "facility" => designs::facility(),
-        "linear" => designs::linear(),
-        "showcase" => designs::showcase(),
-        "grand" => designs::grand(),
-        "pd_lab" => designs::pd_lab(),
-        other => {
-            eprintln!("unknown LEVELGEN_DESIGN='{other}', using 'facility'");
-            designs::facility()
-        }
+/// Every registered design, by the name `LEVELGEN_DESIGN` takes. The golden tests walk
+/// this same table, so a design cannot be runnable without also being tested.
+pub const DESIGNS: &[(&str, fn() -> BuiltLevel)] = &[
+    ("smoke", designs::smoke),
+    ("arena", designs::arena),
+    ("varied", designs::varied),
+    ("sprawl", designs::sprawl),
+    ("facility", designs::facility),
+    ("linear", designs::linear),
+    ("showcase", designs::showcase),
+    ("grand", designs::grand),
+    ("compound", designs::compound),
+    ("generated", designs::generated),
+    ("pd_lab", designs::pd_lab),
+];
+
+/// Look a design up by name.
+pub fn design(name: &str) -> Option<BuiltLevel> {
+    DESIGNS.iter().find(|(n, _)| *n == name).map(|(_, f)| f())
+}
+
+/// The display name a generated level is saved under — also how the harness recognises
+/// a file it wrote itself (and so may overwrite) from one an author made.
+pub fn generated_name(design: &str) -> String {
+    format!("levelgen {design}")
+}
+
+/// Headless entry point. Reads `LEVELGEN_DESIGN` (default `grand`) and, optionally,
+/// `LEVELGEN_SLOT`. Exits non-zero on any failure so a scripted caller notices.
+pub fn run() {
+    let name = std::env::var("LEVELGEN_DESIGN").unwrap_or_else(|_| "grand".to_string());
+    if name == "gen" {
+        return run_generator();
+    }
+    let Some(built) = design(&name) else {
+        let names: Vec<&str> = DESIGNS.iter().map(|(n, _)| *n).collect();
+        eprintln!("unknown LEVELGEN_DESIGN='{name}' — known designs: {}", names.join(", "));
+        std::process::exit(2);
+    };
+    // Where it goes: a named level in the LEVELS tab by default, or a numbered quick
+    // slot (F-key / `LOAD_SLOT`) when asked for one explicitly.
+    let slot: Option<u8> = std::env::var("LEVELGEN_SLOT").ok().and_then(|s| s.trim().parse().ok());
+    let path = match slot {
+        Some(n) => persist::slot_path(n),
+        None => persist::path_for_name(&generated_name(&name)).expect("design names slug"),
     };
 
-    println!("=== levelgen: design='{design}' -> slot {slot} ===\n");
-    analyze_and_print(&built);
-
-    match serialize::write_slot(&built, slot) {
-        Ok(path) => {
-            println!("\nwrote playable level to {}", path.display());
-            verify_loads(slot);
+    // `LEVELGEN_REPORT=json` prints the report as JSON (one document on stdout) for a
+    // scripted caller to assert on; the default is the text report.
+    let json = std::env::var("LEVELGEN_REPORT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
+    if !json {
+        println!("=== levelgen: design='{name}' -> {} ===
+", path.display());
+    }
+    match generate(&name, &built, &path) {
+        Ok(out) if json => println!("{}", serde_json::to_string_pretty(&out.json).unwrap_or_default()),
+        Ok(out) => println!("{}", out.text),
+        Err(e) => {
+            eprintln!("[!] levelgen failed: {e}");
+            std::process::exit(1);
         }
-        Err(e) => eprintln!("\nfailed to write slot {slot}: {e}"),
     }
 }
 
-/// Load the just-written slot back through the **real** game persist path
-/// (`World::load_slot`) headlessly, proving the file is actually playable and
-/// re-bakes cleanly — not just that our serializer emitted plausible JSON.
-fn verify_loads(slot: u8) {
-    let mut world = crate::world::World::new();
-    match world.load_slot(slot) {
-        Ok(meshes) => println!(
-            "verify: slot {slot} loads in-engine OK ({} region mesh/clear ops rebuilt)",
-            meshes.len()
-        ),
-        Err(e) => eprintln!("verify: slot {slot} FAILED to load in-engine: {e}"),
+/// `LEVELGEN_DESIGN=gen`: generate `LEVELGEN_TRIES` seeds from `LEVELGEN_SEED`, rank
+/// them, and put the winner through the same save → reload → report as any design.
+/// `LEVELGEN_ROOMS` / `LEVELGEN_LOOPS` set the size; `LEVELGEN_UPPER` / `LEVELGEN_LOWER`
+/// how many of those rooms go upstairs and in the basement (0 = a single floor).
+fn run_generator() {
+    let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(d);
+    let seed = env("LEVELGEN_SEED", 1);
+    let tries = env("LEVELGEN_TRIES", 32) as usize;
+    let defaults = generate::GenParams::default();
+    let params = generate::GenParams {
+        rooms: env("LEVELGEN_ROOMS", defaults.rooms as u64) as usize,
+        loops: env("LEVELGEN_LOOPS", defaults.loops as u64) as usize,
+        upper: env("LEVELGEN_UPPER", defaults.upper as u64) as usize,
+        lower: env("LEVELGEN_LOWER", defaults.lower as u64) as usize,
+    };
+    let json = std::env::var("LEVELGEN_REPORT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
+    let t0 = std::time::Instant::now();
+    let ranked = generate::best_of(seed, tries, &params);
+    let board: Vec<serde_json::Value> = ranked
+        .iter()
+        .take(5)
+        .map(|c| {
+            let r = c.report.as_ref();
+            serde_json::json!({
+                "seed": c.seed,
+                "score": c.score,
+                "verdict": r.map(|r| format!("{:?}", r.verdict)),
+                "rooms": r.map(|r| r.rooms.len()),
+                "loops": r.map(|r| r.loops),
+                "dead_ends": r.map(|r| r.dead_ends.len()),
+            })
+        })
+        .collect();
+    let failed = ranked.iter().filter(|c| c.score.is_none()).count();
+    if !json {
+        println!(
+            "=== levelgen: generated {tries} seed(s) from {seed} ({} rooms: {} up, {} down; {} loops asked) in {:.1} s — {failed} failed ===",
+            params.rooms,
+            params.upper,
+            params.lower,
+            params.loops,
+            t0.elapsed().as_secs_f32()
+        );
+        println!("  rank  seed   score  verdict  rooms  loops  dead-ends");
+        for (i, c) in ranked.iter().take(5).enumerate() {
+            let r = c.report.as_ref();
+            println!(
+                "  {:>4}  {:>4}  {:>6}  {:<7}  {:>5}  {:>5}  {:>9}",
+                i + 1,
+                c.seed,
+                c.score.map(|s| format!("{s:.1}")).unwrap_or_else(|| "—".into()),
+                r.map(|r| format!("{:?}", r.verdict)).unwrap_or_else(|| "no floor".into()),
+                r.map(|r| r.rooms.len()).unwrap_or(0),
+                r.map(|r| r.loops).unwrap_or(0),
+                r.map(|r| r.dead_ends.len()).unwrap_or(0),
+            );
+        }
+        println!();
+    }
+    // One try means "show me this seed" — report it even if it fails.
+    let Some(win) = ranked.first().filter(|c| c.score.is_some() || tries == 1) else {
+        eprintln!("[!] every generated seed failed its report — try another LEVELGEN_SEED");
+        // Say why, for the first one: a bare "failed" is no help to whoever tunes this.
+        if let Some(r) = ranked.first().and_then(|c| c.report.as_ref()) {
+            eprintln!("    seed {} failed on:", ranked[0].seed);
+            for c in r.checks.iter().filter(|c| c.status == analyze::Status::Fail) {
+                eprintln!("      [FAIL] {:<15} {}", c.check, c.detail);
+            }
+        }
+        std::process::exit(1);
+    };
+    let dname = format!("gen-{}", win.seed);
+    let slot: Option<u8> = std::env::var("LEVELGEN_SLOT").ok().and_then(|s| s.trim().parse().ok());
+    let path = match slot {
+        Some(n) => persist::slot_path(n),
+        None => persist::path_for_name(&generated_name(&dname)).expect("generated names slug"),
+    };
+    match generate(&dname, &win.built, &path) {
+        Ok(mut out) if json => {
+            if let Some(o) = out.json.as_object_mut() {
+                o.insert("leaderboard".into(), board.into());
+            }
+            println!("{}", serde_json::to_string_pretty(&out.json).unwrap_or_default());
+        }
+        Ok(out) => println!("{}", out.text),
+        Err(e) => {
+            eprintln!("[!] levelgen failed: {e}");
+            std::process::exit(1);
+        }
     }
 }
 
-/// Bake the nav grid from a built level and print the full text report.
-/// Bypasses `World` entirely — constructs the region + structure solids from the
-/// engine's public API, exactly mirroring `World::structure_solid_boxes` +
-/// `nav::bake`.
-pub fn analyze_and_print(built: &BuiltLevel) {
-    // One region holding every carve/add brush (the builder is single-region).
-    let mut region = Region::new(0);
-    region.brushes = built.brushes.clone();
-    region.stairs = built.stairs.clone(); // CSG stair treads → nav solids
-    region.refresh_shell();
-    let brushes = region.brushes.clone();
-    let mut regions = vec![region];
+/// Analyze a built level headlessly without writing a file — the generator's judge.
+/// `None` when it has no walkable floor at all.
+pub(crate) fn analyze_built(name: &str, built: &BuiltLevel) -> Option<analyze::ReportData> {
+    let mut w = World::new();
+    w.load_built_level(built).ok()?;
+    let nav = w.bake_level_nav()?;
+    w.calculate_nav_issues();
+    let issues = w.nav_issues()?;
+    Some(analyze::Analysis::new(name, &nav, &w, built, issues).data())
+}
 
-    // Structure solids: platform slabs + stair-run step blocks (the nav extras). The
-    // stair boxes are kept apart as well as included, because the bake relaxes its step
-    // limit inside stair geometry and must be told which boxes those are.
-    let mut solids: Vec<[f32; 6]> = Vec::new();
-    for p in &built.platforms {
-        if let Some(b) = p.solid_box(&brushes) {
-            solids.push(b);
-        }
-    }
-    let mut stair_volumes: Vec<[f32; 6]> = Vec::new();
-    for r in &built.stair_runs {
-        let fp = r
-            .from_platform
-            .and_then(|id| built.platforms.iter().find(|p| p.id == id));
-        let tp = r
-            .to_platform
-            .and_then(|id| built.platforms.iter().find(|p| p.id == id));
-        stair_volumes.extend(structures::stair_run_boxes(r, fp, tp, &brushes));
-    }
-    solids.extend_from_slice(&stair_volumes);
+/// A finished run: the text report and the same content as JSON.
+pub struct Generated {
+    pub text: String,
+    pub json: serde_json::Value,
+}
 
-    match nav::bake(&mut regions, &solids, &stair_volumes) {
-        Some(navw) => {
-            let a = analyze::Analysis::new(&navw, &regions, built);
-            print!("{}", a.report());
-        }
-        None => println!("[!] nav bake produced nothing — the level has no walkable volume."),
+/// Build → save → reload → analyze. The level analyzed is the one **read back from
+/// disk**, i.e. exactly what an author opens.
+pub fn generate(name: &str, built: &BuiltLevel, path: &Path) -> Result<Generated, String> {
+    refuse_foreign(path, name)?;
+
+    let mut world = headless_world();
+    world.load_built_level(built).map_err(|e| format!("load into World: {e}"))?;
+    world.set_level_name(&generated_name(name));
+    world.save_level(path).map_err(|e| format!("save {}: {e}", path.display()))?;
+
+    let mut loaded = headless_world();
+    loaded
+        .load_level(path)
+        .map_err(|e| format!("reload {}: {e}", path.display()))?;
+    let roundtrip = roundtrip_check(built, &loaded);
+    let roundtrip_ok = roundtrip.starts_with("round trip: OK");
+
+    let nav = loaded
+        .bake_level_nav()
+        .ok_or("nav bake produced nothing — the level has no walkable volume")?;
+    loaded.calculate_nav_issues();
+    let issues = loaded.nav_issues().ok_or("the NAV pass produced no findings")?;
+    let analysis = analyze::Analysis::new(name, &nav, &loaded, built, issues);
+
+    let mut text = analysis.report();
+    text.push_str(&format!("
+{roundtrip}
+wrote playable level to {}
+", path.display()));
+
+    let mut json = serde_json::to_value(analysis.data()).map_err(|e| e.to_string())?;
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert("roundtrip_ok".into(), roundtrip_ok.into());
+        obj.insert("roundtrip".into(), roundtrip.into());
+        obj.insert("file".into(), path.display().to_string().into());
+    }
+    Ok(Generated { text, json })
+}
+
+/// A `World` for headless use, with prop bounds registered the way the app registers
+/// them at startup — without which placed props would silently vanish from the bake.
+pub fn headless_world() -> World {
+    let mut w = World::new();
+    w.register_catalog_prop_bounds();
+    w
+}
+
+/// Refuse to overwrite a level the harness did not write. Quick slots are exempt: the
+/// caller named that slot explicitly, and overwriting it is what the flag has always
+/// meant.
+fn refuse_foreign(path: &Path, design: &str) -> Result<(), String> {
+    if !path.exists() || is_slot(path) {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let existing = serde_json::from_str::<serde_json::Value>(&text)
+        .ok()
+        .and_then(|v| v.get("name").and_then(|n| n.as_str()).map(str::to_string))
+        .unwrap_or_default();
+    if existing == generated_name(design) {
+        Ok(())
+    } else {
+        Err(format!(
+            "{} already exists and was not written by the harness (its name is {existing:?}) \
+             — refusing to overwrite it",
+            path.display()
+        ))
     }
 }
+
+fn is_slot(path: &Path) -> bool {
+    path.file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.strip_prefix("slot"))
+        .is_some_and(|n| n.parse::<u8>().is_ok())
+}
+
+/// Did the level survive save → load intact? Compared as JSON so the check needs no
+/// `PartialEq` on the engine types, and brushes in id order because a load re-partitions
+/// them into regions (which is also where the fold order comes back from).
+fn roundtrip_check(built: &BuiltLevel, loaded: &World) -> String {
+    fn json<T: serde::Serialize>(v: &T) -> serde_json::Value {
+        serde_json::to_value(v).unwrap_or(serde_json::Value::Null)
+    }
+    let mut brushes: Vec<_> = loaded.regions().iter().flat_map(|r| r.brushes.iter().copied()).collect();
+    brushes.sort_by_key(|b| b.id);
+    let mut stairs: Vec<_> = loaded.regions().iter().flat_map(|r| r.stairs.iter().copied()).collect();
+    stairs.sort_by_key(|s| s.void_ids[0]);
+    let mut want_stairs = built.stairs.clone();
+    want_stairs.sort_by_key(|s| s.void_ids[0]);
+
+    let mut bad = Vec::new();
+    if json(&brushes) != json(&built.brushes) {
+        bad.push("brushes");
+    }
+    if json(&stairs) != json(&want_stairs) {
+        bad.push("CSG stairs");
+    }
+    if json(&loaded.platforms()) != json(&built.platforms) {
+        bad.push("platforms");
+    }
+    if json(&loaded.stair_runs()) != json(&built.stair_runs) {
+        bad.push("stair-runs");
+    }
+    if loaded.spawn_marker().distance(built.spawn) > 1e-4 {
+        bad.push("spawn");
+    }
+    if bad.is_empty() {
+        format!(
+            "round trip: OK — saved and reloaded through the game's own level format \
+             ({} brushes, {} stairs, {} platforms, {} stair-runs, {} regions after load)",
+            brushes.len(),
+            stairs.len(),
+            built.platforms.len(),
+            built.stair_runs.len(),
+            loaded.regions().len()
+        )
+    } else {
+        format!("[!] round trip: MISMATCH in {} after save → load", bad.join(", "))
+    }
+}
+

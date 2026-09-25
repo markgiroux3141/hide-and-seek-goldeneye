@@ -375,8 +375,17 @@ fn resolve_run(
             StairStyle::Block | StairStyle::Ramp => {
                 floor_y_under(bottom_pt.x, bottom_pt.z, bottom_pt.y, brushes)
             }
+            // …except where `find_floor_y_at` is not merely different but **wrong**: its
+            // 0.0 world-ground default sits *above* the foot of any flight below y=0, so
+            // every step came out with negative height and the run baked **no boxes at
+            // all** — the player still walked it (their collider is the ramp quad, which
+            // never reads `floor_y`), hunters could not. That is the "free-standing
+            // stairs down never bake into enemy nav" rule the levelgen skill carried
+            // for two months. A floor above the flight's own foot is never meaningful,
+            // so clamping to the foot changes only runs that were culled; every run
+            // that baked before bakes identically.
             StairStyle::Platform => {
-                find_floor_y_at(bottom_pt.x, bottom_pt.z, bottom_pt.y, brushes)
+                find_floor_y_at(bottom_pt.x, bottom_pt.z, bottom_pt.y, brushes).min(bottom_pt.y)
             }
         }
     } else {

@@ -691,6 +691,102 @@ pub fn secondary_glb(mesh: MeshId) -> Option<&'static str> {
     })
 }
 
+/// A catalog prop's model(s), loaded from disk — everything about a prop except the GPU
+/// upload.
+pub enum CatalogModel {
+    /// One consolidated mesh (a secondary alpha-cutout half, if any, already appended).
+    Static(engine::assets::textured_model::TexturedModel),
+    /// The sentry gun's parts, in [`crate::turret::PARTS`] order.
+    Rig(Vec<engine::assets::textured_model::TexturedModel>),
+}
+
+/// A catalog row plus its loaded model.
+pub struct LoadedProp {
+    pub def: &'static PropDef,
+    pub model: CatalogModel,
+}
+
+impl LoadedProp {
+    /// Model-space bounds — what [`crate::world::World::register_prop_bounds`] wants. A
+    /// rig measures the **assembled** turret, not its exploded parts sheet.
+    pub fn bounds(&self) -> (glam::Vec3, glam::Vec3) {
+        match &self.model {
+            CatalogModel::Static(m) => model_aabb(m),
+            CatalogModel::Rig(parts) => crate::turret::assembled_bounds(parts),
+        }
+    }
+}
+
+/// Load every [`CATALOG`] prop from disk, CPU-side only.
+///
+/// Split out of app startup so the **headless** tools can learn prop bounds too. Before
+/// this, only the windowed app registered them (inside its GPU-upload loop), so every
+/// headless bake — `profile_hunt`, `probe_hunt`, the levelgen harness — voxelized a level
+/// with its crates and furniture missing, and reported different islands than the NAV
+/// tab did for the same file. A prop that fails to load is logged and skipped, as it
+/// always was.
+pub fn load_catalog() -> Vec<LoadedProp> {
+    let dir = format!("{}/../../assets/props", env!("CARGO_MANIFEST_DIR"));
+    let mut out = Vec::with_capacity(CATALOG.len());
+    for def in CATALOG {
+        let path = format!("{dir}/{}", def.glb);
+        // The sentry gun is an articulated prop: its export is a parts sheet, so it loads
+        // split into its six pieces (see `crate::turret`).
+        if def.mesh == MeshId::SentryGun {
+            match engine::assets::obj_model::load_obj_components(&path) {
+                Ok(parts) if parts.len() == crate::turret::PARTS.len() => out.push(LoadedProp {
+                    def,
+                    model: CatalogModel::Rig(parts),
+                }),
+                Ok(parts) => log::warn!(
+                    "prop '{}' split into {} pieces, rig expects {} — turret disabled",
+                    def.name,
+                    parts.len(),
+                    crate::turret::PARTS.len()
+                ),
+                Err(e) => log::warn!("prop '{}' load failed: {e}", def.name),
+            }
+            continue;
+        }
+        match load_prop_model(&path) {
+            Ok(mut model) => {
+                // Consolidate the alpha-cutout "secondary" half (glass/chain-link/grates)
+                // onto the opaque primary, so the prop is one merged mesh.
+                if let Some(sec) = secondary_glb(def.mesh) {
+                    match load_prop_model(&format!("{dir}/{sec}")) {
+                        Ok(secondary) => model.append(secondary),
+                        Err(e) => {
+                            log::warn!("prop '{}' secondary '{sec}' load failed: {e}", def.name)
+                        }
+                    }
+                }
+                out.push(LoadedProp {
+                    def,
+                    model: CatalogModel::Static(model),
+                });
+            }
+            Err(e) => log::warn!("prop '{}' load failed: {e}", def.name),
+        }
+    }
+    out
+}
+
+/// Axis-aligned bounds of a model's vertices (zero box for an empty model).
+pub fn model_aabb(model: &engine::assets::textured_model::TexturedModel) -> (glam::Vec3, glam::Vec3) {
+    let mut min = glam::Vec3::splat(f32::INFINITY);
+    let mut max = glam::Vec3::splat(f32::NEG_INFINITY);
+    for v in &model.vertices {
+        let p = glam::Vec3::from_array(v.pos);
+        min = min.min(p);
+        max = max.max(p);
+    }
+    if model.vertices.is_empty() {
+        (glam::Vec3::ZERO, glam::Vec3::ZERO)
+    } else {
+        (min, max)
+    }
+}
+
 /// Whether placing this mesh authors a **pickup** — something the player collects
 /// rather than scenery. Drives the panel's pickup settings block and the
 /// [`crate::ecs::Pickup`] component attached at placement.

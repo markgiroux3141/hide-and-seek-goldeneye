@@ -4297,6 +4297,39 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         );
     }
 
+    /// Regression: a grounded **platform-style** flight descending below y=0 baked no
+    /// nav at all, so hunters could never follow the player down it.
+    ///
+    /// The same `find_floor_y_at` 0.0 default as the block-stair case above, reached
+    /// through the other style. The fixture is the `grand` design's sunken pit exactly:
+    /// a hall at y=0, a 16×16 pit 4 WT deep, and the free-standing stair down into it.
+    #[test]
+    fn a_platform_stair_down_into_a_pit_bakes_walkable_nav() {
+        use crate::levelgen::builder::LevelBuilder;
+
+        let mut b = LevelBuilder::new();
+        b.room("hall", 0.0, 0.0, 56.0, 48.0, 0.0, 30.0);
+        b.pit(20.0, 16.0, 16.0, 16.0, 0.0, 4.0);
+        b.stair_ground((20.0, 0.0, 24.0), (25.0, -5.0, 24.0), 4.0, false);
+        let built = b.finish();
+
+        let run = built.stair_runs[0];
+        assert_eq!(run.style, StairStyle::Platform, "the builder's own style");
+        let boxes = structures::stair_run_boxes(&run, None, None, &built.brushes);
+        assert_eq!(boxes.len(), 5, "one solid step per WT of the 5 WT descent");
+
+        let mut region = Region::new(0);
+        region.brushes = built.brushes.clone();
+        let mut regions = vec![region];
+        let navw = nav::bake(&mut regions, &boxes, &boxes).expect("bakes");
+        let hall = Vec3::new(10.0, 0.0, 10.0) * WORLD_SCALE;
+        let pit = Vec3::new(30.0, -4.0, 28.0) * WORLD_SCALE;
+        assert!(
+            navw.find_path(hall, pit).is_some(),
+            "a hunter on the hall floor can walk down into the pit"
+        );
+    }
+
     /// The point of block style: the flight wears the **room's** theme, not the blue
     /// `simple_blue` scheme every other structure is locked to. Asserted on the built
     /// mesh's zone groups, which is what the renderer actually binds textures from.

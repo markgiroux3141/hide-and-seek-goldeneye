@@ -314,6 +314,23 @@ pub fn path_for_name_in(dir: &Path, name: &str) -> Option<PathBuf> {
     (!slug.is_empty()).then(|| dir.join(format!("{slug}.json")))
 }
 
+/// Turn a command-line / env-var level reference into a file: a quick-slot number
+/// (`7` → `slot7.json`), a path to an existing file, or a level's display name
+/// (`"facility 2"` → `facility_2.json`), tried in that order. `None` when it names
+/// nothing on disk. Shared by `LOAD_LEVEL` and the headless tools so they all accept the
+/// same things.
+pub fn resolve_level_arg(arg: &str) -> Option<PathBuf> {
+    let arg = arg.trim();
+    if let Ok(n) = arg.parse::<u8>() {
+        return Some(slot_path(n)).filter(|p| p.exists());
+    }
+    let as_path = PathBuf::from(arg);
+    if as_path.is_file() {
+        return Some(as_path);
+    }
+    path_for_name(arg).filter(|p| p.exists())
+}
+
 /// Where a level called `name` would live **beside** the file at `path`.
 ///
 /// Rename and duplicate resolve their destination this way rather than through
@@ -461,6 +478,28 @@ impl LevelSeed {
 }
 
 impl World {
+    /// The level's CSG regions, as partitioned on load. Read-only — for tools that
+    /// analyze a loaded level (the levelgen harness) without owning its geometry.
+    pub fn regions(&self) -> &[Region] {
+        &self.regions
+    }
+
+    /// The level's free-standing platforms.
+    pub fn platforms(&self) -> &[Platform] {
+        &self.platforms
+    }
+
+    /// The level's free-standing stair-runs.
+    pub fn stair_runs(&self) -> &[StairRun] {
+        &self.stair_runs
+    }
+
+    /// The level's authored spawn marker (metres) — the hunt's fallback entry when no
+    /// spawn pads are authored.
+    pub fn spawn_marker(&self) -> Vec3 {
+        self.spawn_point
+    }
+
     /// This level's display name ("Bunker Base"), or empty if it has never been named.
     pub fn level_name(&self) -> &str {
         &self.level_name
