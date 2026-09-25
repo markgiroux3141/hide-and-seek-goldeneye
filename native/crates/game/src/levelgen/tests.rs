@@ -135,3 +135,115 @@ fn the_harness_never_overwrites_an_authored_level() {
     assert!(refuse_foreign(&dir.join("absent.json"), "grand").is_ok(), "a new file is fine");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ─── The analyzer ──────────────────────────────────────────────────────────────
+
+use super::builder::LevelBuilder;
+use engine::geometry::csg_runtime::{Axis, Side, StairDir};
+
+/// Run the whole analysis on a built level, the way the harness does (minus the file).
+fn analyze(built: &BuiltLevel) -> analyze::ReportData {
+    let mut w = world_with(built);
+    let nav = w.bake_level_nav().expect("bakes");
+    w.calculate_nav_issues();
+    let issues = w.nav_issues().expect("findings");
+    analyze::Analysis::new("test", &nav, &w, built, issues).data()
+}
+
+fn check<'a>(d: &'a analyze::ReportData, name: &str) -> &'a analyze::Check {
+    d.checks.iter().find(|c| c.check == name).expect("check exists")
+}
+
+/// Two rooms whose air boxes share a face have no wall between them — one space. The
+/// report says so when nobody declared it; a 1 WT gap keeps a wall and says nothing.
+#[test]
+fn rooms_sharing_a_face_are_reported_as_merged() {
+    let mut b = LevelBuilder::new();
+    b.room("west", 0.0, 0.0, 12.0, 12.0, 0.0, 12.0);
+    b.room("east", 12.0, 0.0, 12.0, 12.0, 0.0, 12.0); // x=12: flush against west
+    b.spawn_wt(6.0, 0.0, 6.0);
+    let d = analyze(&b.finish());
+    assert_eq!(d.merged, vec![["west".to_string(), "east".to_string()]]);
+    assert_eq!(check(&d, "merged rooms").status, analyze::Status::Warn);
+
+    let mut b = LevelBuilder::new();
+    b.room("west", 0.0, 0.0, 12.0, 12.0, 0.0, 12.0);
+    b.room("east", 13.0, 0.0, 12.0, 12.0, 0.0, 12.0); // a 1 WT wall survives
+    b.spawn_wt(6.0, 0.0, 6.0);
+    assert!(analyze(&b.finish()).merged.is_empty());
+}
+
+/// Loops are counted with corridors as nodes: two parallel halls between the same two
+/// rooms are a real second route; one corridor serving three rooms is not a loop.
+#[test]
+fn loops_count_parallel_halls_and_not_shared_corridors() {
+    let mut b = LevelBuilder::new();
+    let a = b.room("a", 0.0, 0.0, 12.0, 16.0, 0.0, 12.0);
+    let c = b.room("c", 20.0, 0.0, 12.0, 16.0, 0.0, 12.0);
+    b.passage(a, c, 10.0, 2.0, 12.0, 4.0, 0.0, 10.0);
+    b.passage(a, c, 10.0, 10.0, 12.0, 4.0, 0.0, 10.0);
+    b.spawn_wt(6.0, 0.0, 6.0);
+    assert_eq!(analyze(&b.finish()).loops, 1, "two halls between a and c = one loop");
+
+    // A corridor along the top touching three rooms that are otherwise walled apart.
+    let mut b = LevelBuilder::new();
+    for (name, x) in [("r1", 0.0), ("r2", 12.0), ("r3", 24.0)] {
+        b.room(name, x, 6.0, 10.0, 10.0, 0.0, 12.0);
+        b.void(x + 3.0, 3.0, 4.0, 4.0, 0.0, 10.0); // a door from the corridor into it
+    }
+    b.void(0.0, 0.0, 34.0, 4.0, 0.0, 10.0); // the corridor, z 0..4
+    b.spawn_wt(5.0, 0.0, 10.0);
+    let d = analyze(&b.finish());
+    assert_eq!(d.loops, 0, "a shared corridor is a hub, not a loop");
+    assert!(d.rooms.iter().all(|r| r.degree == 2), "each room reaches the other two");
+}
+
+/// A deck overlooks the room it stands in when sighted from its edge at the player's
+/// eye. The first analyzer sighted from 0.4 m above the deck's centre and reported
+/// wide mezzanines as overlooking nothing.
+#[test]
+fn a_perch_is_sighted_from_its_edge_at_eye_height() {
+    let mut b = LevelBuilder::new();
+    let hall = b.room("hall", 0.0, 0.0, 40.0, 40.0, 0.0, 24.0);
+    b.platform("deck", 0.0, 0.0, 40.0, 12.0, 12.0, false);
+    let deck = b.last_room();
+    b.link(hall, deck);
+    b.spawn_wt(20.0, 0.0, 30.0);
+    let d = analyze(&b.finish());
+    let perch = d.perches.iter().find(|p| p.name == "deck").expect("the deck is a perch");
+    let o = perch.overlooks.iter().find(|o| o.room == "hall").expect("it sees the hall");
+    assert!(
+        o.seen as f32 / o.total as f32 > 0.5,
+        "a 12 WT deck along one wall sees most of a 40×40 hall ({} / {})",
+        o.seen,
+        o.total
+    );
+}
+
+/// Stair treads are steps, not floors: a room with a CSG stair down to a basement has
+/// two floors, not one per tread.
+#[test]
+fn stair_treads_are_not_floors() {
+    let mut b = LevelBuilder::new();
+    let top = b.room("top", 0.0, 0.0, 24.0, 20.0, 0.0, 14.0);
+    let low = b.room("low", 0.0, 27.0, 24.0, 20.0, -6.0, 12.0);
+    b.csg_stair(Axis::Z, Side::Max, 20.0, 8.0, 14.0, 0.0, 10.0, StairDir::Down, 6);
+    b.link(top, low);
+    b.spawn_wt(12.0, 0.0, 10.0);
+    let d = analyze(&b.finish());
+    let ys: Vec<i32> = d.floors.iter().map(|f| f.y).collect();
+    assert_eq!(ys, vec![-6, 0], "two floors; the six treads between them are steps");
+    assert_eq!(check(&d, "reachable").status, analyze::Status::Pass, "{:?}", check(&d, "reachable"));
+}
+
+/// A deck with too little headroom above it has no standable floor at all — a
+/// different finding from a deck that is merely cut off, with a different fix.
+#[test]
+fn a_deck_under_a_low_ceiling_has_no_floor_rather_than_no_route() {
+    let d = analyze(&designs::smoke());
+    let perch = d.rooms.iter().find(|r| r.name == "perch_b").unwrap();
+    assert_eq!(perch.cells, 0, "5 WT deck in an 8 WT room leaves 3 WT of headroom");
+    let reach = check(&d, "reachable");
+    assert_eq!(reach.status, analyze::Status::Fail);
+    assert!(reach.detail.contains("no standable floor"), "{}", reach.detail);
+}

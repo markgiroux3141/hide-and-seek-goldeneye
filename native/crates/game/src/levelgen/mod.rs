@@ -71,9 +71,16 @@ pub fn run() {
         None => persist::path_for_name(&generated_name(&name)).expect("design names slug"),
     };
 
-    println!("=== levelgen: design='{name}' -> {} ===\n", path.display());
+    // `LEVELGEN_REPORT=json` prints the report as JSON (one document on stdout) for a
+    // scripted caller to assert on; the default is the text report.
+    let json = std::env::var("LEVELGEN_REPORT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
+    if !json {
+        println!("=== levelgen: design='{name}' -> {} ===
+", path.display());
+    }
     match generate(&name, &built, &path) {
-        Ok(report) => println!("{report}"),
+        Ok(out) if json => println!("{}", serde_json::to_string_pretty(&out.json).unwrap_or_default()),
+        Ok(out) => println!("{}", out.text),
         Err(e) => {
             eprintln!("[!] levelgen failed: {e}");
             std::process::exit(1);
@@ -81,9 +88,15 @@ pub fn run() {
     }
 }
 
-/// Build → save → reload → analyze, returning the full report. The level analyzed is
-/// the one **read back from disk**, i.e. exactly what an author opens.
-fn generate(name: &str, built: &BuiltLevel, path: &Path) -> Result<String, String> {
+/// A finished run: the text report and the same content as JSON.
+pub struct Generated {
+    pub text: String,
+    pub json: serde_json::Value,
+}
+
+/// Build → save → reload → analyze. The level analyzed is the one **read back from
+/// disk**, i.e. exactly what an author opens.
+pub fn generate(name: &str, built: &BuiltLevel, path: &Path) -> Result<Generated, String> {
     refuse_foreign(path, name)?;
 
     let mut world = headless_world();
@@ -96,17 +109,28 @@ fn generate(name: &str, built: &BuiltLevel, path: &Path) -> Result<String, Strin
         .load_level(path)
         .map_err(|e| format!("reload {}: {e}", path.display()))?;
     let roundtrip = roundtrip_check(built, &loaded);
+    let roundtrip_ok = roundtrip.starts_with("round trip: OK");
 
     let nav = loaded
         .bake_level_nav()
         .ok_or("nav bake produced nothing — the level has no walkable volume")?;
-    let mut report = analyze::Analysis::new(&nav, loaded.regions(), built).report();
-    report.push_str("\n------------- NAV (same as O → NAV → Calculate) -------------\n");
-    report.push_str(&loaded.nav_issue_report());
-    report.push_str("\n\n");
-    report.push_str(&roundtrip);
-    report.push_str(&format!("\nwrote playable level to {}\n", path.display()));
-    Ok(report)
+    loaded.calculate_nav_issues();
+    let issues = loaded.nav_issues().ok_or("the NAV pass produced no findings")?;
+    let analysis = analyze::Analysis::new(name, &nav, &loaded, built, issues);
+
+    let mut text = analysis.report();
+    text.push_str(&format!("
+{roundtrip}
+wrote playable level to {}
+", path.display()));
+
+    let mut json = serde_json::to_value(analysis.data()).map_err(|e| e.to_string())?;
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert("roundtrip_ok".into(), roundtrip_ok.into());
+        obj.insert("roundtrip".into(), roundtrip.into());
+        obj.insert("file".into(), path.display().to_string().into());
+    }
+    Ok(Generated { text, json })
 }
 
 /// A `World` for headless use, with prop bounds registered the way the app registers

@@ -45,14 +45,13 @@ solid.
    "levelgen <name>"). It will overwrite its own earlier output but **refuses** to
    overwrite a level an author saved. `LEVELGEN_SLOT=N` writes `levels/slotN.json`
    instead (F-key / `LOAD_SLOT`). Exit code is non-zero on failure.
-   Read the NAV section first (it is what the author will see in-game), then grep
-   the rest (`=> all`, `OK — every`, `density:`, `SNIPER`, `### floor y=`). The
-   floorplans are `step=2` on big levels, which **hides 1-WT-wide features** —
-   don't diagnose thin stairs/pillars from the plan.
-3. **Iterate** until: the NAV section says `1 walkable component` (or every island
-   is one you intend, e.g. a pillar top); `HEADROOM` says OK; loops > 0 and few
-   dead-ends (terminal closets/vaults are fine); at least one working perch; and
-   `round trip: OK`.
+   The report opens with a `VERDICT` and one `[PASS|WARN|FAIL]` line per check —
+   read that first; everything below it is the detail behind a line. For scripting,
+   `LEVELGEN_REPORT=json` prints the same report as one JSON document (`verdict`,
+   `checks`, `rooms`, `declared`, `merged`, `perches`, …) — assert on that rather
+   than grepping prose.
+3. **Iterate** until the verdict has no `FAIL`, and every `WARN` is one you mean
+   (a pillar-top island, a deliberate terminal vault). `round trip: OK` must hold.
 4. **Test**: `cargo test -p game levelgen` — the golden test pins every design's
    walkable components cell for cell. If you changed a design on purpose, update
    its `EXPECTED` row in the same change and say why in its comment.
@@ -108,8 +107,10 @@ All positions min-corner WT. `let mut b = LevelBuilder::new();` … `b.finish()`
   balconies. Layer three heights in one hero room when you can.
 - **Textures per room** via `set_scheme` — visual identity, not all-white.
 - **Cover:** thin full-height pillars (`pillar_in`) to break sightlines.
-- **Perch:** cantilever a wide deck out over a room (don't hug the wall) so it
-  actually overlooks the floor; verify with the SNIPER metric.
+- **Perch:** a deck overlooks whatever its **edge** can see at eye height — a wide
+  mezzanine along a wall works (the old "cantilever it, don't hug the wall" rule was
+  mostly an artefact of a perch check that sighted from the deck's centre, 1 m below
+  eye height). Verify with PERCHES.
 - **Additive-after-subtractive:** anything solid you add (pillars) must come after
   carves — the builder already defers pillars; keep this in mind for custom Adds.
 
@@ -137,12 +138,26 @@ All positions min-corner WT. `let mut b = LevelBuilder::new();` … `b.finish()`
   The analyzer's HEADROOM lint flags anything under 8 — keep it green.
 
 ## Reading the report
-`overview` (bounds/counts) · `FLOORPLANS` (per-floor ASCII: `.`floor `#`solid
-` `air/void `S`spawn, letters=rooms) · `CONNECTIVITY` (reachability + edges +
-loops/dead-ends) · `VERTICALITY` (each floor level reachable? samples many cells)
-· `SNIPER PERCHES` (LOS from platforms into lower rooms) · `HEADROOM` (clearance
-lint) · `CAMP NOOKS` (alcoves). Green = all rooms reachable, HEADROOM OK,
-loops>0, ≥1 perch.
+- **Summary** — `VERDICT` plus one line per check: `walkable` (components; an island
+  over 16 cells fails), `reachable` (cut off vs *no standable floor*, which means
+  under 6 WT of headroom or buried), `declared links` (every `passage`/`link` you
+  declared is walkable), `merged rooms` (two carved rooms share air with no wall
+  and you never declared them connected — usually a missing wall), `loops` (counted
+  on the real walkable graph, corridors as nodes, so parallel halls count),
+  `perches`, `headroom`, `floors`.
+- **NAV** — verbatim what O → NAV → Calculate shows in-game: islands with the gap to
+  the nearest neighbour, orphaned objects, player-only climbs.
+- **ROOMS** — per room: cells, reachable, links in the *derived* graph; then the
+  declared connections (`!!` = not walkable), connections that exist but were never
+  declared, and merged pairs.
+- **FLOORS** — one plan per real floor (a level with ≥ 16 flat cells); treads and
+  steps are drawn on the floor they rise from. `.` floor · `/` stairs & steps · `!`
+  cut off from the main area · `#` wall · `S` spawn · letters = rooms. Wide plans
+  downsample but keep the most important glyph per block, so thin stairs and islands
+  stay visible.
+- **PERCHES** — per deck, the share of each lower room visible from somewhere on its
+  edge at eye height. **HEADROOM** — cramped cells, clustered. **CAMP CORNERS** —
+  flat corner cells clear of stairs.
 
 When done, **append any new playtest feedback / lessons to
 LEVEL_DESIGN_HEURISTICS.md** so the next session inherits them.

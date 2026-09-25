@@ -164,7 +164,7 @@ learned and create a full level." → built the `facility` design.
   truth; treat the degree/dead-end count as *intended-topology* shorthand, and
   prefer `passage(a,b,…)` / `link(a,b)` over `void()` when you want the edge
   counted.
-- **A high central perch overlooks corridors better than the floor below it.**
+- *(⚠ SUPERSEDED 2026-09-24: a perch-metric artefact — see "the report was measuring the wrong things".)* **A high central perch overlooks corridors better than the floor below it.**
   The mezzanine saw only ~14/255 atrium-floor cells (its own slab + pillars block
   straight-down LOS) but strongly covered the barracks/mess/bunk approaches
   *through the hallways* at eye height. Perches are corridor-watchers; for a true
@@ -254,7 +254,7 @@ Pushed the two queued items: go bigger, and add sunken pits.
 ### Still open
 - ~~Debug `stair_ground` (ground-to-ground) so open pits can use a free-standing
   stair instead of a CSG cut.~~ Fixed 2026-09-24.
-- Perch-over-own-room: a big edge-hugging mezzanine overlooks *adjacent rooms*
+- *(⚠ SUPERSEDED 2026-09-24: a perch-metric artefact — see "the report was measuring the wrong things".)* Perch-over-own-room: a big edge-hugging mezzanine overlooks *adjacent rooms*
   well but not the floor beneath it; cantilever a narrower deck out over the room
   for a true floor overlook.
 
@@ -336,6 +336,32 @@ never reads the floor. The six configs all shared the one input that mattered.
 **Lesson for this log:** a limitation found by black-box trial and error is a
 hypothesis, not a rule. Before writing one down, read the code that produces the
 geometry (here, five lines of `stair_run_boxes`) or probe it directly.
+
+## 2026-09-24 — the report was measuring the wrong things (analyzer rewrite)
+
+The levelgen report was rebuilt (summary first, JSON, a derived room graph). Three of
+its old numbers had been steering the rules above:
+
+- **Perches.** The old check sighted from 0.4 m above the *centre* of the deck — a
+  metre under the player's eye, from the one spot its own slab hides the floor below
+  best. That is why a wide mezzanine "saw only 14 atrium cells" and why the log
+  concluded perches must be cantilevered and must not hug the wall. From the edge at
+  eye height, `grand`'s wall-hugging 56×12 mezzanine sees **69%** of the hall and
+  `facility`'s sees 83% of the atrium. **Superseded:** "a high central perch
+  overlooks corridors better than the floor below it" and "cantilever the platform
+  out over the room" (07-25) — hugging the wall is fine; what matters is an edge.
+- **Loops.** Counted from declared edges, and then (briefly) from a room-to-room graph
+  that collapsed parallel halls into one edge. Counted now on the walkable graph with
+  corridors as their own nodes, `sprawl` has the 2 loops it was designed with.
+- **Floorless decks look "reachable".** `smoke`'s perch sits 5 WT up in an 8 WT room
+  — 3 WT of headroom, so not one standable cell — and the old check passed it by
+  snapping to a stair tread nearby. It is now its own finding ("no standable floor").
+
+New check, first catch: **merged rooms**. `grand`'s north_loft is carved flush against
+the hall (its air starts at z=0 where the hall's ends), so there is no wall between
+them — the 6-wide "door off the deck" the design declared is actually the whole wall.
+**Rule:** keep ≥ 1 WT of solid between rooms that should be separate; connect them
+with a `passage`.
 
 ## Toward a Claude skill
 Eventually package the above as a `level-design` skill: the checklist + the WT

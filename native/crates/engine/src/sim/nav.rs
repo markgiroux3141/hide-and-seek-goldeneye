@@ -90,6 +90,27 @@ pub fn path_stats() -> String {
     )
 }
 
+/// One standable cell of a [`WalkGraph`].
+#[derive(Clone, Copy, Debug)]
+pub struct WalkCell {
+    /// Global WT cell indices — the same integer grid brushes are authored on.
+    pub wt: (i32, i32, i32),
+    /// Floor position in metres (the cell's horizontal centre, at its floor).
+    pub pos: Vec3,
+    /// Walkable component id (see [`NavWorld::component_sizes`]).
+    pub comp: u32,
+    /// Inside authored stair geometry, where the step limit relaxes.
+    pub stair: bool,
+}
+
+/// The walkable grid as data: cells, plus directed moves between them as index pairs
+/// into `cells`. See [`NavWorld::walk_graph`].
+#[derive(Clone, Debug, Default)]
+pub struct WalkGraph {
+    pub cells: Vec<WalkCell>,
+    pub moves: Vec<(u32, u32)>,
+}
+
 /// A* penalty for routing through a **shut but openable** door — large enough to
 /// prefer an already-open detour, finite so a hunter will still work a door when that
 /// is the only way through. JS `navWorld.DOOR_COST` is 25 on a base move cost of 1;
@@ -1045,6 +1066,55 @@ impl NavWorld {
             }
         }
         out
+    }
+
+    /// The whole walkable graph as plain data — every labelled standable cell and every
+    /// move between neighbours that [`Self::can_step`] allows — for **offline** analysis
+    /// (the levelgen report derives its room graph from this).
+    ///
+    /// It exposes adjacency rather than re-deriving it, so an analysis can never disagree
+    /// with A\* about what connects to what: the neighbour enumeration is
+    /// [`Self::label_components`]'s own, and the move test is the one definition of nav
+    /// adjacency. Moves are **directed** (a climb is checked from the bottom), so a step
+    /// that is walkable both ways appears once in each direction.
+    ///
+    /// Allocates the whole grid's worth of cells — a report-time query, not a frame one.
+    pub fn walk_graph(&self) -> WalkGraph {
+        let mut cells = Vec::new();
+        let mut index = HashMap::new();
+        for iy in 0..self.ny {
+            for iz in 0..self.nz {
+                for ix in 0..self.nx {
+                    let comp = self.comp[self.idx(ix, iy, iz)];
+                    if comp == 0 {
+                        continue;
+                    }
+                    index.insert((ix, iy, iz), cells.len() as u32);
+                    cells.push(WalkCell {
+                        wt: (ix + self.x0, iy + self.y0, iz + self.z0),
+                        pos: self.cell_floor_meters(ix, iy, iz),
+                        comp,
+                        stair: self.is_stair_cell(ix, iy, iz),
+                    });
+                }
+            }
+        }
+        let mut moves = Vec::new();
+        for (&cur, &from) in &index {
+            for (dx, dz) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                for dy in -STAIR_STEP..=STAIR_STEP {
+                    let n = (cur.0 + dx, cur.1 + dy, cur.2 + dz);
+                    if !self.in_bounds(n.0, n.1, n.2) || !self.can_step(cur, n) {
+                        continue;
+                    }
+                    if let Some(&to) = index.get(&n) {
+                        moves.push((from, to));
+                    }
+                }
+            }
+        }
+        moves.sort_unstable();
+        WalkGraph { cells, moves }
     }
 
     /// The largest walkable component — "the level", as against the islands. Every
