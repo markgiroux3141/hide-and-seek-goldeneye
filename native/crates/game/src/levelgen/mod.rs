@@ -96,7 +96,8 @@ pub fn run() {
 
 /// `LEVELGEN_DESIGN=gen`: generate `LEVELGEN_TRIES` seeds from `LEVELGEN_SEED`, rank
 /// them, and put the winner through the same save → reload → report as any design.
-/// `LEVELGEN_ROOMS` / `LEVELGEN_LOOPS` set the size.
+/// `LEVELGEN_ROOMS` / `LEVELGEN_LOOPS` set the size; `LEVELGEN_UPPER` / `LEVELGEN_LOWER`
+/// how many of those rooms go upstairs and in the basement (0 = a single floor).
 fn run_generator() {
     let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(d);
     let seed = env("LEVELGEN_SEED", 1);
@@ -105,6 +106,8 @@ fn run_generator() {
     let params = generate::GenParams {
         rooms: env("LEVELGEN_ROOMS", defaults.rooms as u64) as usize,
         loops: env("LEVELGEN_LOOPS", defaults.loops as u64) as usize,
+        upper: env("LEVELGEN_UPPER", defaults.upper as u64) as usize,
+        lower: env("LEVELGEN_LOWER", defaults.lower as u64) as usize,
     };
     let json = std::env::var("LEVELGEN_REPORT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
     let t0 = std::time::Instant::now();
@@ -127,8 +130,10 @@ fn run_generator() {
     let failed = ranked.iter().filter(|c| c.score.is_none()).count();
     if !json {
         println!(
-            "=== levelgen: generated {tries} seed(s) from {seed} ({} rooms, {} loops asked) in {:.1} s — {failed} failed ===",
+            "=== levelgen: generated {tries} seed(s) from {seed} ({} rooms: {} up, {} down; {} loops asked) in {:.1} s — {failed} failed ===",
             params.rooms,
+            params.upper,
+            params.lower,
             params.loops,
             t0.elapsed().as_secs_f32()
         );
@@ -148,8 +153,16 @@ fn run_generator() {
         }
         println!();
     }
-    let Some(win) = ranked.first().filter(|c| c.score.is_some()) else {
+    // One try means "show me this seed" — report it even if it fails.
+    let Some(win) = ranked.first().filter(|c| c.score.is_some() || tries == 1) else {
         eprintln!("[!] every generated seed failed its report — try another LEVELGEN_SEED");
+        // Say why, for the first one: a bare "failed" is no help to whoever tunes this.
+        if let Some(r) = ranked.first().and_then(|c| c.report.as_ref()) {
+            eprintln!("    seed {} failed on:", ranked[0].seed);
+            for c in r.checks.iter().filter(|c| c.status == analyze::Status::Fail) {
+                eprintln!("      [FAIL] {:<15} {}", c.check, c.detail);
+            }
+        }
         std::process::exit(1);
     };
     let dname = format!("gen-{}", win.seed);

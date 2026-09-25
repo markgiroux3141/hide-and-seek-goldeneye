@@ -73,12 +73,16 @@ eleaseuild-and-hide.exe
 `LEVELGEN_DESIGN=gen` runs the **generator** (`levelgen/generate.rs`): it builds
 `LEVELGEN_TRIES` seeds (default 32) from `LEVELGEN_SEED` (default 1), analyzes each,
 drops any with a FAIL, ranks the rest (loops, few dead-ends, clean rules, variety,
-size) and puts the winner through the normal report as `levelgen gen-<seed>`. Size
-with `LEVELGEN_ROOMS` (default 9) and `LEVELGEN_LOOPS` (default 3). A seed always
-rebuilds the same level, so `LEVELGEN_TRIES=1 LEVELGEN_SEED=<winner>` reproduces one.
-It is **single-floor for now** (stage 6a); stairs, stacked rooms and balconies are
-next. Treat a winner as a starting point: generate, walk it, then sculpt it in the
-editor or copy its structure into a hand-written design.
+size, floors) and puts the winner through the normal report as `levelgen gen-<seed>`.
+Size with `LEVELGEN_ROOMS` (default 10) and `LEVELGEN_LOOPS` (default 3); of those
+rooms, `LEVELGEN_UPPER` (default 2) go on an upper floor at y=16 — entered from a
+balcony in the hero hall, with a second flight down through an upper room's floor in
+most levels — and `LEVELGEN_LOWER` (default 2) in a basement at y=−14, entered through
+a big ground room's floor. `0` / `0` gives a single floor. A seed always rebuilds the
+same level, so `LEVELGEN_TRIES=1 LEVELGEN_SEED=<n>` reproduces one — and reports it
+even if it fails, which is how to see *why* a seed fails. Treat a winner as a starting
+point: generate, walk it, then sculpt it in the editor or copy its structure into a
+hand-written design.
 
 Headless diagnostics take any level too — a slot number, a level name, or a path —
 and now bake **with** placed props, exactly as in-game:

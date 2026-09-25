@@ -40,7 +40,8 @@ row here; when the report starts enforcing one, name the check.
 | Cover pillars to break long sightlines | 07-25 | Advice |
 | Route a perch's stair along a wall so it keeps its view | 07-25 varied | Advice |
 | Sprawl as chains branching off each other, not a hub | 07-25 2nd walk | Advice |
-| A second route up/down each vertical, for flanking | 07-25 | Advice |
+| A second route up/down each vertical, for flanking | 07-25 | Built in — the generator's `second_route` (most levels); advice for hand designs |
+| Pillars ≥ 4 WT (1 m) from flights, holes, decks and each other | 09-25 generator | Built in — generator `PILLAR_GAP`; enforced — check `pinches` |
 | Free-standing stairs down are player-only | 07-25 / 07-26 | **Superseded 09-24** — a bug (`find_floor_y_at`), fixed |
 | Cantilever perches; don't hug the wall | 07-25 | **Superseded 09-24** — a perch-metric artefact |
 
@@ -398,6 +399,16 @@ the hall (its air starts at z=0 where the hall's ends), so there is no wall betw
 them — the 6-wide "door off the deck" the design declared is actually the whole wall.
 **Rule:** keep ≥ 1 WT of solid between rooms that should be separate; connect them
 with a `passage`.
+
+## 2026-09-25 — first walks of generated levels (gen-10, gen-125, gen-28, gen-212)
+
+- ✅ Single-floor and three-floor generated levels play: "a good start". The balcony →
+  door → upper floor → flight back down loop, and the basement's two ways in, work for
+  the player and for hunters.
+- ✋ **Textures need work.** The generator gives each room an independent random scheme
+  (0..8), with no theming by role, wing or floor. Not a priority yet. When it is, the
+  obvious next rule is *per-wing or per-floor theming* rather than per-room noise —
+  and a lint to go with it.
 
 ## Toward a Claude skill
 Eventually package the above as a `level-design` skill: the checklist + the WT

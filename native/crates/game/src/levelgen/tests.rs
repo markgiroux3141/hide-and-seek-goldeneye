@@ -35,9 +35,9 @@ const EXPECTED: &[(&str, &[usize])] = &[
     // 12 WT ceiling rule (the undercroft's floor dropped to keep its slab).
     ("grand", &[7896]),
     ("compound", &[3019]),
-    // The generator's seed 7. A change to room sizing, placement, loop-closing or
-    // furnishing moves this — deliberately, if the change was meant to.
-    ("generated", &[4733]),
+    // The generator's seed 7 (three floors since stage 6b). A change to room sizing,
+    // placement, loop-closing or furnishing moves this — deliberately, if it was meant to.
+    ("generated", &[5568]),
     ("pd_lab", &[3952]),
 ];
 
@@ -265,7 +265,7 @@ fn a_deck_under_a_low_ceiling_has_no_floor_rather_than_no_route() {
 
 // ─── The relational builder ───────────────────────────────────────────────────
 
-use super::builder::Dir;
+use super::builder::{Dir, RoomId};
 
 fn reach(d: &analyze::ReportData) -> analyze::Status {
     check(d, "reachable").status
@@ -452,4 +452,40 @@ fn best_of_ranks_best_first() {
     let scores: Vec<f32> = ranked.iter().filter_map(|c| c.score).collect();
     assert!(!scores.is_empty(), "at least one of four seeds passes");
     assert!(scores.windows(2).all(|w| w[0] >= w[1]), "{scores:?}");
+}
+
+/// Stage 6b: the default level has three floors, and asking for none gives one.
+#[test]
+fn the_generator_builds_floors_when_asked_and_not_otherwise() {
+    let d = analyze_built("t", &generate::build(3, &GenParams::default())).unwrap();
+    let ys: Vec<i32> = d.floors.iter().map(|f| f.y).collect();
+    assert!(ys.contains(&-14) && ys.contains(&0) && ys.contains(&16), "floors {ys:?}");
+    let flat = GenParams { upper: 0, lower: 0, ..GenParams::default() };
+    let d = analyze_built("t", &generate::build(3, &flat)).unwrap();
+    assert_eq!(d.floors.iter().map(|f| f.y).collect::<Vec<_>>(), vec![0]);
+}
+
+/// The upper floor is not a dead-end branch: most levels get a second way between it
+/// and the ground (a flight down from an upper room into the ground room beneath). This
+/// was built in 0 levels of 24 until the flight search sampled only legal starts and the
+/// first upper room was stacked over a big ground neighbour on purpose.
+#[test]
+fn most_levels_get_a_second_route_between_floors() {
+    let mut with = 0;
+    for seed in 1..=8 {
+        let built = generate::build(seed, &GenParams::default());
+        let floor = |r: RoomId| built.rooms[r.0].aabb[1];
+        let kind = |r: RoomId| built.rooms[r.0].kind;
+        let second = built.edges.iter().any(|&(a, b)| {
+            let ys = [floor(a), floor(b)];
+            ys.contains(&16.0)
+                && ys.contains(&0.0)
+                && kind(a) == super::builder::LabelKind::Room
+                && kind(b) == super::builder::LabelKind::Room
+                && a.0 != 0
+                && b.0 != 0
+        });
+        with += usize::from(second);
+    }
+    assert!(with >= 5, "only {with} of 8 levels have a second route up");
 }

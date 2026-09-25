@@ -83,8 +83,8 @@ fn span(a: [f32; 6], k: usize) -> (f32, f32) {
 /// with `a`'s face toward `b` at `a_face` and `b`'s at `b_face` (`sign` +1 when `b` is
 /// on the larger side), overlapping over `[o0, o1)` on the other horizontal axis.
 pub(crate) struct Facing {
-    axis: Axis,
-    sign: f32,
+    pub(crate) axis: Axis,
+    pub(crate) sign: f32,
     a_face: f32,
     b_face: f32,
     pub(crate) gap: f32,
