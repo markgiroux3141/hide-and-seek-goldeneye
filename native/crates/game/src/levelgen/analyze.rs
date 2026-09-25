@@ -55,6 +55,27 @@ const PLAN_MAX_COLS: i32 = 120;
 /// Findings are clustered to one representative per this many metres.
 const CLUSTER_M: f32 = 2.0;
 
+// ── Design rules (LEVEL_DESIGN_HEURISTICS.md → lints) ──
+// Each is a playtest lesson, not a correctness bound: they can raise the verdict to WARN,
+// never to FAIL, and every one names the rule it enforces.
+
+/// "Ceilings: minimum ~12 WT (3 m) … Never 8 WT." (2026-07-25, first walk of `arena`.)
+const MIN_CEILING: f32 = 12.0;
+/// "One or two hero rooms 40–60 WT wide with 24–30 WT ceilings." (the slot-1 study)
+const HERO_SPAN: f32 = 40.0;
+const HERO_CEILING: f32 = 24.0;
+/// The hero-room rule is about levels, not test rooms: only past this many rooms.
+const HERO_MIN_ROOMS: usize = 5;
+/// "Platform width: walkable and generous — ≥ 4 WT deep … A 2-WT sliver looks broken."
+const DECK_MIN_DEPTH: f32 = 4.0;
+/// "Stairs eat floor … Put stairs in a large room; never in a small one." 16×16 WT.
+const STAIR_ROOM_MIN_AREA: f32 = 256.0;
+/// "Room-size variety … avoid a uniform grid of identical boxes." Footprint areas whose
+/// coefficient of variation is under this read as one size.
+const UNIFORM_AREA_CV: f32 = 0.3;
+/// "A long skinny room plays totally differently (sniper lane)."
+const SKINNY_ASPECT: f32 = 2.5;
+
 /// How a check came out. Ordered: the verdict is the worst status present.
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 #[serde(rename_all = "lowercase")]
@@ -161,6 +182,8 @@ pub struct ReportData {
     pub design: String,
     pub verdict: Status,
     pub checks: Vec<Check>,
+    /// Design-rule lints — the heuristics log, enforced. WARN at most.
+    pub lints: Vec<Check>,
     /// Relational builder calls that could not be built (see `builder` module docs).
     pub problems: Vec<String>,
     /// Walkable component sizes, largest first (the main one first).
@@ -858,7 +881,7 @@ impl<'a> Analysis<'a> {
                 "no corridor too narrow for a hunter's body".into()
             } else {
                 format!(
-                    "{pinch} cell(s) in corridors a hunter barely fits or cannot fit (narrowest                      {:.2} m; a body is {:.2} m) — see NAV for where",
+                    "{pinch} cell(s) in corridors a hunter barely fits or cannot fit (narrowest {:.2} m; a body is {:.2} m) — see NAV for where",
                     self.issues.narrowest,
                     2.0 * crate::world::ENEMY_RADIUS
                 )
@@ -883,13 +906,20 @@ impl<'a> Analysis<'a> {
             ),
         );
 
-        let verdict = checks.iter().map(|c| c.status).max().unwrap_or(Status::Pass);
+        let lints = self.lints(&room_rows, &perches);
+        let verdict = checks
+            .iter()
+            .chain(&lints)
+            .map(|c| c.status)
+            .max()
+            .unwrap_or(Status::Pass);
         let verdict = if verdict == Status::Info { Status::Pass } else { verdict };
 
         ReportData {
             design: self.design.to_string(),
             verdict,
             checks,
+            lints,
             problems,
             components: comps,
             nav,
@@ -907,6 +937,152 @@ impl<'a> Analysis<'a> {
         }
     }
 
+    // ─── Design rules ───────────────────────────────────────────────────────
+
+    /// The heuristics log as lints. Each check's detail names its rule.
+    fn lints(&self, rows: &[RoomRow], perches: &[PerchRow]) -> Vec<Check> {
+        let labels = &self.level.rooms;
+        let rooms: Vec<usize> = (0..labels.len()).filter(|&i| !self.platform[i]).collect();
+        let mut out = Vec::new();
+        let mut lint = |check, bad: bool, ok: String, warn: String| {
+            out.push(Check {
+                check,
+                status: if bad { Status::Warn } else { Status::Pass },
+                detail: if bad { warn } else { ok },
+            })
+        };
+        let names = |v: &[usize]| v.iter().map(|&i| labels[i].name.as_str()).collect::<Vec<_>>().join(", ");
+
+        let low: Vec<usize> = rooms.iter().copied().filter(|&i| labels[i].aabb[4] < MIN_CEILING).collect();
+        lint(
+            "ceilings",
+            !low.is_empty(),
+            format!("every room is ≥ {MIN_CEILING} WT tall"),
+            format!("under {MIN_CEILING} WT (\"never an 8-WT ceiling\"): {}", names(&low)),
+        );
+
+        let areas: Vec<f32> = rooms.iter().map(|&i| labels[i].aabb[3] * labels[i].aabb[5]).collect();
+        let mean = areas.iter().sum::<f32>() / areas.len().max(1) as f32;
+        let sd = (areas.iter().map(|a| (a - mean).powi(2)).sum::<f32>() / areas.len().max(1) as f32).sqrt();
+        let cv = if mean > 0.0 { sd / mean } else { 0.0 };
+        let skinny = rooms
+            .iter()
+            .filter(|&&i| {
+                let (w, d) = (labels[i].aabb[3], labels[i].aabb[5]);
+                w.max(d) / w.min(d).max(1.0) >= SKINNY_ASPECT
+            })
+            .count();
+        lint(
+            "variety",
+            rooms.len() >= 4 && cv < UNIFORM_AREA_CV,
+            format!("room footprints vary (spread {:.0}%), {skinny} long-skinny room(s)", cv * 100.0),
+            format!(
+                "{} rooms, all about one size (spread {:.0}%) — \"avoid a uniform grid of identical boxes\"",
+                rooms.len(),
+                cv * 100.0
+            ),
+        );
+
+        let hero = rooms.iter().any(|&i| {
+            let a = labels[i].aabb;
+            a[3].max(a[5]) >= HERO_SPAN && a[4] >= HERO_CEILING
+        });
+        lint(
+            "hero room",
+            rooms.len() >= HERO_MIN_ROOMS && !hero,
+            if hero {
+                "has a hero room (≥ 40 WT across, ≥ 24 WT tall)".into()
+            } else {
+                "small level — no hero room expected".into()
+            },
+            format!(
+                "no room ≥ {HERO_SPAN} WT across with a ≥ {HERO_CEILING} WT ceiling — \"go big: one or \
+                 two hero rooms\""
+            ),
+        );
+
+        let decks: Vec<usize> = (0..labels.len()).filter(|&i| self.platform[i]).collect();
+        let slivers: Vec<usize> = decks
+            .iter()
+            .copied()
+            .filter(|&i| labels[i].aabb[3].min(labels[i].aabb[5]) < DECK_MIN_DEPTH)
+            .collect();
+        // A deck that neither leads anywhere nor overlooks anything is the "platform that
+        // goes nowhere" from the first playtest. A dead-end perch with a view is fine.
+        let pointless: Vec<usize> = decks
+            .iter()
+            .copied()
+            .filter(|&i| {
+                let leads = rows[i].degree >= 2;
+                let views = perches.iter().any(|p| {
+                    p.name == labels[i].name
+                        && p.overlooks.iter().any(|o| o.seen as f32 / o.total as f32 >= PERCH_MIN_SHARE)
+                });
+                !leads && !views
+            })
+            .collect();
+        let deck_detail = {
+            let mut v = Vec::new();
+            if !slivers.is_empty() {
+                v.push(format!("under {DECK_MIN_DEPTH} WT deep (\"a sliver looks broken\"): {}", names(&slivers)));
+            }
+            if !pointless.is_empty() {
+                v.push(format!(
+                    "lead nowhere and overlook nothing (\"platforms must lead somewhere\"): {}",
+                    names(&pointless)
+                ));
+            }
+            v.join("; ")
+        };
+        lint(
+            "decks",
+            !slivers.is_empty() || !pointless.is_empty(),
+            if decks.is_empty() {
+                "no platforms".into()
+            } else {
+                format!("all {} deck(s) are ≥ {DECK_MIN_DEPTH} WT deep and lead somewhere or overlook a room", decks.len())
+            },
+            deck_detail,
+        );
+
+        // Free-standing flights stand in the room their foot is in.
+        let mut cramped_stairs = Vec::new();
+        for r in &self.level.stair_runs {
+            let plat = |id: Option<u32>| id.and_then(|id| self.level.platforms.iter().find(|p| p.id == id));
+            let a = engine::geometry::structures::resolve_run_anchor(plat(r.from_platform), &r.anchor_from);
+            let b = engine::geometry::structures::resolve_run_anchor(plat(r.to_platform), &r.anchor_to);
+            let foot = if a[1] <= b[1] { a } else { b };
+            let host = rooms.iter().copied().find(|&i| {
+                let l = labels[i].aabb;
+                foot[0] >= l[0] && foot[0] <= l[0] + l[3] && foot[2] >= l[2] && foot[2] <= l[2] + l[5]
+                    && foot[1] >= l[1] - 1.0 && foot[1] < l[1] + l[4]
+            });
+            if let Some(i) = host {
+                if labels[i].aabb[3] * labels[i].aabb[5] < STAIR_ROOM_MIN_AREA && !cramped_stairs.contains(&i) {
+                    cramped_stairs.push(i);
+                }
+            }
+        }
+        lint(
+            "stair space",
+            !cramped_stairs.is_empty(),
+            "every free-standing stair stands in a room of ≥ 16×16 WT".into(),
+            format!("a stair in a small room (\"stairs eat floor … never in a small one\"): {}", names(&cramped_stairs)),
+        );
+
+        let schemes: std::collections::BTreeSet<usize> = rooms.iter().map(|&i| labels[i].scheme).collect();
+        lint(
+            "textures",
+            rooms.len() >= 3 && schemes.len() <= 1,
+            format!("{} texture scheme(s) across {} rooms", schemes.len(), rooms.len()),
+            format!(
+                "all {} rooms share one texture scheme — \"textures per room: visual identity, not all-white\"",
+                rooms.len()
+            ),
+        );
+        out
+    }
+
     // ─── The text ───────────────────────────────────────────────────────────
 
     /// The full text report: summary first, detail after.
@@ -920,10 +1096,14 @@ impl<'a> Analysis<'a> {
         let _ = writeln!(s, "==================== LEVEL REPORT: {} ====================", d.design);
         let (fails, warns) = (
             d.checks.iter().filter(|c| c.status == Status::Fail).count(),
-            d.checks.iter().filter(|c| c.status == Status::Warn).count(),
+            d.checks.iter().chain(&d.lints).filter(|c| c.status == Status::Warn).count(),
         );
         let _ = writeln!(s, "VERDICT: {}   ({fails} fail, {warns} warn)", d.verdict.tag());
         for c in &d.checks {
+            let _ = writeln!(s, "  [{}] {:<15} {}", c.status.tag(), c.check, c.detail);
+        }
+        let _ = writeln!(s, "  design rules (LEVEL_DESIGN_HEURISTICS.md):");
+        for c in &d.lints {
             let _ = writeln!(s, "  [{}] {:<15} {}", c.status.tag(), c.check, c.detail);
         }
 

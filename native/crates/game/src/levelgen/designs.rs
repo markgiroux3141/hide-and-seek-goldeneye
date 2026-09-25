@@ -252,7 +252,7 @@ pub fn grand() -> BuiltLevel {
     b.link(mezz_room, north_loft);
     b.set_scheme(3);
     // A 9 WT wall: the 8-step stairwell plus its landing.
-    let attic = b.room_beside("attic", north_loft, Dir::North, 9.0, 24.0, 12.0, 22.0, 10.0);
+    let attic = b.room_beside("attic", north_loft, Dir::North, 9.0, 24.0, 12.0, 22.0, 12.0);
     b.stair_between(north_loft, attic, 8.0);
 
     // ===== LOWER WING: hole in the armory floor -> undercroft -> platform stair =====
@@ -262,8 +262,9 @@ pub fn grand() -> BuiltLevel {
     // `stair_through_floor` since 2026-09: the hand-placed hole was 8 WT long for a
     // 13 WT flight, so the lower treads ran on under the slab with ~0.5 m of headroom
     // and the undercroft was cut off from hunters. The hole now covers the flight.
+    // 12 WT tall (the ceiling rule), so its floor drops to −14 to keep a 2 WT slab.
     b.set_scheme(4);
-    let undercroft = b.room("undercroft", -28.0, 6.0, 24.0, 22.0, -12.0, 10.0);
+    let undercroft = b.room("undercroft", -28.0, 6.0, 24.0, 22.0, -14.0, 12.0);
     b.stair_through_floor(armory, undercroft, -22.0, 16.0, Dir::East, 4.0);
 
     // ---- Cover: thin full-height pillars on the main floor (scheme 0) ----
@@ -547,7 +548,7 @@ pub fn compound() -> BuiltLevel {
 
     // Down: a vault under the hall, through its floor.
     b.set_scheme(5);
-    let vault = b.room("vault", 30.0, 2.0, 32.0, 16.0, -12.0, 10.0);
+    let vault = b.room("vault", 30.0, 2.0, 32.0, 16.0, -14.0, 12.0);
     b.stair_through_floor(hall, vault, 34.0, 10.0, Dir::East, 4.0);
 
     // Cover in the hall, clear of the stairs, the hole, the balcony and every door — and
@@ -565,7 +566,7 @@ pub fn compound() -> BuiltLevel {
         (8.0, 0.0, -12.0, 180.0),
         (36.0, 0.0, -10.0, 0.0),
         (62.0, 0.0, 20.0, -90.0),
-        (58.0, -12.0, 14.0, 90.0),
+        (58.0, -14.0, 14.0, 90.0),
         (46.0, 12.0, 34.0, 180.0),
     ] {
         b.spawn_pad(x, y, z, yaw);
@@ -574,7 +575,7 @@ pub fn compound() -> BuiltLevel {
     b.weapon("KF7 Soviet", 6.0, 0.0, -6.0);
     b.weapon("Shotgun", 38.0, 0.0, -6.0);
     b.weapon("AR33", 40.0, 0.0, 18.0);
-    b.weapon("RC-P90", 50.0, -12.0, 6.0);
+    b.weapon("RC-P90", 54.0, -14.0, 6.0);
     b.ammo("PP7", 20.0, 0.0, 16.0);
     b.ammo("KF7 Soviet", 8.0, 0.0, -6.0);
     b.ammo("AR33", 42.0, 0.0, 18.0);

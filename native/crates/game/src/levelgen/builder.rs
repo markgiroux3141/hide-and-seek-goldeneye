@@ -208,6 +208,9 @@ pub struct RoomLabel {
     /// WT AABB `[x, y, z, w, h, d]`.
     pub aabb: [f32; 6],
     pub kind: LabelKind,
+    /// The texture scheme the room was carved with (meaningless for a platform deck,
+    /// which always wears the platform style).
+    pub scheme: usize,
 }
 
 impl RoomLabel {
@@ -340,6 +343,7 @@ impl LevelBuilder {
             name: name.to_string(),
             aabb: [x, floor, z, w, height, d],
             kind: LabelKind::Room,
+            scheme: self.cur_scheme,
         });
         RoomId(self.rooms.len() - 1)
     }
@@ -540,6 +544,7 @@ impl LevelBuilder {
             name: name.to_string(),
             aabb: [x, top, z, sx, 1.0, sz],
             kind: LabelKind::Platform,
+            scheme: self.cur_scheme,
         });
         PlatId(id)
     }
@@ -981,8 +986,14 @@ impl LevelBuilder {
         let (lu, ll) = (self.label(upper), self.label(lower));
         let (fu, fl) = (lu[1], ll[1]);
         let ceiling_below = fl + ll[4];
-        if ceiling_below > fu {
-            return self.problem(call, format!("{} is not below {}", self.name(lower).to_string(), self.name(upper).to_string()));
+        if ceiling_below > fu - 1.0 {
+            let (l, u) = (self.name(lower).to_string(), self.name(upper).to_string());
+            return self.problem(
+                call,
+                format!(
+                    "{l}'s ceiling ({ceiling_below}) must sit at least 1 WT below {u}'s floor ({fu}) — with no slab between them they are one space"
+                ),
+            );
         }
         let rise = fu - fl;
         // A stair-run's lowest tread sits one step above its ground anchor, so anchor one

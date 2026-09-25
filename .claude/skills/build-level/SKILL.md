@@ -52,6 +52,10 @@ solid.
    than grepping prose.
 3. **Iterate** until the verdict has no `FAIL`, and every `WARN` is one you mean
    (a pillar-top island, a deliberate terminal vault). `round trip: OK` must hold.
+   The summary's **design rules** block is the heuristics log enforced as lints
+   (ceilings, variety, hero room, decks, stair space, textures) — each warning quotes
+   the rule it comes from. The table at the top of LEVEL_DESIGN_HEURISTICS.md says
+   which rules are enforced, which are still advice, and which were superseded.
 4. **Test**: `cargo test -p game levelgen` — the golden test pins every design's
    walkable components cell for cell. If you changed a design on purpose, update
    its `EXPECTED` row in the same change and say why in its comment.

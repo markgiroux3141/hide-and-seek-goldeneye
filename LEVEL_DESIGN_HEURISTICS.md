@@ -8,6 +8,42 @@ agent follows to author coherent, fun levels, verified by the headless report
 
 Units: **WT** = world tile = 0.25 m. So 4 WT = 1 m, a "2 m ceiling" = 8 WT.
 
+## Rules at a glance
+
+The log below is append-only history; this table is the current state of every rule
+in it. **Enforced** rules are checked by the levelgen report (`levelgen/analyze.rs`):
+a *check* can fail the verdict, a *lint* (the report's "design rules" block) can only
+warn. **Advice** rules are not machine-checkable yet. **Superseded** rules turned out
+to be wrong — the entry that overturned them says why. When you add a rule, add its
+row here; when the report starts enforcing one, name the check.
+
+| Rule | From | Status |
+| --- | --- | --- |
+| Ceilings ≥ 12 WT; never 8 | 07-25 arena walk | Enforced — lint `ceilings` |
+| Mix room sizes; no uniform grid | 07-25 arena walk | Enforced — lint `variety` |
+| One or two hero rooms, 40–60 WT across, 24–30 WT tall | 07-25 slot-1 study | Enforced — lint `hero room` |
+| Platforms ≥ 4 WT deep | 07-25 arena walk | Enforced — lint `decks` |
+| Platforms lead somewhere (or are a perch with a view) | 07-25 arena walk | Enforced — lint `decks` |
+| Stairs in large rooms, never small ones | 07-25 varied | Enforced — lint `stair space` |
+| A texture scheme per room | 07-25 slot-1 study | Enforced — lint `textures` |
+| Every room reachable; no accidental islands | 07-25 | Enforced — checks `walkable`, `reachable` |
+| Loops, not spokes; few dead-ends (terminal vaults are fine) | 07-25 | Enforced — check `loops` (warns only at 0 loops) |
+| ≥ 1 perch with a real overlook | 07-25 | Enforced — check `perches` |
+| Headroom ≥ 8 WT on every walkable cell | 07-25 slot-1 study | Enforced — check `headroom` |
+| A wall between rooms meant to be separate (≥ 1 WT) | 09-24 | Enforced — check `merged rooms` |
+| Pillars ≥ 3 WT from walls, stairs and doors (or flush) | 09-25 compound | Enforced — check `pinches` |
+| Passages overlap both rooms by ≥ 2 WT | 07-25 varied | Built in — `door`, `corridor` |
+| Anything solid added after the carves | 07-25 varied | Built in — the builder defers pillars |
+| A floor hole covers its whole stair, with headroom | 07-26 | Built in — `stair_through_floor` |
+| A stair must lead somewhere at its far level | 07-25 sprawl | Built in — `stair_between` |
+| Split levels (pits, mezzanines, catwalks) read as handcrafted | 07-25 slot-1 study | Advice |
+| Cover pillars to break long sightlines | 07-25 | Advice |
+| Route a perch's stair along a wall so it keeps its view | 07-25 varied | Advice |
+| Sprawl as chains branching off each other, not a hub | 07-25 2nd walk | Advice |
+| A second route up/down each vertical, for flanking | 07-25 | Advice |
+| Free-standing stairs down are player-only | 07-25 / 07-26 | **Superseded 09-24** — a bug (`find_floor_y_at`), fixed |
+| Cantilever perches; don't hug the wall | 07-25 | **Superseded 09-24** — a perch-metric artefact |
+
 ---
 
 ## Player feedback log (chronological — the source of truth)

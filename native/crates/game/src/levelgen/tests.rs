@@ -31,9 +31,10 @@ const EXPECTED: &[(&str, &[usize])] = &[
     ("showcase", &[4502]),
     // One component since 2026-09 (was [7328, 496, 16]): the undercroft stair now goes
     // through `stair_through_floor`, whose hole covers the whole flight, and the loft sits
-    // across a real wall from the hall.
-    ("grand", &[7904]),
-    ("compound", &[3027]),
+    // across a real wall from the hall. 7896: the attic and undercroft were raised to the
+    // 12 WT ceiling rule (the undercroft's floor dropped to keep its slab).
+    ("grand", &[7896]),
+    ("compound", &[3019]),
     ("pd_lab", &[3952]),
 ];
 
@@ -367,4 +368,41 @@ fn pads_and_pickups_are_authored_entities() {
     let world = world_with(&built);
     assert_eq!(world.spawn_pad_count(), 2);
     assert_eq!(built.entities.len(), 3, "two pads and the one real weapon");
+}
+
+// ─── Design rules ─────────────────────────────────────────────────────────────
+
+fn lint(d: &analyze::ReportData, name: &str) -> analyze::Status {
+    d.lints.iter().find(|c| c.check == name).expect("lint exists").status
+}
+
+/// The lints are the playtest log, enforced — so they must flag `arena` for exactly
+/// what its first walk-through complained about (LEVEL_DESIGN_HEURISTICS 2026-07-25:
+/// rooms too small and all one size, ceilings too low, a sliver of a platform, a
+/// cramped stair) and pass the designs built after those lessons.
+#[test]
+fn the_design_rules_flag_the_arena_for_its_playtest_complaints() {
+    let d = analyze(&designs::arena());
+    for rule in ["ceilings", "variety", "hero room", "decks", "stair space", "textures"] {
+        assert_eq!(lint(&d, rule), analyze::Status::Warn, "arena should break {rule}");
+    }
+    for name in ["grand", "compound"] {
+        let d = analyze(&design(name).unwrap());
+        for c in &d.lints {
+            assert_eq!(c.status, analyze::Status::Pass, "{name}: {} — {}", c.check, c.detail);
+        }
+    }
+}
+
+/// Rooms stacked with no slab between them are one space: `stair_through_floor` says
+/// so instead of cutting a hole through a floor that is not there.
+#[test]
+fn stair_through_floor_needs_a_slab() {
+    let mut b = LevelBuilder::new();
+    let up = b.room("up", 0.0, 0.0, 30.0, 20.0, 0.0, 14.0);
+    let down = b.room("down", 2.0, 2.0, 26.0, 16.0, -12.0, 12.0); // ceiling at 0
+    b.stair_through_floor(up, down, 6.0, 10.0, Dir::East, 4.0);
+    let built = b.finish();
+    assert_eq!(built.problems.len(), 1);
+    assert!(built.problems[0].contains("slab"), "{}", built.problems[0]);
 }
