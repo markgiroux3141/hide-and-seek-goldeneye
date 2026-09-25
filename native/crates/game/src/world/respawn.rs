@@ -343,8 +343,18 @@ mod tests {
         // Not back before the delay…
         run(&mut world, RESPAWN_DELAY * 0.5);
         assert!(world.enemies[1].enemy.is_dead(), "still down mid-beat");
-        // …and back after it.
-        run(&mut world, RESPAWN_DELAY);
+        // …and back after it. Checked on the step it returns, not a beat later: a hunter
+        // is live the moment it respawns, and a Perfect Dark bot (no alert pause) is
+        // already metres off its pad and firing a second after — which is right, and
+        // would read here as "respawned somewhere else with a half-empty gun".
+        let dt = 1.0 / 60.0;
+        let input = InputState::default();
+        for _ in 0..(RESPAWN_DELAY * 2.0 / dt).ceil() as usize {
+            if !world.enemies[1].enemy.is_dead() {
+                break;
+            }
+            world.fixed_step(dt, &input);
+        }
         assert_eq!(world.enemies.len(), 3, "the roster length never changed");
         let inst = &world.enemies[1];
         assert!(!inst.enemy.is_dead(), "slot 1 is alive again");

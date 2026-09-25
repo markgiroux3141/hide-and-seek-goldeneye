@@ -749,6 +749,181 @@ impl PoseLayer for AdditiveDecayLayer {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Flinch — Perfect Dark's procedural "I've been shot" (additive, clip-free).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Perfect Dark's **procedural hit flinch** (`chr_flinch_body` / `chr_flinch_head` /
+/// `chr_get_flinch_amount`, `chr.c:1532-1600`, applied in `chr_handle_joint_positioned`
+/// at `chr.c:1766`): a short additive twist of the waist, shoulders and neck that plays
+/// over **whatever the body is doing** — running, aiming, firing — with no clip and no
+/// interruption.
+///
+/// It is the whole of a PD simulant's reaction to a bullet. `chr_begin_argh` returns
+/// early for bots (`chraction.c:3426`), so they never play an injury animation and
+/// never stop firing; the flinch, a grunt and a shove are what reads as "hit".
+///
+/// Two variants, as in the source:
+/// * **Body** — 30 ticks (60 Hz): a sine ramp up over 10, then a sine decay over 20. A
+///   random direction (PD's three random bits) picks the sign of each twist: shoulders
+///   and waist pitch and yaw 15°, the waist rolls 10°. It does **not** restart while one
+///   is playing (the `flinchcnt < 0` gate), so automatic fire does not pin a body in a
+///   permanent cringe.
+/// * **Head** — a headshot snaps the neck 60–85° away from the shot, up in 4 ticks,
+///   decaying over the rest. The shot's bearing (octant) picks the direction, so a shot
+///   from the front throws the head back and one from the side rolls it. A headshot
+///   during a flinch restarts it near the peak (PD clamps `flinchcnt` to 4).
+///
+/// Rotations are applied **about the character's model axes** (+X lateral = pitch, +Y
+/// up = yaw, +Z forward = roll), conjugated into each joint's local frame, so they read
+/// the same whatever pose the animation left the joint in.
+pub struct FlinchLayer {
+    /// Waist (spine root of the upper body), neck, and the two shoulders — any may be
+    /// absent on a rig that does not have it.
+    pub waist: Option<usize>,
+    pub neck: Option<usize>,
+    pub shoulders: [Option<usize>; 2],
+    /// Multiplies every angle; 1.0 is PD's. A kill-switch at 0.
+    pub strength: f32,
+    /// Ticks (60 Hz) into the current flinch, or `None` when idle (`flinchcnt = -1`).
+    count: Option<f32>,
+    /// PD's `flinchtype`, 0..=7.
+    kind: u8,
+    head: bool,
+}
+
+/// Length of a flinch in 60 Hz ticks (`chr.c:2726`, NTSC).
+pub const FLINCH_TICKS: f32 = 30.0;
+
+impl FlinchLayer {
+    pub fn new(waist: Option<usize>, neck: Option<usize>, shoulders: [Option<usize>; 2]) -> Self {
+        FlinchLayer { waist, neck, shoulders, strength: 1.0, count: None, kind: 0, head: false }
+    }
+
+    /// `chr_flinch_body`: start a body flinch in direction `kind & 7` — unless one is
+    /// already playing, which it leaves alone.
+    pub fn flinch_body(&mut self, kind: u8) {
+        if self.count.is_none() {
+            self.count = Some(1.0);
+            self.kind = kind & 7;
+            self.head = false;
+        }
+    }
+
+    /// `chr_flinch_head`: a headshot. `shot_bearing` is the direction the shot came
+    /// **from**, relative to the character's facing, radians counter-clockwise seen
+    /// from above (0 = in front, +π/2 = its left). Always takes over from a body
+    /// flinch; restarts a head flinch that is already past its peak.
+    pub fn flinch_head(&mut self, shot_bearing: f32) {
+        self.count = match self.count {
+            None => Some(1.0),
+            Some(c) if c > 8.0 => Some(4.0),
+            other => other,
+        };
+        let a = shot_bearing.rem_euclid(std::f32::consts::TAU);
+        let octant = ((a + std::f32::consts::PI / 8.0) * 8.0 / std::f32::consts::TAU).floor();
+        self.kind = (octant as i32).rem_euclid(8) as u8;
+        self.head = true;
+    }
+
+    /// Whether a flinch is playing.
+    pub fn active(&self) -> bool {
+        self.count.is_some()
+    }
+
+    /// `chr_get_flinch_amount`: 0..=1 along the flinch's curve (NTSC constants).
+    pub fn amount(&self) -> f32 {
+        let Some(v) = self.count else { return 0.0 };
+        let q = std::f32::consts::FRAC_PI_2;
+        let a = if self.head {
+            if v < 4.0 { (v * q / 4.0).sin() } else { 1.0 - ((v - 4.0) * 0.060_405_627).sin() }
+        } else if v < 10.0 {
+            (v * q / 10.0).sin()
+        } else {
+            1.0 - ((v - 10.0) * 0.078_527_316).sin()
+        };
+        a.clamp(0.0, 1.0)
+    }
+
+    /// The model-space rotation for each joint right now, `[waist, neck, shoulder,
+    /// shoulder]`, as `(pitch, yaw, roll)` radians — PD's per-`flinchtype` table.
+    fn angles(&self) -> [(f32, f32, f32); 4] {
+        let amt = self.amount() * self.strength;
+        let k = self.kind;
+        let d = |deg: f32| deg.to_radians() * amt;
+        let mut out = [(0.0, 0.0, 0.0); 4];
+        if self.head {
+            let deg = if k % 2 == 0 { 85.0 } else { 60.0 };
+            let roll = match k {
+                5..=7 => -d(deg),
+                1..=3 => d(deg),
+                _ => 0.0,
+            };
+            let pitch = match k {
+                7 | 0 | 1 => d(deg),
+                3..=5 => -d(deg),
+                _ => 0.0,
+            };
+            out[1] = (pitch, 0.0, roll);
+        } else {
+            let yaw_sign = match k {
+                0..=2 => 1.0,
+                3..=5 => -1.0,
+                _ => 0.0,
+            };
+            let shoulder = (-d(15.0), -yaw_sign * d(15.0), 0.0);
+            out[2] = shoulder;
+            out[3] = shoulder;
+            let roll = match k {
+                2 | 5 | 7 => d(10.0),
+                1 | 4 | 6 => -d(10.0),
+                _ => 0.0,
+            };
+            out[0] = (d(15.0), yaw_sign * d(15.0), roll);
+        }
+        out
+    }
+}
+
+impl PoseLayer for FlinchLayer {
+    fn apply(&mut self, pose: &mut Pose, ctx: &LayerCtx) {
+        let Some(c) = self.count else { return };
+        let angles = self.angles();
+        // Advance the clock after sampling, so the first frame shows tick 1 as PD does.
+        let next = c + ctx.dt * 60.0;
+        self.count = (next < FLINCH_TICKS).then_some(next);
+        if self.strength <= 0.0 {
+            return;
+        }
+        let sk = ctx.skeleton;
+        // Parent globals from the incoming pose: each twist is about the model axes at
+        // the joint's pivot, so it is conjugated through the parent's world rotation.
+        let globals = sk.global_transforms(&pose.locals());
+        let joints = [self.waist, self.neck, self.shoulders[0], self.shoulders[1]];
+        for (joint, (pitch, yaw, roll)) in joints.into_iter().zip(angles) {
+            let Some(j) = joint.filter(|&j| j < pose.joint_count()) else { continue };
+            if pitch == 0.0 && yaw == 0.0 && roll == 0.0 {
+                continue;
+            }
+            let delta = Quat::from_rotation_y(yaw) * Quat::from_rotation_x(pitch) * Quat::from_rotation_z(roll);
+            let p_rot = match sk.parents[j] {
+                Some(p) => globals[p].to_scale_rotation_translation().1,
+                None => Quat::IDENTITY,
+            };
+            let g_rot = p_rot * pose.r[j];
+            pose.r[j] = (p_rot.inverse() * delta * g_rot).normalize();
+        }
+    }
+
+    fn name(&self) -> &str {
+        "flinch"
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Locomotion blend space — the base-layer kind (writes the whole pose).
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1266,5 +1441,67 @@ mod tests {
             assert!(q.is_finite(), "non-finite rotation in composed pose");
         }
         assert_eq!(anim.layer_count(), 2);
+    }
+
+    /// PD's flinch curve: a body flinch peaks at tick 10, is over by tick 30, and a
+    /// second hit mid-flinch does not restart it (the `flinchcnt < 0` gate).
+    #[test]
+    fn a_body_flinch_follows_pds_curve_and_does_not_restart() {
+        let mut f = FlinchLayer::new(Some(0), None, [None, None]);
+        f.flinch_body(3);
+        f.count = Some(10.0);
+        assert!((f.amount() - 1.0).abs() < 1e-3, "peak at tick 10, got {}", f.amount());
+        f.count = Some(29.9);
+        assert!(f.amount() < 0.01, "near zero at the end, got {}", f.amount());
+        f.count = Some(20.0);
+        f.flinch_body(6);
+        assert_eq!(f.count, Some(20.0), "a flinch in progress was restarted");
+        assert_eq!(f.kind, 3, "…or re-aimed");
+    }
+
+    /// A headshot snaps up in 4 ticks, picks its direction from the shot's octant, and
+    /// takes over a body flinch.
+    #[test]
+    fn a_head_flinch_is_fast_and_aimed_away_from_the_shot() {
+        let mut f = FlinchLayer::new(None, Some(0), [None, None]);
+        f.flinch_body(1);
+        f.flinch_head(0.0); // from straight ahead
+        assert!(f.head && f.kind == 0);
+        f.count = Some(4.0);
+        assert!((f.amount() - 1.0).abs() < 1e-3);
+        let (pitch, _, roll) = f.angles()[1];
+        assert!(pitch > 1.4 && roll == 0.0, "a frontal headshot throws the head back 85°");
+        f.flinch_head(std::f32::consts::FRAC_PI_2); // from its left
+        assert_eq!(f.kind, 2);
+        let (_, _, roll) = f.angles()[1];
+        assert!(roll > 0.0, "a shot from the left rolls the head");
+    }
+
+    /// The layer finishes on its own and leaves the pose untouched once it has.
+    #[test]
+    fn a_flinch_times_out_and_then_is_a_no_op() {
+        let sk = crate::skeletal::Skeleton {
+            names: vec!["root".into()],
+            parents: vec![None],
+            local_bind: vec![Mat4::IDENTITY],
+            bind_t: vec![Vec3::ZERO],
+            bind_r: vec![Quat::IDENTITY],
+            bind_s: vec![Vec3::ONE],
+            inverse_bind: vec![Mat4::IDENTITY],
+        };
+        let mut f = FlinchLayer::new(Some(0), None, [None, None]);
+        f.flinch_body(0);
+        let ctx = LayerCtx { skeleton: &sk, dt: 1.0 / 60.0 };
+        let mut moved = false;
+        for _ in 0..40 {
+            let mut p = Pose::bind(&sk);
+            f.apply(&mut p, &ctx);
+            moved |= p.r[0].angle_between(Quat::IDENTITY) > 0.05;
+        }
+        assert!(moved, "the flinch never showed");
+        assert!(!f.active(), "still flinching after 40 ticks");
+        let mut p = Pose::bind(&sk);
+        f.apply(&mut p, &ctx);
+        assert!(p.r[0].angle_between(Quat::IDENTITY) < 1e-6);
     }
 }

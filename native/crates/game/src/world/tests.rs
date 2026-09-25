@@ -145,6 +145,8 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         let mut world = World::new();
         world.initial_meshes();
         world.toggle_mode(); // HUNT — bake nav + spawn the roster
+        // The standoff dead-band is `AI=ours`'s; a PD bot backs up to its weapon's band.
+        world.set_ai_mode(crate::enemy::AiMode::Ours);
         assert!(!world.enemies.is_empty(), "hunters spawned");
         let ppos = world.player_pos().expect("player exists in HUNT");
 
@@ -738,6 +740,8 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         // lethal from full health, which would make the second shot land on a corpse.
         let shoot_at = |height_frac: f32| -> Option<(HitPart, usize)> {
             let mut world = World::new();
+            // The mission guard's stagger — a simulant flinches and fights on instead.
+            world.set_reaction_style(super::ReactionStyle::Guard);
             if world.pd_anim_template.is_none() || world.pd_bodies().is_empty() {
                 return None;
             }
@@ -877,6 +881,8 @@ fn arm_with(world: &mut World, name: &str) -> usize {
     #[test]
     fn pd_hunters_flinch_and_die_on_pd_clips() {
         let mut world = World::new();
+        // The mission guard's stagger — a simulant flinches and fights on instead.
+        world.set_reaction_style(super::ReactionStyle::Guard);
         if world.pd_anim_template.is_none() || world.pd_bodies().is_empty() {
             eprintln!("skipping: PD assets not loaded");
             return;
@@ -1330,9 +1336,49 @@ fn arm_with(world: &mut World, name: &str) -> usize {
     /// `enemy_combat_step`, which knows nothing about the mixer or `Enemy::stun`, so a
     /// stunned hunter mid-flinch kept emitting rounds from an in-flight burst. Not new with
     /// the GoldenEye bodies — it predates them and applied to Perfect Dark ones equally.
+    /// **A simulant fights through being shot** — Perfect Dark's bot reaction, the
+    /// default. `chr_begin_argh` returns early for bots (`chraction.c:3426`), so a hit
+    /// flinches the body and shoves it, and nothing else: no stun, no dropped trigger,
+    /// no injury animation taking over the body.
+    #[test]
+    fn a_simulant_flinches_is_shoved_and_keeps_firing() {
+        let mut world = World::new();
+        assert_eq!(world.reaction_style(), super::ReactionStyle::Simulant, "the default");
+        arm_with(&mut world, "PP7"); // 25 dmg — non-lethal on a full-health hunter
+        world.set_wave_size(1);
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT
+        world.advance_animation(1.0 / 60.0);
+        if world.enemies.is_empty() {
+            eprintln!("skipping: no hunters spawned");
+            return;
+        }
+        world.start_enemy_fire(0);
+        assert!(world.enemies[0].fire_elapsed.is_some(), "a burst is running");
+        let torso = {
+            let p = world.enemies[0].enemy.pos;
+            let (head_min, _) = world.body_hit_zones(world.enemies[0].body);
+            Vec3::new(p.x, p.y + head_min * 0.7, p.z)
+        };
+        world.hit_enemy(0, torso);
+        let inst = &mut world.enemies[0];
+        assert!(!inst.enemy.is_dead(), "one PP7 round is not lethal");
+        assert!(!inst.enemy.is_stunned(), "a simulant is never stunned by a hit");
+        assert!(inst.fire_elapsed.is_some(), "…and its burst carries on");
+        assert!(!inst.anim.is_playing_oneshot(), "no injury animation takes over the body");
+        assert!(inst.enemy.shove_speed() > 0.5, "the round shoved it");
+        let flinching = inst
+            .stack
+            .layer_as::<engine::skeletal::layers::FlinchLayer>(super::ENEMY_FLINCH_LAYER)
+            .is_some_and(|f| f.active());
+        assert!(flinching, "the body flinches");
+    }
+
     #[test]
     fn a_flinching_hunter_stops_firing() {
         let mut world = World::new();
+        // The mission guard's stagger — a simulant flinches and fights on instead.
+        world.set_reaction_style(super::ReactionStyle::Guard);
         arm_with(&mut world, "PP7"); // 25 dmg — non-lethal on a full-health hunter
         world.set_wave_size(1);
         world.initial_meshes();
@@ -1400,6 +1446,8 @@ fn arm_with(world: &mut World, name: &str) -> usize {
     #[test]
     fn a_flinching_hunter_cannot_restart_its_burst() {
         let mut world = World::new();
+        // The mission guard's stagger — a simulant flinches and fights on instead.
+        world.set_reaction_style(super::ReactionStyle::Guard);
         arm_with(&mut world, "PP7");
         world.set_wave_size(1);
         world.initial_meshes();
@@ -2260,6 +2308,8 @@ fn arm_with(world: &mut World, name: &str) -> usize {
     #[test]
     fn hits_flinch_only_when_hit_reactions_enabled() {
         let mut world = World::new();
+        // The mission guard's stagger — a simulant flinches and fights on instead.
+        world.set_reaction_style(super::ReactionStyle::Guard);
         // The canned flinch is a GoldenEye *clip set* behaviour; a GoldenEye body is on
         // Perfect Dark's animations (and so its authored reactions) by default now.
         world.set_goldeneye_clips(true);
@@ -2569,6 +2619,8 @@ fn arm_with(world: &mut World, name: &str) -> usize {
     #[test]
     fn nonlethal_hit_staggers_then_blends_back() {
         let mut world = World::new();
+        // The mission guard's stagger — a simulant flinches and fights on instead.
+        world.set_reaction_style(super::ReactionStyle::Guard);
         arm_with(&mut world, "PP7"); // 25 dmg — non-lethal on a 100-hp hunter
         assert!(world.ragdoll(), "ragdoll feature on by default");
         world.set_authored_reactions(false); // isolate the physics stagger (see above)

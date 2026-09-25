@@ -335,6 +335,9 @@ impl World {
                     inst.enemy.set_fetch_target(fetch);
                     // Arm the wall-clearance nudge for this step's movement commit.
                     inst.enemy.set_wall_clearance_radius(wall_clear_r);
+                    // PD's sightline round-robin: one character per tick, so each hunter
+                    // re-tests its target every (player + hunters) ticks.
+                    inst.enemy.set_insight_period(pd_actors.len() as u32, i as u32);
                     // Select the decision layer (utility vs legacy FSM) for this step.
                     inst.enemy.set_utility(utility_on);
                     // Perfect Dark hunters always know where the player is (movement

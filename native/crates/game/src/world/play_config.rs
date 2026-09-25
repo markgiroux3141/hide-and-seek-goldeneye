@@ -249,7 +249,7 @@ impl Default for PlayConfig {
             // boot, which is exactly the boot pin it replaces.
             enemy_count: super::ENEMY_COUNT,
             difficulty: 0,
-            ai: AiMode::Ours,
+            ai: AiMode::Pd,
             bodies: BodySet::All,
             hunter_weapon: HunterWeapon::Loot,
             respawn: true,

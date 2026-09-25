@@ -39,8 +39,8 @@ use engine::skeletal::anim::AnimPlayer;
 use engine::skeletal::anim_set;
 use engine::skeletal::clip;
 use engine::skeletal::layers::{
-    AdditiveDecayLayer, AimCone, AimOffsetLayer, ClipOverlayLayer, LayerCtx, LayeredAnimator,
-    LocomotionBlendLayer, Pose, PoseLayer, RootTranslateLayer, TwoBoneIkLayer,
+    AdditiveDecayLayer, AimCone, AimOffsetLayer, ClipOverlayLayer, FlinchLayer, LayerCtx,
+    LayeredAnimator, LocomotionBlendLayer, Pose, PoseLayer, RootTranslateLayer, TwoBoneIkLayer,
 };
 use engine::skeletal::gltf_skin::{self, SkinnedModel};
 use engine::geometry::structures::{
@@ -181,6 +181,9 @@ pub(crate) const ENEMY_AIM_OVERLAY_LAYER: usize = 1;
 pub(crate) const ENEMY_CHEST_AIM_LAYER: usize = 2;
 pub(crate) const ENEMY_HEAD_LOOK_LAYER: usize = 3;
 pub(crate) const ENEMY_RECOIL_LAYER: usize = 4;
+/// Perfect Dark's procedural hit flinch (waist, neck, shoulders) — last, so it twists
+/// whatever aim and recoil left there. See [`engine::skeletal::layers::FlinchLayer`].
+pub(crate) const ENEMY_FLINCH_LAYER: usize = 5;
 /// Aim cone (radians) the chest may swing to point the barrel at the player — wide
 /// enough for the clip bias (~45°) plus pitch, capped (~80°) so a target that's
 /// swung behind the shoulder pins the torso at the edge instead of contorting it.
@@ -272,6 +275,8 @@ pub(crate) const ENEMY_FIRE_TAIL: f32 = 0.25;
 pub(crate) struct EnemyArm {
     /// Right (gun) shoulder — the recoil kick anchor + ANIM_DEBUG measurement.
     shoulder: usize,
+    /// Left shoulder — the flinch twists both.
+    left_shoulder: usize,
     /// Right elbow + hand, kept for the ANIM_DEBUG arm measurement only.
     mid: usize,
     end: usize,
@@ -309,6 +314,7 @@ impl EnemyArm {
         // Upper body = the subtree of the two hands' lowest common ancestor (the
         // chest): chest + head + both arms, excluding the pelvis + legs.
         let left_hand = sk.index_of(LEFT_HAND_BONE)?;
+        let left_shoulder = sk.parents[sk.parents[left_hand]?]?;
         let chest = sk.lowest_common_ancestor(&[end, left_hand])?;
         let upper_body = sk.subtree(chest);
         // Head gaze axis in the head's local frame, from the bind pose. The model
@@ -327,7 +333,18 @@ impl EnemyArm {
             Some((hip, knee, foot))
         };
         let legs = [leg_chain(LEFT_FOOT_BONE)?, leg_chain(RIGHT_FOOT_BONE)?];
-        Some(EnemyArm { shoulder, mid, end, chest, head, head_forward, upper_body, pelvis, legs })
+        Some(EnemyArm {
+            shoulder,
+            left_shoulder,
+            mid,
+            end,
+            chest,
+            head,
+            head_forward,
+            upper_body,
+            pelvis,
+            legs,
+        })
     }
 
     /// Right shoulder joint index (the ANIM_DEBUG arm measurement anchor).
@@ -374,6 +391,13 @@ impl EnemyArm {
             Vec3::X,
             ENEMY_RECOIL_DECAY,
             ENEMY_RECOIL_MAX,
+        )));
+        // PD's joint callback twists the waist, neck and both shoulders; on our rig the
+        // waist is the chest joint (`Bone_2`, parent of both arms and the head).
+        s.push(Box::new(FlinchLayer::new(
+            Some(self.chest),
+            Some(self.head),
+            [Some(self.left_shoulder), Some(self.shoulder)],
         )));
         s
     }
@@ -754,6 +778,36 @@ pub(crate) const PD_BODY_CATALOG: &[(&str, &str)] = &[
 /// Perfect Dark's animations. The narrower sets exist because the two families still look
 /// completely different, and because a checkout without the PD export has to degrade to
 /// GoldenEye rather than to an empty hunt.
+/// **How a hunter reacts to a hit it survives** — the first thing that separates the
+/// two enemy archetypes (`RETRO_ENEMIES.md` §5).
+///
+/// * [`Self::Simulant`] — Perfect Dark's **combat-simulator bot**: a procedural flinch
+///   ([`engine::skeletal::layers::FlinchLayer`]), a grunt and a shove along the shot, and
+///   it **keeps fighting**. `chr_begin_argh` returns early for bots (`chraction.c:3426`),
+///   so they never play an injury animation and are never stunned. The default.
+/// * [`Self::Guard`] — the GoldenEye / PD **mission guard**: the authored injury
+///   animation for the part that was hit, with the trigger dropped and the body stunned
+///   for its length (0.5 s for a torso hit, up to 5 s for a leg — PD guards play them
+///   whole). Kept for the mission-guard archetype; `REACTIONS=guard` selects it.
+///
+/// Deaths are the same either way (the authored death table).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ReactionStyle {
+    #[default]
+    Simulant,
+    Guard,
+}
+
+impl ReactionStyle {
+    /// `REACTIONS=guard|sim`, defaulting to the simulant.
+    pub fn from_env() -> Self {
+        match std::env::var("REACTIONS").unwrap_or_default().trim().to_ascii_lowercase().as_str() {
+            "guard" | "ge" | "stagger" => ReactionStyle::Guard,
+            _ => ReactionStyle::Simulant,
+        }
+    }
+}
+
 #[derive(
     Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize,
 )]
@@ -2144,6 +2198,8 @@ pub struct World {
     /// were ported, and a ragdoll discards them. Turning it off is the A/B: PD
     /// hunters fall back to the ragdoll like GoldenEye ones.
     authored_reactions: bool,
+    /// How a hunter reacts to a hit it survives — see [`ReactionStyle`].
+    reaction_style: ReactionStyle,
     /// **How hunters fight** — Perfect Dark's bot model, on every hunter, always. Every
     /// hunter spawns carrying a [`crate::pdsim::Simulant`], wears a Perfect Dark body
     /// driven by [`PD_TEMPLATE_CLIPS`], and aims / shoots the Perfect Dark way; see
@@ -3101,6 +3157,7 @@ impl World {
             hunt_spawn: None,
             hit_reactions: false, // GoldenEye-style flinches; PD hunters use their own tables
             authored_reactions: true, // PD hunters react on PD's tables, not the ragdoll
+            reaction_style: ReactionStyle::from_env(),
             local_avoidance: true, // ORCA crowd steering on by default (kill-switch below)
             head_look: true, // procedural head look-at on by default (kill-switch below)
             foot_ik: true, // ground-adaptive foot IK + cadence on by default (kill-switch below)
@@ -3579,6 +3636,15 @@ impl World {
     /// Whether PD hunters use their authored reaction tables (inspection / tests).
     pub fn authored_reactions(&self) -> bool {
         self.authored_reactions
+    }
+
+    /// How hunters react to hits they survive (see [`ReactionStyle`]).
+    pub fn set_reaction_style(&mut self, style: ReactionStyle) {
+        self.reaction_style = style;
+    }
+
+    pub fn reaction_style(&self) -> ReactionStyle {
+        self.reaction_style
     }
 
     /// Whether physics-ragdoll death is active (inspection / tests).

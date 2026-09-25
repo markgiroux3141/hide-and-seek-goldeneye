@@ -276,6 +276,31 @@ Read `gailists.c:2020-2060` and `:2733-2860`, and `chraicommands.c:6472`.
 > are found; the regression test is `hunters_below_the_player_climb_to_find_them_on_facility_2`.
 > This was `AI=ours` only, since `pd_step` doesn't flank; facility 2 has no PLAY config, so it
 > runs `ours`.
+>
+> **`AI=pd` is the default (2026-09-25).** Running the AI lab under it found four PD-mode
+> defects that the lab had never seen, because it always ran `ours`:
+> 1. **A player on ground a hunter can't reach froze the hunter.** A* said "no route" and the
+>    hunter stood still, in both modes once the flank bug was fixed. Now it walks to the
+>    reachable cell nearest you and fights from there (`NavWorld::reachable_stand_in`, cached
+>    per hunter). The old "climbs to another floor" test had been passing by luck.
+> 2. **A gunless PD hunter with nothing to fetch charged the player.** It now roams the search
+>    points instead.
+> 3. **Sightline flicker.** PD refreshes one character's sightline per tick, round-robin
+>    (`bot.c:1601`), and holds it in between. Ported; label flips round a pillar dropped from 107
+>    to 73.
+> 4. **Stun-lock in a pack.** This is what A1 fixes: a hunter took 23 friendly leg hits of 3.7 s
+>    each and never fired.
+>
+> **A1 status: built, green (881 tests), release built, awaiting playtest.**
+> `ReactionStyle::{Simulant (default), Guard}`. The simulant gets PD's procedural flinch (the
+> engine's `FlinchLayer`: body or head, PD's curve and angle table) and a shove (`shotspeed`:
+> +0.75 run-speed units per hit, cap 1.5, linear bleed, applied through `try_step`). No stun
+> and no dropped trigger. `REACTIONS=guard` brings back the injury-table stagger for an A/B.
+> Friendly fire now lands at the real impact point.
+>
+> **Still open for A3:** the band-edge plant/run (Ok↔Advance) under a drifting player. PD
+> smooths the velocity, and a PD-mode stop-start check goes in with that. The two thrash tests
+> are pinned to `ours` until then.
 
 The stages are ordered like the levelgen retro. The user playtests after each stage before the next one starts.
 

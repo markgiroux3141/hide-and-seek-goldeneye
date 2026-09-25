@@ -48,7 +48,9 @@ use crate::pdsim::difficulty::BotDifficulty;
 use crate::pdsim::distmode::{DistBand, DistMode, DistModeState};
 
 /// **Which engagement model the hunters run** — `AI=pd|ours`, resolved from the
-/// environment at boot exactly like `ARSENAL=` and `BODIES=`, and defaulting to ours.
+/// environment at boot exactly like `ARSENAL=` and `BODIES=`, and defaulting to **pd**
+/// (since 2026-09-25: the PD combat-simulator bot is the enemy being perfected first —
+/// `RETRO_ENEMIES.md` §5).
 ///
 /// Both AIs stay runnable; this picks between them, it does not delete either. What
 /// each one owns is audited in `DESIGN_AI_PD_VS_OURS.md`, and the short version is
@@ -57,10 +59,10 @@ use crate::pdsim::distmode::{DistBand, DistMode, DistModeState};
 /// nav/A*, ORCA, wall clearance, foot IK, head look-at and animation.
 ///
 /// ```text
-/// AI=ours   (default) our handcrafted hunter: perception cone, search + investigate,
+/// AI=ours             our handcrafted hunter: perception cone, search + investigate,
 ///                     a utility-scored FSM, standoff-and-hold combat, aim-dodge,
 ///                     flanking, cover/peek, burst-and-reposition, suppressing fire.
-/// AI=pd               Perfect Dark's deathmatch simulant: omniscient, never searches,
+/// AI=pd     (default) Perfect Dark's deathmatch simulant: omniscient, never searches,
 ///                     four-mode distance-band combat (`botcmd_tick_dist_mode`) with
 ///                     none of the evasive or tactical movement above, and PD's
 ///                     reload rule.
@@ -72,14 +74,14 @@ use crate::pdsim::distmode::{DistBand, DistMode, DistModeState};
 /// seeing how it feels against ours is the entire reason the switch exists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AiMode {
-    /// Our handcrafted hunter (the default, and the shipping behaviour).
+    /// Our handcrafted hunter.
     Ours,
-    /// Perfect Dark's simulant engagement model.
+    /// Perfect Dark's simulant engagement model (the default).
     Pd,
 }
 
 impl AiMode {
-    /// Resolve from the `AI` environment variable, defaulting to [`AiMode::Ours`].
+    /// Resolve from the `AI` environment variable, defaulting to [`AiMode::Pd`].
     ///
     /// Applied **last** at boot and logged, which is trap #6 from the weapons handoff:
     /// an explicit choice has to outrank a mode default, because `enable_pd_lab` once
@@ -87,11 +89,11 @@ impl AiMode {
     pub fn from_env() -> Self {
         let raw = std::env::var("AI").unwrap_or_default();
         match raw.trim().to_ascii_lowercase().as_str() {
-            "pd" | "perfectdark" | "perfect-dark" | "sim" => AiMode::Pd,
-            "" | "ours" | "our" | "hs" => AiMode::Ours,
+            "" | "pd" | "perfectdark" | "perfect-dark" | "sim" => AiMode::Pd,
+            "ours" | "our" | "hs" => AiMode::Ours,
             other => {
-                log::warn!("AI={other:?} is not pd|ours — falling back to ours");
-                AiMode::Ours
+                log::warn!("AI={other:?} is not pd|ours — falling back to pd");
+                AiMode::Pd
             }
         }
     }
@@ -309,6 +311,17 @@ const SPEED_SEARCH: f32 = 1.6; // ~walk gait — calm sweeping / investigating
 const SPEED_ADVANCE: f32 = 3.2; // ~jog gait — closing on the player while firing
 /// Chase speed (JS `chaseSpeed`) — the urgent run.
 pub(crate) const SPEED_CHASE: f32 = 4.6; // m/s (~run gait)
+
+/// Perfect Dark's **shot shove** on a bot (`chraction.c:4920`, `bondmove.c:1841`), in
+/// units of a full run — PD adds `shotspeed` to the position at the rate its own run
+/// uses, so 1.0 is "running speed". Each hit adds 0.75 along the shot; the total is
+/// capped at 1.5 and bleeds off linearly at 1/30 of a unit per tick (2 a second), so a
+/// lone hit shoves a hunter ~0.65 m over ~0.4 s and a burst stacks into a stagger-step.
+const SHOVE_PER_HIT: f32 = 0.75;
+const SHOVE_MAX: f32 = 1.5;
+const SHOVE_DECAY: f32 = 2.0;
+/// What 1.0 shove unit is in m/s: the hunter's own run.
+const SHOVE_UNIT: f32 = SPEED_CHASE;
 const REPATH_INTERVAL: f32 = 0.4; // s between path recomputes (CHASE_UPDATE_INTERVAL)
 /// How close to a vent mouth counts as *holding* it rather than still walking to it.
 ///
@@ -535,6 +548,13 @@ pub struct Enemy {
     path: Vec<Vec3>,
     path_idx: usize,
     repath_timer: f32,
+    /// The last goal nav could not route to, and the reachable spot it offered instead
+    /// ([`NavWorld::reachable_stand_in`]) — cached because that search can cost a full
+    /// cube of cells, and the goal (a player on a crate) usually holds still.
+    stand_in: Option<(Vec3, Option<Vec3>)>,
+    /// Perfect Dark's `aibot->shotspeed`: an XZ velocity (in [`SHOVE_UNIT`]s) that each
+    /// hit adds to and the movement commit spends and bleeds off. See [`Self::shove`].
+    shove: Vec3,
     /// The nav-overlay index of a shut door standing in this hunter's way, if any —
     /// drained into [`EnemyStep::open_door`] so the `World` (which owns the door
     /// entities and the audio) can work it. Cleared each step it isn't needed.
@@ -733,6 +753,18 @@ pub struct Enemy {
     /// anti-oscillation override and the 1 s command TTL. Advanced only by
     /// [`Self::pd_step`]; inert (and unread) under `AI=ours`.
     dist: DistModeState,
+    /// `aibot->chrsinsight[]` for the current target: the sightline as last *sampled*,
+    /// and whom it was sampled against. PD does not re-test every sightline every tick
+    /// — `bot_tick_unpaused` refreshes **one** character per tick, round-robin
+    /// (`bot.c:1601`, `queryplayernum`), so each is re-tested every `g_MpNumChrs`
+    /// ticks and holds in between. That hold is what stops a sightline grazing a
+    /// pillar edge from flipping `OK`↔`ADVANCE` (plant ↔ run) every tick.
+    insight_held: Option<(TargetId, bool)>,
+    /// Characters in the match — the round-robin period (see [`Self::insight_held`]) —
+    /// and this hunter's slot in it, so a pack does not re-sample on the same tick.
+    insight_period: u32,
+    insight_phase: u32,
+    insight_tick: u32,
     /// A tiny xorshift, seeded per hunter at spawn. Its only consumer is the random
     /// 0.33–2.33 s `OK` hold PD arms when a backup loses sight (`botcmd.c:152`);
     /// keeping it on the hunter (rather than reaching for the `World`'s RNG) is what
@@ -758,6 +790,8 @@ impl Enemy {
             pos: feet,
             path: Vec::new(),
             path_idx: 0,
+            stand_in: None,
+            shove: Vec3::ZERO,
             repath_timer: 0.0,
             pending_door: None,
             last_block: StepBlock::None,
@@ -814,6 +848,10 @@ impl Enemy {
             omniscient: false,
             vent_watch: false,
             dist: DistModeState::default(),
+            insight_held: None,
+            insight_period: 1,
+            insight_phase: 0,
+            insight_tick: 0,
             // Seeded from the spawn position so each hunter draws its own sequence and
             // a replayed run reproduces exactly (spawns are deterministic); never zero,
             // which is xorshift's fixed point.
@@ -838,10 +876,46 @@ impl Enemy {
         self.detectable = v;
     }
 
+    /// **Shove** this hunter along `dir` (XZ; its length is ignored) — one hit's worth of
+    /// Perfect Dark's `shotspeed += vector * 0.75`, capped at [`SHOVE_MAX`]. Spent by the
+    /// next movement commits ([`Self::integrate_move`]).
+    pub fn shove(&mut self, dir: Vec3) {
+        let d = Vec3::new(dir.x, 0.0, dir.z).normalize_or_zero();
+        self.shove += d * SHOVE_PER_HIT;
+        let len = self.shove.length();
+        if len > SHOVE_MAX {
+            self.shove *= SHOVE_MAX / len;
+        }
+    }
+
+    /// The shove still to be spent (in run-speed units) — 0 once it has bled off.
+    pub fn shove_speed(&self) -> f32 {
+        self.shove.length()
+    }
+
+    /// `bmove_dampen_shotspeed`: bleed the shove off linearly, along its own direction.
+    fn bleed_shove(&mut self, dt: f32) {
+        let len = self.shove.length();
+        if len <= 1e-4 {
+            self.shove = Vec3::ZERO;
+            return;
+        }
+        let next = (len - SHOVE_DECAY * dt).max(0.0);
+        self.shove *= next / len;
+    }
+
     /// Enable/disable the utility-AI decision layer (roadmap #4). The `World` sets this
     /// each step from its `utility_ai` flag; `false` runs the legacy FSM (kill-switch).
     pub fn set_utility(&mut self, on: bool) {
         self.utility = on;
+    }
+
+    /// How many characters are in the match (`g_MpNumChrs`) and which slot this hunter
+    /// is — the round-robin that paces how often [`Self::pd_step`] re-tests its
+    /// sightline. The `World` sets it each step; the default (1) re-tests every tick.
+    pub fn set_insight_period(&mut self, chrs: u32, slot: u32) {
+        self.insight_period = chrs.max(1);
+        self.insight_phase = slot % self.insight_period;
     }
 
     /// Enable/disable **omniscience** — Perfect Dark's knowledge rule. See
@@ -1168,10 +1242,17 @@ impl Enemy {
     pub(crate) fn integrate_move(&mut self, vel: Vec3, dt: f32, nav: &NavWorld) {
         if self.dead {
             self.vel = Vec3::ZERO;
+            self.shove = Vec3::ZERO;
             return;
         }
         let start = self.pos;
-        let planar = Vec3::new(vel.x, 0.0, vel.z);
+        // The shot shove rides on top of whatever the AI asked for — PD adds `shotspeed`
+        // to the position after the bot's own movement (`chr.c:648`) — and goes through
+        // the same `try_step`, so a shove can never carry a hunter through a wall or off
+        // a ledge it could not have walked off.
+        let shove = self.shove * SHOVE_UNIT;
+        self.bleed_shove(dt);
+        let planar = Vec3::new(vel.x + shove.x, 0.0, vel.z + shove.z);
         if !self.try_step(planar, dt, nav) {
             let pref = self.desired_vel;
             self.try_step(pref, dt, nav);
@@ -2507,10 +2588,43 @@ impl Enemy {
             self.last_known = Some(target_pos); // a PD bot's knowledge never goes stale
             return;
         }
+        // ── Nothing to fight with, nothing to fetch — or the player is invisible ──
+        // The `World` clears `detectable` for a hunter that is shopping (no gun, or no
+        // rounds anywhere) and for the `N` observe aid. PD's own bot would go in with its
+        // fists; ours have none, so walking up to the player to pull a trigger that does
+        // nothing is the one thing it must not do. Roam the World's search points
+        // instead — harmless, and it keeps the hunter moving so it passes by the next
+        // gun that respawns. Our utility layer reaches the same place through perception
+        // (an undetectable player is never perceived); this ladder ignores perception by
+        // design, so it has to say it.
+        if target.is_player() && !self.detectable {
+            self.state = AiState::Search;
+            self.holding = false;
+            match self.search_target {
+                Some(t) => {
+                    if self.move_toward(dt, t, nav, SPEED_SEARCH) {
+                        self.search_target = None;
+                        step.needs_search_target = true;
+                    }
+                }
+                None => step.needs_search_target = true,
+            }
+            return;
+        }
         // `aibot->targetinsight` is a raw line of sight, not a view cone: PD's 45° cone
         // gates *firing* (in `pdsim`), never seeing. So this deliberately does not go
-        // through `perceives`.
-        let insight = self.can_see(target, physics);
+        // through `perceives`. Sampled round-robin and held, as PD does — see
+        // `insight_held`. A new target is always sampled at once.
+        self.insight_tick = self.insight_tick.wrapping_add(1);
+        let due = (self.insight_tick + self.insight_phase) % self.insight_period.max(1) == 0;
+        let insight = match self.insight_held {
+            Some((id, seen)) if id == target.id && !due => seen,
+            _ => {
+                let seen = self.can_see(target, physics);
+                self.insight_held = Some((target.id, seen));
+                seen
+            }
+        };
         // `chr_get_distance_to_coord` (`botcmd.c:98`) — the 3D separation, so a target
         // one floor up is not "at the right distance".
         let dist = self.engage_dist(target_pos);
@@ -2942,7 +3056,13 @@ impl Enemy {
         self.repath_timer -= dt;
         if self.repath_timer <= 0.0 {
             self.repath_timer = REPATH_INTERVAL;
-            match nav.find_path(self.pos, target) {
+            // No route to the target itself (it stands on ground a hunter cannot climb
+            // to) → route to the reachable spot nearest it, and fight from there.
+            let route = nav.find_path(self.pos, target).or_else(|| {
+                let sub = self.stand_in_for(nav, target)?;
+                nav.find_path(self.pos, sub)
+            });
+            match route {
                 // A route has to have somewhere to go. `find_path` snaps an off-mesh goal
                 // onto the nearest standable cell within ~6 m, and when the target is a
                 // point you cannot stand on — a flank offset swung into a wall, a spot in
@@ -3003,6 +3123,20 @@ impl Enemy {
             }
         }
         false
+    }
+
+    /// The reachable stand-in for an unreachable `target` (see
+    /// [`NavWorld::reachable_stand_in`]), re-searched only once the target has moved
+    /// off the cached one by more than a cell.
+    fn stand_in_for(&mut self, nav: &NavWorld, target: Vec3) -> Option<Vec3> {
+        if let Some((goal, sub)) = self.stand_in {
+            if goal.distance_squared(target) <= WT * WT {
+                return sub;
+            }
+        }
+        let sub = nav.reachable_stand_in(self.pos, target);
+        self.stand_in = Some((target, sub));
+        sub
     }
 
     /// Choose the spot to juke to for a burst-and-reposition (called on the
@@ -3486,6 +3620,39 @@ mod tests {
 
     /// An open baked room + an empty physics world (so line-of-sight is always clear),
     /// for driving the FSM headlessly.
+    /// Perfect Dark's shot shove: one hit carries a hunter ~0.65 m along the shot and
+    /// bleeds off by itself (`bmove_dampen_shotspeed`), and a shove never walks it
+    /// through a wall — it goes through the same `try_step` as the AI's own movement.
+    #[test]
+    fn a_shove_carries_a_hunter_along_the_shot_and_bleeds_off() {
+        let nav = open_room();
+        let start = Vec3::new(10.0, 0.0, 10.0);
+        let mut e = Enemy::new(start, Vec3::new(10.0, 0.0, 20.0));
+        e.shove(Vec3::X);
+        let dt = 1.0 / 60.0;
+        for _ in 0..60 {
+            e.integrate_move(Vec3::ZERO, dt, &nav);
+        }
+        let moved = e.pos - start;
+        assert!(moved.x > 0.4 && moved.x < 0.9, "one hit should shove ~0.65 m, got {moved:?}");
+        assert!(moved.z.abs() < 1e-3, "straight along the shot");
+        assert_eq!(e.shove_speed(), 0.0, "bled off within a second");
+        // Stacking caps at 1.5 units, however many rounds land at once.
+        for _ in 0..10 {
+            e.shove(Vec3::Z);
+        }
+        assert!((e.shove_speed() - SHOVE_MAX).abs() < 1e-4);
+        // Into a wall: the room is 20 m square, so a hunter against its +X wall stays in.
+        let mut w = Enemy::new(Vec3::new(19.7, 0.0, 10.0), Vec3::ZERO);
+        for _ in 0..5 {
+            w.shove(Vec3::X);
+        }
+        for _ in 0..60 {
+            w.integrate_move(Vec3::ZERO, dt, &nav);
+        }
+        assert!(w.pos.x < 20.0, "shoved through the wall to {:?}", w.pos);
+    }
+
     fn open_room() -> NavWorld {
         use engine::geometry::csg_runtime::{Brush, Op, Region};
         let mut regions = {

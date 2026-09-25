@@ -1374,6 +1374,12 @@ impl World {
             // an owner, so there is nobody to credit. The victim still takes the death.
             self.start_death(idx, collider, at, knock, Killer::Unattributed);
             log::info!("HUNTER DOWN (blast, {dmg:.0} dmg)");
+        } else if self.reaction_style == super::ReactionStyle::Simulant {
+            // A bot caught in a blast gets the same as a bot shot: `chr_damage`'s aibot
+            // branch flinches it and shoves it along the blast (`chraction.c:4920`).
+            self.simulant_flinch(idx, (at - blast_center).normalize_or_zero(), false);
+            let hp = self.enemies.get(idx).map(|i| i.enemy.health()).unwrap_or(0.0);
+            log::info!("hunter caught in blast — {dmg:.0} dmg, {hp:.0} hp left (flinch)");
         } else if self.ragdoll {
             // Phase 3 default: a brief physics-ragdoll stagger (radial from the blast) +
             // a short stun, blended into animation, then the hunter fights on.
@@ -1479,6 +1485,28 @@ impl World {
                 inst.anim.play_once(death_start + pick, 0.2, None, None);
             }
         }
+    }
+
+    /// A **Perfect Dark bot's** reaction to a hit it survives (`chr_damage`'s aibot
+    /// branch, `chraction.c:4970`): flinch the body — or the head, snapped away from the
+    /// shot, on a headshot — and shove it along `shot_dir`. No stun and no dropped
+    /// trigger: a simulant fights straight through being hit. The pain vocal has
+    /// already played (the grunt).
+    fn simulant_flinch(&mut self, idx: usize, shot_dir: Vec3, head: bool) {
+        let kind = self.rand_below(8) as u8; // PD's three random bits
+        let Some(inst) = self.enemies.get_mut(idx) else { return };
+        // Where the shot came from, relative to the way the body faces (CCW from above,
+        // 0 = in front) — which octant a headshot throws the head away from.
+        let from = -shot_dir;
+        let bearing = from.x.atan2(from.z) - inst.yaw();
+        if let Some(f) = inst.stack.layer_as::<FlinchLayer>(ENEMY_FLINCH_LAYER) {
+            if head {
+                f.flinch_head(bearing);
+            } else {
+                f.flinch_body(kind);
+            }
+        }
+        inst.enemy.shove(shot_dir);
     }
 
     /// Seed a ragdoll for hunter `idx` from its CURRENT animated pose (so it starts
@@ -1645,6 +1673,15 @@ impl World {
             let knock = (dir + Vec3::Y * 0.25).normalize_or_zero() * RAGDOLL_BULLET_IMPULSE;
             self.start_death(idx, collider, hit_point, knock, killer);
             log::info!("HUNTER DOWN ({zone:?}, {dmg:.0} dmg)");
+        } else if self.reaction_style == super::ReactionStyle::Simulant {
+            // Perfect Dark's bot: flinch, shove, keep fighting (see `ReactionStyle`).
+            let head = match self.enemies.get(idx).and_then(|i| i.hit_part) {
+                Some(p) => p == crate::combat::hit_anim::HitPart::Head,
+                None => matches!(zone, HitZone::Head),
+            };
+            self.simulant_flinch(idx, dir, head);
+            let hp = self.enemies.get(idx).map(|i| i.enemy.health()).unwrap_or(0.0);
+            log::info!("hunter hit — {zone:?} {dmg:.0} dmg, {hp:.0} hp left (flinch)");
         } else if let Some(r) = self.pd_reaction(idx, false) {
             // Perfect Dark's injury table for the part that was hit — usually the
             // opening frames of a death animation rather than a purpose-made flinch
@@ -2268,25 +2305,17 @@ impl World {
                 // authored reaction exactly as it would from the player — one damage
                 // path, not two.
                 //
-                // The impact is a fixed chest height, not where the round crossed the
-                // body — deliberately, for now. The real point (`muzzle + shot_dir *
-                // along`) lets a packmate's round take an arm, and PD's arm injury row
-                // is the full ANIM_000F at half speed: a **3 s stun** (PD guards play it
-                // whole — every setup sets `set_recovery_speed(0)`). A pack firing
-                // through its own front rank then stun-locks it (measured: the
-                // `a_pack_still_engages_despite_self_occlusion` lab run). That is the
-                // simulant-vs-guard reaction question in `RETRO_ENEMIES.md` §1.2, and
-                // this moves to the real point once simulants stop stunning.
-                let _ = along;
+                // The impact is where the round actually crossed the victim — the point
+                // on the shot line nearest its body axis — so a packmate's round can take
+                // a head or a limb like the player's can. (It was pinned to the chest
+                // while hunters still stunned on a hit: PD's arm injury row is a 3 s
+                // stun, and a pack firing through its own front rank stun-locked it.
+                // Under `ReactionStyle::Guard` that can still happen — which is what
+                // GoldenEye guards did to each other too.)
                 log::info!("hunter {idx} shot hunter {j}");
-                let chest = self
-                    .enemies
-                    .get(j)
-                    .map(|e| self.body_height(e.body) * 0.55)
-                    .unwrap_or(0.8);
                 self.hit_enemy_with(
                     j,
-                    victim_pos + Vec3::Y * chest,
+                    muzzle + shot_dir * along,
                     muzzle,
                     weapon.damage,
                     Killer::Hunter(idx),

@@ -197,6 +197,8 @@ impl TestArena {
 /// from cover. Used to prove the reactive aim-dodge doesn't go quiet over time.
 fn aim_hold_lateral(obstacles: &[[f32; 6]]) -> [f32; 12] {
     let mut arena = TestArena::build([60.0, 16.0, 60.0], obstacles, 1, Vec3::new(7.5, 0.0, 4.0));
+    // The aim-dodge is ours: `AI=pd` zeroes it, because PD bots never dodge.
+    arena.world.set_ai_mode(crate::enemy::AiMode::Ours);
     arena.place_hunter(0, 7.5, 11.0); // ~7 m — a rifle's standoff band
     let dt = 1.0 / 60.0;
     let mut lateral = [0.0f32; 12];
@@ -336,6 +338,9 @@ fn losing_sight_settles_into_search_not_flicker() {
 fn a_player_circling_a_pillar_is_handled_cleanly() {
     let pillar = [28.0, 0.0, 28.0, 4.0, 16.0, 4.0]; // centre (7.5,7.5) m, ~1 m square
     let mut arena = TestArena::build([60.0, 16.0, 60.0], &[pillar], 1, Vec3::new(7.5, 0.0, 4.5));
+    // Our utility scorer's hysteresis is what this pins; PD's band-edge plant/run is
+    // stage A3's (see `extended_run_holds_the_hard_invariants_under_pd`).
+    arena.world.set_ai_mode(crate::enemy::AiMode::Ours);
     arena.place_hunter(0, 7.5, 1.0); // south of the pillar; the player orbits it
     let mut mon = JankMonitor::new(1);
     let dt = 1.0 / 60.0;
@@ -362,11 +367,19 @@ fn extended_wander_run() -> JankMonitor {
 }
 
 fn extended_wander_run_n(wave: usize) -> JankMonitor {
+    extended_wander_run_mode(wave, None)
+}
+
+/// [`extended_wander_run_n`] with the engagement model pinned (`None` = the default).
+fn extended_wander_run_mode(wave: usize, mode: Option<crate::enemy::AiMode>) -> JankMonitor {
     let obstacles = [
         [24.0, 0.0, 16.0, 4.0, 16.0, 16.0], // a wall
         [40.0, 0.0, 40.0, 4.0, 16.0, 4.0],  // a pillar
     ];
     let mut arena = TestArena::build([64.0, 16.0, 64.0], &obstacles, wave, Vec3::new(4.0, 0.0, 4.0));
+    if let Some(m) = mode {
+        arena.world.set_ai_mode(m);
+    }
     let mut mon = JankMonitor::new(arena.world.enemies.len());
     let dt = 1.0 / 60.0;
     // Deterministic wander: a small LCG picks new targets; the player eases toward them.
@@ -402,11 +415,29 @@ fn extended_wander_run_n(wave: usize) -> JankMonitor {
 /// defect this run once also exposed has since been fixed.)
 #[test]
 fn extended_run_holds_the_hard_invariants() {
-    let mon = extended_wander_run();
+    let mon = extended_wander_run_mode(4, Some(crate::enemy::AiMode::Ours));
     assert!(mon.violations_of("illegal_y").is_empty(), "a hunter clipped/fell through geometry");
     assert!(mon.violations_of("thrash").is_empty(), "a hunter thrashed states on the long run");
     // ORCA keeps the pack from stacking into one body over the whole soak.
     assert!(mon.violations_of("overlap").is_empty(), "hunters interpenetrated (local avoidance failed)");
+}
+
+/// The same soak under **`AI=pd`**, the default: the geometry and crowd invariants hold
+/// for Perfect Dark's bot too.
+///
+/// Its state *label* is deliberately not held to the thrash limit yet. A PD bot plants
+/// the instant it is inside its weapon's band and runs the instant it is not
+/// (`botcmd_tick_dist_mode`, per tick), so a player drifting along the band's edge flips
+/// it `OK`↔`ADVANCE` several times a second — measured: 73 label flips in 30 s round a
+/// pillar, down from 107 once the sightline round-robin was ported. That is PD's
+/// behaviour, and PD hides it with a smoothed velocity (`moverate`, ~75 ms), which we do
+/// not have yet: it is stage A3 of `RETRO_ENEMIES.md`, and the PD-mode stop-start check
+/// belongs with it, measured on the feet rather than on the label.
+#[test]
+fn extended_run_holds_the_hard_invariants_under_pd() {
+    let mon = extended_wander_run_mode(4, Some(crate::enemy::AiMode::Pd));
+    assert!(mon.violations_of("illegal_y").is_empty(), "a PD hunter clipped/fell through geometry");
+    assert!(mon.violations_of("overlap").is_empty(), "PD hunters interpenetrated");
 }
 
 // ═══ Local avoidance (ORCA) scenarios ═══════════════════════════════════════
@@ -856,6 +887,8 @@ fn pd_omniscient_hunter_finds_a_player_it_cannot_see() {
 #[test]
 fn pd_omniscience_kill_switch_restores_the_search() {
     let (mut arena, player) = omniscience_arena(true);
+    // The kill-switch is `AI=ours`'s: under `AI=pd` a hunter is omniscient by mode.
+    arena.world.set_ai_mode(crate::enemy::AiMode::Ours);
     arena.world.set_pd_omniscience(false);
     assert!(!arena.world.pd_omniscience(), "the kill-switch disables omniscience");
     let (_, searched) = omniscience_run(&mut arena, 20.0, player);

@@ -5476,8 +5476,8 @@ impl ApplicationHandler for App {
         //
         // `AI=pd` swaps our hunter's whole post-contact behaviour for Perfect Dark's
         // deathmatch simulant: omniscient, no search, four-mode distance-band combat,
-        // no dodge/flank/cover/suppress, PD's reload rule. `AI=ours` (the default) is
-        // everything we built. `World::new` already resolved this from the environment;
+        // no dodge/flank/cover/suppress, PD's reload rule — the default since 2026-09-25.
+        // `AI=ours` is everything we built. `World::new` already resolved this from the environment;
         // re-applying it here is the belt to that braces — nothing between the two
         // points may pin an AI mode without an explicit `AI=` losing, which is exactly
         // how `PD_LAB` once ate `BODIES=ge` for a whole playtest.
