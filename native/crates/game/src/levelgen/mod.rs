@@ -40,6 +40,7 @@ pub const DESIGNS: &[(&str, fn() -> BuiltLevel)] = &[
     ("linear", designs::linear),
     ("showcase", designs::showcase),
     ("grand", designs::grand),
+    ("compound", designs::compound),
     ("pd_lab", designs::pd_lab),
 ];
 

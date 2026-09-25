@@ -19,7 +19,8 @@ use super::*;
 ///
 /// **Not every design is clean, and each exception says why.**
 const EXPECTED: &[(&str, &[usize])] = &[
-    ("smoke", &[260]),
+    // 304 since 2026-09: room_b raised from 8 to 14 WT, so its perch has floor at all.
+    ("smoke", &[304]),
     // The two hall pillars stop at 8 WT under a 22 WT ceiling; the top of one is a
     // 4-cell island nobody can reach. Correct, and harmless.
     ("arena", &[1408, 4]),
@@ -28,10 +29,11 @@ const EXPECTED: &[(&str, &[usize])] = &[
     ("facility", &[5815]),
     ("linear", &[2150]),
     ("showcase", &[4502]),
-    // The undercroft (496) and a 16-cell run of its stair: the flight carries on past the
-    // floor hole under the armory slab with no headroom. Real geometry, to be fixed when
-    // the designs are ported to the relational builder API.
-    ("grand", &[7328, 496, 16]),
+    // One component since 2026-09 (was [7328, 496, 16]): the undercroft stair now goes
+    // through `stair_through_floor`, whose hole covers the whole flight, and the loft sits
+    // across a real wall from the hall.
+    ("grand", &[7904]),
+    ("compound", &[3027]),
     ("pd_lab", &[3952]),
 ];
 
@@ -58,7 +60,7 @@ macro_rules! golden {
         }
     };
 }
-golden!(smoke, arena, varied, sprawl, facility, linear, showcase, grand, pd_lab);
+golden!(smoke, arena, varied, sprawl, facility, linear, showcase, grand, compound, pd_lab);
 
 #[test]
 fn every_design_has_a_golden_test() {
@@ -87,6 +89,7 @@ fn check_design(name: &str) {
     after.load_level(&path).expect("reloads");
     let _ = std::fs::remove_file(&path);
 
+    assert!(built.problems.is_empty(), "{name}: builder problems {:?}", built.problems);
     let verdict = roundtrip_check(&built, &after);
     assert!(verdict.starts_with("round trip: OK"), "{name}: {verdict}");
 
@@ -240,10 +243,128 @@ fn stair_treads_are_not_floors() {
 /// different finding from a deck that is merely cut off, with a different fix.
 #[test]
 fn a_deck_under_a_low_ceiling_has_no_floor_rather_than_no_route() {
-    let d = analyze(&designs::smoke());
+    // `smoke` as it was before 2026-09: a 5 WT deck in an 8 WT room.
+    let mut b = LevelBuilder::new();
+    let room = b.room("room_b", 0.0, 0.0, 12.0, 12.0, 0.0, 8.0);
+    let perch = b.platform("perch_b", 1.0, 2.0, 6.0, 6.0, 5.0, true);
+    b.stair_to_platform((4.0, 0.0, 11.0), perch, engine::geometry::structures::Edge::ZMax, 0.5, 4.0, true);
+    let deck = b.last_room();
+    b.link(room, deck);
+    b.spawn_wt(9.0, 0.0, 9.0);
+    let d = analyze(&b.finish());
     let perch = d.rooms.iter().find(|r| r.name == "perch_b").unwrap();
     assert_eq!(perch.cells, 0, "5 WT deck in an 8 WT room leaves 3 WT of headroom");
     let reach = check(&d, "reachable");
     assert_eq!(reach.status, analyze::Status::Fail);
     assert!(reach.detail.contains("no standable floor"), "{}", reach.detail);
+}
+
+// ─── The relational builder ───────────────────────────────────────────────────
+
+use super::builder::Dir;
+
+fn reach(d: &analyze::ReportData) -> analyze::Status {
+    check(d, "reachable").status
+}
+
+/// `door` finds the wall two rooms share and opens it; the rooms stay two rooms.
+#[test]
+fn a_door_joins_rooms_across_their_shared_wall() {
+    let mut b = LevelBuilder::new();
+    let a = b.room("a", 0.0, 0.0, 16.0, 16.0, 0.0, 12.0);
+    let c = b.room_beside("c", a, Dir::East, 3.0, 12.0, 20.0, 0.0, 12.0);
+    b.door(a, c, 5.0);
+    b.spawn_wt(8.0, 0.0, 8.0);
+    let built = b.finish();
+    assert!(built.problems.is_empty(), "{:?}", built.problems);
+    let d = analyze(&built);
+    assert_eq!(reach(&d), analyze::Status::Pass);
+    assert!(d.merged.is_empty(), "a 3 WT wall is still a wall");
+    assert!(d.declared.iter().all(|e| e.walkable && e.direct));
+}
+
+/// A door between rooms on different floors is a stair, and says so instead of
+/// carving an opening into a wall face.
+#[test]
+fn a_door_between_floors_is_a_problem_not_a_guess() {
+    let mut b = LevelBuilder::new();
+    let a = b.room("a", 0.0, 0.0, 16.0, 16.0, 0.0, 12.0);
+    let c = b.room_beside("c", a, Dir::East, 3.0, 16.0, 16.0, -6.0, 12.0);
+    b.door(a, c, 5.0);
+    let built = b.finish();
+    assert_eq!(built.problems.len(), 1);
+    assert!(built.problems[0].contains("stair_between"), "{}", built.problems[0]);
+    assert_eq!(built.edges.len(), 0, "nothing was built, so nothing is declared");
+}
+
+/// `stair_between` counts the steps and says how much wall it needs when there is
+/// too little; with enough, the lower room is reachable.
+#[test]
+fn stair_between_needs_steps_plus_one_of_wall() {
+    let mut b = LevelBuilder::new();
+    let a = b.room("a", 0.0, 0.0, 16.0, 16.0, 0.0, 14.0);
+    let c = b.room_beside("c", a, Dir::South, 4.0, 16.0, 16.0, -6.0, 12.0);
+    b.stair_between(a, c, 6.0);
+    let built = b.finish();
+    assert_eq!(built.problems.len(), 1);
+    assert!(built.problems[0].contains("needs 7 WT"), "{}", built.problems[0]);
+
+    for wall in [7.0, 12.0] {
+        let mut b = LevelBuilder::new();
+        let a = b.room("a", 0.0, 0.0, 16.0, 16.0, 0.0, 14.0);
+        let c = b.room_beside("c", a, Dir::South, wall, 16.0, 16.0, -6.0, 12.0);
+        b.stair_between(a, c, 6.0);
+        b.spawn_wt(8.0, 0.0, 8.0);
+        let built = b.finish();
+        assert!(built.problems.is_empty(), "{:?}", built.problems);
+        assert_eq!(reach(&analyze(&built)), analyze::Status::Pass, "a {wall} WT wall");
+    }
+}
+
+/// The stacked-rooms stair: the hole covers the flight, so every tread has headroom and
+/// the room below is reachable — the `grand` undercroft defect, made unrepeatable.
+#[test]
+fn stair_through_floor_reaches_the_room_below_with_headroom() {
+    let mut b = LevelBuilder::new();
+    let up = b.room("up", 0.0, 0.0, 30.0, 20.0, 0.0, 14.0);
+    let down = b.room("down", 2.0, 2.0, 26.0, 16.0, -12.0, 10.0);
+    b.stair_through_floor(up, down, 6.0, 10.0, Dir::East, 4.0);
+    b.spawn_wt(3.0, 0.0, 3.0);
+    let built = b.finish();
+    assert!(built.problems.is_empty(), "{:?}", built.problems);
+    let d = analyze(&built);
+    assert_eq!(reach(&d), analyze::Status::Pass, "{:?}", check(&d, "reachable"));
+    assert_eq!(check(&d, "headroom").status, analyze::Status::Pass, "{:?}", check(&d, "headroom"));
+    assert_eq!(d.components.len(), 1);
+}
+
+/// Diagonal rooms get an L-shaped corridor.
+#[test]
+fn a_corridor_bends_to_reach_a_diagonal_room() {
+    let mut b = LevelBuilder::new();
+    let a = b.room("a", 0.0, 0.0, 12.0, 12.0, 0.0, 12.0);
+    let c = b.room("c", 24.0, 24.0, 12.0, 12.0, 0.0, 12.0);
+    b.corridor(a, c, 4.0);
+    b.spawn_wt(6.0, 0.0, 6.0);
+    let built = b.finish();
+    assert!(built.problems.is_empty(), "{:?}", built.problems);
+    assert_eq!(reach(&analyze(&built)), analyze::Status::Pass);
+}
+
+/// Spawn pads and pickups arrive as the entities the editor would have placed, and a
+/// misspelt weapon is a problem rather than a silent no-show.
+#[test]
+fn pads_and_pickups_are_authored_entities() {
+    let mut b = LevelBuilder::new();
+    b.room("a", 0.0, 0.0, 16.0, 16.0, 0.0, 12.0);
+    b.spawn_pad(4.0, 0.0, 4.0, 0.0);
+    b.spawn_pad(12.0, 0.0, 12.0, 180.0);
+    b.weapon("PP7", 8.0, 0.0, 8.0);
+    b.weapon("PP8", 8.0, 0.0, 9.0);
+    let built = b.finish();
+    assert_eq!(built.problems.len(), 1, "{:?}", built.problems);
+    assert!(built.problems[0].contains("PP8"));
+    let world = world_with(&built);
+    assert_eq!(world.spawn_pad_count(), 2);
+    assert_eq!(built.entities.len(), 3, "two pads and the one real weapon");
 }

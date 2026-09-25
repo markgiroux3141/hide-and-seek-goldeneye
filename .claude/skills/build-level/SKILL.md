@@ -72,6 +72,35 @@ and now bake **with** placed props, exactly as in-game:
 
 ## Builder API cheat-sheet (`LevelBuilder`)
 All positions min-corner WT. `let mut b = LevelBuilder::new();` … `b.finish()`.
+`designs::compound` is a whole level written this way — read it first.
+
+### Relational layer — prefer this
+These take **rooms** and work out the boxes themselves (which wall two rooms share,
+where the opening centres, how far it overlaps each room, how many steps a stair
+needs). A call that can't be built records a **builder problem** — the report's
+`builder` check fails and says what to change — rather than carving something wrong.
+Compass: **North = −z** (up in the floorplans), East = +x.
+- `room_beside(name, of, Dir, wall, w, d, floor, height) -> RoomId` — carve a room
+  across a `wall`-thick wall on `of`'s side, centred. `room_beside_at(…, along, …)`
+  sets the offset from `of`'s min corner instead. A wall of ≥ 1 WT keeps them apart.
+- `door(a, b, width)` / `door_at(a, b, t, width, height)` — open the shared wall
+  (at fraction `t` along it), overlapping both rooms by 2 WT; records the edge. Any
+  wall thickness, so it is also a straight corridor. Floors must match (within 1 WT)
+  — except a door *off a mezzanine*: if the lower room's ceiling clears the upper
+  floor by the door's height, it opens at the upper floor.
+- `corridor(a, b, width)` — straight if they face each other, else an L.
+- `window_between(a, b, t, sill, width, height)` — see/shoot-through, not walkable.
+  Keep `t` off the door's (`door` uses 0.5).
+- `stair_between(a, b, width)` — rooms on different floors across a shared wall; the
+  wall must be ≥ steps + 1 WT (it tells you how much to move them if not).
+- `stair_through_floor(upper, lower, x, z, Dir, width)` — rooms stacked one over the
+  other: a free-standing flight from `(x, z)` on the upper floor descending toward
+  `Dir`, with the floor hole cut over the whole flight so every tread has headroom.
+- `spawn_pad(x, y, z, yaw_deg)`, `weapon(name, x, y, z)`, `ammo(name, x, y, z)` — the
+  match. Players and hunters start unarmed, so put weapons down. A misspelt weapon is a
+  builder problem. (Doors as props are not in the builder yet.)
+
+### Coordinate layer
 - `set_scheme(n: 0..=8)` — texture for subsequent carves/pillars. **Vary per room/
   wing** (9 is reserved for platforms). Set before each room.
 - `room(name, x, z, w, d, floor, height) -> RoomId` — carve a room (air box).
@@ -106,7 +135,9 @@ All positions min-corner WT. `let mut b = LevelBuilder::new();` … `b.finish()`
 - **Split-levels read as handcrafted:** sunken pits, raised catwalks/mezzanines,
   balconies. Layer three heights in one hero room when you can.
 - **Textures per room** via `set_scheme` — visual identity, not all-white.
-- **Cover:** thin full-height pillars (`pillar_in`) to break sightlines.
+- **Cover:** thin full-height pillars (`pillar_in`) to break sightlines — **≥ 3 WT
+  from any wall, stair or door**, or flush against it: a 2 WT gap is a 0.5 m slot a
+  hunter's body cannot pass (the `pinches` check flags it).
 - **Perch:** a deck overlooks whatever its **edge** can see at eye height — a wide
   mezzanine along a wall works (the old "cantilever it, don't hug the wall" rule was
   mostly an artefact of a perch check that sighted from the deck's centre, 1 m below
@@ -129,11 +160,10 @@ All positions min-corner WT. `let mut b = LevelBuilder::new();` … `b.finish()`
   spaces; use CSG-down where it's cut into a **real wall** so the fill hides in solid.
 - **A stair-run's lowest tread lands one step ABOVE its ground anchor** — anchor
   one lower to land flush.
-- **Floor hole + downstair:** the hole must be **wide enough to walk through and
-  cover the whole stair footprint**, the **stair top must meet the hole rim** at the
-  upper floor, and there must be **≥8 WT headroom** over every tread. A flight that
-  runs on under the slab past the hole's edge has no headroom and severs the room
-  below (this is what's wrong with `grand`'s undercroft).
+- **Floor hole + downstair:** use `stair_through_floor` — it sizes the hole to the
+  flight. By hand, the hole must **cover the whole stair footprint**, the stair top
+  must meet the hole rim, and every tread needs ≥ 8 WT of headroom; a flight that runs
+  on under the slab past the hole is what cut `grand`'s undercroft off until 2026-09.
 - **Headroom everywhere ≥ 8 WT.** Corridors/stairwells at 7 WT cause head-bump.
   The analyzer's HEADROOM lint flags anything under 8 — keep it green.
 

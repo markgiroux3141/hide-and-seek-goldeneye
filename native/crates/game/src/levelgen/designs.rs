@@ -5,7 +5,7 @@
 use engine::geometry::csg_runtime::{Axis, Side, StairDir};
 use engine::geometry::structures::Edge;
 
-use super::builder::{BuiltLevel, LevelBuilder, RoomId};
+use super::builder::{BuiltLevel, Dir, LevelBuilder, RoomId, DOOR_HEIGHT};
 
 /// **The editor's opening room** — the seed behind `New level → Starter room`, and the
 /// room [`crate::world::World::new`] itself boots into.
@@ -96,12 +96,16 @@ pub fn pd_lab() -> BuiltLevel {
 
 /// Minimal pipeline check: two rooms, an open doorway, one overlook platform +
 /// stair, a spawn. Exists to prove build→bake→report→slot end to end.
+///
+/// room_b was 8 WT tall until 2026-09, which left its 5 WT perch 3 WT of headroom — no
+/// standable cell on it at all. The first analyzer called it reachable anyway, by
+/// snapping to a stair tread beside it.
 pub fn smoke() -> BuiltLevel {
     let mut b = LevelBuilder::new();
-    let a = b.room("room_a", 0.0, 0.0, 12.0, 12.0, 0.0, 8.0);
-    let c = b.room("room_b", 16.0, 0.0, 12.0, 12.0, 0.0, 8.0);
+    let a = b.room("room_a", 0.0, 0.0, 12.0, 12.0, 0.0, 12.0);
+    let c = b.room("room_b", 16.0, 0.0, 12.0, 12.0, 0.0, 14.0);
     // Doorway straddling the x=12..16 wall gap.
-    b.passage(a, c, 10.0, 4.0, 8.0, 4.0, 0.0, 6.0);
+    b.passage(a, c, 10.0, 4.0, 8.0, 4.0, 0.0, 10.0);
 
     let perch = b.platform("perch_b", 17.0, 2.0, 6.0, 6.0, 5.0, true);
     // Stair from room_b floor up to the perch's ZMax edge.
@@ -236,23 +240,31 @@ pub fn grand() -> BuiltLevel {
 
     // ===== UPPER WING: mezzanine -> door -> north_loft -> up-stair -> attic =====
     // Walk off the mezzanine (y=14) through a door in the hall's north wall into a
-    // loft, then a CSG up-stair a flight higher to an attic.
+    // loft, then an up-stair a flight higher to an attic.
+    //
+    // Relational since 2026-09. The loft used to be carved flush against the hall
+    // (its air started at z=0, where the hall's ends), so there was no wall between
+    // them and the "door off the deck" was the whole wall. It now sits across a 2 WT
+    // wall and the door is the only way in.
     b.set_scheme(2);
-    let north_loft = b.room("north_loft", 8.0, -16.0, 32.0, 16.0, 14.0, 12.0);
-    b.passage(mezz_room, north_loft, 18.0, -2.0, 6.0, 4.0, 14.0, 7.0); // door off the deck
+    let north_loft = b.room_beside_at("north_loft", hall, Dir::North, 2.0, 8.0, 32.0, 16.0, 14.0, 12.0);
+    b.door_at(hall, north_loft, 0.4, 6.0, DOOR_HEIGHT); // entered off the mezzanine deck
+    b.link(mezz_room, north_loft);
     b.set_scheme(3);
-    let attic = b.room("attic", 12.0, -36.0, 24.0, 12.0, 22.0, 10.0);
-    b.csg_stair(Axis::Z, Side::Min, -16.0, 16.0, 24.0, 14.0, 26.0, StairDir::Up, 8);
-    b.link(north_loft, attic);
+    // A 9 WT wall: the 8-step stairwell plus its landing.
+    let attic = b.room_beside("attic", north_loft, Dir::North, 9.0, 24.0, 12.0, 22.0, 10.0);
+    b.stair_between(north_loft, attic, 8.0);
 
     // ===== LOWER WING: hole in the armory floor -> undercroft -> platform stair =====
     // A large room under the armory, entered through a floor hole + a free-standing
-    // staircase down (the slot-1 move). Player-walkable; enemy-nav measured below.
+    // staircase down (the slot-1 move).
+    //
+    // `stair_through_floor` since 2026-09: the hand-placed hole was 8 WT long for a
+    // 13 WT flight, so the lower treads ran on under the slab with ~0.5 m of headroom
+    // and the undercroft was cut off from hunters. The hole now covers the flight.
     b.set_scheme(4);
     let undercroft = b.room("undercroft", -28.0, 6.0, 24.0, 22.0, -12.0, 10.0);
-    b.window(-22.0, -2.0, 12.0, 8.0, 2.0, 10.0); // cut the hole through the floor slab
-    b.stair_ground((-18.0, 0.0, 16.0), (-5.0, -13.0, 16.0), 4.0, false);
-    b.link(armory, undercroft);
+    b.stair_through_floor(armory, undercroft, -22.0, 16.0, Dir::East, 4.0);
 
     // ---- Cover: thin full-height pillars on the main floor (scheme 0) ----
     b.set_scheme(0);
@@ -492,6 +504,80 @@ pub fn sprawl() -> BuiltLevel {
     b.pillar_in(west_wing, -26.0, 2.0, 3.0);
 
     b.spawn_wt(8.0, 0.5, 7.0);
+    b.finish()
+}
+
+/// **A whole level written with the relational builder** — no coordinate arithmetic for
+/// any opening or stair — and the first design that is a complete match: spawn pads and
+/// weapons on the floor (the player and the hunters start unarmed).
+///
+/// Ground floor: a lobby, a tall hall east of it, an office and a storeroom along the
+/// north side closing a loop (lobby → office → storage → hall → lobby). A balcony on the
+/// hall's south wall leads through a door into an upper loft; a stair through the hall
+/// floor drops into a vault beneath it. A window lets the lobby watch the hall.
+pub fn compound() -> BuiltLevel {
+    let mut b = LevelBuilder::new();
+
+    b.set_scheme(0);
+    let lobby = b.room("lobby", 0.0, 0.0, 24.0, 20.0, 0.0, 14.0);
+
+    b.set_scheme(1);
+    let hall = b.room_beside("hall", lobby, Dir::East, 2.0, 40.0, 24.0, 0.0, 24.0);
+    b.door(lobby, hall, 6.0);
+    b.window_between(lobby, hall, 0.15, 5.0, 4.0, 4.0);
+
+    b.set_scheme(2);
+    let office = b.room_beside("office", lobby, Dir::North, 2.0, 16.0, 14.0, 0.0, 12.0);
+    b.door(lobby, office, 5.0);
+
+    b.set_scheme(3);
+    let storage = b.room_beside_at("storage", hall, Dir::North, 2.0, 0.0, 14.0, 12.0, 0.0, 12.0);
+    b.door(office, storage, 4.0); // a short hall through the 6 WT between them
+    b.door(storage, hall, 6.0);
+
+    // Up: a balcony along the hall's south wall, a stair up to it, a door off it.
+    let balcony = b.platform("balcony", 26.0, 14.0, 40.0, 8.0, 12.0, true);
+    let balcony_room = b.last_room();
+    b.stair_to_platform((56.0, 0.0, 2.0), balcony, Edge::ZMin, 0.75, 4.0, true);
+    b.link(hall, balcony_room);
+    b.set_scheme(4);
+    let loft = b.room_beside("loft", hall, Dir::South, 2.0, 30.0, 14.0, 12.0, 12.0);
+    b.door(hall, loft, 6.0);
+    b.link(balcony_room, loft);
+
+    // Down: a vault under the hall, through its floor.
+    b.set_scheme(5);
+    let vault = b.room("vault", 30.0, 2.0, 32.0, 16.0, -12.0, 10.0);
+    b.stair_through_floor(hall, vault, 34.0, 10.0, Dir::East, 4.0);
+
+    // Cover in the hall, clear of the stairs, the hole, the balcony and every door — and
+    // ≥ 3 WT from any wall: a pillar 2 WT off a wall leaves a 0.5 m slot a hunter's body
+    // cannot pass (the NAV pinch check caught the first placement doing exactly that).
+    b.set_scheme(1);
+    b.pillar_in(hall, 29.0, 3.0, 3.0);
+    b.pillar_in(hall, 38.0, 2.0, 3.0);
+    b.pillar_in(hall, 48.0, 2.0, 3.0);
+
+    // The match: pads in every wing, and something to pick up in each.
+    b.spawn_wt(12.0, 0.0, 10.0);
+    for (x, y, z, yaw) in [
+        (4.0, 0.0, 4.0, 45.0),
+        (8.0, 0.0, -12.0, 180.0),
+        (36.0, 0.0, -10.0, 0.0),
+        (62.0, 0.0, 20.0, -90.0),
+        (58.0, -12.0, 14.0, 90.0),
+        (46.0, 12.0, 34.0, 180.0),
+    ] {
+        b.spawn_pad(x, y, z, yaw);
+    }
+    b.weapon("PP7", 18.0, 0.0, 16.0);
+    b.weapon("KF7 Soviet", 6.0, 0.0, -6.0);
+    b.weapon("Shotgun", 38.0, 0.0, -6.0);
+    b.weapon("AR33", 40.0, 0.0, 18.0);
+    b.weapon("RC-P90", 50.0, -12.0, 6.0);
+    b.ammo("PP7", 20.0, 0.0, 16.0);
+    b.ammo("KF7 Soviet", 8.0, 0.0, -6.0);
+    b.ammo("AR33", 42.0, 0.0, 18.0);
     b.finish()
 }
 

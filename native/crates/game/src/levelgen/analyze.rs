@@ -31,7 +31,7 @@ use engine::sim::nav::{NavWorld, WalkGraph};
 use glam::Vec3;
 use serde::Serialize;
 
-use super::builder::BuiltLevel;
+use super::builder::{BuiltLevel, LabelKind};
 use crate::world::{NavIssues, NavSeverity, World};
 
 /// A level with at least this many flat (non-stair) walkable cells is a **floor** and
@@ -161,6 +161,8 @@ pub struct ReportData {
     pub design: String,
     pub verdict: Status,
     pub checks: Vec<Check>,
+    /// Relational builder calls that could not be built (see `builder` module docs).
+    pub problems: Vec<String>,
     /// Walkable component sizes, largest first (the main one first).
     pub components: Vec<usize>,
     pub nav: Vec<NavLineRow>,
@@ -218,16 +220,7 @@ impl<'a> Analysis<'a> {
         let graph = nav.walk_graph();
         let at: HashMap<_, _> = graph.cells.iter().enumerate().map(|(i, c)| (c.wt, i)).collect();
 
-        // Platform labels are the ones the builder mirrored off a platform deck.
-        let platform: Vec<bool> = level
-            .rooms
-            .iter()
-            .map(|r| {
-                level.platforms.iter().any(|p| {
-                    p.x == r.aabb[0] && p.z == r.aabb[2] && p.y == r.aabb[1] && r.aabb[4] == 1.0
-                })
-            })
-            .collect();
+        let platform: Vec<bool> = level.rooms.iter().map(|r| r.kind == LabelKind::Platform).collect();
 
         // A cell belongs to the most specific (smallest) label containing it: a deck
         // inside a hall is the deck, not the hall.
@@ -687,6 +680,17 @@ impl<'a> Analysis<'a> {
         let mut checks = Vec::new();
         let mut check = |check, status, detail: String| checks.push(Check { check, status, detail });
 
+        let problems = self.level.problems.clone();
+        check(
+            "builder",
+            if problems.is_empty() { Status::Pass } else { Status::Fail },
+            if problems.is_empty() {
+                "every relational call was built".into()
+            } else {
+                format!("{} call(s) could not be built: {}", problems.len(), problems.join(" | "))
+            },
+        );
+
         let islands = &comps[comps.len().min(1)..];
         check(
             "walkable",
@@ -799,12 +803,32 @@ impl<'a> Analysis<'a> {
                 }
             ),
         );
+        // Summarise each deck by the room it stands in when it has one — the classic
+        // overlook — rather than by whatever far room it glimpses best through a door.
+        let host = |p: &PerchRow| {
+            let lab = rooms.iter().find(|r| r.name == p.name)?;
+            let (cx, cz) = (lab.aabb[0] + lab.aabb[3] * 0.5, lab.aabb[2] + lab.aabb[5] * 0.5);
+            rooms
+                .iter()
+                .enumerate()
+                .find(|(i, r)| {
+                    !self.platform[*i]
+                        && cx >= r.aabb[0]
+                        && cx < r.aabb[0] + r.aabb[3]
+                        && cz >= r.aabb[2]
+                        && cz < r.aabb[2] + r.aabb[5]
+                        && lab.aabb[1] > r.aabb[1]
+                        && lab.aabb[1] < r.aabb[1] + r.aabb[4]
+                })
+                .map(|(_, r)| r.name.clone())
+        };
         let best = perches
             .iter()
             .filter_map(|p| {
-                p.overlooks
-                    .first()
-                    .map(|o| (p, o, o.seen as f32 / o.total as f32))
+                let pick = host(p)
+                    .and_then(|h| p.overlooks.iter().find(|o| o.room == h))
+                    .or(p.overlooks.first())?;
+                Some((p, pick, pick.seen as f32 / pick.total as f32))
             })
             .max_by(|a, b| a.2.total_cmp(&b.2));
         check(
@@ -824,6 +848,20 @@ impl<'a> Analysis<'a> {
                     perches.len()
                 ),
                 _ => format!("none of {} deck(s) overlooks a lower room", perches.len()),
+            },
+        );
+        let pinch = self.issues.pinch_cells;
+        check(
+            "pinches",
+            if pinch == 0 { Status::Pass } else { Status::Warn },
+            if pinch == 0 {
+                "no corridor too narrow for a hunter's body".into()
+            } else {
+                format!(
+                    "{pinch} cell(s) in corridors a hunter barely fits or cannot fit (narrowest                      {:.2} m; a body is {:.2} m) — see NAV for where",
+                    self.issues.narrowest,
+                    2.0 * crate::world::ENEMY_RADIUS
+                )
             },
         );
         check(
@@ -852,6 +890,7 @@ impl<'a> Analysis<'a> {
             design: self.design.to_string(),
             verdict,
             checks,
+            problems,
             components: comps,
             nav,
             rooms: room_rows,
