@@ -133,6 +133,18 @@ pub(crate) fn fire_window_for(class: EnemyWeaponClass, dual: bool) -> (f32, f32)
 /// a Perfect Dark hunter's burst switches to by bearing
 /// ([`crate::combat::attack_anim::slot_is_fire`]). Asking the table rather than
 /// comparing three constants is what keeps this honest as the set grows.
+/// Blend `pose` toward `other` by `w` (0 = unchanged, 1 = `other`), joint by joint:
+/// lerped translation and scale, slerped rotation. Joints past the shorter pose are
+/// left alone.
+fn blend_pose_into(pose: &mut Pose, other: &Pose, w: f32) {
+    let w = w.clamp(0.0, 1.0);
+    for b in 0..pose.joint_count().min(other.joint_count()) {
+        pose.t[b] = pose.t[b].lerp(other.t[b], w);
+        pose.r[b] = pose.r[b].slerp(other.r[b], w);
+        pose.s[b] = pose.s[b].lerp(other.s[b], w);
+    }
+}
+
 pub(crate) fn is_fire_clip(idx: usize) -> bool {
     idx == FIRE_RIFLE_IDX
         || idx == FIRE_PISTOL_IDX
@@ -337,16 +349,17 @@ impl World {
                 .get(inst.body)
                 .map(|p| p[if inst.pd_anims { 0 } else { 1 }])
                 .unwrap_or(0.0);
-            // A hit/death one-shot takes over the whole body: feed its pose as the
-            // base and bypass locomotion + aim. `is_fire_clip` guard is vestigial
-            // (fire is a timer, never on the mixer) but keeps the check honest.
-            let one_shot =
-                inst.anim.is_playing_oneshot() && !is_fire_clip(inst.anim.current_clip());
+            // A hit/death one-shot is playing. It no longer *replaces* the stack: the
+            // stack keeps running underneath (aim, look and IK easing out on their own
+            // weights) and the one-shot is crossfaded over it by `oneshot_w` below — so
+            // it blends in from the pose on screen instead of cutting to it.
+            let one_shot = inst.anim.is_playing_oneshot();
             // Cadence: warp the gait phase rate to the hunter's ACTUAL committed ground
             // speed (which ORCA can drop below the intended gait speed), so the feet
-            // cycle at the real travel rate instead of skating. Only while moving; off
-            // (1.0) when foot-IK is disabled or the hunter is ~stopped.
-            let stride_scale = if foot_ik_on && inst.anim_speed > 0.2 {
+            // cycle at the real travel rate instead of skating. Only while moving (1.0
+            // when ~stopped). Not tied to foot IK: skating is a cadence problem, and a
+            // hunter with IK off slides just the same.
+            let stride_scale = if inst.anim_speed > 0.2 {
                 let v = inst.enemy.velocity();
                 let actual = (v.x * v.x + v.z * v.z).sqrt();
                 (actual / inst.anim_speed).clamp(STRIDE_SCALE_MIN, STRIDE_SCALE_MAX)
@@ -356,7 +369,7 @@ impl World {
             if let Some(loco) = inst.stack.layer_as::<LocomotionBlendLayer>(ENEMY_LOCO_LAYER) {
                 loco.speed = inst.anim_speed;
                 loco.stride_scale = stride_scale;
-                loco.enabled = !one_shot;
+                loco.enabled = true;
             }
             let engaged = matches!(
                 inst.enemy.state(),
@@ -378,7 +391,7 @@ impl World {
             // it follows. Bypassed during a hit/death one-shot.
             if let Some(ov) = inst.stack.layer_as::<ClipOverlayLayer>(ENEMY_AIM_OVERLAY_LAYER) {
                 ov.weight = inst.aim_weight;
-                ov.enabled = !one_shot;
+                ov.enabled = true;
             }
             // Chest-aim: swing the whole hold so the real gun barrel points at the
             // player (bearing + height), cone-clamped, eased in with the aim weight.
@@ -400,7 +413,7 @@ impl World {
                 if let Some(t) = aim_target {
                     ca.target = t;
                 }
-                ca.weight = if one_shot || !tracking { 0.0 } else { inst.aim_weight };
+                ca.weight = if !tracking { 0.0 } else { inst.aim_weight };
             }
 
             // ── Head look-at: turn the head toward what the hunter is thinking about. ──
@@ -459,24 +472,19 @@ impl World {
                     hl.target = t;
                 }
                 hl.enabled = head_look_on;
-                hl.weight = if one_shot { 0.0 } else { inst.head_look_weight };
+                hl.weight = inst.head_look_weight;
             }
 
-            // Base pose: the hit/death one-shot when active, else the bind pose for
-            // the locomotion blend layer to overwrite with the current gait.
-            let base = if one_shot {
-                inst.anim.pose(sk)
-            } else {
-                Pose::bind(sk)
-            };
+            // Base pose: bind, for the locomotion blend layer to overwrite with the gait.
             let ctx = LayerCtx { skeleton: sk, dt };
-            let mut pose = inst.stack.evaluate(base, &ctx);
+            let mut pose = inst.stack.evaluate(Pose::bind(sk), &ctx);
 
             // ── Ground-adaptive foot IK post-pass (after the stack, not a stack layer:
             // the feet must be read from the finished locomotion pose, and grounding
-            // needs the world transform + nav floor query only the `World` has). Skipped
-            // during a hit/death one-shot so the canned clip plays untouched. ──
-            if foot_ik_on && !one_shot {
+            // needs the world transform + nav floor query only the `World` has). It
+            // grounds the *stack's* pose; a one-shot blended over it below brings its own
+            // feet, so the IK fades out with the stack as the one-shot fades in. ──
+            if foot_ik_on {
                 if let (Some(arm), Some(nav)) = (arms.get(inst.body).and_then(|a| a.as_ref()), nav) {
                     let yaw = inst.yaw();
                     ground_feet(
@@ -502,12 +510,29 @@ impl World {
                     let char_inv =
                         char_transform_raw(inst.enemy.pos, inst.yaw(), feet_off).inverse();
                     let rp = reaction.rag.model_local_pose(physics, sk, char_inv);
-                    for b in 0..pose.joint_count().min(rp.joint_count()) {
-                        pose.t[b] = pose.t[b].lerp(rp.t[b], w);
-                        pose.r[b] = pose.r[b].slerp(rp.r[b], w);
-                        pose.s[b] = pose.s[b].lerp(rp.s[b], w);
-                    }
+                    blend_pose_into(&mut pose, &rp, w);
                 }
+            }
+
+            // ── The one-shot crossfade (PD's 16-tick merge) ──
+            // In over `ONESHOT_MERGE` from the pose on screen, and out over the same from
+            // the one-shot's last frame (held, because by then the mixer has already
+            // returned to looping). A death never returns, so it stays at 1.
+            let rate = dt / ONESHOT_MERGE;
+            inst.oneshot_w = if one_shot {
+                (inst.oneshot_w + rate).min(1.0)
+            } else {
+                (inst.oneshot_w - rate).max(0.0)
+            };
+            if one_shot {
+                inst.oneshot_hold = Some(inst.anim.pose(sk));
+            }
+            if inst.oneshot_w > 0.0 {
+                if let Some(shot) = inst.oneshot_hold.as_ref() {
+                    blend_pose_into(&mut pose, shot, inst.oneshot_w);
+                }
+            } else {
+                inst.oneshot_hold = None;
             }
             inst.final_pose = Some(pose);
         }

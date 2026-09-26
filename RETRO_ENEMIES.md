@@ -298,6 +298,35 @@ Read `gailists.c:2020-2060` and `:2733-2860`, and `chraicommands.c:6472`.
 > and no dropped trigger. `REACTIONS=guard` brings back the injury-table stagger for an A/B.
 > Friendly fire now lands at the real impact point.
 >
+> **A1 COMMITTED 512dad7** (playtest: "the enemies are relentless now and they find me
+> quick").
+>
+> **A2 status: built, green (882 tests), release built, awaiting playtest.**
+> - **Hit/death one-shots crossfade over PD's 16-tick merge** (`ONESHOT_MERGE`, ~0.27 s), from
+>   the live pose and back out to it. The stack keeps running underneath, and aim, look and IK
+>   ease out on their own weights. The mixer's own fade is zeroed, because it faded from a
+>   hidden clip. Measured: a kill used to swing a joint 106° in one frame; the first blended
+>   frame turns it 17°.
+> - **Gait anchors are measured off the clips** (`AnimationClip::ground_speed`: the root's mean
+>   forward velocity relative to the planted foot, taken at wave spawn). Walk / jog / run come
+>   out at ~0.82 / 1.37 / 3.04 m/s, against the 1.5 / 3.5 / 5.0 guesses. Past the run clip,
+>   cadence scales up (cap 2×), and the stride correction no longer depends on foot IK. Net
+>   planted-foot drift is now 2% / 1% / 0% of body speed at walk / jog / chase, down from
+>   77% / 55% / 42%.
+> - The mixer's dead fire-window plumbing is removed.
+> - **Deferred:** sharing clips through `Arc` (memory only, not feel).
+>
+> **Faithfulness pass (user: "as faithful to PD as we can, even if it changes our
+> system").** It came out of the "they can't hit me" playtest bug. Under `AI=pd`:
+> - The **shove unit** is PD's own: `shotspeed` is scaled by `ANIM_0029`'s travel, and
+>   `ANIM_0029` is our run clip. That's 2.85 m/s on a PD body.
+> - **Speed** follows PD's tier (`bot_calculate_max_speed`: Normal ≈ 4.6 m/s), not our dial.
+> - **Health is flat**: PD's tiers never touch it. Our dial's 2.2–4× health let a hunter soak
+>   an automatic for 3–6 s while shoved across the room.
+>
+> Correction: PD bots **do** stand still to shoot (`chr_try_stop` in OK mode). The earlier
+> claim that they "run into their shove" was wrong.
+>
 > **Still open for A3:** the band-edge plant/run (Ok↔Advance) under a drifting player. PD
 > smooths the velocity, and a PD-mode stop-start check goes in with that. The two thrash tests
 > are pinned to `ours` until then.

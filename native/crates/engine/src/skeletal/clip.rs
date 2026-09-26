@@ -99,6 +99,61 @@ impl AnimationClip {
         (t, r, s)
     }
 
+    /// The **ground speed a gait clip is authored for**, in model units per second — the
+    /// speed the body has to travel for its planted foot not to slide.
+    ///
+    /// Measured, not assumed: over one cycle, whichever foot is in its lowest band
+    /// (stance) is taken to be on the ground, and the root's velocity *relative to that
+    /// foot*, along the character's forward axis (model +Z), is the travel speed.
+    /// Relative to the foot, so it is the same answer for an in-place clip (the foot
+    /// sweeps back under a still root) and a root-motion one (the root moves over a
+    /// still foot).
+    ///
+    /// The **mean** over every stance sample of both feet — the stance distance over the
+    /// stance time — not the median: a foot decelerates through its stance, so the
+    /// median sat well above the average (2.2 m/s against 1.4 for the jog) and a body
+    /// driven at it slid a quarter of every stride.
+    ///
+    /// `None` for a clip too short to sample or with no stance at all (idle).
+    pub fn ground_speed(&self, skeleton: &Skeleton, root: usize, feet: [usize; 2]) -> Option<f32> {
+        const N: usize = 120;
+        if self.duration <= 1e-3 || [root, feet[0], feet[1]].iter().any(|&j| j >= skeleton.joint_count()) {
+            return None;
+        }
+        let dt = self.duration / N as f32;
+        let mut root_p = Vec::with_capacity(N + 1);
+        let mut foot_p = [Vec::with_capacity(N + 1), Vec::with_capacity(N + 1)];
+        for i in 0..=N {
+            let g = skeleton.global_transforms(&self.pose_locals(i as f32 * dt, skeleton));
+            root_p.push(g[root].w_axis.truncate());
+            for f in 0..2 {
+                foot_p[f].push(g[feet[f]].w_axis.truncate());
+            }
+        }
+        let mut speeds: Vec<f32> = Vec::new();
+        for f in 0..2 {
+            let ys: Vec<f32> = foot_p[f].iter().map(|p| p.y).collect();
+            let lo = ys.iter().cloned().fold(f32::INFINITY, f32::min);
+            let hi = ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            if hi - lo < 1e-4 {
+                continue; // the foot never lifts: not a gait
+            }
+            let planted = |i: usize| ys[i] <= lo + (hi - lo) * 0.15;
+            for i in 0..N {
+                if planted(i) && planted(i + 1) {
+                    let a = root_p[i] - foot_p[f][i];
+                    let b = root_p[i + 1] - foot_p[f][i + 1];
+                    speeds.push((b - a).z / dt);
+                }
+            }
+        }
+        if speeds.is_empty() {
+            return None;
+        }
+        let mean = speeds.iter().sum::<f32>() / speeds.len() as f32;
+        (mean > 1e-4).then_some(mean)
+    }
+
     /// Local pose transforms per joint at `time` (composed `T·R·S`).
     pub fn pose_locals(&self, time: f32, skeleton: &Skeleton) -> Vec<Mat4> {
         let (t, r, s) = self.pose_trs(time, skeleton);

@@ -1402,7 +1402,7 @@ impl World {
             let Some(inst) = self.enemies.get_mut(idx) else { return };
             let band = band_for_speed(inst.enemy.speed());
             let dur = inst.anim.clip(clip).map(|c| c.duration).unwrap_or(0.4);
-            inst.anim.play_once(clip, 0.1, Some(band), None);
+            inst.anim.play_once(clip, 0.0, Some(band));
             inst.enemy.stun(dur);
             let hp = inst.enemy.health();
             self.stop_enemy_fire(idx); // `chr_stop_firing` before `ACT_ARGH`
@@ -1471,7 +1471,9 @@ impl World {
         // `set_authored_reactions(false)` puts PD hunters back on it for an A/B.
         if let Some(r) = self.pd_reaction(idx, true) {
             if let Some(inst) = self.enemies.get_mut(idx) {
-                inst.anim.play_once_scaled(r.slot, 0.2, None, None, r.speed, r.end);
+                // No mixer fade: the crossfade from the live pose is `advance_animation`'s
+                // (`ONESHOT_MERGE`), and a mixer fade would blend in its hidden clip.
+                inst.anim.play_once_scaled(r.slot, 0.0, None, r.speed, r.end);
                 inst.thud = Some(r.thud);
             }
         } else if self.ragdoll {
@@ -1482,7 +1484,7 @@ impl World {
             let death_start = CHAR_HIT_START + anim_set::HIT_CLIPS.len();
             let pick = self.rand_below(anim_set::DEATH_CLIPS.len());
             if let Some(inst) = self.enemies.get_mut(idx) {
-                inst.anim.play_once(death_start + pick, 0.2, None, None);
+                inst.anim.play_once(death_start + pick, 0.0, None);
             }
         }
     }
@@ -1701,7 +1703,7 @@ impl World {
                 .or_else(|| inst.anim.clip(r.slot).map(|c| c.duration))
                 .unwrap_or(0.4)
                 / r.speed.max(0.01);
-            inst.anim.play_once_scaled(r.slot, 0.1, Some(band), None, r.speed, r.end);
+            inst.anim.play_once_scaled(r.slot, 0.0, Some(band), r.speed, r.end);
             inst.enemy.stun(dur);
             let hp = inst.enemy.health();
             log::info!("hunter hit — {zone:?} {dmg:.0} dmg, {hp:.0} hp left (PD injury table)");
@@ -1730,7 +1732,7 @@ impl World {
             // `is_playing_oneshot` back off, letting the HUNT driver resume.
             let band = band_for_speed(inst.enemy.speed());
             let dur = inst.anim.clip(clip).map(|c| c.duration).unwrap_or(0.4);
-            inst.anim.play_once(clip, 0.1, Some(band), None);
+            inst.anim.play_once(clip, 0.0, Some(band));
             inst.enemy.stun(dur);
             let hp = inst.enemy.health();
             log::info!("hunter hit — {zone:?} {dmg:.0} dmg, {hp:.0} hp left ({name})");

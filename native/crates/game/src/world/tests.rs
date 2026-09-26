@@ -1336,6 +1336,52 @@ fn arm_with(world: &mut World, name: &str) -> usize {
     /// `enemy_combat_step`, which knows nothing about the mixer or `Enemy::stun`, so a
     /// stunned hunter mid-flinch kept emitting rounds from an in-flight burst. Not new with
     /// the GoldenEye bodies — it predates them and applied to Perfect Dark ones equally.
+    /// **A death blends in from the pose on screen** instead of cutting to it — Perfect
+    /// Dark's 16-tick merge. The first rendered frame after the kill is still almost
+    /// exactly the running, aiming body; one merge later the death clip owns it.
+    ///
+    /// Before, the one-shot replaced the stack outright and faded (for 0.2 s) from the
+    /// mixer's *hidden* idle clip, so a hunter shot mid-aim popped to arms-down idle on
+    /// the kill frame.
+    #[test]
+    fn a_death_blends_in_from_the_pose_on_screen() {
+        let mut world = World::new();
+        world.set_wave_size(1);
+        world.initial_meshes();
+        world.toggle_mode(); // HUNT
+        if world.enemies.is_empty() || world.char_models.is_empty() {
+            eprintln!("skipping: no hunters / bodies");
+            return;
+        }
+        let dt = 1.0 / 60.0;
+        let input = InputState::default();
+        for _ in 0..30 {
+            world.fixed_step(dt, &input);
+            world.advance_animation(dt);
+        }
+        let max_turn = |a: &Pose, b: &Pose| {
+            (0..a.joint_count().min(b.joint_count()))
+                .map(|j| a.r[j].angle_between(b.r[j]).to_degrees())
+                .fold(0.0f32, f32::max)
+        };
+        let before = world.enemies[0].final_pose.clone().expect("posed");
+        let at = world.enemies[0].enemy.pos + Vec3::Y * 0.8;
+        world.hit_enemy_with(0, at, at - Vec3::Z, 1e6, Killer::Player);
+        assert!(world.enemies[0].enemy.is_dead());
+        world.advance_animation(dt);
+        let first = world.enemies[0].final_pose.clone().expect("posed");
+        let body = world.enemies[0].body;
+        let shot = world.enemies[0].anim.pose(&world.char_models[body].skeleton);
+        let cut = max_turn(&before, &shot);
+        let seen = max_turn(&before, &first);
+        println!("death, first frame: the cut would turn a joint {cut:.0}°, the blend turns it {seen:.0}°");
+        assert!(seen < cut * 0.25 + 1.0, "the death still pops: {seen:.0}° of {cut:.0}° on frame one");
+        for _ in 0..((ONESHOT_MERGE / dt).ceil() as usize + 1) {
+            world.advance_animation(dt);
+        }
+        assert_eq!(world.enemies[0].oneshot_w, 1.0, "the death clip owns the body after one merge");
+    }
+
     /// **A simulant fights through being shot** — Perfect Dark's bot reaction, the
     /// default. `chr_begin_argh` returns early for bots (`chraction.c:3426`), so a hit
     /// flinches the body and shoves it, and nothing else: no stun, no dropped trigger,
@@ -2341,10 +2387,15 @@ fn arm_with(world: &mut World, name: &str) -> usize {
         );
     }
 
-    /// Duel mode: exactly one hunter spawns, and difficulty scales its spawn health.
+    /// Duel mode: exactly one hunter spawns, and under `AI=ours` difficulty scales its
+    /// spawn health. (Under `AI=pd` it does not — PD's tiers never touch health; see
+    /// `World::hunter_spawn_health` and the check at the end.)
     #[test]
     fn one_hunter_spawns_with_difficulty_scaled_health() {
         let mut world = World::new();
+        let mut cfg = world.play_config().clone();
+        cfg.ai = crate::enemy::AiMode::Ours;
+        world.set_play_config(cfg);
         world.initial_meshes();
         world.change_difficulty(DIFFICULTY_MAX as i32); // before the spawn
         world.toggle_mode(); // HUNT: spawn the (single) wave
@@ -2355,6 +2406,10 @@ fn arm_with(world: &mut World, name: &str) -> usize {
             "difficulty scales spawn health up ({hp} vs base {})",
             crate::enemy::ENEMY_HEALTH
         );
+
+        // …and a Perfect Dark bot at the same dial has flat health.
+        world.set_ai_mode(crate::enemy::AiMode::Pd);
+        assert_eq!(world.hunter_spawn_health(), crate::enemy::ENEMY_HEALTH, "PD tiers never scale health");
     }
 
     /// Track A: four PP7 hits kill a hunter — it takes damage each shot, and the
@@ -5850,5 +5905,84 @@ fn hunters_below_the_player_climb_to_find_them_on_facility_2() {
 {}", world.hunter_report())
         });
         println!("{mode}: first sightline after {t:.1} s");
+    }
+}
+
+/// **A running hunter's planted foot stays planted.** The gait blend is driven by the
+/// speeds its clips are authored for, measured off the clips (`World::gait_anchors`), and
+/// past the run clip its cadence speeds up to match — so at every speed a hunter moves,
+/// the foot on the ground moves with the ground.
+///
+/// Measured against the 3DS-era guesses (1.5 / 3.5 / 5.0 m/s): at the 4.6 m/s chase
+/// speed a planted foot slid at roughly a third of the body's speed.
+#[test]
+fn a_running_hunters_planted_foot_does_not_slide() {
+    use engine::skeletal::layers::{LayerCtx, LocomotionBlendLayer, Pose, PoseLayer};
+    let world = World::new();
+    let (Some(t), Some(m)) = (world.pd_anim_template_ge.as_ref(), world.char_models.first()) else {
+        eprintln!("skipping: no clips / bodies");
+        return;
+    };
+    let sk = &m.skeleton;
+    let root = sk.index_of(super::PELVIS_BONE).unwrap();
+    let feet = [sk.index_of(super::LEFT_FOOT_BONE).unwrap(), sk.index_of(super::RIGHT_FOOT_BONE).unwrap()];
+    let measured = world.gait_anchors(t, 0);
+    assert!((0.7..1.4).contains(&measured[0]), "walk {:.2} m/s", measured[0]);
+    assert!((2.8..4.0).contains(&measured[2]), "run {:.2} m/s", measured[2]);
+    // The slip of whichever foot is lowest, as a fraction of body speed, for a body moving
+    // at `v` down +Z with the gait blended on these anchors.
+    let slip = |anchors: [f32; 3], v: f32| -> f32 {
+        let loco = vec![
+            (0.0, t.clip(0).unwrap().clone()),
+            (anchors[0], t.clip(1).unwrap().clone()),
+            (anchors[1], t.clip(2).unwrap().clone()),
+            (anchors[2], t.clip(3).unwrap().clone()),
+        ];
+        let mut layer = LocomotionBlendLayer::new(loco);
+        layer.speed = v;
+        let dt = 1.0 / 120.0;
+        let ctx = LayerCtx { skeleton: sk, dt };
+        let world_foot = |pose: &Pose, f: usize, travelled: f32| {
+            let g = pose.joint_global_transforms(sk);
+            let p = (g[feet[f]].w_axis.truncate() - g[root].w_axis.truncate()) * super::CHAR_SCALE;
+            (p + Vec3::Z * travelled, g[feet[f]].w_axis.y)
+        };
+        // Record both feet over 3 s, then judge each only while it is planted — in its
+        // lowest 15% of height, the same stance test `ground_speed` measures with (a jog
+        // and a run have flight phases where neither foot is down).
+        let mut track: [Vec<(Vec3, f32)>; 2] = [Vec::new(), Vec::new()];
+        for i in 0..(3.0 / dt) as usize {
+            let mut pose = Pose::bind(sk);
+            layer.apply(&mut pose, &ctx);
+            let travelled = v * dt * i as f32;
+            for (f, tr) in track.iter_mut().enumerate() {
+                tr.push(world_foot(&pose, f, travelled));
+            }
+        }
+        let mut slips = Vec::new();
+        for tr in &track {
+            let lo = tr.iter().map(|p| p.1).fold(f32::INFINITY, f32::min);
+            let hi = tr.iter().map(|p| p.1).fold(f32::NEG_INFINITY, f32::max);
+            let planted = |k: usize| tr[k].1 <= lo + (hi - lo) * 0.15;
+            for k in 1..tr.len() {
+                if planted(k) && planted(k - 1) {
+                    slips.push((tr[k].0 - tr[k - 1].0).z / dt / v);
+                }
+            }
+        }
+        // The planted foot's NET drift along the run, as a fraction of body speed: what
+        // reads as skating. (Its instantaneous speed wobbles through a stance whatever
+        // the anchors are — heel strike, roll, toe-off — so that is not the measure.)
+        (slips.iter().sum::<f32>() / slips.len() as f32).abs()
+    };
+    let guessed = [
+        engine::skeletal::anim_set::SPEED_WALK,
+        engine::skeletal::anim_set::SPEED_JOG,
+        engine::skeletal::anim_set::SPEED_RUN,
+    ];
+    for v in [measured[0], measured[1], 4.6] {
+        let (now, before) = (slip(measured, v), slip(guessed, v));
+        println!("{v:.1} m/s: planted foot slides at {:.0}% of body speed (was {:.0}%)", now * 100.0, before * 100.0);
+        assert!(now < 0.15, "at {v:.1} m/s the planted foot slides at {:.0}% of body speed", now * 100.0);
     }
 }

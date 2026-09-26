@@ -1398,8 +1398,9 @@ fn pd_mode_zeroes_the_behaviours_perfect_dark_does_not_have() {
     assert_eq!(pd.flank, 0.0, "PD bots do not flank");
     assert_eq!(pd.cover, 0.0, "PD bots do not take cover");
     assert_eq!(pd.suppress, 0.0, "PD bots have no suppressing-fire behaviour");
+    // Speed is PD's too now: a bot runs at its tier's speed, not at our dial's.
+    assert_eq!(pd.speed_mult, pd.tier.speed_ratio(), "a PD bot runs at its tier's speed");
     // The knobs that are NOT PD-specific stay put — this is a flag, not a lobotomy.
-    assert_eq!(pd.speed_mult, ours.speed_mult, "movement speed still follows the dial");
     assert_eq!(pd.sense, ours.sense, "perception reach still follows the dial");
 
     world.set_ai_mode(AiMode::Ours);
@@ -1832,4 +1833,60 @@ fn an_armed_hunter_ignores_the_pickups_and_fights() {
         "an armed hunter detoured to within {near_gun:.1}m of a pickup it does not need"
     );
     assert!(mon.violations_of("stall").is_empty(), "the armed hunter stalled instead of fighting");
+}
+
+/// **A hunter under fire is shoved, but never pinned.** The playtest after A1: "they have
+/// a hard time hitting me now — he was aiming too far right, then too far left". Each
+/// round shoves a simulant (PD's `shotspeed`), and with our dial's 2.2–4× hunter health a
+/// hunter soaked an automatic for 3–6 s, was shoved 10 m to the far wall and could not
+/// aim. PD's bots have flat health (`World::hunter_spawn_health`), so the exchange is
+/// over before the shove can carry one off.
+///
+/// A real duel: the player hits with a KF7 (15 dmg) every other round of its 0.12 s
+/// cadence, the hunter starts 2 m away at the default dial.
+#[test]
+fn a_hunter_under_fire_is_shoved_but_never_pinned() {
+    use crate::pdsim::difficulty::BotDifficulty;
+    let mut arena = TestArena::build_pd([60.0, 16.0, 60.0], &[], 1, Vec3::new(7.5, 0.0, 2.5), BotDifficulty::Normal);
+    arena.world.set_ai_mode(crate::enemy::AiMode::Pd);
+    arena.world.set_difficulty(4);
+    arena.set_player(7.5, 2.5);
+    arena.place_hunter(0, 7.5, 4.5); // 2 m — point blank
+    arena.world.player_invulnerable = true;
+    let band_max = crate::combat::enemy_weapons::dist_band_for(&arena.world.enemies[0].weapon, false).max_m;
+    let dt = 1.0 / 60.0;
+    let (mut died, mut furthest, mut shoved) = (None, 0.0f32, false);
+    for i in 0..(20.0 / dt) as usize {
+        arena.set_player(7.5, 2.5);
+        if i % 14 == 0 {
+            let at = arena.world.enemies[0].enemy.pos + Vec3::Y * 1.0;
+            let from = arena.world.player_pos().unwrap() + Vec3::Y * 1.35;
+            arena.world.hit_enemy_with(0, at, from, 15.0, crate::world::Killer::Player);
+            shoved |= arena.world.enemies[0].enemy.shove_speed() > 0.0;
+        }
+        arena.step(dt);
+        if arena.world.enemies[0].enemy.is_dead() {
+            died = Some(i as f32 * dt);
+            break;
+        }
+        furthest = furthest.max(arena.world.enemies[0].enemy.pos.distance(arena.world.player_pos().unwrap()));
+    }
+    println!("under fire: dead after {died:?}, shoved out to {furthest:.1} m (band max {band_max:.1})");
+    assert!(shoved, "the hits never shoved it — the test is not testing anything");
+    assert!(died.is_some_and(|t| t < 3.0), "a PD hunter soaked an automatic for {died:?}");
+    assert!(furthest < band_max + 1.0, "shoved out to {furthest:.1} m, past its {band_max:.1} m band");
+}
+
+/// [`crate::enemy::SHOVE_UNIT`] is Perfect Dark's own unit — the ground its run clip
+/// (`ANIM_0029`, our `03-run`) covers, on a Perfect Dark body — and not a tuned number.
+#[test]
+fn the_shove_unit_is_pds_run_clip() {
+    let world = World::new();
+    let (Some(t), Some(b)) = (world.pd_anim_template.as_ref(), world.pd_bodies().next()) else {
+        eprintln!("skipping: no PD clips / bodies");
+        return;
+    };
+    let run = world.gait_anchors(t, b)[2];
+    println!("PD run clip on a PD body: {run:.2} m/s; SHOVE_UNIT {:.2}", crate::enemy::SHOVE_UNIT);
+    assert!((run - crate::enemy::SHOVE_UNIT).abs() < 0.15, "run clip {run:.2} m/s vs SHOVE_UNIT");
 }

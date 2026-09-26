@@ -313,15 +313,26 @@ const SPEED_ADVANCE: f32 = 3.2; // ~jog gait — closing on the player while fir
 pub(crate) const SPEED_CHASE: f32 = 4.6; // m/s (~run gait)
 
 /// Perfect Dark's **shot shove** on a bot (`chraction.c:4920`, `bondmove.c:1841`), in
-/// units of a full run — PD adds `shotspeed` to the position at the rate its own run
-/// uses, so 1.0 is "running speed". Each hit adds 0.75 along the shot; the total is
-/// capped at 1.5 and bleeds off linearly at 1/30 of a unit per tick (2 a second), so a
-/// lone hit shoves a hunter ~0.65 m over ~0.4 s and a burst stacks into a stagger-step.
+/// PD's own units: each hit adds 0.75 along the shot, the total is capped at 1.5, and it
+/// bleeds off linearly at 1/30 of a unit per tick (2 a second).
 const SHOVE_PER_HIT: f32 = 0.75;
 const SHOVE_MAX: f32 = 1.5;
 const SHOVE_DECAY: f32 = 2.0;
-/// What 1.0 shove unit is in m/s: the hunter's own run.
-const SHOVE_UNIT: f32 = SPEED_CHASE;
+/// What 1.0 shove unit is in m/s — **PD's own definition**, measured.
+///
+/// PD moves a bot by `shotspeed * g_HeadAnims[HEADANIM_MOVING].translateperframe * 0.5`
+/// a tick (`chr.c:648`): the same scale as the player's own forward input, whose 1.0 is
+/// the player's run — the ground `ANIM_0029` covers per tick at its 0.5 playback. And
+/// `ANIM_0029` is our run clip (`03-run`). Measured on a Perfect Dark body
+/// (`AnimationClip::ground_speed`) it covers **2.85 m/s**; the test
+/// `the_shove_unit_is_pds_run_clip` keeps this constant honest against the clip.
+///
+/// History: the first cut took the unit as the hunter's 4.6 m/s run. Under an automatic
+/// the shove sat at its cap, 6.9 m/s, and a hunter slid 10 m to the far wall and could
+/// not kill ("they have a hard time hitting me now"). A 2 m/s retune fixed that by feel;
+/// this replaces the guess with the source's number (a PD bot, like ours, stands still
+/// in range — `chr_try_stop` — and is shoved while it does).
+pub(crate) const SHOVE_UNIT: f32 = 2.85;
 const REPATH_INTERVAL: f32 = 0.4; // s between path recomputes (CHASE_UPDATE_INTERVAL)
 /// How close to a vent mouth counts as *holding* it rather than still walking to it.
 ///
@@ -3620,7 +3631,7 @@ mod tests {
 
     /// An open baked room + an empty physics world (so line-of-sight is always clear),
     /// for driving the FSM headlessly.
-    /// Perfect Dark's shot shove: one hit carries a hunter ~0.65 m along the shot and
+    /// Perfect Dark's shot shove: one hit carries a hunter ~0.4 m along the shot and
     /// bleeds off by itself (`bmove_dampen_shotspeed`), and a shove never walks it
     /// through a wall — it goes through the same `try_step` as the AI's own movement.
     #[test]
@@ -3634,7 +3645,7 @@ mod tests {
             e.integrate_move(Vec3::ZERO, dt, &nav);
         }
         let moved = e.pos - start;
-        assert!(moved.x > 0.4 && moved.x < 0.9, "one hit should shove ~0.65 m, got {moved:?}");
+        assert!(moved.x > 0.3 && moved.x < 0.5, "one hit should shove ~0.4 m, got {moved:?}");
         assert!(moved.z.abs() < 1e-3, "straight along the shot");
         assert_eq!(e.shove_speed(), 0.0, "bled off within a second");
         // Stacking caps at 1.5 units, however many rounds land at once.

@@ -59,10 +59,6 @@ pub struct AnimPlayer {
     return_to: Option<usize>,
     /// Fade used for the auto-return crossfade.
     return_fade: f32,
-    /// The active fire window `(start, end)` in seconds for a fire one-shot, and
-    /// whether playback is currently inside it. `None` → no fire clip playing.
-    fire_window: Option<(f32, f32)>,
-    fire_open: bool,
 }
 
 /// Default crossfade for the auto-return from a one-shot to the base loop.
@@ -80,8 +76,6 @@ impl AnimPlayer {
             blend_rate: f32::INFINITY,
             return_to: None,
             return_fade: RETURN_FADE,
-            fire_window: None,
-            fire_open: false,
         }
     }
 
@@ -111,22 +105,16 @@ impl AnimPlayer {
         }
         self.start(idx, fade, true);
         self.return_to = None;
-        self.fire_window = None;
-        self.fire_open = false;
     }
 
     /// Play clip `idx` **once** (fire / hit / death): it clamps on its last frame
     /// rather than looping. When it finishes it crossfades back to `return_to`
     /// (the base loop) — or stays clamped if `return_to` is `None` (death).
-    /// `fire_window` supplies the shot window for a fire clip.
-    pub fn play_once(
-        &mut self,
-        idx: usize,
-        fade: f32,
-        return_to: Option<usize>,
-        fire_window: Option<(f32, f32)>,
-    ) {
-        self.play_once_scaled(idx, fade, return_to, fire_window, 1.0, None);
+    ///
+    /// (A fire window used to ride along here for fire one-shots. Firing is a timer
+    /// on the hunter now, never a mixer clip, so nothing supplied or read it.)
+    pub fn play_once(&mut self, idx: usize, fade: f32, return_to: Option<usize>) {
+        self.play_once_scaled(idx, fade, return_to, 1.0, None);
     }
 
     /// [`Self::play_once`] with Perfect Dark's per-row playback controls: a `speed`
@@ -139,7 +127,6 @@ impl AnimPlayer {
         idx: usize,
         fade: f32,
         return_to: Option<usize>,
-        fire_window: Option<(f32, f32)>,
         speed: f32,
         end: Option<f32>,
     ) {
@@ -147,8 +134,6 @@ impl AnimPlayer {
         self.current.speed = speed.max(0.0);
         self.current.end = end;
         self.return_to = return_to;
-        self.fire_window = fire_window;
-        self.fire_open = false;
     }
 
     /// Shared clip-switch: move `current` to `prev` and start `idx` fresh.
@@ -191,14 +176,9 @@ impl AnimPlayer {
         end > 0.0 && self.current.time >= end
     }
 
-    /// Whether playback is currently inside a fire clip's shot window.
-    pub fn fire_window_open(&self) -> bool {
-        self.fire_open
-    }
-
     /// Advance all playing clips + the crossfade by `dt`. Looping clips wrap;
     /// one-shots clamp on their last frame, then auto-return to `return_to`
-    /// (unless `None`). Updates the fire-window state.
+    /// (unless `None`).
     pub fn update(&mut self, dt: f32) {
         advance(&mut self.current, &self.clips, dt);
         if let Some(prev) = self.prev.as_mut() {
@@ -209,14 +189,6 @@ impl AnimPlayer {
                 self.prev = None;
             }
         }
-
-        // Fire window: open while the (one-shot) clock is inside [start, end].
-        self.fire_open = match self.fire_window {
-            Some((s, e)) if !self.current.looping => {
-                self.current.time >= s && self.current.time <= e
-            }
-            _ => false,
-        };
 
         // One-shot finished (clamped at its end) → return to the base loop.
         if !self.current.looping {
@@ -395,7 +367,7 @@ mod tests {
         let idle = clip("00-idle.glb", &m.skeleton);
         let hit = clip("0E-hit-left-shoulder.glb", &m.skeleton);
         let mut p = AnimPlayer::new(vec![idle, hit], 0);
-        p.play_once(1, 0.0, Some(0), None);
+        p.play_once(1, 0.0, Some(0));
         assert!(p.is_playing_oneshot(), "one-shot playing");
         let dur = p.clip(1).unwrap().duration;
         p.update(dur + 0.5); // past the end
@@ -409,24 +381,11 @@ mod tests {
         let idle = clip("00-idle.glb", &m.skeleton);
         let death = clip("1A-death-forward-face-down.glb", &m.skeleton);
         let mut p = AnimPlayer::new(vec![idle, death], 0);
-        p.play_once(1, 0.0, None, None);
+        p.play_once(1, 0.0, None);
         let dur = p.clip(1).unwrap().duration;
         p.update(dur + 1.0);
         assert!(p.is_playing_oneshot(), "death clamps, does not return");
         assert_eq!(p.current_clip(), 1);
-    }
-
-    #[test]
-    fn fire_window_opens_inside_the_timing_window() {
-        let m = karl();
-        let idle = clip("00-idle.glb", &m.skeleton);
-        let fire = clip("01-fire-standing.glb", &m.skeleton);
-        let mut p = AnimPlayer::new(vec![idle, fire], 0);
-        p.play_once(1, 0.0, Some(0), Some((0.9, 2.67)));
-        p.update(0.5);
-        assert!(!p.fire_window_open(), "before the window (t=0.5)");
-        p.update(0.6); // t = 1.1, inside [0.9, 2.67]
-        assert!(p.fire_window_open(), "inside the window (t=1.1)");
     }
 
     #[test]

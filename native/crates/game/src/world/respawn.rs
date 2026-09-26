@@ -93,7 +93,7 @@ impl World {
         let watch = self.player_pos().unwrap_or(spawn);
         // Respawn health tracks the LIVE difficulty dial, matching `restart_hunt`: turn
         // the dial mid-round and the next body in reflects it.
-        let spawn_hp = crate::enemy::ENEMY_HEALTH * self.difficulty_params().health_mult;
+        let spawn_hp = self.hunter_spawn_health();
         let (radius, half_height) = self.body_capsule(
             self.enemies.get(idx).map(|i| i.body).unwrap_or(0),
         );
@@ -175,6 +175,8 @@ impl World {
         inst.anim.play(0, 0.0);
         inst.render_yaw = None;
         inst.final_pose = None;
+        inst.oneshot_w = 0.0;
+        inst.oneshot_hold = None;
         inst.aim_weight = 0.0;
         inst.head_look_weight = 0.0;
         inst.head_look_point = None;

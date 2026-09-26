@@ -1024,9 +1024,20 @@ impl PoseLayer for LocomotionBlendLayer {
         // Advance the shared phase by the BLENDED cadence, so a faster gait cycles
         // faster and the two clips stay in step. `stride_scale` warps the cadence to
         // the character's real ground speed (cut foot-skate) without touching the pose.
+        //
+        // Past the fastest anchor there is no faster clip to blend toward, so the top
+        // clip's cadence is sped up in proportion instead — the anchors are the speeds
+        // the clips are authored for, and a body travelling faster than that must step
+        // faster or skate. Capped (`OVERSPEED_MAX`), as Perfect Dark caps its run clip.
+        let top = self.anchors[self.anchors.len() - 1].0;
+        let over = if top > 1e-3 && self.speed > top {
+            (self.speed / top).min(OVERSPEED_MAX)
+        } else {
+            1.0
+        };
         let period = d0 + (d1 - d0) * w;
-        self.phase =
-            (self.phase + self.stride_scale.max(0.0) * ctx.dt / period.max(1e-3)).rem_euclid(1.0);
+        self.phase = (self.phase + over * self.stride_scale.max(0.0) * ctx.dt / period.max(1e-3))
+            .rem_euclid(1.0);
     }
 
     fn name(&self) -> &str {
@@ -1037,6 +1048,13 @@ impl PoseLayer for LocomotionBlendLayer {
         self
     }
 }
+
+/// Fastest a [`LocomotionBlendLayer`] will speed its top gait clip up to cover a body
+/// moving faster than the clip is authored for. PD caps its run at 1.2× (`player.c`),
+/// but its clips are authored near its bots' speed; ours chase at 4.6 m/s on a ~3 m/s
+/// run clip, and the difficulty dial adds up to 1.5× on top (5.5 m/s at the default),
+/// so the cap sits where the default still steps rather than skates.
+pub const OVERSPEED_MAX: f32 = 2.0;
 
 /// `acos` guarded against out-of-domain inputs from float error.
 fn clamp_acos(x: f32) -> f32 {

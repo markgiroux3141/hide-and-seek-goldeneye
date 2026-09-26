@@ -184,6 +184,10 @@ pub(crate) const ENEMY_RECOIL_LAYER: usize = 4;
 /// Perfect Dark's procedural hit flinch (waist, neck, shoulders) — last, so it twists
 /// whatever aim and recoil left there. See [`engine::skeletal::layers::FlinchLayer`].
 pub(crate) const ENEMY_FLINCH_LAYER: usize = 5;
+/// Seconds a hit/death one-shot takes to blend in from (and back out to) the live
+/// pose: Perfect Dark's standard merge, 16 ticks at 60 Hz (`chr_begin_argh`,
+/// `chr_begin_death`, `model_set_animation_with_merge(…, 16, …)`).
+pub(crate) const ONESHOT_MERGE: f32 = 16.0 / 60.0;
 /// Aim cone (radians) the chest may swing to point the barrel at the player — wide
 /// enough for the clip bias (~45°) plus pitch, capped (~80°) so a target that's
 /// swung behind the shoulder pins the torso at the edge instead of contorting it.
@@ -1932,6 +1936,14 @@ pub(crate) struct EnemyInstance {
     /// skinning matrices and the hand-bone weapon transform (so the gun follows
     /// the aimed arm). `None` until the first `advance_animation`.
     pub final_pose: Option<Pose>,
+    /// How far the body has crossfaded into a hit/death **one-shot** (0 = the live
+    /// layer stack, 1 = the one-shot alone). Eased over [`ONESHOT_MERGE`] each way, so a
+    /// one-shot blends in from the pose actually on screen and back out into it —
+    /// Perfect Dark's `model_set_animation_with_merge` (16 ticks), not a cut.
+    pub oneshot_w: f32,
+    /// The one-shot's last pose, held while it blends back out into the stack once the
+    /// mixer has already returned to looping (so the exit fades from what was shown).
+    pub oneshot_hold: Option<Pose>,
     /// Active death ragdoll (`Some` once killed while the [`World::ragdoll`] flag is
     /// on) — a chain of dynamic bodies that replaces the canned death clip. While set,
     /// this hunter's pose + model transform come from the physics bodies (WORLD-space
@@ -3771,6 +3783,22 @@ impl World {
         Some(RadarView { range, floor, blips })
     }
 
+    /// A hunter's health at spawn and respawn.
+    ///
+    /// Under `AI=pd` it is **flat**: Perfect Dark's difficulty tiers change a bot's aim,
+    /// reaction and speed and never its health (`g_BotDifficulties` has no health
+    /// field). Our dial's 1×–4× survivability is `AI=ours`'s. Measured, it was the root
+    /// of "they have a hard time hitting me": a 220–400 hp hunter soaks an automatic for
+    /// 3–6 s, is shoved across the room the whole time (PD's `shotspeed`) and cannot
+    /// aim, where a PD bot is dead in ~1.4 s and never gets pinned.
+    pub(crate) fn hunter_spawn_health(&self) -> f32 {
+        if self.ai_mode.is_pd() {
+            crate::enemy::ENEMY_HEALTH
+        } else {
+            crate::enemy::ENEMY_HEALTH * self.difficulty_params().health_mult
+        }
+    }
+
     /// The difficulty-derived tuning for the current level (see [`DiffParams`]). Linear
     /// ramp from all-neutral at level 0 to brutal at [`DIFFICULTY_MAX`].
     pub(crate) fn difficulty_params(&self) -> DiffParams {
@@ -3801,11 +3829,24 @@ impl World {
         // same dial back unchanged.
         let pd = self.ai_mode.is_pd();
         let off = |v: f32| if pd { 0.0 } else { v };
+        let tier = self
+            .pd
+            .difficulty
+            .unwrap_or_else(|| pd_lab::tier_for_dial_frac(self.difficulty_frac()));
         crate::enemy::AiTuning {
             alert: crate::enemy::ALERT_DURATION * dp.reaction_mult,
             cooldown: crate::enemy::COOLDOWN_DURATION * dp.cooldown_mult,
             dodge: off(dp.dodge),
-            speed_mult: dp.speed_mult,
+            // Under `AI=pd` a bot runs at its tier's speed (`bot_calculate_max_speed`,
+            // `bot.c:1096`): Meat 0.66×, Normal 1.0×, Hard 1.24×, Dark 1.47× of Normal —
+            // and Normal *is* our 4.6 m/s chase (7.6 PD units a tick through the 0.945
+            // smoother ≈ 4.6 m/s). It used to follow our dial's 1.0–1.5×, so the AI lab's
+            // max-dial Normal bot ran at 6.9 m/s, faster than PD's Dark one.
+            speed_mult: if pd {
+                self.pd.bot_type.speed_override().unwrap_or_else(|| tier.speed_ratio())
+            } else {
+                dp.speed_mult
+            },
             sense: dp.sense_mult,
             suppress: off(dp.suppress),
             flank: off(dp.flank),
@@ -3813,10 +3854,7 @@ impl World {
             mode: self.ai_mode,
             // The same tier the hunters' simulants carry, so the distance-band rule and
             // the aim model agree about how good this bot is.
-            tier: self
-                .pd
-                .difficulty
-                .unwrap_or_else(|| pd_lab::tier_for_dial_frac(self.difficulty_frac())),
+            tier,
         }
     }
 
