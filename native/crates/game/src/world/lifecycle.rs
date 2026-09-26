@@ -335,10 +335,14 @@ impl World {
                     inst.enemy.set_fetch_target(fetch);
                     // Arm the wall-clearance nudge for this step's movement commit.
                     inst.enemy.set_wall_clearance_radius(wall_clear_r);
+                    // PD's sightline round-robin: one character per tick, so each hunter
+                    // re-tests its target every (player + hunters) ticks.
+                    inst.enemy.set_insight_period(pd_actors.len() as u32, i as u32);
                     // Select the decision layer (utility vs legacy FSM) for this step.
                     inst.enemy.set_utility(utility_on);
                     // Perfect Dark hunters always know where the player is (movement
-                    // only — perception is untouched, see `Enemy::known_player_pos`).
+                    // only — perception is untouched, see `Enemy::known_target_pos`).
+                    // Every hunter has a simulant, so today this is every hunter.
                     inst.enemy.set_omniscient(
                         !shopping && (pd_mode || (omniscient_on && inst.pdsim.is_some())),
                     );
@@ -409,7 +413,7 @@ impl World {
                         ),
                         None => crate::enemy::EnemyStep::default(),
                     };
-                    // ── PD simulant layer (PD_LAB only) ──
+                    // ── PD simulant layer (every hunter) ──
                     // Runs AFTER the FSM so the FSM still owns movement, and the
                     // simulant only overrides where the weapon points and whether
                     // it fires. The sight check is a raw LOS ray of its own rather
@@ -1034,6 +1038,42 @@ impl World {
         self.hunters_enabled
     }
 
+    /// The walk / jog / run speeds (m/s) template `t`'s gait clips are **authored for**,
+    /// measured on body `body`'s skeleton ([`clip::AnimationClip::ground_speed`]) so the
+    /// blend plays each clip at the speed its planted foot does not slide.
+    ///
+    /// The old anchors (1.5 / 3.5 / 5.0) were guesses carried over from the 3DS port.
+    /// Measured, the shared GoldenEye/Perfect Dark gait is ~1.0 / 2.2 / 3.3 m/s — so a
+    /// hunter running at 4.6 m/s was playing a ~3 m/s gait and its feet slid a third of
+    /// every stride. Falls back to the old constants (and says so) if any clip fails to
+    /// measure or the three do not come out in order.
+    pub(crate) fn gait_anchors(&self, t: &AnimPlayer, body: usize) -> [f32; 3] {
+        let fallback = [anim_set::SPEED_WALK, anim_set::SPEED_JOG, anim_set::SPEED_RUN];
+        let measured = (|| {
+            let sk = &self.char_models.get(body)?.skeleton;
+            let root = sk.index_of(super::PELVIS_BONE)?;
+            let feet = [sk.index_of(super::LEFT_FOOT_BONE)?, sk.index_of(super::RIGHT_FOOT_BONE)?];
+            let mut out = [0.0f32; 3];
+            for (k, v) in out.iter_mut().enumerate() {
+                *v = t.clip(k + 1)?.ground_speed(sk, root, feet)? * super::CHAR_SCALE;
+            }
+            (out[0] > 0.1 && out[0] < out[1] && out[1] < out[2]).then_some(out)
+        })();
+        match measured {
+            Some(a) => {
+                log::info!(
+                    "gait anchors for body {body}: walk {:.2} / jog {:.2} / run {:.2} m/s (measured)",
+                    a[0], a[1], a[2]
+                );
+                a
+            }
+            None => {
+                log::warn!("gait anchors for body {body} would not measure — using the 1.5/3.5/5.0 guesses");
+                fallback
+            }
+        }
+    }
+
     fn spawn_wave(&mut self, nav: &NavWorld) {
         // The `J` dev toggle: no hunters at all, so the level can be authored and
         // walked without being chased.
@@ -1065,12 +1105,13 @@ impl World {
             let idx = match templates.iter().position(|(k, _, _)| *k == key) {
                 Some(k) => k,
                 None => {
+                    let anchors = self.gait_anchors(&t, b);
                     let loco = (|| {
                         Some(vec![
                             (0.0, t.clip(0)?.clone()),
-                            (anim_set::SPEED_WALK, t.clip(1)?.clone()),
-                            (anim_set::SPEED_JOG, t.clip(2)?.clone()),
-                            (anim_set::SPEED_RUN, t.clip(3)?.clone()),
+                            (anchors[0], t.clip(1)?.clone()),
+                            (anchors[1], t.clip(2)?.clone()),
+                            (anchors[2], t.clip(3)?.clone()),
                         ])
                     })();
                     templates.push((key, t.clone(), loco));
@@ -1093,7 +1134,7 @@ impl World {
         // search FSM takes over immediately; if in view they engage, which is right).
         let watch = self.player_pos().unwrap_or(self.spawn_point);
         // Difficulty survivability: each hunter spawns with scaled health.
-        let spawn_hp = crate::enemy::ENEMY_HEALTH * self.difficulty_params().health_mult;
+        let spawn_hp = self.hunter_spawn_health();
         // ANIM_DEBUG → spawn a single AR33-rifle hunter (a two-handed weapon, to
         // check the aim/hold transfers from the one-handed pistol case) so behaviour
         // can be observed in isolation.
@@ -1113,6 +1154,9 @@ impl World {
         // silently arming the pack with something else.
         if let crate::world::HunterWeapon::Fixed(name) = self.hunter_weapon_policy().clone() {
             match self.arsenal.weapons().iter().find(|w| w.name == name) {
+                Some(w) if !w.hunter_usable() => log::warn!(
+                    "the level asks every hunter to carry the {name}, which a hunter                      cannot fire (hunters are hitscan-only) — keeping the roster mix"
+                ),
                 Some(w) => {
                     log::info!("every hunter carries the {name}");
                     roster = vec![(*w, false)];
@@ -1343,10 +1387,12 @@ impl World {
                 anim_speed: 0.0,
                 render_yaw: None,
                 final_pose: None,
+                oneshot_w: 0.0,
+                oneshot_hold: None,
                 ragdoll: None,
                 ragdoll_time: 0.0,
                 reaction: None,
-                // PD lab only: attach the simulant model. Each gets a distinct seed
+                // Attach the simulant model (every hunter). Each gets a distinct seed
                 // so same-tier simulants still wander their aim individually —
                 // that per-bot variation is the point of randomising the
                 // convergence rate rather than the shot outcome.

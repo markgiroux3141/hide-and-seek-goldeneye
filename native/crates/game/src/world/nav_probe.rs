@@ -681,11 +681,20 @@ mod tests {
     ///
     /// Asserted on the outcome a player cares about — did it turn up — because every
     /// internal signal in that failure looked healthy.
+    ///
+    /// **The landing is out of a hunter's reach** — its platforms rise 1 m apart, four
+    /// times a hunter's step — which this test did not know for its first month: it
+    /// passed because the flank point sent the hunter across its own floor until it
+    /// happened to flicker into Attack. So what it pins now is the rule for a player on
+    /// ground the hunters cannot climb to: come to the nearest reachable spot and fight
+    /// from there (`NavWorld::reachable_stand_in`), rather than stand where it spawned
+    /// because A\* said "no route" — which is what both AI modes did once the flank bug
+    /// was fixed.
     #[test]
     fn a_hunter_climbs_to_a_player_on_another_floor() {
         let mut world = big_room(24.0);
-        // A landing 3 m up with a ramp of platforms leading to it, so reaching the player
-        // needs a real climb rather than a walk across the floor.
+        // A landing 3 m up on a ramp of platforms a player can jump but a hunter cannot
+        // climb, so the hunter has to get as close as the floor allows.
         for (i, y) in [4.0f32, 8.0, 12.0].into_iter().enumerate() {
             world.platforms.push(Platform {
                 id: i as u32 + 1,

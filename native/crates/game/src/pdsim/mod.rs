@@ -6,8 +6,8 @@
 //!
 //! # What this replaces
 //!
-//! Our existing hunters resolve a shot by rolling `accuracy * (1 - dist/range)`
-//! and applying damage on a win (`world::combat::emit_enemy_shot`). PD does not
+//! Our hunters used to resolve a shot by rolling `accuracy * (1 - dist/range)` and
+//! applying damage on a win (retired, `DESIGN_PD_SIMULANT_AI.md` §17). PD does not
 //! do that, at all. A simulant points a real weapon in world space and fires a
 //! genuine hitscan; whether it connects depends only on where the barrel actually
 //! is. Every behaviour players read as "human" — leading badly at low skill,

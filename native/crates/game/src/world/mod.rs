@@ -39,8 +39,8 @@ use engine::skeletal::anim::AnimPlayer;
 use engine::skeletal::anim_set;
 use engine::skeletal::clip;
 use engine::skeletal::layers::{
-    AdditiveDecayLayer, AimCone, AimOffsetLayer, ClipOverlayLayer, LayerCtx, LayeredAnimator,
-    LocomotionBlendLayer, Pose, PoseLayer, RootTranslateLayer, TwoBoneIkLayer,
+    AdditiveDecayLayer, AimCone, AimOffsetLayer, ClipOverlayLayer, FlinchLayer, LayerCtx,
+    LayeredAnimator, LocomotionBlendLayer, Pose, PoseLayer, RootTranslateLayer, TwoBoneIkLayer,
 };
 use engine::skeletal::gltf_skin::{self, SkinnedModel};
 use engine::geometry::structures::{
@@ -181,6 +181,13 @@ pub(crate) const ENEMY_AIM_OVERLAY_LAYER: usize = 1;
 pub(crate) const ENEMY_CHEST_AIM_LAYER: usize = 2;
 pub(crate) const ENEMY_HEAD_LOOK_LAYER: usize = 3;
 pub(crate) const ENEMY_RECOIL_LAYER: usize = 4;
+/// Perfect Dark's procedural hit flinch (waist, neck, shoulders) — last, so it twists
+/// whatever aim and recoil left there. See [`engine::skeletal::layers::FlinchLayer`].
+pub(crate) const ENEMY_FLINCH_LAYER: usize = 5;
+/// Seconds a hit/death one-shot takes to blend in from (and back out to) the live
+/// pose: Perfect Dark's standard merge, 16 ticks at 60 Hz (`chr_begin_argh`,
+/// `chr_begin_death`, `model_set_animation_with_merge(…, 16, …)`).
+pub(crate) const ONESHOT_MERGE: f32 = 16.0 / 60.0;
 /// Aim cone (radians) the chest may swing to point the barrel at the player — wide
 /// enough for the clip bias (~45°) plus pitch, capped (~80°) so a target that's
 /// swung behind the shoulder pins the torso at the edge instead of contorting it.
@@ -272,6 +279,8 @@ pub(crate) const ENEMY_FIRE_TAIL: f32 = 0.25;
 pub(crate) struct EnemyArm {
     /// Right (gun) shoulder — the recoil kick anchor + ANIM_DEBUG measurement.
     shoulder: usize,
+    /// Left shoulder — the flinch twists both.
+    left_shoulder: usize,
     /// Right elbow + hand, kept for the ANIM_DEBUG arm measurement only.
     mid: usize,
     end: usize,
@@ -309,6 +318,7 @@ impl EnemyArm {
         // Upper body = the subtree of the two hands' lowest common ancestor (the
         // chest): chest + head + both arms, excluding the pelvis + legs.
         let left_hand = sk.index_of(LEFT_HAND_BONE)?;
+        let left_shoulder = sk.parents[sk.parents[left_hand]?]?;
         let chest = sk.lowest_common_ancestor(&[end, left_hand])?;
         let upper_body = sk.subtree(chest);
         // Head gaze axis in the head's local frame, from the bind pose. The model
@@ -327,7 +337,18 @@ impl EnemyArm {
             Some((hip, knee, foot))
         };
         let legs = [leg_chain(LEFT_FOOT_BONE)?, leg_chain(RIGHT_FOOT_BONE)?];
-        Some(EnemyArm { shoulder, mid, end, chest, head, head_forward, upper_body, pelvis, legs })
+        Some(EnemyArm {
+            shoulder,
+            left_shoulder,
+            mid,
+            end,
+            chest,
+            head,
+            head_forward,
+            upper_body,
+            pelvis,
+            legs,
+        })
     }
 
     /// Right shoulder joint index (the ANIM_DEBUG arm measurement anchor).
@@ -374,6 +395,13 @@ impl EnemyArm {
             Vec3::X,
             ENEMY_RECOIL_DECAY,
             ENEMY_RECOIL_MAX,
+        )));
+        // PD's joint callback twists the waist, neck and both shoulders; on our rig the
+        // waist is the chest joint (`Bone_2`, parent of both arms and the head).
+        s.push(Box::new(FlinchLayer::new(
+            Some(self.chest),
+            Some(self.head),
+            [Some(self.left_shoulder), Some(self.shoulder)],
         )));
         s
     }
@@ -504,8 +532,8 @@ pub(crate) const ZONE_HEAD_MULT: f32 = 4.0;
 pub(crate) const ZONE_TORSO_MULT: f32 = 1.0;
 pub(crate) const ZONE_LEG_MULT: f32 = 0.6;
 
-// ─── Enemies fire back (A3) — data-driven arsenal + probabilistic hit ────────
-// Per-weapon damage / accuracy / range / fire-rate now live on the equipped
+// ─── Enemies fire back (A3) — data-driven arsenal ───────────────────────────
+// Per-weapon damage / spread / range / fire-rate now live on the equipped
 // [`EnemyWeaponDef`] (see `combat::enemy_weapons`); only the shared feedback
 // timings stay here.
 /// The muzzle-flash countdown (s) after each enemy shot; >0 → the enemy muzzle
@@ -754,6 +782,36 @@ pub(crate) const PD_BODY_CATALOG: &[(&str, &str)] = &[
 /// Perfect Dark's animations. The narrower sets exist because the two families still look
 /// completely different, and because a checkout without the PD export has to degrade to
 /// GoldenEye rather than to an empty hunt.
+/// **How a hunter reacts to a hit it survives** — the first thing that separates the
+/// two enemy archetypes (`RETRO_ENEMIES.md` §5).
+///
+/// * [`Self::Simulant`] — Perfect Dark's **combat-simulator bot**: a procedural flinch
+///   ([`engine::skeletal::layers::FlinchLayer`]), a grunt and a shove along the shot, and
+///   it **keeps fighting**. `chr_begin_argh` returns early for bots (`chraction.c:3426`),
+///   so they never play an injury animation and are never stunned. The default.
+/// * [`Self::Guard`] — the GoldenEye / PD **mission guard**: the authored injury
+///   animation for the part that was hit, with the trigger dropped and the body stunned
+///   for its length (0.5 s for a torso hit, up to 5 s for a leg — PD guards play them
+///   whole). Kept for the mission-guard archetype; `REACTIONS=guard` selects it.
+///
+/// Deaths are the same either way (the authored death table).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ReactionStyle {
+    #[default]
+    Simulant,
+    Guard,
+}
+
+impl ReactionStyle {
+    /// `REACTIONS=guard|sim`, defaulting to the simulant.
+    pub fn from_env() -> Self {
+        match std::env::var("REACTIONS").unwrap_or_default().trim().to_ascii_lowercase().as_str() {
+            "guard" | "ge" | "stagger" => ReactionStyle::Guard,
+            _ => ReactionStyle::Simulant,
+        }
+    }
+}
+
 #[derive(
     Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize,
 )]
@@ -764,8 +822,8 @@ pub enum BodySet {
     PerfectDark,
 }
 
-/// The **Perfect Dark hunter clip set** — the same 36 slots as the GoldenEye
-/// template, in the same order, so [`FIRE_RIFLE_IDX`], [`CHAR_HIT_START`] and the
+/// The **Perfect Dark hunter clip set** — the GoldenEye template's 36 slots in the
+/// same order (plus PD-only slots after them, 51 in all), so [`FIRE_RIFLE_IDX`], [`CHAR_HIT_START`] and the
 /// death block at `CHAR_HIT_START + HIT_CLIPS.len()` address a PD hunter with the
 /// arithmetic they already use. The filenames are numbered because that order is
 /// load-bearing: slot `n` is file `n`.
@@ -1214,11 +1272,6 @@ const BRACE_MAX: f32 = 8.0;
 /// triangles at the seam (JS `E = WALL_THICKNESS / 2`).
 const BURY_EPS: f32 = WALL_THICKNESS / 2.0;
 
-/// Seconds of sustained breaching to break a door (JS `door.js` `DOOR_HP`).
-/// Unused while breakable doors stay disabled; kept for re-enable.
-#[allow(dead_code)]
-const DOOR_HP: f32 = 2.5;
-
 /// Reserved renderer/physics id for the combined free-standing structures mesh
 /// (all platforms + stair-runs). CSG region ids count up from 0, so `u32::MAX`
 /// never collides — the structures live in the same mesh + trimesh-collider
@@ -1277,17 +1330,14 @@ pub(crate) struct Selection {
     side: Side,
 }
 
-/// A breakable door, live only during the HUNT (JS `door.js`). The panel is a
-/// standalone cuboid collider that blocks the player; the nav overlay adds a
-/// cost the hunter reads live. Breaching drains `hp`, then removes the collider
-/// and flips the nav flag — **no re-voxelization, no CSG re-eval** (the thesis).
-/// `aabb` is the doorframe carve in WT (min corner + dims), used to draw the panel.
+/// The JS port's breakable spawn door (`door.js`). **Vestigial:** nothing builds one
+/// any more — the spawn is a floor marker, hunters never breach, and the doors the
+/// player places are ECS entities (`crate::ecs::Door`). `World::doors` is always
+/// empty; this and [`World::door_mesh`] remain only until that pass is removed.
+/// `aabb` is the doorframe carve in WT (min corner + dims).
 pub(crate) struct Door {
     aabb: Brush,
-    hp: f32,
     broken: bool,
-    /// The panel collider's index in [`PhysicsWorld`], removed on breach.
-    panel: usize,
 }
 
 /// A live hit spark (Player Combat P2): a bright marker at a shot's impact point,
@@ -1886,6 +1936,14 @@ pub(crate) struct EnemyInstance {
     /// skinning matrices and the hand-bone weapon transform (so the gun follows
     /// the aimed arm). `None` until the first `advance_animation`.
     pub final_pose: Option<Pose>,
+    /// How far the body has crossfaded into a hit/death **one-shot** (0 = the live
+    /// layer stack, 1 = the one-shot alone). Eased over [`ONESHOT_MERGE`] each way, so a
+    /// one-shot blends in from the pose actually on screen and back out into it —
+    /// Perfect Dark's `model_set_animation_with_merge` (16 ticks), not a cut.
+    pub oneshot_w: f32,
+    /// The one-shot's last pose, held while it blends back out into the stack once the
+    /// mixer has already returned to looping (so the exit fades from what was shown).
+    pub oneshot_hold: Option<Pose>,
     /// Active death ragdoll (`Some` once killed while the [`World::ragdoll`] flag is
     /// on) — a chain of dynamic bodies that replaces the canned death clip. While set,
     /// this hunter's pose + model transform come from the physics bodies (WORLD-space
@@ -2113,7 +2171,7 @@ pub struct World {
     /// call site). `None` if any clip failed to load.
     char_anim_template: Option<AnimPlayer>,
     /// The **Perfect Dark** counterpart of [`Self::char_anim_template`], filling the
-    /// same 36 slots in the same order with PD's own animations (see
+    /// same slots in the same order with PD's own animations (see
     /// [`PD_TEMPLATE_CLIPS`]). A hunter wearing a PD body clones this one instead.
     ///
     /// It has to be a separate template rather than a retarget: a clip stores each
@@ -2152,6 +2210,8 @@ pub struct World {
     /// were ported, and a ragdoll discards them. Turning it off is the A/B: PD
     /// hunters fall back to the ragdoll like GoldenEye ones.
     authored_reactions: bool,
+    /// How a hunter reacts to a hit it survives — see [`ReactionStyle`].
+    reaction_style: ReactionStyle,
     /// **How hunters fight** — Perfect Dark's bot model, on every hunter, always. Every
     /// hunter spawns carrying a [`crate::pdsim::Simulant`], wears a Perfect Dark body
     /// driven by [`PD_TEMPLATE_CLIPS`], and aims / shoots the Perfect Dark way; see
@@ -2230,12 +2290,14 @@ pub struct World {
     /// baseline: when off, each hunter runs the legacy FSM (`Enemy::update`'s match).
     /// Reuses every tuned movement/perception primitive — only the *decision* changes.
     utility_ai: bool,
-    /// Whether **PD-lab hunters are omniscient** — Perfect Dark's knowledge rule: they
-    /// always know where the player is and navigate to the live position instead of a
-    /// last-known one, so breaking line-of-sight no longer sends them fan-out searching.
-    /// **On by default**, and PD-lab-only (a GoldenEye hunter is never affected, so the
-    /// normal game is unchanged). A kill-switch / A-B baseline; see
-    /// [`crate::enemy::Enemy::known_player_pos`] for what it does and does *not* change.
+    /// Whether **hunters with a simulant are omniscient** — Perfect Dark's knowledge
+    /// rule: they always know where the player is and navigate to the live position
+    /// instead of a last-known one, so breaking line-of-sight no longer sends them
+    /// fan-out searching. **On by default, and every hunter has a simulant** — so in
+    /// the shipping game this covers the whole pack in both AI modes, and Search /
+    /// Investigate / hearing never run (`RETRO_ENEMIES.md` §1.1). A kill-switch / A-B
+    /// baseline; see [`crate::enemy::Enemy::known_target_pos`] for what it does and
+    /// does *not* change.
     pd_omniscience: bool,
     /// **Which engagement model the hunters run** (`AI=pd|ours`, default ours). Unlike
     /// the flags above this is not a kill-switch but a full A/B: `ours` is everything
@@ -3107,6 +3169,7 @@ impl World {
             hunt_spawn: None,
             hit_reactions: false, // GoldenEye-style flinches; PD hunters use their own tables
             authored_reactions: true, // PD hunters react on PD's tables, not the ragdoll
+            reaction_style: ReactionStyle::from_env(),
             local_avoidance: true, // ORCA crowd steering on by default (kill-switch below)
             head_look: true, // procedural head look-at on by default (kill-switch below)
             foot_ik: true, // ground-adaptive foot IK + cadence on by default (kill-switch below)
@@ -3587,6 +3650,15 @@ impl World {
         self.authored_reactions
     }
 
+    /// How hunters react to hits they survive (see [`ReactionStyle`]).
+    pub fn set_reaction_style(&mut self, style: ReactionStyle) {
+        self.reaction_style = style;
+    }
+
+    pub fn reaction_style(&self) -> ReactionStyle {
+        self.reaction_style
+    }
+
     /// Whether physics-ragdoll death is active (inspection / tests).
     pub fn ragdoll(&self) -> bool {
         self.ragdoll
@@ -3711,6 +3783,22 @@ impl World {
         Some(RadarView { range, floor, blips })
     }
 
+    /// A hunter's health at spawn and respawn.
+    ///
+    /// Under `AI=pd` it is **flat**: Perfect Dark's difficulty tiers change a bot's aim,
+    /// reaction and speed and never its health (`g_BotDifficulties` has no health
+    /// field). Our dial's 1×–4× survivability is `AI=ours`'s. Measured, it was the root
+    /// of "they have a hard time hitting me": a 220–400 hp hunter soaks an automatic for
+    /// 3–6 s, is shoved across the room the whole time (PD's `shotspeed`) and cannot
+    /// aim, where a PD bot is dead in ~1.4 s and never gets pinned.
+    pub(crate) fn hunter_spawn_health(&self) -> f32 {
+        if self.ai_mode.is_pd() {
+            crate::enemy::ENEMY_HEALTH
+        } else {
+            crate::enemy::ENEMY_HEALTH * self.difficulty_params().health_mult
+        }
+    }
+
     /// The difficulty-derived tuning for the current level (see [`DiffParams`]). Linear
     /// ramp from all-neutral at level 0 to brutal at [`DIFFICULTY_MAX`].
     pub(crate) fn difficulty_params(&self) -> DiffParams {
@@ -3741,11 +3829,24 @@ impl World {
         // same dial back unchanged.
         let pd = self.ai_mode.is_pd();
         let off = |v: f32| if pd { 0.0 } else { v };
+        let tier = self
+            .pd
+            .difficulty
+            .unwrap_or_else(|| pd_lab::tier_for_dial_frac(self.difficulty_frac()));
         crate::enemy::AiTuning {
             alert: crate::enemy::ALERT_DURATION * dp.reaction_mult,
             cooldown: crate::enemy::COOLDOWN_DURATION * dp.cooldown_mult,
             dodge: off(dp.dodge),
-            speed_mult: dp.speed_mult,
+            // Under `AI=pd` a bot runs at its tier's speed (`bot_calculate_max_speed`,
+            // `bot.c:1096`): Meat 0.66×, Normal 1.0×, Hard 1.24×, Dark 1.47× of Normal —
+            // and Normal *is* our 4.6 m/s chase (7.6 PD units a tick through the 0.945
+            // smoother ≈ 4.6 m/s). It used to follow our dial's 1.0–1.5×, so the AI lab's
+            // max-dial Normal bot ran at 6.9 m/s, faster than PD's Dark one.
+            speed_mult: if pd {
+                self.pd.bot_type.speed_override().unwrap_or_else(|| tier.speed_ratio())
+            } else {
+                dp.speed_mult
+            },
             sense: dp.sense_mult,
             suppress: off(dp.suppress),
             flank: off(dp.flank),
@@ -3753,10 +3854,7 @@ impl World {
             mode: self.ai_mode,
             // The same tier the hunters' simulants carry, so the distance-band rule and
             // the aim model agree about how good this bot is.
-            tier: self
-                .pd
-                .difficulty
-                .unwrap_or_else(|| pd_lab::tier_for_dial_frac(self.difficulty_frac())),
+            tier,
         }
     }
 

@@ -19,7 +19,8 @@
 //! * **`speed`** — per row, so the same clip reads as a heavy fall in one table and a
 //!   faster crumple in another.
 //! * **`thudframe1`/`thudframe2`** — the frames a falling body hits the floor, for
-//!   the impact sound. Recorded here; nothing drives per-frame animation events yet.
+//!   the impact sound. `World::advance_animation` plays it when the death clip's
+//!   clock crosses each frame.
 //!
 //! # The `flip` flag, and why dropping it costs less than it looks
 //!
@@ -93,7 +94,7 @@ pub struct AnimRow {
     /// Stop here (seconds), or `None` to play the clip out — PD's `endframe`.
     pub end: Option<f32>,
     /// Frames at which a falling body strikes the floor (`thudframe1/2`, `-1` for
-    /// none). Kept for the impact sound; nothing consumes them yet.
+    /// none) — the impact sound, played by `World::advance_animation`.
     pub thud: (f32, f32),
 }
 

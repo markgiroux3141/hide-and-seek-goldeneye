@@ -252,6 +252,85 @@ Read `gailists.c:2020-2060` and `:2733-2860`, and `chraicommands.c:6472`.
 
 ## 5. Suggested plan
 
+> **Re-scoped 2026-09-25 (user decision).** There will be two enemy archetypes: the **PD
+> combat-simulator bot** (deathmatch, omniscient, no stagger) and the **mission guard**
+> (GoldenEye / PD solo: perception, stagger, patrols, morale). GoldenEye and PD guards are one
+> system; the ge-decomp has the same `ACT_*` set. **The simulator bot comes first and gets
+> finished before the guard is started.** So the plan below is now "Track A: the simulant".
+> The stages are unchanged, minus anything guard-only. The knowledge-policy half of Stage 1
+> is parked with the guard.
+>
+> **Track A order:**
+> - **A1 simulant reactions:** PD's procedural flinch plus shove, no stun, keep firing; this
+>   also unlocks friendly fire at the real impact point.
+> - **A2 animation foundation:** crossfade from the on-screen pose; measured gait speeds.
+> - **A3 PD locomotion:** velocity smoothing and arrival slowdown; face the target only when
+>   about to attack; leg/torso twist plus reversed-run backpedal.
+> - **A4 combat readability:** windup, positional gunfire, per-weapon damage.
+> - **A5 structure**, alongside the others.
+>
+> **Found in the first playtest (facility 2, "I had to go find him"): FIXED.**
+> `chase_aim_point` built its flank point at the *hunter's* height. Every hunter on a lower
+> floor therefore aimed at a spot on its own floor under the player, and flip-flopped there for
+> the whole round. Measured: 3 of the 10 pads were never found in 60 s. After the fix all 10
+> are found; the regression test is `hunters_below_the_player_climb_to_find_them_on_facility_2`.
+> This was `AI=ours` only, since `pd_step` doesn't flank; facility 2 has no PLAY config, so it
+> runs `ours`.
+>
+> **`AI=pd` is the default (2026-09-25).** Running the AI lab under it found four PD-mode
+> defects that the lab had never seen, because it always ran `ours`:
+> 1. **A player on ground a hunter can't reach froze the hunter.** A* said "no route" and the
+>    hunter stood still, in both modes once the flank bug was fixed. Now it walks to the
+>    reachable cell nearest you and fights from there (`NavWorld::reachable_stand_in`, cached
+>    per hunter). The old "climbs to another floor" test had been passing by luck.
+> 2. **A gunless PD hunter with nothing to fetch charged the player.** It now roams the search
+>    points instead.
+> 3. **Sightline flicker.** PD refreshes one character's sightline per tick, round-robin
+>    (`bot.c:1601`), and holds it in between. Ported; label flips round a pillar dropped from 107
+>    to 73.
+> 4. **Stun-lock in a pack.** This is what A1 fixes: a hunter took 23 friendly leg hits of 3.7 s
+>    each and never fired.
+>
+> **A1 status: built, green (881 tests), release built, awaiting playtest.**
+> `ReactionStyle::{Simulant (default), Guard}`. The simulant gets PD's procedural flinch (the
+> engine's `FlinchLayer`: body or head, PD's curve and angle table) and a shove (`shotspeed`:
+> +0.75 run-speed units per hit, cap 1.5, linear bleed, applied through `try_step`). No stun
+> and no dropped trigger. `REACTIONS=guard` brings back the injury-table stagger for an A/B.
+> Friendly fire now lands at the real impact point.
+>
+> **A1 COMMITTED 512dad7** (playtest: "the enemies are relentless now and they find me
+> quick").
+>
+> **A2 status: built, green (882 tests), release built, awaiting playtest.**
+> - **Hit/death one-shots crossfade over PD's 16-tick merge** (`ONESHOT_MERGE`, ~0.27 s), from
+>   the live pose and back out to it. The stack keeps running underneath, and aim, look and IK
+>   ease out on their own weights. The mixer's own fade is zeroed, because it faded from a
+>   hidden clip. Measured: a kill used to swing a joint 106° in one frame; the first blended
+>   frame turns it 17°.
+> - **Gait anchors are measured off the clips** (`AnimationClip::ground_speed`: the root's mean
+>   forward velocity relative to the planted foot, taken at wave spawn). Walk / jog / run come
+>   out at ~0.82 / 1.37 / 3.04 m/s, against the 1.5 / 3.5 / 5.0 guesses. Past the run clip,
+>   cadence scales up (cap 2×), and the stride correction no longer depends on foot IK. Net
+>   planted-foot drift is now 2% / 1% / 0% of body speed at walk / jog / chase, down from
+>   77% / 55% / 42%.
+> - The mixer's dead fire-window plumbing is removed.
+> - **Deferred:** sharing clips through `Arc` (memory only, not feel).
+>
+> **Faithfulness pass (user: "as faithful to PD as we can, even if it changes our
+> system").** It came out of the "they can't hit me" playtest bug. Under `AI=pd`:
+> - The **shove unit** is PD's own: `shotspeed` is scaled by `ANIM_0029`'s travel, and
+>   `ANIM_0029` is our run clip. That's 2.85 m/s on a PD body.
+> - **Speed** follows PD's tier (`bot_calculate_max_speed`: Normal ≈ 4.6 m/s), not our dial.
+> - **Health is flat**: PD's tiers never touch it. Our dial's 2.2–4× health let a hunter soak
+>   an automatic for 3–6 s while shoved across the room.
+>
+> Correction: PD bots **do** stand still to shoot (`chr_try_stop` in OK mode). The earlier
+> claim that they "run into their shove" was wrong.
+>
+> **Still open for A3:** the band-edge plant/run (Ok↔Advance) under a drifting player. PD
+> smooths the velocity, and a PD-mode stop-start check goes in with that. The two thrash tests
+> are pinned to `ours` until then.
+
 The stages are ordered like the levelgen retro. The user playtests after each stage before the next one starts.
 
 **Stage 0: tell the truth (bugs plus docs; almost no change to feel)**
@@ -268,6 +347,27 @@ The stages are ordered like the levelgen retro. The user playtests after each st
 - Fix every stale doc in §3d. Update `DESIGN_AI_PD_VS_OURS.md` and the `pd_lab.rs` header.
 - Delete `breach_tick`, `advance_facing`/`TURN_RATE`, the `is_fire_clip` guard and `AnimPlayer::fire_window`.
 - Make `pdsim` non-optional, which removes three `is_some()` branches.
+
+> **Stage 0 status (2026-09-25, branch `feat/enemy-overhaul`): built, green, awaiting playtest.**
+> - Done: hit part + blood read the on-screen pose; no bounty for hunter-on-hunter kills
+>   (an unowned blast still pays, since only the player's explosives exist in play); knockback
+>   comes from whoever fired; a blast clears the bullet's hit part; hunters skip weapons they
+>   can't fire (launchers, grenades, mines: pickups, the fixed-weapon policy, the PLAY-tab
+>   list); `breach_tick` + `DOOR_HP` deleted; the stale docs above fixed.
+> - **Deferred: friendly fire's real impact point.** Measured: the moment a packmate's round
+>   could hit an arm, the AI lab's `a_pack_still_engages_despite_self_occlusion` failed. The
+>   front rank was stun-locked by the rank behind it, because PD's arm injury row is a 3 s
+>   stun. It moves once Stage 1 decides the reaction style.
+> - Deferred to Stage 2: `AnimPlayer::fire_window` and the `is_fire_clip` guard (the mixer
+>   gets reworked there anyway); making `pdsim` non-optional (goes with Stage 1's knowledge
+>   policy).
+>
+> **Measured stun per PD injury row** (full clip ÷ speed, what `hit_enemy_with` stuns for):
+> torso / head / pelvis 0.5–0.67 s; bicep 1.8–3.1 s; forearm 2.4 s; hand 3.7–4.7 s;
+> leg 3.7–**5.1 s**. PD guards really do play these whole: every level script sets
+> `set_recovery_speed(0)` (149/149 calls), so `chr_get_ranged_argh_speed` leaves the end
+> frame at the last frame. That's the GoldenEye "juggle", and it's why a limb hit takes a
+> hunter out of the fight for seconds.
 
 **Stage 1: settle two decisions (you need to make these)**
 

@@ -93,7 +93,7 @@ impl World {
         let watch = self.player_pos().unwrap_or(spawn);
         // Respawn health tracks the LIVE difficulty dial, matching `restart_hunt`: turn
         // the dial mid-round and the next body in reflects it.
-        let spawn_hp = crate::enemy::ENEMY_HEALTH * self.difficulty_params().health_mult;
+        let spawn_hp = self.hunter_spawn_health();
         let (radius, half_height) = self.body_capsule(
             self.enemies.get(idx).map(|i| i.body).unwrap_or(0),
         );
@@ -175,6 +175,8 @@ impl World {
         inst.anim.play(0, 0.0);
         inst.render_yaw = None;
         inst.final_pose = None;
+        inst.oneshot_w = 0.0;
+        inst.oneshot_hold = None;
         inst.aim_weight = 0.0;
         inst.head_look_weight = 0.0;
         inst.head_look_point = None;
@@ -335,7 +337,7 @@ mod tests {
         // One lethal shot through the real damage funnel, so `start_death` runs (and with
         // it the scoreboard credit + the respawn clock).
         let at = world.enemies[1].enemy.pos + Vec3::Y * 0.8;
-        world.hit_enemy_with(1, at, 1e6, Killer::Player);
+        world.hit_enemy_with(1, at, at - Vec3::Z, 1e6, Killer::Player);
         assert!(world.enemies[1].enemy.is_dead(), "slot 1 is down");
         assert_eq!(world.enemies.len(), 3, "a death does not shrink the roster");
         assert!(world.enemies[1].respawn_timer.is_some(), "its clock is armed");
@@ -343,8 +345,18 @@ mod tests {
         // Not back before the delay…
         run(&mut world, RESPAWN_DELAY * 0.5);
         assert!(world.enemies[1].enemy.is_dead(), "still down mid-beat");
-        // …and back after it.
-        run(&mut world, RESPAWN_DELAY);
+        // …and back after it. Checked on the step it returns, not a beat later: a hunter
+        // is live the moment it respawns, and a Perfect Dark bot (no alert pause) is
+        // already metres off its pad and firing a second after — which is right, and
+        // would read here as "respawned somewhere else with a half-empty gun".
+        let dt = 1.0 / 60.0;
+        let input = InputState::default();
+        for _ in 0..(RESPAWN_DELAY * 2.0 / dt).ceil() as usize {
+            if !world.enemies[1].enemy.is_dead() {
+                break;
+            }
+            world.fixed_step(dt, &input);
+        }
         assert_eq!(world.enemies.len(), 3, "the roster length never changed");
         let inst = &world.enemies[1];
         assert!(!inst.enemy.is_dead(), "slot 1 is alive again");
@@ -425,7 +437,7 @@ mod tests {
 
         for expected in 1..=3u32 {
             let at = world.enemies[0].enemy.pos + Vec3::Y * 0.8;
-            world.hit_enemy_with(0, at, 1e6, Killer::Player);
+            world.hit_enemy_with(0, at, at - Vec3::Z, 1e6, Killer::Player);
             assert!(world.enemies[0].enemy.is_dead(), "down on pass {expected}");
             assert_eq!(
                 world.hunter_scores()[0].deaths, expected,

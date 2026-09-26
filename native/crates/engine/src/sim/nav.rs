@@ -370,6 +370,12 @@ pub const fn max_step_m() -> f32 {
     MAX_STEP as f32 * WORLD_SCALE
 }
 
+/// How far (cells) [`NavWorld::reachable_stand_in`] looks for a reachable stand-in when
+/// the real goal is on ground a hunter cannot reach: 6 m, enough for a crate, a ledge or
+/// a landing a storey up, and small enough that a player on a genuinely separate part
+/// of the level is not "approached" from the far side of a wall.
+pub const REACH_SUBSTITUTE_CELLS: i32 = 24;
+
 impl NavWorld {
     /// Total cell count (for logging).
     pub fn cell_count(&self) -> usize {
@@ -1571,6 +1577,69 @@ impl NavWorld {
         PATH_EXPANDED.fetch_add(expanded, Relaxed);
         PATH_FAILS.fetch_add(1, Relaxed);
         None
+    }
+
+    /// Where to walk instead when `goal_m` cannot be walked to from `start_m`: the
+    /// **reachable** standable cell nearest the goal, within [`REACH_SUBSTITUTE_CELLS`].
+    /// `None` when the goal *is* reachable (walk to it) or when nothing reachable is near
+    /// it (a genuinely separate part of the level).
+    ///
+    /// What a pursuer needs, as opposed to what a validator needs. A player who jumps onto
+    /// a crate, a ledge or a platform the hunters cannot climb (facility 2 has 36 such
+    /// player-only climbs) stands on a cell of another walkable component, and
+    /// [`Self::find_path`] rightly says there is no route. A hunter that takes "no route"
+    /// as "stand still" is the "it couldn't find me" playtest report; Perfect Dark's bot
+    /// goes to the closest place it can reach and fights from there. `find_path` keeps its
+    /// honest answer for the nav tools; the movement code asks this as well.
+    ///
+    /// Up to a full 49³-cell cube when nothing is near, so callers cache it against the
+    /// goal rather than asking every repath.
+    pub fn reachable_stand_in(&self, start_m: Vec3, goal_m: Vec3) -> Option<Vec3> {
+        let start = self
+            .cell_at(start_m.x, start_m.y, start_m.z)
+            .or_else(|| self.nearest_cell(start_m))?;
+        let comp = self.comp.get(self.idx(start.0, start.1, start.2)).copied().filter(|&c| c != 0)?;
+        if self.component_at(goal_m) == Some(comp) {
+            return None; // reachable as it stands
+        }
+        let sub = self.nearest_cell_in_component(goal_m, comp, REACH_SUBSTITUTE_CELLS)?;
+        Some(self.cell_floor_meters(sub.0, sub.1, sub.2))
+    }
+
+    /// The standable cell of component `comp` nearest `m`, searched in growing cubic
+    /// shells out to `max_r` cells and stopped at the first shell that can no longer
+    /// beat the best found — so the common case (the player one step up on a crate) is
+    /// a few hundred cells, not the full cube.
+    fn nearest_cell_in_component(&self, m: Vec3, comp: u32, max_r: i32) -> Option<(i32, i32, i32)> {
+        let cx = (m_to_wt(m.x) - self.x0 as f32).floor() as i32;
+        let cy = (m_to_wt(m.y) - self.y0 as f32).floor() as i32;
+        let cz = (m_to_wt(m.z) - self.z0 as f32).floor() as i32;
+        let mut best: Option<((i32, i32, i32), i32)> = None;
+        for r in 0..=max_r {
+            // Every cell on shell r is at least r cells away; once the best is closer
+            // than that, no later shell can improve on it.
+            if best.is_some_and(|(_, d)| d <= r * r) {
+                break;
+            }
+            for iy in (cy - r)..=(cy + r) {
+                for iz in (cz - r)..=(cz + r) {
+                    for ix in (cx - r)..=(cx + r) {
+                        let on_shell = (ix - cx).abs() == r || (iy - cy).abs() == r || (iz - cz).abs() == r;
+                        if !on_shell || !self.in_bounds(ix, iy, iz) || !self.is_standable(ix, iy, iz) {
+                            continue;
+                        }
+                        if self.comp.get(self.idx(ix, iy, iz)).copied() != Some(comp) {
+                            continue;
+                        }
+                        let d = (ix - cx).pow(2) + (iy - cy).pow(2) + (iz - cz).pow(2);
+                        if best.is_none_or(|(_, bd)| d < bd) {
+                            best = Some(((ix, iy, iz), d));
+                        }
+                    }
+                }
+            }
+        }
+        best.map(|(c, _)| c)
     }
 
     fn nearest_cell(&self, m: Vec3) -> Option<(i32, i32, i32)> {

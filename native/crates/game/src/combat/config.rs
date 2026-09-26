@@ -205,6 +205,15 @@ impl WeaponStats {
         self.magazine_size == 0
     }
 
+    /// Whether a **hunter** can use this weapon as the weapon it is. A hunter's
+    /// trigger is hitscan-only (`World::emit_pd_shot`), so a launcher, a grenade or
+    /// a mine in its hands would fire 8-damage bullets — and, being unclipped or
+    /// odd-clipped, never reload. Until hunters can throw and launch, they neither
+    /// pick these up nor get handed them by the PLAY tab.
+    pub fn hunter_usable(&self) -> bool {
+        !self.is_unarmed() && matches!(self.fire_kind, FireKind::Hitscan)
+    }
+
     /// Whether this weapon came from the Perfect Dark table rather than the
     /// GoldenEye one.
     ///
