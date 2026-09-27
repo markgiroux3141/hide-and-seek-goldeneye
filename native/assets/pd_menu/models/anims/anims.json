@@ -1,0 +1,20 @@
+{
+ "508": {
+  "id": "ANIM_01FC",
+  "file": "01fc.bin",
+  "numframes": 33,
+  "bytesperframe": 44,
+  "headerlen": 162,
+  "framelen": 12,
+  "flags": 1
+ },
+ "1037": {
+  "id": "ANIM_040D",
+  "file": "040d.bin",
+  "numframes": 45,
+  "bytesperframe": 12,
+  "headerlen": 97,
+  "framelen": 12,
+  "flags": 0
+ }
+}

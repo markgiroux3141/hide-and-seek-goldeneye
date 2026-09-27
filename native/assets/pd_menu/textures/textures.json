@@ -1,0 +1,50 @@
+{
+ "0x01e5": {
+  "file": "tex_01e5.png",
+  "w": 64,
+  "h": 64,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0c9a": {
+  "file": "tex_0c9a.png",
+  "w": 64,
+  "h": 64,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x084e": {
+  "file": "tex_084e.png",
+  "w": 11,
+  "h": 11,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0858": {
+  "file": "tex_0858.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA32",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x08f4": {
+  "file": "tex_08f4.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA32",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0001": {
+  "file": "tex_0001.png",
+  "w": 1,
+  "h": 1,
+  "format": "RGBA16_CI4",
+  "source": "pd",
+  "codec": "zlib"
+ }
+}

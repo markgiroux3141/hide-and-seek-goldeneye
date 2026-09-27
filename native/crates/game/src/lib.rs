@@ -16,6 +16,7 @@ pub mod gamepad;
 pub mod hud;
 pub mod levelgen;
 pub mod pd_guns;
+pub mod pd_menu;
 pub mod pd_spike;
 pub mod pdsim;
 pub mod props;
