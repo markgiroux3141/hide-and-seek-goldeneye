@@ -1,0 +1,84 @@
+newmtl m0ClampS
+Ka 0 0 0
+illum 0
+Ns 64
+d 1.000000
+map_Kd tempImgEd0311.bmp
+
+newmtl m1ClampT
+Ka 0 0 0
+illum 0
+Ns 64
+d 1.000000
+map_Kd tempImgEd030F.bmp
+
+newmtl m2ClampT
+Ka 0 0 0
+illum 0
+Ns 64
+d 1.000000
+map_Kd tempImgEd0312.bmp
+
+newmtl m3
+Ka 0 0 0
+illum 0
+Ns 64
+d 1.000000
+map_Kd tempImgEd0309.bmp
+
+newmtl m4
+Ka 0 0 0
+illum 0
+Ns 64
+d 1.000000
+map_Kd tempImgEd0310.bmp
+
+newmtl m5ClampSClampT
+Ka 0 0 0
+illum 0
+Ns 64
+d 1.000000
+map_Kd tempImgEd030A.bmp
+
+newmtl m6ClampSClampT
+Ka 0 0 0
+illum 0
+Ns 64
+d 1.000000
+map_Kd tempImgEd030B.bmp
+
+newmtl m7ClampSClampT
+Ka 0 0 0
+illum 0
+Ns 64
+d 1.000000
+map_Kd tempImgEd030C.bmp
+
+newmtl m8ClampSClampT
+Ka 0 0 0
+illum 0
+Ns 64
+d 1.000000
+map_Kd tempImgEd030D.bmp
+
+newmtl m9
+Ka 0 0 0
+illum 0
+Ns 64
+d 1.000000
+map_Kd tempImgEd030E.bmp
+
+newmtl m10ClampSClampT
+Ka 0 0 0
+illum 0
+Ns 64
+d 1.000000
+map_Kd tempImgEd0308.bmp
+
+newmtl m11
+Ka 0 0 0
+illum 0
+Ns 64
+d 1.000000
+map_Kd tempImgEd0313.bmp
+

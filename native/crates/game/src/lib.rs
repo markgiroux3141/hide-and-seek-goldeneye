@@ -15,6 +15,7 @@ pub mod enemy;
 pub mod gamepad;
 pub mod hud;
 pub mod levelgen;
+pub mod pd_spike;
 pub mod pdsim;
 pub mod props;
 /// Crate-private: the middle-mouse authoring menu is a front-end over the app's own
