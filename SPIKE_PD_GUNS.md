@@ -95,6 +95,36 @@ Sounds come from `pd_sfx.py` and land in `native/assets/audio/pd/sfx/`. They pla
   - Never drive the game window yourself. Check visuals with `pd_gun_snapshot` (`--all`, `--seq`), which renders offscreen and writes PNGs you can Read.
   - Frame-to-frame effects need every frame drawn. `Snap::live` renders frames without saving them.
 
+## N64 video + CRT (branch `spike/n64-crt`)
+
+The panel's **VIDEO** section, off by default, shows the range the way an N64 on a CRT did. Every stage can be toggled on its own. Code: `n64video.rs` / `n64video.wgsl`.
+
+- **Decomp-sourced:** 320×220 NTSC (hi-res is 640×220, not 440×330), a 16-bit colour image, VI gamma off, the dither filter and divot on, LAN1 (anti-aliased), Bayer as the usual colour dither, `G_TF_BILERP`.
+- **The chain:**
+  - the world renders into a 320×220 engine scene target (`Renderer::set_scene_size`);
+  - guns, PD's post effects, and the HUD with the sight rasterised into it (`n64_hud_canvas`, the real `sight_draw_aimer` / `sight_draw_maian`);
+  - RDP store: RGBA5551 + Bayer;
+  - VI: the dither ("restore") filter, edge AA and divot;
+  - then either the flat 4:3 raster or the CRT: an RGB / S-Video / composite signal (a real YIQ subcarrier encode and decode), a gaussian beam that widens with brightness, a phosphor mask, halation, curvature and overscan.
+- **3-point filtering** is in both the engine's `shader_textured.wgsl` (`Lighting.count.y`) and `pdgun.wgsl` (per level, blending levels like TRILERP).
+- **From memory, not verified:** the Bayer matrix, the dither rule and the VI filters follow angrylion-rdp-plus as I remember it. They have not been checked against its source.
+- **Approximated:** coverage. The RDP stores 3-bit coverage per pixel; we render one sample per pixel, so an edge pixel is the near side of a depth discontinuity (cvg 4). The world's depth is copied out before the gun pass clears it (`PdRenderer::world_depth_copy`).
+- **Snapshots:**
+  - `pd_gun_snapshot <out> --n64 [weapons]` renders each stage configuration over a test backdrop (gradient, stripes, colour bars);
+  - `--crt-still <image>` runs only the CRT half on any image, e.g. an emulator capture, to judge the tube separately.
+- **Measured traps:**
+  - a gaussian chroma low-pass leaks the subcarrier (−23 dB) and stripes every flat colour; the fix is a box of exactly one subcarrier period (9 taps), tested in `composite_chroma_taps_null_the_subcarrier`;
+  - scanline gaps only show at a beam σ below about 0.3 lines, because a gaussian comb's ripple is exp(−2π²σ²).
+- **Playtest 1 ("too degraded"; broken grout lines on the wall tiles):** texture aliasing, not a post effect. Every PD texture carries a mip chain (`texdecompress.c:212-300`, `tex_shrink_paletted`); the engine's world textures had none, so at 320 px each pixel landed on one arbitrary texel. Fix:
+  - world textures now get a box-filtered mip chain (`upload_material_texture`);
+  - the normal view and the shadow pass pin level 0, so they are unchanged;
+  - N64 mode blends 3-point across two LODs, like PD's TRILERP.
+- **Added after playtest 1:**
+  - a resolution option: 320×220, PD hi-res 640×220, and 640×440 beyond N64 on a 480-line raster;
+  - a signal-sharpness slider (scales the bandwidth; the composite box stays one period long);
+  - TV presets (clean RGB / S-Video / composite); the default is now S-Video.
+- **Not done:** the engine walls' per-vertex lighting and fog, PD's TMEM cap on LOD count (distant textures past the last LOD still alias on real hardware), and a measured comparison against real-hardware captures.
+
 ### Invariants that bit us (don't regress)
 - **GPU model lookup:** `PdRenderer` keys models by **`ModelDef.name`** (e.g. `falcon2.bin`), not the file stem.
 - **Default hands:** `combathandslod` (`HAND_MODELS[0]`).

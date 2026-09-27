@@ -31,7 +31,9 @@ use engine::geometry::csg_runtime::Region;
 use engine::render::renderer::{EguiFrame, Renderer};
 
 use super::bgun::*;
+use super::font::{split, Canvas};
 use super::gset::*;
+use super::n64video::{self, Mask, N64Video, Preset, Resolution, Signal, VideoSettings};
 use super::player::PdInput;
 use super::render::PdRenderer;
 use super::sim::{Sim, SoundReq, HAND_MODELS};
@@ -105,6 +107,12 @@ pub struct App {
     grid: bool,
     /// The HUD canvas's texture.
     hud_tex: Option<egui::TextureHandle>,
+    /// N64 video + CRT (the VIDEO section of the panel).
+    video: VideoSettings,
+    n64v: Option<N64Video>,
+    /// The left panel's width in physical pixels (0 when hidden): the tube
+    /// is centred in the rest of the window.
+    panel_px: f32,
     pads: Option<Gamepads>,
     n64: N64State,
     prev_start: bool,
@@ -272,6 +280,9 @@ impl App {
             invert_pad_aim: true,
             grid: false,
             hud_tex: None,
+            video: VideoSettings::default(),
+            n64v: None,
+            panel_px: 0.0,
             pads: Gamepads::new(),
             n64: N64State::default(),
             prev_start: false,
@@ -410,6 +421,8 @@ impl App {
         let fps = self.fps;
         let pad_connected = self.pads.as_ref().is_some_and(|p| p.connected());
         let mut hud_tex = self.hud_tex.take();
+        let mut video = self.video;
+        let mut panel_px = 0.0f32;
 
         let out = self.egui_ctx.run(raw, |ctx| {
             let screen = ctx.screen_rect();
@@ -421,7 +434,9 @@ impl App {
 
             // sight_draw_default (sight.c:615): only while R is held (or with
             // "always show target"); red when a board is under the crosshair.
-            let sighton = p.insightaimmode || always_sight;
+            // N64 video draws the sight and the HUD into the frame itself
+            // (`App::n64_hud`), so they go through the VI and the tube too.
+            let sighton = (p.insightaimmode || always_sight) && !video.n64;
             if sighton && sim.bgun.hands[HAND_RIGHT].weaponnum != WEAPON_UNARMED {
                 let (x, y) = (p.crosspos[0], p.crosspos[1]);
                 let dir = sim.bgun.cam_screen_dir([x, y], 1.0);
@@ -441,7 +456,7 @@ impl App {
 
             // PD's gun HUD (bgun_draw_hud), drawn by the sim in PD pixels and
             // scaled up without filtering.
-            if let Some(cv) = &sim.hud {
+            if let Some(cv) = sim.hud.as_ref().filter(|_| !video.n64) {
                 let img = egui::ColorImage::from_rgba_premultiplied([cv.w, cv.h], &cv.rgba8());
                 let tex = match hud_tex.take() {
                     Some(mut t) => {
@@ -464,7 +479,8 @@ impl App {
             }
 
             if show_panel {
-                egui::SidePanel::left("pdguns").resizable(false).default_width(250.0).show(ctx, |ui| {
+                let panel = egui::SidePanel::left("pdguns").resizable(false).default_width(250.0).show(ctx, |ui| {
+                    egui::ScrollArea::vertical().id_salt("pdpanel").show(ui, |ui| {
                     ui.heading("PD RANGE");
                     ui.label(egui::RichText::new("Perfect Dark's guns, ported").weak());
                     ui.label(format!("{fps:.0} fps"));
@@ -485,6 +501,8 @@ impl App {
                     ui.checkbox(&mut always_sight, "always show target");
                     ui.checkbox(&mut invert_pad_aim, "invert pad aim (up/down)");
                     ui.checkbox(&mut grid, "grid walls");
+                    ui.separator();
+                    video_panel(ui, &mut video);
                     ui.horizontal(|ui| {
                         if ui.button("clear targets").clicked() {
                             reset_targets = true;
@@ -543,7 +561,9 @@ C-lt/rt strafe · C-up/dn look · Start panel",
                         .small()
                         .weak(),
                     );
+                    });
                 });
+                panel_px = panel.response.rect.right() * ctx.pixels_per_point();
             }
         });
         state.handle_platform_output(&window, out.platform_output);
@@ -557,6 +577,8 @@ C-lt/rt strafe · C-up/dn look · Start panel",
         self.always_sight = always_sight;
         self.invert_pad_aim = invert_pad_aim;
         self.hud_tex = hud_tex;
+        self.video = video;
+        self.panel_px = panel_px;
         self.sim.player.mouse_sens = sens;
         self.sim.room.br_settled_regional = brightness;
         if grid != self.grid {
@@ -598,21 +620,51 @@ C-lt/rt strafe · C-up/dn look · Start panel",
         if dt > 0.0 {
             self.fps = self.fps * 0.95 + (1.0 / dt) * 0.05;
         }
-        if let Some(r) = self.renderer.as_ref() {
-            self.sim.aspect = r.aspect();
+        let n64 = self.video.n64;
+        if let Some(r) = self.renderer.as_mut() {
+            // N64 video: the world renders at PD's resolution (320×220 is
+            // square pixels; the picture keeps that 320:220 shape at 4:3 with
+            // the VI's black bars in every mode), whatever the window.
+            r.set_scene_size(n64.then_some(self.video.resolution.size()));
+            let three_point = n64 && self.video.three_point;
+            if self.pd.as_ref().is_some_and(|p| p.three_point != three_point) {
+                r.set_three_point_filter(three_point);
+            }
+            if let Some(pd) = self.pd.as_mut() {
+                pd.three_point = three_point;
+            }
+            self.sim.aspect = if n64 { n64video::N64_W as f32 / n64video::N64_H as f32 } else { r.aspect() };
         }
         self.step(dt);
         let egui_frame = self.ui();
-        let (Some(renderer), Some(pd)) = (self.renderer.as_mut(), self.pd.as_mut()) else { return };
-        let aspect = renderer.aspect();
+        let hud = if n64 { self.n64_hud() } else { None };
+        let (Some(renderer), Some(pd), Some(nv)) = (self.renderer.as_mut(), self.pd.as_mut(), self.n64v.as_mut()) else { return };
+        let aspect = self.sim.aspect;
         let vp = world_vp(&self.sim, aspect);
         let sim = &self.sim;
+        let video = self.video;
+        let panel_px = self.panel_px;
         renderer.render_with_hook(vp, egui_frame, &mut |h| {
+            let n64 = n64 && h.depth_texture.is_some();
+            pd.world_depth_copy = match (n64 && video.aa, h.depth_texture) {
+                (true, Some(src)) => Some((src.clone(), nv.world_depth(h.device, h.width, h.height))),
+                _ => None,
+            };
             pd.draw(h.device, h.queue, h.encoder, h.color, h.depth, aspect, vp, sim);
             let fx = PdRenderer::post_fx(sim);
             pd.post(h.device, h.queue, h.encoder, h.color_texture, h.color, h.width, h.height, fx);
+            if n64 {
+                nv.upload_hud(h.device, h.queue, hud.as_ref());
+                let rect = n64video::tube_rect(h.present_width, h.present_height, panel_px);
+                nv.run(h.device, h.queue, h.encoder, h.color, h.depth, (h.width, h.height), h.present, rect, &video);
+            }
         });
         let _ = self.world_vp(aspect);
+    }
+
+    /// N64 video's HUD layer (see [`n64_hud_canvas`]).
+    fn n64_hud(&self) -> Option<Canvas> {
+        Some(n64_hud_canvas(&self.sim, self.always_sight))
     }
 
     fn weapon_by_index(&self, i: usize) -> Option<(i32, bool)> {
@@ -644,6 +696,7 @@ impl ApplicationHandler for App {
         let (device, queue, cf, df) = renderer.gpu();
         let mut pd = PdRenderer::new(device, queue, cf, df);
         pd.load_models(device, queue, &self.sim);
+        self.n64v = Some(N64Video::new(device, cf));
         self.egui_state = Some(egui_winit::State::new(self.egui_ctx.clone(), egui::ViewportId::ROOT, &*window, None, None, None));
         self.renderer = Some(renderer);
         self.pd = Some(pd);
@@ -857,6 +910,180 @@ fn sight_draw_default(
         ((x + r, y + gap), (x + r, y + r)),
     ] {
         painter.line_segment([to_px(a.0, a.1), to_px(b.0, b.1)], stroke);
+    }
+}
+
+/// N64 video's HUD layer: PD's gun HUD with the sight drawn into it, in PD
+/// pixels, as the N64 draws both into the framebuffer.
+pub(super) fn n64_hud_canvas(sim: &Sim, always_sight: bool) -> Canvas {
+    let p = &sim.bgun.p;
+    let mut cv = match &sim.hud {
+        Some(h) => Canvas { w: h.w, h: h.h, px: h.px.clone() },
+        None => Canvas::new(p.screen_width.round() as usize, p.screen_height.round() as usize),
+    };
+    let sighton = p.insightaimmode || always_sight;
+    if sighton && sim.bgun.hands[HAND_RIGHT].weaponnum != WEAPON_UNARMED {
+        let (x, y) = (p.crosspos[0], p.crosspos[1]);
+        let dir = sim.bgun.cam_screen_dir([x, y], 1.0);
+        let world_dir = p.projection.transform_vector3(dir);
+        let on_target = matches!(
+            sim.range.raycast(sim.player.pos, world_dir, 65536.0).map(|h| h.kind),
+            Some(super::range::HitKind::Target(_))
+        );
+        if sim.bgun.hands[HAND_RIGHT].weaponnum == WEAPON_FARSIGHT {
+            canvas_sight_maian(&mut cv, x as i32, y as i32, on_target);
+        } else {
+            let (colour, radius, gap) = if on_target { (0xff000060, 6, 3) } else { (0x00ff0028, 8, 5) };
+            canvas_sight_aimer(&mut cv, x as i32, y as i32, radius, gap, colour);
+        }
+    }
+    cv
+}
+
+/// The panel's VIDEO section: N64 video on/off, each VI stage, and the tube.
+fn video_panel(ui: &mut egui::Ui, v: &mut VideoSettings) {
+    ui.label(egui::RichText::new("VIDEO").strong());
+    ui.checkbox(&mut v.n64, "N64 video");
+    ui.add_enabled_ui(v.n64, |ui| {
+        egui::ComboBox::from_label("resolution").selected_text(v.resolution.label()).show_ui(ui, |ui| {
+            for r in Resolution::ALL {
+                ui.selectable_value(&mut v.resolution, r, r.label());
+            }
+        });
+        ui.indent("n64stages", |ui| {
+            ui.checkbox(&mut v.three_point, "3-point texture filter");
+            ui.checkbox(&mut v.fb16, "16-bit colour + Bayer dither");
+            ui.add_enabled(v.fb16, egui::Checkbox::new(&mut v.dither_filter, "VI dither filter"));
+            ui.checkbox(&mut v.aa, "VI anti-alias (depth edges)");
+            ui.checkbox(&mut v.divot, "VI divot filter");
+        });
+        ui.checkbox(&mut v.crt, "CRT");
+        ui.add_enabled_ui(v.crt, |ui| {
+            ui.indent("crtopts", |ui| {
+                ui.horizontal(|ui| {
+                    for p in Preset::ALL {
+                        if ui.small_button(p.label()).clicked() {
+                            p.apply(v);
+                        }
+                    }
+                });
+                egui::ComboBox::from_label("signal").selected_text(v.signal.label()).show_ui(ui, |ui| {
+                    for s in Signal::ALL {
+                        ui.selectable_value(&mut v.signal, s, s.label());
+                    }
+                });
+                egui::ComboBox::from_label("mask").selected_text(v.mask.label()).show_ui(ui, |ui| {
+                    for m in Mask::ALL {
+                        ui.selectable_value(&mut v.mask, m, m.label());
+                    }
+                });
+                ui.add(egui::Slider::new(&mut v.mask_strength, 0.0..=1.0).text("mask strength"));
+                ui.add(egui::Slider::new(&mut v.scanlines, 0.0..=1.0).text("scanlines"));
+                ui.add(egui::Slider::new(&mut v.sharpness, 0.5..=2.5).text("signal sharpness"));
+                ui.add(egui::Slider::new(&mut v.halation, 0.0..=0.3).text("halation"));
+                ui.add(egui::Slider::new(&mut v.curvature, 0.0..=0.2).text("curvature"));
+                ui.add(egui::Slider::new(&mut v.overscan, 0.0..=0.1).text("overscan"));
+            });
+        });
+        if ui.small_button("reset video").clicked() {
+            *v = VideoSettings { n64: true, ..VideoSettings::default() };
+        }
+    });
+}
+
+/// `gDPHudRectangle` (`gbiex.h:101`) at `g_UiScaleX` 1: both corners inclusive,
+/// blended `G_RM_XLU_SURF` in the prim colour (`text_begin_boxmode`).
+fn hud_rect(cv: &mut Canvas, x1: i32, y1: i32, x2: i32, y2: i32, colour: u32) {
+    cv.fill_rect(x1, y1, x2 + 1, y2 + 1, colour);
+}
+
+/// `sight_draw_aimer` (`sight.c:428`) into the HUD canvas, single player.
+fn canvas_sight_aimer(cv: &mut Canvas, x: i32, y: i32, radius: i32, cornergap: i32, colour: u32) {
+    let (vl, vt) = (0, 0);
+    let (vr, vb) = (cv.w as i32 - 1, cv.h as i32 - 1);
+    let line = 0x00ff0028;
+    hud_rect(cv, vl + 48, y, x - radius + 2, y, line);
+    hud_rect(cv, x + radius - 2, y, vr - 49, y, line);
+    hud_rect(cv, x, vt + 10, x, y - radius + 2, line);
+    hud_rect(cv, x, y + radius - 2, x, vb - 10, line);
+    let (r, g) = (radius, cornergap);
+    for (x1, y1, x2, y2) in [
+        (x - r, y - r, x - r, y + r),
+        (x + r, y - r, x + r, y + r),
+        (x - r, y - r, x + r, y - r),
+        (x - r, y + r, x + r, y + r),
+        // The corners a second time.
+        (x - r, y - r, x - r, y - g),
+        (x - r, y + g, x - r, y + r),
+        (x + r, y - r, x + r, y - g),
+        (x + r, y + g, x + r, y + r),
+        (x - r, y - r, x - g, y - r),
+        (x + g, y - r, x + r, y - r),
+        (x - r, y + r, x - g, y + r),
+        (x + g, y + r, x + r, y + r),
+    ] {
+        hud_rect(cv, x1, y1, x2, y2, colour);
+    }
+}
+
+/// `sight_draw_maian` (`sight.c:1278`) into the HUD canvas: the four
+/// smooth-shaded triangles (`G_CC_SHADE`, XLU), then the inner box's border.
+fn canvas_sight_maian(cv: &mut Canvas, x: i32, y: i32, hasprop: bool) {
+    let (w, h) = (cv.w as i32, cv.h as i32);
+    let (vr, vb) = (w - 1, h - 1);
+    let outer = 0x00ff000f;
+    let inner = if hasprop { 0xff000060 } else { 0x00ff0044 };
+    let v = [
+        ((w >> 1) as f32, 10.0, outer),
+        ((w >> 1) as f32, (vb - 10) as f32, outer),
+        (48.0, (h >> 1) as f32, outer),
+        ((vr - 49) as f32, (h >> 1) as f32, outer),
+        ((x - 4) as f32, (y - 4) as f32, inner),
+        ((x + 4) as f32, (y - 4) as f32, inner),
+        ((x + 4) as f32, (y + 4) as f32, inner),
+        ((x - 4) as f32, (y + 4) as f32, inner),
+    ];
+    // gSPTri4(0, 4, 5, 5, 3, 6, 7, 6, 1, 4, 7, 2)
+    for t in [[0, 4, 5], [5, 3, 6], [7, 6, 1], [4, 7, 2]] {
+        shade_tri(cv, [v[t[0]], v[t[1]], v[t[2]]]);
+    }
+    let b = 0x00ff0028;
+    hud_rect(cv, x - 4, y - 4, x - 4, y + 4, b);
+    hud_rect(cv, x + 4, y - 4, x + 4, y + 4, b);
+    hud_rect(cv, x - 4, y - 4, x + 4, y - 4, b);
+    hud_rect(cv, x - 4, y + 4, x + 4, y + 4, b);
+}
+
+/// A gouraud-shaded triangle (vertex colours as RGBA words), sampled at pixel
+/// centres and blended XLU.
+fn shade_tri(cv: &mut Canvas, v: [(f32, f32, u32); 3]) {
+    let col = v.map(|(_, _, c)| {
+        let (rgb, a) = split(c);
+        [rgb[0], rgb[1], rgb[2], a]
+    });
+    let (x0, y0) = (v[0].0, v[0].1);
+    let (x1, y1) = (v[1].0, v[1].1);
+    let (x2, y2) = (v[2].0, v[2].1);
+    let area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+    if area.abs() < 1e-6 {
+        return;
+    }
+    let minx = x0.min(x1).min(x2).floor().max(0.0) as i32;
+    let maxx = x0.max(x1).max(x2).ceil().min(cv.w as f32 - 1.0) as i32;
+    let miny = y0.min(y1).min(y2).floor().max(0.0) as i32;
+    let maxy = y0.max(y1).max(y2).ceil().min(cv.h as f32 - 1.0) as i32;
+    for py in miny..=maxy {
+        for px in minx..=maxx {
+            let (sx, sy) = (px as f32 + 0.5, py as f32 + 0.5);
+            let w0 = ((x1 - sx) * (y2 - sy) - (x2 - sx) * (y1 - sy)) / area;
+            let w1 = ((x2 - sx) * (y0 - sy) - (x0 - sx) * (y2 - sy)) / area;
+            let w2 = 1.0 - w0 - w1;
+            if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                continue;
+            }
+            let c: [f32; 4] = std::array::from_fn(|i| col[0][i] * w0 + col[1][i] * w1 + col[2][i] * w2);
+            cv.blend(px, py, [c[0], c[1], c[2]], c[3]);
+        }
     }
 }
 

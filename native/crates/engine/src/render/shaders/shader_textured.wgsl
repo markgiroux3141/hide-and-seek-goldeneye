@@ -32,7 +32,7 @@ struct Light {
 };
 struct Lighting {
     ambient: vec4<f32>,          // rgb = ambient colour × level, w = flat flag (1 = flat)
-    count: vec4<u32>,            // x = active light count
+    count: vec4<u32>,            // x = active light count, y = 3-point texture filter
     lights: array<Light, 32>,
 };
 @group(2) @binding(0) var<uniform> lighting: Lighting;
@@ -134,9 +134,39 @@ fn vs_main(in: VsIn) -> VsOut {
     return out;
 }
 
+// The N64's 3-point texture filter (`G_TF_BILERP`), selected by
+// `lighting.count.y`: the RDP's cheaper bilinear splits each texel square on
+// its diagonal and interpolates the three corners of the half the sample falls
+// in. Every tap lands on a texel centre, so the sampler's filter mode doesn't
+// matter and its wrap mode still applies.
+fn sample_3point(uv: vec2<f32>, level: u32) -> vec4<f32> {
+    let size = vec2<f32>(textureDimensions(tex, level));
+    let lf = f32(level);
+    var off = fract(uv * size - vec2<f32>(0.5));
+    off = off - step(1.0, off.x + off.y);
+    let c0 = textureSampleLevel(tex, samp, uv - off / size, lf);
+    let c1 = textureSampleLevel(tex, samp, uv - vec2<f32>(off.x - sign(off.x), off.y) / size, lf);
+    let c2 = textureSampleLevel(tex, samp, uv - vec2<f32>(off.x, off.y - sign(off.y)) / size, lf);
+    return c0 + abs(off.x) * (c1 - c0) + abs(off.y) * (c2 - c0);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
-    let c = textureSample(tex, samp, in.uv * material.params.x + material.params.yz);
+    let uv = in.uv * material.params.x + material.params.yz;
+    // Texel footprint (in uniform control flow, before any branch or discard).
+    let texels = uv * vec2<f32>(textureDimensions(tex, 0));
+    let rho = max(length(dpdx(texels)), length(dpdy(texels)));
+    // The normal view: level 0 only, as it was before the textures had mips.
+    var c = textureSampleLevel(tex, samp, uv, 0.0);
+    if (lighting.count.y != 0u) {
+        // N64 video: 3-point on the two LODs the footprint falls between,
+        // blended by the fraction (PD's TRILERP 2-cycle mode).
+        let top = f32(textureNumLevels(tex) - 1u);
+        let lod = clamp(log2(max(rho, 1e-6)), 0.0, top);
+        let l0 = u32(floor(lod));
+        let l1 = min(l0 + 1u, u32(top));
+        c = mix(sample_3point(uv, l0), sample_3point(uv, l1), fract(lod));
+    }
     // Alpha-test (JS `alphaTest: 0.5`): cut out the transparent texels of the
     // railing texture. Opaque zone textures decode to alpha 1, so they're
     // unaffected — and discard is order-independent, needing no blend/sort.

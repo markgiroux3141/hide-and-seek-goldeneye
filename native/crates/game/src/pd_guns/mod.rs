@@ -59,6 +59,7 @@ pub mod fx;
 pub mod gset;
 pub mod hud;
 pub mod model;
+pub mod n64video;
 pub mod nbomb;
 pub mod pdmtx;
 pub mod player;
