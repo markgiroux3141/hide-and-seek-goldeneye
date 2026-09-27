@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
-use kira::{AudioManager as KiraManager, AudioManagerSettings, DefaultBackend, Decibels, Tween};
+use kira::{AudioManager as KiraManager, AudioManagerSettings, DefaultBackend, Decibels, Panning, PlaybackRate, Tween};
 
 /// Convert a linear amplitude gain (the JS `GainNode` model: 1.0 = unchanged,
 /// 0.5 = half) to the decibels kira wants: `dB = 20·log10(amplitude)`. Clamped
@@ -42,6 +42,9 @@ pub struct AudioManager {
     /// can be stopped when the mode changes (music is HUNT-only — see
     /// `World::sync_mode_music`). `None` while nothing is playing.
     music: Option<StaticSoundHandle>,
+    /// Voices started by [`Self::play_voice`] that the caller may stop (loops).
+    voices: HashMap<u64, StaticSoundHandle>,
+    next_voice: u64,
     /// `native/assets/audio/`, resolved once from the engine crate's manifest dir.
     root: PathBuf,
 }
@@ -67,6 +70,8 @@ impl AudioManager {
             manager,
             sounds: HashMap::new(),
             music: None,
+            voices: HashMap::new(),
+            next_voice: 1,
             root,
         })
     }
@@ -107,6 +112,43 @@ impl AudioManager {
         let data = data.volume(amplitude_to_db(volume));
         if let Err(e) = self.manager.play(data) {
             log::warn!("audio: play '{name}' failed: {e}");
+        }
+    }
+
+    /// Play a one-shot (or loop) with a playback rate (pitch; 1.0 = as recorded)
+    /// and stereo pan (-1 left .. 1 right). Returns a voice id for
+    /// [`Self::stop_voice`]; one-shots are forgotten once they finish.
+    pub fn play_voice(&mut self, name: &str, volume: f32, rate: f64, pan: f32, looping: bool) -> Option<u64> {
+        if !self.sounds.contains_key(name) {
+            self.load(name);
+        }
+        let data = self.sounds.get(name)?;
+        let mut data = data
+            .volume(amplitude_to_db(volume))
+            .playback_rate(PlaybackRate(rate))
+            .panning(Panning(pan.clamp(-1.0, 1.0)));
+        if looping {
+            data = data.loop_region(..);
+        }
+        self.voices.retain(|_, h| h.state() != kira::sound::PlaybackState::Stopped);
+        match self.manager.play(data) {
+            Ok(handle) => {
+                let id = self.next_voice;
+                self.next_voice += 1;
+                self.voices.insert(id, handle);
+                Some(id)
+            }
+            Err(e) => {
+                log::warn!("audio: play '{name}' failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// Stop a voice started by [`Self::play_voice`] (no-op if already finished).
+    pub fn stop_voice(&mut self, id: u64) {
+        if let Some(mut h) = self.voices.remove(&id) {
+            h.stop(Tween::default());
         }
     }
 
