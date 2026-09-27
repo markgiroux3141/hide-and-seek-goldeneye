@@ -116,13 +116,14 @@ fn falcon_fires_down_the_range_and_hits_the_board() {
     assert!(sim.sounds.iter().any(|s| s.id == 0x804d), "no Falcon shot sound: {:?}", sim.sounds.iter().map(|s| s.id).collect::<Vec<_>>());
 }
 
-/// The spike's two shaders pass the validator wgpu runs at `create_shader_module`.
+/// The spike's shaders pass the validator wgpu runs at `create_shader_module`.
 #[test]
 fn pd_shaders_validate() {
     for (name, src) in [
         ("pdgun.wgsl", include_str!("pdgun.wgsl")),
         ("pdfx.wgsl", include_str!("pdfx.wgsl")),
         ("pdpost.wgsl", include_str!("pdpost.wgsl")),
+        ("n64video.wgsl", include_str!("n64video.wgsl")),
     ] {
         let module = naga::front::wgsl::parse_str(src).unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())

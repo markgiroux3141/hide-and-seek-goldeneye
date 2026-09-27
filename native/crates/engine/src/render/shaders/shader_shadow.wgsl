@@ -47,7 +47,9 @@ fn vs_main(
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Cutout: railings (and any alpha-keyed zone) drop their transparent texels so
     // the occluder — and thus its shadow — has the same holes as the visible mesh.
-    let c = textureSample(tex, samp, in.uv * material.params.x);
+    // Level 0: material textures carry mips (for the N64 view) but shadows keep
+    // the full-size alpha they always had.
+    let c = textureSampleLevel(tex, samp, in.uv * material.params.x, 0.0);
     if (c.a < 0.5) {
         discard;
     }

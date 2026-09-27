@@ -5,6 +5,10 @@
 //! the PD layer — guns, hands, beams, sparks, boards, bullet holes — is drawn.
 //!
 //! `cargo run --release --bin pd_gun_snapshot -- <outdir> [weapon ...]`
+//!
+//! N64 video (`n64video`): `--n64 [weapon ...]` renders at 320x220 over a test
+//! backdrop and saves each stage configuration; `--crt-still <image>` runs
+//! only the CRT half on an image (an emulator capture, say).
 
 use std::path::Path;
 
@@ -145,6 +149,12 @@ pub fn run(out: &Path, weapons: &[String]) {
     let mut pd = PdRenderer::new(&g.device, &g.queue, wgpu::TextureFormat::Rgba8UnormSrgb, wgpu::TextureFormat::Depth32Float);
     pd.load_models(&g.device, &g.queue, &sim);
     let idle = PdInput::default();
+    if weapons.first().map(|s| s.as_str()) == Some("--n64") {
+        return run_n64(&g, out, &weapons[1..]);
+    }
+    if weapons.first().map(|s| s.as_str()) == Some("--crt-still") {
+        return run_crt_still(&g, out, &weapons[1..]);
+    }
     if weapons.first().map(|s| s.as_str()) == Some("--seq") {
         let names: Vec<&str> = weapons[1..].iter().map(|s| s.as_str()).collect();
         let mut snap = Snap { g: &g, pd: &mut pd, out };
@@ -632,5 +642,223 @@ fn run_sequence(s: &mut Snap, sim: &mut Sim, name: &str) {
             s.png(sim, "hud_6_boost");
         }
         other => eprintln!("  unknown sequence {other}"),
+    }
+}
+
+// ─── N64 video (`--n64`, `--crt-still`) ─────────────────────────────────────
+
+use super::n64video::{self, Mask, N64Video, Preset, Resolution, Signal, VideoSettings};
+
+/// The tube's output size (4:3).
+const PW: u32 = 1440;
+const PH: u32 = 1080;
+
+fn texture(g: &Gpu, label: &str, w: u32, h: u32, format: wgpu::TextureFormat, usage: wgpu::TextureUsages) -> (wgpu::Texture, wgpu::TextureView) {
+    let t = g.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage,
+        view_formats: &[],
+    });
+    let v = t.create_view(&Default::default());
+    (t, v)
+}
+
+fn clear_pass(enc: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
+    let _rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("n64-clear"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+        })],
+        depth_stencil_attachment: None,
+        timestamp_writes: None,
+        occlusion_query_set: None,
+    });
+}
+
+/// Read an RGBA8 texture back and save it.
+fn save(g: &Gpu, mut enc: wgpu::CommandEncoder, tex: &wgpu::Texture, w: u32, h: u32, path: &Path) {
+    let row = (w * 4).div_ceil(256) * 256;
+    let buf = g.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("n64-read"),
+        size: (row * h) as u64,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    enc.copy_texture_to_buffer(
+        tex.as_image_copy(),
+        wgpu::TexelCopyBufferInfo { buffer: &buf, layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(h) } },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    g.queue.submit(Some(enc.finish()));
+    let slice = buf.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    g.device.poll(wgpu::Maintain::Wait);
+    let data = slice.get_mapped_range();
+    let mut img = image::RgbaImage::new(w, h);
+    for y in 0..h {
+        let src = &data[(y * row) as usize..(y * row + w * 4) as usize];
+        for x in 0..w {
+            let i = (x * 4) as usize;
+            img.put_pixel(x, y, image::Rgba([src[i], src[i + 1], src[i + 2], 255]));
+        }
+    }
+    drop(data);
+    buf.unmap();
+    img.save(path).expect("save png");
+}
+
+/// A backdrop that shows what the stages do (the snapshot has no engine
+/// world): a smooth sky gradient (banding, dither, the dither filter), fine
+/// stripes (luma detail near the subcarrier: rainbowing) and saturated colour
+/// bars (composite bleed), as raw display bytes.
+fn backdrop(w: u32, h: u32) -> Vec<u8> {
+    let mut px = Vec::with_capacity((w * h * 4) as usize);
+    let bars: [[u8; 3]; 8] = [[191, 191, 191], [191, 191, 0], [0, 191, 191], [0, 191, 0], [191, 0, 191], [191, 0, 0], [0, 0, 191], [16, 16, 16]];
+    for y in 0..h {
+        for x in 0..w {
+            let fy = y as f32 / h as f32;
+            let c = if fy > 0.86 {
+                bars[(x * 8 / w) as usize]
+            } else if fy > 0.78 {
+                let period = if x < w / 2 { 4 } else { 2 };
+                if x % period < period / 2 { [220, 220, 220] } else { [30, 30, 30] }
+            } else {
+                let t = fy / 0.78;
+                let a = [24.0, 40.0, 92.0];
+                let b = [200.0, 130.0, 80.0];
+                [0, 1, 2].map(|i| (a[i] + (b[i] - a[i]) * t) as u8)
+            };
+            px.extend_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+    }
+    px
+}
+
+/// One frame through the N64 chain at 320×220 into a 4:3 PNG.
+fn render_n64(g: &Gpu, pd: &mut PdRenderer, nv: &mut N64Video, sim: &Sim, s: &VideoSettings, path: &Path) {
+    let (w, h) = s.resolution.size();
+    let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST;
+    let (scene, sv) = texture(g, "n64-scene", w, h, wgpu::TextureFormat::Rgba8UnormSrgb, usage);
+    let depth_usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC;
+    let (depth, dv) = texture(g, "n64-scene-depth", w, h, wgpu::TextureFormat::Depth32Float, depth_usage);
+    let (present, pv) = texture(g, "n64-present", PW, PH, wgpu::TextureFormat::Rgba8UnormSrgb, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+    g.queue.write_texture(
+        scene.as_image_copy(),
+        &backdrop(w, h),
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    let mut enc = g.device.create_command_encoder(&Default::default());
+    clear_pass(&mut enc, &pv);
+    {
+        let _rp = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("n64-depth-clear"),
+            color_attachments: &[],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &dv,
+                depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Clear(1.0), store: wgpu::StoreOp::Store }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+    }
+    let aspect = n64video::N64_W as f32 / n64video::N64_H as f32;
+    let vp = super::app::world_vp(sim, aspect);
+    pd.three_point = s.n64 && s.three_point;
+    pd.world_depth_copy = (s.n64 && s.aa).then(|| (depth.clone(), nv.world_depth(&g.device, w, h)));
+    pd.draw(&g.device, &g.queue, &mut enc, &sv, &dv, aspect, vp, sim);
+    let fx = PdRenderer::post_fx(sim);
+    pd.post(&g.device, &g.queue, &mut enc, Some(&scene), &sv, w, h, fx);
+    nv.upload_hud(&g.device, &g.queue, Some(&super::app::n64_hud_canvas(sim, false)));
+    nv.run(&g.device, &g.queue, &mut enc, &sv, &dv, (w, h), &pv, n64video::tube_rect(PW, PH, 0.0), s);
+    save(g, enc, &present, PW, PH, path);
+}
+
+/// The configurations `--n64` saves for each frame, cumulative in order.
+fn n64_configs() -> Vec<(&'static str, VideoSettings)> {
+    let all = VideoSettings { n64: true, ..VideoSettings::default() };
+    let raw = VideoSettings { three_point: false, fb16: false, dither_filter: false, aa: false, divot: false, crt: false, ..all };
+    let preset = |p: Preset| {
+        let mut v = all;
+        p.apply(&mut v);
+        v
+    };
+    vec![
+        ("a_raw", raw),
+        ("b_3point", VideoSettings { three_point: true, ..raw }),
+        ("c_fb16", VideoSettings { three_point: true, fb16: true, ..raw }),
+        ("d_vi", VideoSettings { crt: false, ..all }),
+        ("e_crt_clean", preset(Preset::Clean)),
+        ("f_crt_svideo", preset(Preset::SVideo)),
+        ("g_crt_composite", preset(Preset::Composite)),
+        ("h_crt_slot", VideoSettings { mask: Mask::Slot, ..all }),
+        ("i_hires", VideoSettings { resolution: Resolution::Hi, ..all }),
+        ("j_double", VideoSettings { resolution: Resolution::Double, ..all }),
+    ]
+}
+
+fn run_n64(g: &Gpu, out: &Path, weapons: &[String]) {
+    let mut sim = Sim::new(super::sim::HAND_MODELS[0]).expect("sim");
+    sim.aspect = n64video::N64_W as f32 / n64video::N64_H as f32;
+    let mut pd = PdRenderer::new(&g.device, &g.queue, wgpu::TextureFormat::Rgba8UnormSrgb, wgpu::TextureFormat::Depth32Float);
+    pd.load_models(&g.device, &g.queue, &sim);
+    let mut nv = N64Video::new(&g.device, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let idle = PdInput::default();
+    let list: Vec<i32> = if weapons.is_empty() {
+        vec![WEAPON_FALCON2, WEAPON_CMP150]
+    } else {
+        weapons
+            .iter()
+            .filter_map(|n| sim.gset.weapons.values().find(|w| w.short_name.eq_ignore_ascii_case(n) || w.name.eq_ignore_ascii_case(n)).map(|w| w.weaponnum))
+            .collect()
+    };
+    for w in list {
+        let n = sim.gset.weapon(w).map_or(format!("w{w}"), |d| d.name.replace(' ', "_"));
+        sim.frame(&PdInput { select: Some((w, false)), ..PdInput::default() }, 4);
+        for _ in 0..150 {
+            sim.frame(&idle, 4);
+        }
+        let aim = PdInput { aim: true, ..PdInput::default() };
+        for (shot, input, frames_n) in [("idle", &idle, 1), ("aim", &aim, 60)] {
+            for _ in 0..frames_n {
+                sim.frame(input, 4);
+            }
+            for (cfg, s) in n64_configs() {
+                render_n64(g, &mut pd, &mut nv, &sim, &s, &out.join(format!("n64_{n}_{shot}_{cfg}.png")));
+            }
+        }
+        eprintln!("{n}: done");
+    }
+}
+
+fn run_crt_still(g: &Gpu, out: &Path, args: &[String]) {
+    let Some(src) = args.first() else {
+        eprintln!("usage: --crt-still <image>");
+        return;
+    };
+    let img = image::open(src).expect("open image").to_rgba8();
+    let size = img.dimensions();
+    let stem = Path::new(src).file_stem().and_then(|s| s.to_str()).unwrap_or("still").to_string();
+    let mut nv = N64Video::new(&g.device, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let all = VideoSettings { n64: true, ..VideoSettings::default() };
+    for (cfg, s) in [
+        ("flat", VideoSettings { crt: false, ..all }),
+        ("rgb", VideoSettings { signal: Signal::Rgb, ..all }),
+        ("svideo", VideoSettings { signal: Signal::SVideo, ..all }),
+        ("composite", VideoSettings { signal: Signal::Composite, ..all }),
+    ] {
+        let (present, pv) = texture(g, "still-present", PW, PH, wgpu::TextureFormat::Rgba8UnormSrgb, wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC);
+        let mut enc = g.device.create_command_encoder(&Default::default());
+        clear_pass(&mut enc, &pv);
+        nv.run_still(&g.device, &g.queue, &mut enc, img.as_raw(), size, &pv, n64video::tube_rect(PW, PH, 0.0), &s);
+        save(g, enc, &present, PW, PH, &out.join(format!("crt_{stem}_{cfg}.png")));
     }
 }

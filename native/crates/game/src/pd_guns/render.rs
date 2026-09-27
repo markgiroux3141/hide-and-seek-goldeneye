@@ -164,6 +164,12 @@ pub struct PdRenderer {
     /// The last finished frame (`vi_get_front_buffer`), for the zoom blur.
     post_prev: Option<(wgpu::Texture, wgpu::TextureView, u32, u32)>,
     post_seed: u32,
+    /// N64 video: sample bilinear textures with the RDP's 3-point filter.
+    pub three_point: bool,
+    /// N64 video: `(scene depth, destination)` — the world's depth is copied out
+    /// after the world-effects pass, before the gun pass clears it, so the VI's
+    /// edge finder sees world and gun silhouettes both.
+    pub world_depth_copy: Option<(wgpu::Texture, wgpu::Texture)>,
 }
 
 #[repr(C)]
@@ -504,6 +510,8 @@ impl PdRenderer {
             slots: Vec::new(),
             fx_buf: None,
             star_rng: Rng::new(99),
+            three_point: false,
+            world_depth_copy: None,
         }
     }
 
@@ -665,7 +673,7 @@ impl PdRenderer {
             tex: [size[0], size[1], ul[0], ul[1]],
             shift: [shift[0], shift[1], has_tex, if m.two_cycle { 1.0 } else { 0.0 }],
             flags: [alpha_test, m.fog_tint as u32, m.env.is_none() as u32, m.fog.is_none() as u32],
-            flags2: [m.texgen_linear as u32, 0, (m.blend == "alpha") as u32, 0],
+            flags2: [m.texgen_linear as u32, 0, (m.blend == "alpha") as u32, (has_tex > 0.0 && linear) as u32],
         };
         let buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("pdgun-mat"),
@@ -1074,7 +1082,8 @@ impl PdRenderer {
         }
         self.ensure_slots(device, slot_data.len());
         for (i, (f, mats)) in slot_data.iter().enumerate() {
-            queue.write_buffer(&self.slots[i].frame_buf, 0, bytemuck::bytes_of(f));
+            let f = FrameU { cloak: [f.cloak[0], self.three_point as u32 as f32, f.cloak[2], f.cloak[3]], ..*f };
+            queue.write_buffer(&self.slots[i].frame_buf, 0, bytemuck::bytes_of(&f));
             let n = mats.len().min(MAX_JOINTS);
             let arr: Vec<[[f32; 4]; 4]> = mats[..n].iter().map(|m| m.to_cols_array_2d()).collect();
             queue.write_buffer(&self.slots[i].joint_buf, 0, bytemuck::cast_slice(&arr));
@@ -1206,6 +1215,10 @@ impl PdRenderer {
                     }
                 }
             }
+        }
+
+        if let Some((src, dst)) = &self.world_depth_copy {
+            encoder.copy_texture_to_texture(src.as_image_copy(), dst.as_image_copy(), src.size());
         }
 
         // ── bgun_render: z cleared, the gun's projection ──

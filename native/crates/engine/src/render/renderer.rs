@@ -295,6 +295,28 @@ pub struct PassHook<'a> {
     /// The frame's colour texture, when the surface supports `COPY_SRC` (for
     /// hooks that read the frame back, e.g. framebuffer effects).
     pub color_texture: Option<&'a wgpu::Texture>,
+    /// The depth texture behind `depth`, when it can be copied and sampled (the
+    /// scene target's; the window-sized depth buffer is attachment-only).
+    pub depth_texture: Option<&'a wgpu::Texture>,
+    /// The swapchain view the frame is presented from. It is `color` itself
+    /// unless a scene target is set ([`Renderer::set_scene_size`]). With a scene
+    /// target, the world is drawn into the small `color`, `present` has been
+    /// cleared to black, and **the hook must draw the scene into `present`
+    /// itself**; the engine does not scale it up.
+    pub present: &'a wgpu::TextureView,
+    pub present_width: u32,
+    pub present_height: u32,
+}
+
+/// A fixed-size offscreen target the forward pass renders into instead of the
+/// swapchain (see [`Renderer::set_scene_size`]).
+struct SceneTarget {
+    width: u32,
+    height: u32,
+    color: wgpu::Texture,
+    color_view: wgpu::TextureView,
+    depth: wgpu::Texture,
+    depth_view: wgpu::TextureView,
 }
 
 pub struct Renderer {
@@ -408,6 +430,12 @@ pub struct Renderer {
     theme_preview_camera_bind: wgpu::BindGroup,
     /// `true` = checkerboard grid view; `false` = textured. Toggled by Backslash.
     grid_mode: bool,
+    /// Offscreen forward-pass target at a fixed resolution (N64 video spike);
+    /// `None` = draw straight into the swapchain as always.
+    scene: Option<SceneTarget>,
+    /// The textured world samples its texture the N64 way (3-point, `G_TF_BILERP`)
+    /// instead of nearest. Carried to the shader in `Lighting.count.y`.
+    three_point: bool,
 
     // Selection highlight (world-space quad over the picked face).
     highlight_pipeline: wgpu::RenderPipeline,
@@ -2143,6 +2171,8 @@ impl Renderer {
             theme_preview_camera_buf,
             theme_preview_camera_bind,
             grid_mode: false,
+            scene: None,
+            three_point: false,
             highlight_pipeline,
             surface_tint_pipeline,
             highlight_mesh: None,
@@ -3133,36 +3163,7 @@ impl Renderer {
                 log::warn!("set_material_texture: '{name}' failed to decode");
                 return false;
             };
-            let size = wgpu::Extent3d {
-                width: dec.width,
-                height: dec.height,
-                depth_or_array_layers: 1,
-            };
-            let tex = self.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("material-texture"),
-                size,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &tex,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &dec.rgba,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(4 * dec.width),
-                    rows_per_image: Some(dec.height),
-                },
-                size,
-            );
+            let tex = upload_material_texture(&self.device, &self.queue, "material-texture", dec.width, dec.height, &dec.rgba);
             self.material_views
                 .insert(name.to_string(), tex.create_view(&wgpu::TextureViewDescriptor::default()));
             self._material_keepalive.push(tex);
@@ -3367,6 +3368,7 @@ impl Renderer {
         u.ambient = [ar * level, ag * level, ab * level, if real { 0.0 } else { 1.0 }];
         let n = lights.len().min(MAX_LIGHTS);
         u.count[0] = n as u32;
+        u.count[1] = self.three_point as u32;
         for (i, (pos, col, intensity, range, shadow)) in lights.iter().take(n).enumerate() {
             u.lights[i] = GpuLight {
                 pos_range: [pos.x, pos.y, pos.z, *range],
@@ -3392,6 +3394,65 @@ impl Renderer {
     /// Current framebuffer aspect ratio (for the camera's projection).
     pub fn aspect(&self) -> f32 {
         self.config.width as f32 / self.config.height.max(1) as f32
+    }
+
+    /// Render the world into a fixed-size offscreen target (e.g. 320×220 for the
+    /// N64 video spike) instead of the swapchain; `None` restores the normal
+    /// path. With a target set, [`Self::render_with_hook`]'s hook gets the small
+    /// target as `color`/`depth` and must present it itself (see [`PassHook`]).
+    /// Only a hook-driven app should set this: plain [`Self::render`] would show
+    /// a black screen.
+    pub fn set_scene_size(&mut self, size: Option<(u32, u32)>) {
+        let Some((width, height)) = size else {
+            self.scene = None;
+            return;
+        };
+        if self.scene.as_ref().is_some_and(|s| s.width == width && s.height == height) {
+            return;
+        }
+        let extent = wgpu::Extent3d { width: width.max(1), height: height.max(1), depth_or_array_layers: 1 };
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC;
+        let color = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("scene-color"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: self.config.format,
+            usage,
+            view_formats: &[],
+        });
+        let depth = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("scene-depth"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_FORMAT,
+            usage,
+            view_formats: &[],
+        });
+        self.scene = Some(SceneTarget {
+            width,
+            height,
+            color_view: color.create_view(&Default::default()),
+            depth_view: depth.create_view(&Default::default()),
+            color,
+            depth,
+        });
+    }
+
+    /// The scene target's size, when one is set.
+    pub fn scene_size(&self) -> Option<(u32, u32)> {
+        self.scene.as_ref().map(|s| (s.width, s.height))
+    }
+
+    /// Sample the textured world with the N64's 3-point filter (`G_TF_BILERP`)
+    /// instead of nearest. Survives later [`Self::set_lighting`] calls.
+    pub fn set_three_point_filter(&mut self, on: bool) {
+        self.three_point = on;
+        // `LightingUniform.count[1]`: after `ambient` (16 bytes) and `count[0]`.
+        self.queue.write_buffer(&self.lighting_buf, 20, bytemuck::bytes_of(&(on as u32)));
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -3566,11 +3627,17 @@ impl Renderer {
                 }
             }
         }
+        // With a scene target set, the world renders into it instead (the hook
+        // presents it; see `PassHook::present`).
+        let (fwd_color, fwd_depth) = match &self.scene {
+            Some(s) => (&s.color_view, &s.depth_view),
+            None => (&view_tex, &self.depth_view),
+        };
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("forward-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view_tex,
+                    view: fwd_color,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -3583,7 +3650,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth_view,
+                    view: fwd_depth,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
@@ -3808,16 +3875,51 @@ impl Renderer {
         } // end forward pass
 
         let copyable = self.config.usage.contains(wgpu::TextureUsages::COPY_SRC);
-        hook(&mut PassHook {
-            device: &self.device,
-            queue: &self.queue,
-            encoder: &mut encoder,
-            color: &view_tex,
-            depth: &self.depth_view,
-            width: self.config.width,
-            height: self.config.height,
-            color_texture: copyable.then_some(&frame.texture),
-        });
+        match &self.scene {
+            Some(s) => {
+                // The swapchain hasn't been touched yet: clear it (the hook's
+                // picture may not fill it, e.g. a 4:3 image in a wide window).
+                encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("present-clear"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view_tex,
+                        resolve_target: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                hook(&mut PassHook {
+                    device: &self.device,
+                    queue: &self.queue,
+                    encoder: &mut encoder,
+                    color: &s.color_view,
+                    depth: &s.depth_view,
+                    width: s.width,
+                    height: s.height,
+                    color_texture: Some(&s.color),
+                    depth_texture: Some(&s.depth),
+                    present: &view_tex,
+                    present_width: self.config.width,
+                    present_height: self.config.height,
+                });
+            }
+            None => hook(&mut PassHook {
+                device: &self.device,
+                queue: &self.queue,
+                encoder: &mut encoder,
+                color: &view_tex,
+                depth: &self.depth_view,
+                width: self.config.width,
+                height: self.config.height,
+                color_texture: copyable.then_some(&frame.texture),
+                depth_texture: None,
+                present: &view_tex,
+                present_width: self.config.width,
+                present_height: self.config.height,
+            }),
+        }
 
         // ── Overlay pass: depth is CLEARED here so the first-person weapon
         // viewmodel is always on top and never clips into world geometry (exactly
@@ -4042,38 +4144,7 @@ fn build_materials(
                 // Never fails: a missing BMP comes back magenta so the gap is
                 // visible on the surface rather than silently untextured.
                 let dec = textures::decode(name);
-                let size = wgpu::Extent3d {
-                    width: dec.width,
-                    height: dec.height,
-                    depth_or_array_layers: 1,
-                };
-                let tex = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some(name),
-                    size,
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    // sRGB: the BMPs are authored in gamma space and the surface
-                    // is sRGB, so decode-on-sample + encode-on-write is correct.
-                    format: wgpu::TextureFormat::Rgba8UnormSrgb,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &tex,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &dec.rgba,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(4 * dec.width),
-                        rows_per_image: Some(dec.height),
-                    },
-                    size,
-                );
+                let tex = upload_material_texture(device, queue, name, dec.width, dec.height, &dec.rgba);
                 view_by_name.insert(
                     name.to_string(),
                     tex.create_view(&wgpu::TextureViewDescriptor::default()),
@@ -4102,6 +4173,56 @@ fn build_materials(
         views: view_by_name,
         keepalive,
     }
+}
+
+/// A world material texture (sRGB: the BMPs are authored in gamma space and
+/// the surface is sRGB) with a full mip chain. The normal textured view samples
+/// level 0 only, exactly as before the chain existed; the N64 video mode's
+/// 3-point path picks levels by footprint, as PD does with the LODs every one
+/// of its textures carries (`texdecompress.c`, `tex_shrink_paletted`). Each
+/// level is the 2x2 box average of the raw (gamma-space) bytes, like PD's
+/// shrink.
+fn upload_material_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> wgpu::Texture {
+    let levels = 32 - width.max(height).max(1).leading_zeros();
+    let tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        mip_level_count: levels,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let (mut w, mut h, mut px) = (width, height, rgba.to_vec());
+    for level in 0..levels {
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: level, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+            &px,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * w), rows_per_image: Some(h) },
+            wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        );
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let mut next = vec![0u8; (nw * nh * 4) as usize];
+        for y in 0..nh {
+            for x in 0..nw {
+                for c in 0..4 {
+                    let at = |sx: u32, sy: u32| px[((sy.min(h - 1) * w + sx.min(w - 1)) * 4) as usize + c] as u32;
+                    let sum = at(2 * x, 2 * y) + at(2 * x + 1, 2 * y) + at(2 * x, 2 * y + 1) + at(2 * x + 1, 2 * y + 1);
+                    next[((y * nw + x) * 4) as usize + c] = ((sum + 2) / 4) as u8;
+                }
+            }
+        }
+        (w, h, px) = (nw, nh, next);
+    }
+    tex
 }
 
 /// Build one `(texture, sampler, params)` material bind group.

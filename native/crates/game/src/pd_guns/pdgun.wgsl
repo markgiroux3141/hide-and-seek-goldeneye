@@ -18,7 +18,7 @@ struct Frame {
     lookat_y: vec4<f32>,
     envcol: vec4<f32>,    // renderdata envcolour (0..1)
     xray: vec4<f32>,      // x-ray flat colour + alpha (alpha 0 = off)
-    cloak: vec4<f32>,     // x: cloaked env alpha (0 = off)
+    cloak: vec4<f32>,     // x: cloaked env alpha (0 = off), y: 3-point filter (N64 video)
 };
 
 struct Material {
@@ -32,7 +32,7 @@ struct Material {
     tex: vec4<f32>,      // width, height, uls, ult
     shift: vec4<f32>,    // shift scale s, t, has_texture, two_cycle
     flags: vec4<u32>,    // alpha_test (0 none, 1 edge, 2 threshold), fog_tint, env_from_frame, fog_from_frame
-    flags2: vec4<u32>,   // texgen_linear, star uv override, translucent material, _
+    flags2: vec4<u32>,   // texgen_linear, star uv override, translucent material, bilerp (G_TF_BILERP)
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -204,13 +204,40 @@ fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
     return select(hi, lo, c <= vec3<f32>(0.04045));
 }
 
+// The RDP's 3-point filter on one mip level (see the engine's
+// `shader_textured.wgsl`): every tap is a texel centre, so the sampler only
+// contributes its wrap/clamp/mirror mode.
+fn three_point_level(uv: vec2<f32>, level: u32) -> vec4<f32> {
+    let size = vec2<f32>(textureDimensions(tex0, level));
+    let lf = f32(level);
+    var off = fract(uv * size - vec2<f32>(0.5));
+    off = off - step(1.0, off.x + off.y);
+    let c0 = textureSampleLevel(tex0, samp, uv - off / size, lf);
+    let c1 = textureSampleLevel(tex0, samp, uv - vec2<f32>(off.x - sign(off.x), off.y) / size, lf);
+    let c2 = textureSampleLevel(tex0, samp, uv - vec2<f32>(off.x, off.y - sign(off.y)) / size, lf);
+    return c0 + abs(off.x) * (c1 - c0) + abs(off.y) * (c2 - c0);
+}
+
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     var t0 = vec4<f32>(1.0);
     if (mat.shift.z != 0.0) {
         // Tile coordinates: texels × 2^-shift − (uls, ult), over the tile size.
         let st = in.st * mat.shift.xy - mat.tex.zw;
-        t0 = textureSample(tex0, samp, st / mat.tex.xy);
+        let uv = st / mat.tex.xy;
+        t0 = textureSample(tex0, samp, uv);
+        if (frame.cloak.y != 0.0 && mat.flags2.w != 0u) {
+            // N64 video: 3-point per level; mipmapped textures blend the two
+            // nearest levels by the hardware's LOD, as TRILERP does.
+            let size0 = vec2<f32>(textureDimensions(tex0, 0u));
+            let texels = uv * size0;
+            let rho = max(length(dpdx(texels)), length(dpdy(texels)));
+            let top = f32(textureNumLevels(tex0) - 1u);
+            let lod = clamp(log2(max(rho, 1e-6)), 0.0, top);
+            let l0 = u32(floor(lod));
+            let l1 = min(l0 + 1u, u32(top));
+            t0 = mix(three_point_level(uv, l0), three_point_level(uv, l1), fract(lod));
+        }
     }
     var i: Inputs;
     i.combined = vec4<f32>(0.0);
