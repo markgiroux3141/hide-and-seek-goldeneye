@@ -37,7 +37,7 @@ struct Video {
     crt: vec4<f32>,    // signal (0 RGB, 1 S-Video, 2 composite), scanlines 0..1, mask (0 none, 1 aperture grille, 2 slot, 3 shadow), mask strength
     crt2: vec4<f32>,   // curvature, halation, overscan, composite luma gain at the subcarrier
     tube: vec4<f32>,   // the tube's rect in present pixels: x0, y0, w, h
-    raster: vec4<f32>, // raster lines (240, or 480 for the beyond-N64 mode), signal bandwidth scale, _, _
+    raster: vec4<f32>, // raster lines (240, or 480 for the beyond-N64 mode), signal bandwidth scale, TV-set frame (1 = on), _
     // Composite decoder taps k = −32..32 at NTSC_DT: (luma, I, Q, _) weights,
     // each normalised to sum 1 (built by `n64video::ntsc_taps`).
     ntsc: array<vec4<f32>, 65>,
@@ -485,15 +485,18 @@ fn mask(p: vec2<f32>) -> vec3<f32> {
 
 @fragment
 fn fs_tube(in: VOut) -> @location(0) vec4<f32> {
-    // Curvature: each axis bows with the square of the other.
+    // Curvature: each axis bows with the square of the other. Inside the TV
+    // set's photo (`fs_frame`) the photo's own glass gives the shape, so the
+    // raster stays flat and fills the screen box.
+    let framed = v.raster.z != 0.0;
     var cc = in.uv * 2.0 - 1.0;
-    let k = v.crt2.x;
+    let k = select(v.crt2.x, 0.0, framed);
     cc = cc * (1.0 + k * vec2<f32>(cc.y * cc.y, cc.x * cc.x));
     // Rounded corners and the black outside the glass.
     let r = 0.05;
     let qd = abs(cc) - vec2<f32>(1.0 - r);
     let corner = length(max(qd, vec2<f32>(0.0))) - r;
-    let glass = 1.0 - smoothstep(-0.004, 0.004, corner);
+    let glass = select(1.0 - smoothstep(-0.004, 0.004, corner), 1.0, framed);
     if (glass <= 0.0) {
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
@@ -532,4 +535,18 @@ fn fs_tube(in: VOut) -> @location(0) vec4<f32> {
     // A little falloff towards the corners.
     let vig = 1.0 - 0.12 * dot(cc * cc, cc * cc);
     return vec4<f32>(light * vig * glass, 1.0);
+}
+
+// The TV set: a photo of a portable CRT with a chroma-green screen, drawn over
+// the tube with the green keyed out. The key is how far green exceeds the
+// other two channels, softened so the screen's anti-aliased edge blends; the
+// despill clamps green to the larger of red and blue, which leaves the grey
+// and black plastic alone and takes the green fringe off the bezel's edge.
+@fragment
+fn fs_frame(in: VOut) -> @location(0) vec4<f32> {
+    let c = textureSampleLevel(t0, s_lin, in.uv, 0.0).rgb;
+    let key = c.g - max(c.r, c.b);
+    let a = 1.0 - smoothstep(0.12, 0.40, key);
+    let rgb = vec3<f32>(c.r, min(c.g, max(c.r, c.b)), c.b);
+    return vec4<f32>(srgb_to_linear(rgb), a);
 }

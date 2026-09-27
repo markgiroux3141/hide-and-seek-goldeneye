@@ -76,7 +76,7 @@ impl Preset {
     pub fn apply(self, v: &mut VideoSettings) {
         let (signal, scan, mask, hal, curve, sharp) = match self {
             Preset::Clean => (Signal::Rgb, 0.45, 0.15, 0.03, 0.03, 1.4),
-            Preset::SVideo => (Signal::SVideo, 0.6, 0.25, 0.05, 0.05, 1.0),
+            Preset::SVideo => (Signal::SVideo, 0.9, 0.25, 0.05, 0.05, 1.0),
             Preset::Composite => (Signal::Composite, 0.75, 0.35, 0.06, 0.06, 1.0),
         };
         v.signal = signal;
@@ -92,6 +92,21 @@ impl Preset {
 const SIG_W: u32 = 1280;
 const GLOW_W: u32 = 160;
 const GLOW_H: u32 = 120;
+
+/// The TV set's photo (4:3, chroma-green screen) and the box its screen fills,
+/// in the photo's pixels: the green spans x 234..1215, y 104..808, and the box
+/// runs a few pixels past it so the raster is under the key's soft edge.
+const TV_PHOTO: &[u8] = include_bytes!("crt_screen.png");
+const TV_SIZE: [f32; 2] = [1448.0, 1086.0];
+const TV_SCREEN: [f32; 4] = [231.0, 101.0, 1219.0, 812.0];
+
+/// Where the tube goes inside a TV set drawn over `rect`.
+fn tv_screen_rect(rect: [f32; 4]) -> [f32; 4] {
+    let (sx, sy) = (rect[2] / TV_SIZE[0], rect[3] / TV_SIZE[1]);
+    let x0 = rect[0] + TV_SCREEN[0] * sx;
+    let y0 = rect[1] + TV_SCREEN[1] * sy;
+    [x0.floor(), y0.floor(), ((TV_SCREEN[2] - TV_SCREEN[0]) * sx).ceil(), ((TV_SCREEN[3] - TV_SCREEN[1]) * sy).ceil()]
+}
 
 /// Near/far of the engine's world projection (`app::world_vp`) and PD's gun
 /// projection (`PdRenderer::draw`), for the edge finder's 1/z.
@@ -159,6 +174,9 @@ pub struct VideoSettings {
     pub scanlines: f32,
     pub mask: Mask,
     pub mask_strength: f32,
+    /// Show the tube inside a TV set (`crt_screen.png`), its green screen
+    /// replaced by the picture.
+    pub tv_frame: bool,
     pub curvature: f32,
     pub halation: f32,
     pub overscan: f32,
@@ -171,7 +189,7 @@ impl Default for VideoSettings {
     fn default() -> Self {
         let mut v = VideoSettings {
             n64: false,
-            resolution: Resolution::Lo,
+            resolution: Resolution::Hi,
             three_point: true,
             fb16: true,
             dither_filter: true,
@@ -182,9 +200,10 @@ impl Default for VideoSettings {
             scanlines: 0.75,
             mask: Mask::ApertureGrille,
             mask_strength: 0.35,
+            tv_frame: true,
             curvature: 0.06,
             halation: 0.06,
-            overscan: 0.04,
+            overscan: 0.08,
             sharpness: 1.0,
         };
         Preset::SVideo.apply(&mut v);
@@ -271,6 +290,20 @@ fn tex(device: &wgpu::Device, label: &str, w: u32, h: u32, format: wgpu::Texture
 }
 
 const FB: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+/// The TV set's photo as raw bytes (the key works on the photo's own values).
+fn tv_photo(device: &wgpu::Device, queue: &wgpu::Queue) -> Tex {
+    let img = image::load_from_memory(TV_PHOTO).expect("crt_screen.png").to_rgba8();
+    let (w, h) = img.dimensions();
+    let t = tex(device, "n64-tv-photo", w, h, FB, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
+    queue.write_texture(
+        t.tex.as_image_copy(),
+        img.as_raw(),
+        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+    );
+    t
+}
 const SIG: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
 /// The per-scene-size textures.
@@ -294,6 +327,8 @@ pub struct N64Video {
     signal: wgpu::RenderPipeline,
     glow: wgpu::RenderPipeline,
     tube: wgpu::RenderPipeline,
+    frame_pipe: wgpu::RenderPipeline,
+    tv_photo: Tex,
     sig: Tex,
     glow_tex: Tex,
     targets: Option<Targets>,
@@ -312,7 +347,7 @@ pub struct N64Video {
 }
 
 impl N64Video {
-    pub fn new(device: &wgpu::Device, present_format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, present_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("n64video"),
             source: wgpu::ShaderSource::Wgsl(include_str!("n64video.wgsl").into()),
@@ -363,7 +398,7 @@ impl N64Video {
             bind_group_layouts: &[&bgl],
             push_constant_ranges: &[],
         });
-        let pipe = |entry: &str, format: wgpu::TextureFormat| {
+        let pipe_blend = |entry: &str, format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&layout),
@@ -371,7 +406,7 @@ impl N64Video {
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some(entry),
-                    targets: &[Some(wgpu::ColorTargetState { format, blend: None, write_mask: wgpu::ColorWrites::ALL })],
+                    targets: &[Some(wgpu::ColorTargetState { format, blend, write_mask: wgpu::ColorWrites::ALL })],
                     compilation_options: Default::default(),
                 }),
                 primitive: wgpu::PrimitiveState::default(),
@@ -381,6 +416,7 @@ impl N64Video {
                 cache: None,
             })
         };
+        let pipe = |entry: &str, format: wgpu::TextureFormat| pipe_blend(entry, format, None);
         let buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("n64video-u"),
             size: std::mem::size_of::<VideoU>() as u64,
@@ -403,6 +439,8 @@ impl N64Video {
             signal: pipe("fs_signal", SIG),
             glow: pipe("fs_glow", SIG),
             tube: pipe("fs_tube", present_format),
+            frame_pipe: pipe_blend("fs_frame", present_format, Some(wgpu::BlendState::ALPHA_BLENDING)),
+            tv_photo: tv_photo(device, queue),
             sig: tex(device, "n64-signal", SIG_W, LINES, SIG, sampled),
             glow_tex: tex(device, "n64-glow", GLOW_W, GLOW_H, SIG, sampled),
             clear: tex(device, "n64-clear", 1, 1, FB, upload),
@@ -503,7 +541,7 @@ impl N64Video {
             crt: [signal, s.scanlines, mask, s.mask_strength],
             crt2: [s.curvature, s.halation, s.overscan, self.ntsc_gain],
             tube: rect,
-            raster: [self.sig_lines as f32, s.sharpness, 0.0, 0.0],
+            raster: [self.sig_lines as f32, s.sharpness, (s.crt && s.tv_frame) as u32 as f32, 0.0],
             ntsc: self.ntsc_taps,
         }
     }
@@ -549,6 +587,11 @@ impl N64Video {
         rp.draw(0..3, 0..1);
     }
 
+    /// The tube's rect for `rect`: the whole of it, or the TV set's screen.
+    fn tube_in(rect: [f32; 4], s: &VideoSettings) -> [f32; 4] {
+        if s.crt && s.tv_frame { tv_screen_rect(rect) } else { rect }
+    }
+
     /// The CRT half (or the flat raster) from a VI-output texture to `present`.
     fn present(
         &self,
@@ -557,16 +600,20 @@ impl N64Video {
         vid: &wgpu::TextureView,
         present: &wgpu::TextureView,
         rect: [f32; 4],
-        crt: bool,
+        s: &VideoSettings,
     ) {
         let (d, c) = (&self.depth1.view, &self.clear.view);
-        if !crt {
+        if !s.crt {
             Self::pass(encoder, present, &self.flat, &self.bind(device, vid, c, d, d), Some(rect));
             return;
         }
         Self::pass(encoder, &self.sig.view, &self.signal, &self.bind(device, vid, c, d, d), None);
         Self::pass(encoder, &self.glow_tex.view, &self.glow, &self.bind(device, &self.sig.view, c, d, d), None);
-        Self::pass(encoder, present, &self.tube, &self.bind(device, &self.sig.view, &self.glow_tex.view, d, d), Some(rect));
+        let tube = Self::tube_in(rect, s);
+        Self::pass(encoder, present, &self.tube, &self.bind(device, &self.sig.view, &self.glow_tex.view, d, d), Some(tube));
+        if s.tv_frame {
+            Self::pass(encoder, present, &self.frame_pipe, &self.bind(device, &self.tv_photo.view, c, d, d), Some(rect));
+        }
     }
 
     /// The whole chain: `scene` (the low-res scene target, sRGB) and
@@ -590,7 +637,7 @@ impl N64Video {
         self.ensure_targets(device, size.0, size.1);
         let lines = s.resolution.lines();
         self.ensure_raster(device, lines, s.sharpness);
-        let u = self.uniform(s, size, size.1.min(lines), rect);
+        let u = self.uniform(s, size, size.1.min(lines), Self::tube_in(rect, s));
         queue.write_buffer(&self.buf, 0, bytemuck::bytes_of(&u));
         let t = self.targets.as_ref().unwrap();
         let hud = self.hud.as_ref().map(|(t, _, _)| &t.view).unwrap_or(&self.clear.view);
@@ -599,7 +646,7 @@ impl N64Video {
         Self::pass(encoder, &t.fb.view, &self.rdp, &self.bind(device, scene, hud, &t.world_depth.view, scene_depth), None);
         Self::pass(encoder, &t.vi.view, &self.vi, &self.bind(device, &t.fb.view, c, d, d), None);
         Self::pass(encoder, &t.vid.view, &self.divot, &self.bind(device, &t.vi.view, c, d, d), None);
-        self.present(device, encoder, &t.vid.view, present, rect, s.crt);
+        self.present(device, encoder, &t.vid.view, present, rect, s);
     }
 
     /// Only the CRT half, on an image (raw display values, e.g. an emulator
@@ -630,10 +677,10 @@ impl N64Video {
             wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
         );
         let lines = size.1.min(LINES);
-        let u = self.uniform(s, size, lines, rect);
+        let u = self.uniform(s, size, lines, Self::tube_in(rect, s));
         queue.write_buffer(&self.buf, 0, bytemuck::bytes_of(&u));
         let view = t.view.clone();
-        self.present(device, encoder, &view, present, rect, s.crt);
+        self.present(device, encoder, &view, present, rect, s);
     }
 }
 
