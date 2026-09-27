@@ -43,6 +43,8 @@
 //!   the combat boost and the RC-P120 cloak.
 //! * [`render`] + `pdgun.wgsl` / `pdfx.wgsl` / `pdpost.wgsl` — the N64
 //!   display-list state on wgpu, and PD's framebuffer effects.
+//! * [`tvaudio`] — the range heard through a cheap CRT TV's speaker (and the
+//!   N64's 22020 Hz mix), on a kira sub-track.
 //! * [`app`] — the `pd_range` window; [`snapshot`] — headless offscreen PNGs.
 
 pub mod anim;
@@ -70,6 +72,7 @@ pub mod sim;
 pub mod smoke;
 pub mod snapshot;
 pub mod throw;
+pub mod tvaudio;
 pub mod xray;
 
 #[cfg(test)]

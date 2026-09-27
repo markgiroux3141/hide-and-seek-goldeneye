@@ -7,6 +7,7 @@ It is a standalone firing range where the player's weapons are Perfect Dark's ow
 cargo run --release --bin pd_range            # the range (window)
 cargo run --release --bin pd_gun_snapshot -- <outdir> [--all | weapon names]   # offscreen PNGs, no window
 cargo run --release --bin pd_gun_snapshot -- <outdir> --seq <names | all>      # scripted feature sequences
+cargo run --release --bin pd_tv_audio -- <outdir> [--rate R] [sfx names...]   # PD sounds through the TV-speaker chain, offline
 ```
 
 Sequences: `smoke explosion grenade cook pinball mines knife nbomb rocket devastator superdragon crossbow slayer phoenix laptop farsight boost cloak hud`.
@@ -141,3 +142,36 @@ The panel's **VIDEO** section, off by default, shows the range the way an N64 on
 - **The boost cap is 4 quarter-ticks** (PD, and the PC port's `LV_SLOMO_TICK_CAP`). At the 60 Hz rate it changes nothing; slow motion only shows at 30 or 20 Hz.
 - **X-ray clears the engine's world:** the world pass clears to black and resets depth, then draws PD's x-ray BG. Anything new drawn in the world pass must decide what it looks like in x-ray (`Sim::xray()`).
 - **The HUD is drawn by the sim** (`Sim::hud`, a `Canvas` of PD pixels, redrawn every sim frame because `bgun_draw_hud` ticks its own timers). The window uploads it as a nearest-filtered texture, and the snapshot composites it CPU-side.
+
+## Audio: TV speaker (branch `spike/crt-tv-audio`)
+
+The panel's **AUDIO** section (under VIDEO), off by default, plays the range the way PD sounded through a cheap 90s TV. It is independent of the video toggles. Code: `tvaudio.rs`.
+
+- **Decomp-sourced:** the 22020 Hz mix (`audiomgr.c:64`, `osAiSetFrequency(22020)`). Everything else is modelled, not measured from hardware.
+- **Routing:**
+  - one kira sub-track carries the chain; it is made the first time a toggle goes on;
+  - while everything is off, voices play on the main track through the old `play_voice` path, and the chain returns its input bit for bit;
+  - a voice keeps the track it started on, so a loop started with the chain on passes through untouched once it's off.
+- **Engine changes (additive):** a `TrackDsp` trait (one stereo frame in, one out, plus `init(sample_rate)` / `on_block`), `AudioManager::add_dsp_track` and `play_voice_on(track, …)`. `play_voice` is unchanged, and the main game calls none of the new functions.
+- **Why a custom effect, not kira's built-ins:** kira 0.12 has filter / EQ / distortion / compressor / delay, but no mono downmix, resampler or oscillator. Its `Info` can't be built outside the crate either, so its effects can't be rendered offline. `TvChain` is plain Rust, so the tests and `pd_tv_audio` run the exact code that plays.
+- **The N64 half ("N64 mix"):**
+  - an 8th-order anti-alias low-pass at 10.3 kHz, then a sample taken at the 22020 Hz clock;
+  - that sample is held (zero-order hold), and the output is the staircase's average over each device sample, so the hold's timing is exact rather than snapped to the 48 kHz grid;
+  - then the same 10.3 kHz low-pass as reconstruction ("DAC filter"). Off = the raw hold, whose images at 22020 − f fizz above 11 kHz. **Unverified:** whether the N64 board filters its DAC is not in the decomp.
+  - Most of PD's SFX are sampled at 11–16 kHz (41 of the 160 at 15569 Hz), so at pitch 1 there is almost nothing above 11 kHz to remove. The ceiling bites on the 22 kHz sounds and on pitched-up ones, e.g. reloads at speed 2.5.
+- **The TV half ("TV speaker"):** mono → speaker → cabinet → compressor → rail → break-up → volume.
+  - Speaker: the amp's coupling cap (a one-pole high-pass at half the low cut), a biquad high-pass at the low cut with Q 0.9 (a little hump at the cone's resonance), a peaking "boxy mids" bump with Q 1, and a biquad low-pass at the high cut.
+  - Cabinet: a feedback comb with a 1.75 ms round trip (a ~30 cm box, resonances every ~570 Hz), damped by a 2.5 kHz low-pass in the loop; feedback is up to 0.45.
+  - Compressor: feed-forward, peak detector, 2 ms attack and 150 ms release; threshold −6 → −30 dB and ratio 1 → 8 as "compressor" goes 0 → 1.
+  - Rail: linear up to half the ceiling, then a tanh knee that never passes it. The ceiling drops from 0 to −18 dBFS as "overdrive" goes 0 → 1.
+  - Break-up: a one-pole low-pass at 1.5 × the high cut, after the rail, so the clip's harmonics stay inside the speaker's range.
+  - Whine: a 15734.26 Hz sine (4.5 MHz / 286), added after the speaker because it's the flyback transformer, not the cone. It needs the TV half on.
+- **Presets** (they set the speaker, not the switches): big set (stereo, 110 Hz–9 kHz, +2.5 dB), **14" portable** (the default: mono, 250 Hz–5 kHz, +6 dB at 2.1 kHz) and kitchen B&W (mono, 450 Hz–3.5 kHz, +9 dB at 1.7 kHz, heavy drive). "mix" is wet/dry.
+- **Loudness-matched:** each preset's volume is make-up gain (+2.5 / +4 / +7.5 dB). It brings the A-weighted loudness of eight PD sounds back to what they measure with everything off, so an A/B compares tone, not level. After make-up, the guns land within about ±1 dB. The CMP150 is 3–4 dB louder (its energy sits in the bump) and the reload click 4–6 dB quieter. Peaks stay at or under 0 dBFS.
+- **Offline:** `cargo run --release --bin pd_tv_audio -- <outdir> [--rate R] [--gain G] [sfx…]` upsamples PD WAVs to 48 kHz (windowed sinc) and writes each through off / n64 / n64raw / big set / portable / kitchen as float WAVs. The measurements above came from a numpy pass over these files.
+- **Tests (11, `tvaudio::tests`):** off is bit-identical; mono folds one side into both; the portable's band edges and +6 dB bump; the presets order from subtle to awful; the rail is exactly linear below its knee and only loud notes lose level; the compressor leaves quiet notes alone; the cabinet's ripple is over 4 dB but its peaks stay under +7 dB; the N64 half passes 4 kHz and removes 14 kHz to below −40 dB; the raw hold's image sits at the predicted −13 dB (filtered: under −30 dB); the whine is at the line rate and only when asked; the UI link retunes the track on the next block.
+- **Measured traps:**
+  - clipping *before* the speaker's high-pass (the amp's place in the circuit) raised the crest factor 9–14 dB, because the high-pass rebuilds a spike on every flat top. The rail therefore goes last;
+  - a 4th-order anti-alias filter at 10 kHz only takes 12 dB off 14 kHz, which leaves a loud alias at 8 kHz; hence 8th order;
+  - PD's samples are close to full scale (several peak above 0 dBFS after resampling), so the renders are written as float WAVs or clamping hides the peaks.
+- **Not done:** per-voice N64 resampling (PD's RSP resampler aliases pitched-up voices on its own; a track effect only sees the mix), 16-bit output quantisation, and any comparison against a recording of a real set.
