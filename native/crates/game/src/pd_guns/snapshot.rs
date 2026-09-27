@@ -647,7 +647,7 @@ fn run_sequence(s: &mut Snap, sim: &mut Sim, name: &str) {
 
 // ─── N64 video (`--n64`, `--crt-still`) ─────────────────────────────────────
 
-use super::n64video::{self, Mask, N64Video, Preset, Resolution, Signal, VideoSettings};
+use super::n64video::{self, Mask, N64Video, Preset, Resolution, Signal, TvSet, VideoSettings};
 
 /// The tube's output size (4:3).
 const PW: u32 = 1440;
@@ -802,6 +802,8 @@ fn n64_configs() -> Vec<(&'static str, VideoSettings)> {
         ("h_crt_slot", VideoSettings { mask: Mask::Slot, ..all }),
         ("i_hires", VideoSettings { resolution: Resolution::Hi, ..all }),
         ("j_double", VideoSettings { resolution: Resolution::Double, ..all }),
+        ("k_bedroom", VideoSettings { tv: TvSet::Bedroom, ..all }),
+        ("l_no_tv", VideoSettings { tv: TvSet::Off, ..all }),
     ]
 }
 
