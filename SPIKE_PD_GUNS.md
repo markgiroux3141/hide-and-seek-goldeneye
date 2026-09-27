@@ -123,6 +123,7 @@ The panel's **VIDEO** section, off by default, shows the range the way an N64 on
   - a resolution option: 320×220, PD hi-res 640×220, and 640×440 beyond N64 on a 480-line raster;
   - a signal-sharpness slider (scales the bandwidth; the composite box stays one period long);
   - TV presets (clean RGB / S-Video / composite); the default is now S-Video.
+- **TV set** (CRT checkbox, on by default): the tube is drawn into the screen box of `crt_screen.png` (a 4:3 photo of a portable CRT with a chroma-green screen), then the photo goes over it with the green keyed out (`fs_frame`: a soft key on green minus max(red, blue), plus a despill). In this mode the tube's own curvature and corners are off, because the photo's glass gives the shape.
 - **Not done:** the engine walls' per-vertex lighting and fog, PD's TMEM cap on LOD count (distant textures past the last LOD still alias on real hardware), and a measured comparison against real-hardware captures.
 
 ### Invariants that bit us (don't regress)

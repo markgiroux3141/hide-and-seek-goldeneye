@@ -810,7 +810,7 @@ fn run_n64(g: &Gpu, out: &Path, weapons: &[String]) {
     sim.aspect = n64video::N64_W as f32 / n64video::N64_H as f32;
     let mut pd = PdRenderer::new(&g.device, &g.queue, wgpu::TextureFormat::Rgba8UnormSrgb, wgpu::TextureFormat::Depth32Float);
     pd.load_models(&g.device, &g.queue, &sim);
-    let mut nv = N64Video::new(&g.device, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let mut nv = N64Video::new(&g.device, &g.queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     let idle = PdInput::default();
     let list: Vec<i32> = if weapons.is_empty() {
         vec![WEAPON_FALCON2, WEAPON_CMP150]
@@ -847,7 +847,7 @@ fn run_crt_still(g: &Gpu, out: &Path, args: &[String]) {
     let img = image::open(src).expect("open image").to_rgba8();
     let size = img.dimensions();
     let stem = Path::new(src).file_stem().and_then(|s| s.to_str()).unwrap_or("still").to_string();
-    let mut nv = N64Video::new(&g.device, wgpu::TextureFormat::Rgba8UnormSrgb);
+    let mut nv = N64Video::new(&g.device, &g.queue, wgpu::TextureFormat::Rgba8UnormSrgb);
     let all = VideoSettings { n64: true, ..VideoSettings::default() };
     for (cfg, s) in [
         ("flat", VideoSettings { crt: false, ..all }),

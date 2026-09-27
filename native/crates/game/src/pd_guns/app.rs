@@ -696,7 +696,7 @@ impl ApplicationHandler for App {
         let (device, queue, cf, df) = renderer.gpu();
         let mut pd = PdRenderer::new(device, queue, cf, df);
         pd.load_models(device, queue, &self.sim);
-        self.n64v = Some(N64Video::new(device, cf));
+        self.n64v = Some(N64Video::new(device, queue, cf));
         self.egui_state = Some(egui_winit::State::new(self.egui_ctx.clone(), egui::ViewportId::ROOT, &*window, None, None, None));
         self.renderer = Some(renderer);
         self.pd = Some(pd);
@@ -978,6 +978,7 @@ fn video_panel(ui: &mut egui::Ui, v: &mut VideoSettings) {
                     }
                 });
                 ui.add(egui::Slider::new(&mut v.mask_strength, 0.0..=1.0).text("mask strength"));
+                ui.checkbox(&mut v.tv_frame, "TV set");
                 ui.add(egui::Slider::new(&mut v.scanlines, 0.0..=1.0).text("scanlines"));
                 ui.add(egui::Slider::new(&mut v.sharpness, 0.5..=2.5).text("signal sharpness"));
                 ui.add(egui::Slider::new(&mut v.halation, 0.0..=0.3).text("halation"));
