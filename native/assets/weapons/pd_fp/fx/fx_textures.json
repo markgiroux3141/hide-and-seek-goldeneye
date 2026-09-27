@@ -1,0 +1,458 @@
+{
+ "0x0003": {
+  "file": "tex_0003.png",
+  "w": 48,
+  "h": 48,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0004": {
+  "file": "tex_0004.png",
+  "w": 32,
+  "h": 32,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0005": {
+  "file": "tex_0005.png",
+  "w": 54,
+  "h": 54,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0006": {
+  "file": "tex_0006.png",
+  "w": 16,
+  "h": 32,
+  "format": "RGBA32",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0007": {
+  "file": "tex_0007.png",
+  "w": 16,
+  "h": 32,
+  "format": "RGBA16_CI8",
+  "source": "pd",
+  "codec": "zlib"
+ },
+ "0x0008": {
+  "file": "tex_0008.png",
+  "w": 16,
+  "h": 32,
+  "format": "RGBA32",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0009": {
+  "file": "tex_0009.png",
+  "w": 16,
+  "h": 32,
+  "format": "RGBA32",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x000a": {
+  "file": "tex_000a.png",
+  "w": 32,
+  "h": 32,
+  "format": "RGBA32",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x000b": {
+  "file": "tex_000b.png",
+  "w": 32,
+  "h": 32,
+  "format": "RGBA32",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x000e": {
+  "file": "tex_000e.png",
+  "w": 54,
+  "h": 54,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x001a": {
+  "file": "tex_001a.png",
+  "w": 8,
+  "h": 16,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x001b": {
+  "file": "tex_001b.png",
+  "w": 16,
+  "h": 16,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x001c": {
+  "file": "tex_001c.png",
+  "w": 2,
+  "h": 8,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x001d": {
+  "file": "tex_001d.png",
+  "w": 8,
+  "h": 8,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0854": {
+  "file": "tex_0854.png",
+  "w": 48,
+  "h": 48,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0855": {
+  "file": "tex_0855.png",
+  "w": 48,
+  "h": 48,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0856": {
+  "file": "tex_0856.png",
+  "w": 48,
+  "h": 48,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0859": {
+  "file": "tex_0859.png",
+  "w": 16,
+  "h": 32,
+  "format": "RGBA32",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x085a": {
+  "file": "tex_085a.png",
+  "w": 16,
+  "h": 32,
+  "format": "RGBA32",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x08f0": {
+  "file": "tex_08f0.png",
+  "w": 24,
+  "h": 24,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0b53": {
+  "file": "tex_0b53.png",
+  "w": 64,
+  "h": 64,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0c27": {
+  "file": "tex_0c27.png",
+  "w": 64,
+  "h": 64,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0c28": {
+  "file": "tex_0c28.png",
+  "w": 64,
+  "h": 64,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0c32": {
+  "file": "tex_0c32.png",
+  "w": 32,
+  "h": 1,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0c97": {
+  "file": "tex_0c97.png",
+  "w": 16,
+  "h": 16,
+  "format": "RGBA32",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0da5": {
+  "file": "tex_0da5.png",
+  "w": 64,
+  "h": 48,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x001e": {
+  "file": "tex_001e.png",
+  "w": 56,
+  "h": 56,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x001f": {
+  "file": "tex_001f.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA16",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0020": {
+  "file": "tex_0020.png",
+  "w": 56,
+  "h": 56,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0021": {
+  "file": "tex_0021.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA16",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0022": {
+  "file": "tex_0022.png",
+  "w": 56,
+  "h": 56,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0023": {
+  "file": "tex_0023.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA16",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0024": {
+  "file": "tex_0024.png",
+  "w": 56,
+  "h": 56,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0025": {
+  "file": "tex_0025.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA16",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0026": {
+  "file": "tex_0026.png",
+  "w": 56,
+  "h": 56,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0027": {
+  "file": "tex_0027.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA16",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0028": {
+  "file": "tex_0028.png",
+  "w": 56,
+  "h": 56,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0029": {
+  "file": "tex_0029.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA16",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x002a": {
+  "file": "tex_002a.png",
+  "w": 56,
+  "h": 56,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x002b": {
+  "file": "tex_002b.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA16",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x002c": {
+  "file": "tex_002c.png",
+  "w": 56,
+  "h": 56,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x002d": {
+  "file": "tex_002d.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA16",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x002e": {
+  "file": "tex_002e.png",
+  "w": 56,
+  "h": 56,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x002f": {
+  "file": "tex_002f.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA16",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0030": {
+  "file": "tex_0030.png",
+  "w": 56,
+  "h": 56,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0031": {
+  "file": "tex_0031.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA16",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0032": {
+  "file": "tex_0032.png",
+  "w": 56,
+  "h": 56,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0033": {
+  "file": "tex_0033.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA16",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0034": {
+  "file": "tex_0034.png",
+  "w": 56,
+  "h": 56,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0035": {
+  "file": "tex_0035.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA16",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0036": {
+  "file": "tex_0036.png",
+  "w": 56,
+  "h": 56,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0037": {
+  "file": "tex_0037.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA16",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0038": {
+  "file": "tex_0038.png",
+  "w": 56,
+  "h": 56,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x0039": {
+  "file": "tex_0039.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA16",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x003a": {
+  "file": "tex_003a.png",
+  "w": 56,
+  "h": 56,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x003b": {
+  "file": "tex_003b.png",
+  "w": 14,
+  "h": 14,
+  "format": "RGBA16",
+  "source": "pd",
+  "codec": "non-zlib"
+ },
+ "0x063b": {
+  "file": "tex_063b.png",
+  "w": 64,
+  "h": 64,
+  "format": "IA8",
+  "source": "pd",
+  "codec": "non-zlib"
+ }
+}

@@ -283,6 +283,20 @@ pub struct EguiFrame {
     pub pixels_per_point: f32,
 }
 
+/// What [`Renderer::render_with_hook`] hands its hook.
+pub struct PassHook<'a> {
+    pub device: &'a wgpu::Device,
+    pub queue: &'a wgpu::Queue,
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    pub color: &'a wgpu::TextureView,
+    pub depth: &'a wgpu::TextureView,
+    pub width: u32,
+    pub height: u32,
+    /// The frame's colour texture, when the surface supports `COPY_SRC` (for
+    /// hooks that read the frame back, e.g. framebuffer effects).
+    pub color_texture: Option<&'a wgpu::Texture>,
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -598,8 +612,12 @@ impl Renderer {
             .copied()
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
+        // COPY_SRC (when the surface allows it) lets a render hook read the
+        // frame back for framebuffer effects; RENDER_ATTACHMENT is all the
+        // engine itself needs.
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT | (caps.usages & wgpu::TextureUsages::COPY_SRC);
         let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage,
             format,
             width: size.width.max(1),
             height: size.height.max(1),
@@ -3442,6 +3460,21 @@ impl Renderer {
     }
 
     pub fn render(&mut self, view_proj: Mat4, egui: Option<EguiFrame>) {
+        self.render_with_hook(view_proj, egui, &mut |_| {});
+    }
+
+    /// The wgpu handles a caller needs to build its own pipelines for
+    /// [`Renderer::render_with_hook`] (device, queue, colour + depth formats).
+    pub fn gpu(&self) -> (&wgpu::Device, &wgpu::Queue, wgpu::TextureFormat, wgpu::TextureFormat) {
+        (&self.device, &self.queue, self.config.format, DEPTH_FORMAT)
+    }
+
+    /// [`Renderer::render`], plus a caller-owned pass between the forward (world)
+    /// pass and the overlay pass. The hook gets the frame's encoder and attachments:
+    /// the depth buffer still holds the world, so the hook can depth-test effects
+    /// against it and then clear it for its own first-person geometry. Used by
+    /// spikes that bring their own renderer (e.g. `pd_guns`).
+    pub fn render_with_hook(&mut self, view_proj: Mat4, egui: Option<EguiFrame>, hook: &mut dyn FnMut(&mut PassHook)) {
         self.queue.write_buffer(
             &self.camera_buf,
             0,
@@ -3773,6 +3806,18 @@ impl Renderer {
             }
 
         } // end forward pass
+
+        let copyable = self.config.usage.contains(wgpu::TextureUsages::COPY_SRC);
+        hook(&mut PassHook {
+            device: &self.device,
+            queue: &self.queue,
+            encoder: &mut encoder,
+            color: &view_tex,
+            depth: &self.depth_view,
+            width: self.config.width,
+            height: self.config.height,
+            color_texture: copyable.then_some(&frame.texture),
+        });
 
         // ── Overlay pass: depth is CLEARED here so the first-person weapon
         // viewmodel is always on top and never clips into world geometry (exactly

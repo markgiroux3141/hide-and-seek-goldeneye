@@ -33,8 +33,14 @@ serde_json = { workspace = true }
 # winit events into egui input). The painter (egui-wgpu) lives in the engine.
 egui = { workspace = true }
 egui-winit = { workspace = true }
+# The pd_guns spike brings its own wgpu pipelines (N64 combiner port), drawn
+# through `Renderer::render_with_hook`.
+wgpu = { workspace = true }
+bytemuck = { workspace = true }
 
 [dev-dependencies]
 # Used by the gun_strip tests to re-walk a stripped GLB through the SAME glTF
 # crate the engine loader uses, verifying the hand geometry no longer loads.
 gltf = { workspace = true }
+# Validates the pd_guns spike's WGSL (same front-end wgpu runs).
+naga = { version = "24", features = ["wgsl-in"] }
