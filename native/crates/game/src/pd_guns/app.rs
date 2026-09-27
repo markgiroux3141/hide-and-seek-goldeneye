@@ -33,7 +33,7 @@ use engine::render::renderer::{EguiFrame, Renderer};
 use super::bgun::*;
 use super::font::{split, Canvas};
 use super::gset::*;
-use super::n64video::{self, Mask, N64Video, Preset, Resolution, Signal, VideoSettings};
+use super::n64video::{self, Mask, N64Video, Preset, Resolution, Signal, TvSet, VideoSettings};
 use super::player::PdInput;
 use super::render::PdRenderer;
 use super::sim::{Sim, SoundReq, HAND_MODELS};
@@ -978,7 +978,11 @@ fn video_panel(ui: &mut egui::Ui, v: &mut VideoSettings) {
                     }
                 });
                 ui.add(egui::Slider::new(&mut v.mask_strength, 0.0..=1.0).text("mask strength"));
-                ui.checkbox(&mut v.tv_frame, "TV set");
+                egui::ComboBox::from_label("frame").selected_text(v.tv.label()).show_ui(ui, |ui| {
+                    for t in TvSet::ALL {
+                        ui.selectable_value(&mut v.tv, t, t.label());
+                    }
+                });
                 ui.add(egui::Slider::new(&mut v.scanlines, 0.0..=1.0).text("scanlines"));
                 ui.add(egui::Slider::new(&mut v.sharpness, 0.5..=2.5).text("signal sharpness"));
                 ui.add(egui::Slider::new(&mut v.halation, 0.0..=0.3).text("halation"));

@@ -123,7 +123,9 @@ The panel's **VIDEO** section, off by default, shows the range the way an N64 on
   - a resolution option: 320×220, PD hi-res 640×220, and 640×440 beyond N64 on a 480-line raster;
   - a signal-sharpness slider (scales the bandwidth; the composite box stays one period long);
   - TV presets (clean RGB / S-Video / composite); the default is now S-Video.
-- **TV set** (CRT checkbox, on by default): the tube is drawn into the screen box of `crt_screen.png` (a 4:3 photo of a portable CRT with a chroma-green screen), then the photo goes over it with the green keyed out (`fs_frame`: a soft key on green minus max(red, blue), plus a despill). In this mode the tube's own curvature and corners are off, because the photo's glass gives the shape.
+- **TV set** (the CRT section's "frame" selector: TV set / TV set in a bedroom / off; TV set is the default): a 4:3 photo with a chroma-green screen (`crt_screen.png`, `crt_screen_with_background.png`) goes over the tube with the green keyed out (`fs_frame`).
+  - Each photo has its own screen box, taken from the green's **largest connected region**, because the bedroom photo has other chroma-green things (the soda can). Keying applies only inside that box; despill also runs in a thin band around it, for the green reflection on the bezel.
+  - The tube is the 4:3 rect that covers the box, cropped by the bezel rather than stretched (the bedroom box is 1.46:1). That crop counts towards the overscan instead of adding to it, so the HUD stays visible. The photo's glass gives the shape, so the tube's own curvature and corners are off.
 - **Not done:** the engine walls' per-vertex lighting and fog, PD's TMEM cap on LOD count (distant textures past the last LOD still alias on real hardware), and a measured comparison against real-hardware captures.
 
 ### Invariants that bit us (don't regress)

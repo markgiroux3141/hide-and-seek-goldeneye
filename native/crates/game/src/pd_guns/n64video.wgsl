@@ -38,6 +38,7 @@ struct Video {
     crt2: vec4<f32>,   // curvature, halation, overscan, composite luma gain at the subcarrier
     tube: vec4<f32>,   // the tube's rect in present pixels: x0, y0, w, h
     raster: vec4<f32>, // raster lines (240, or 480 for the beyond-N64 mode), signal bandwidth scale, TV-set frame (1 = on), _
+    keybox: vec4<f32>, // the TV photo's screen box (photo uv x0, y0, x1, y1): only pixels inside it are keyed
     // Composite decoder taps k = −32..32 at NTSC_DT: (luma, I, Q, _) weights,
     // each normalised to sum 1 (built by `n64video::ntsc_taps`).
     ntsc: array<vec4<f32>, 65>,
@@ -537,16 +538,28 @@ fn fs_tube(in: VOut) -> @location(0) vec4<f32> {
     return vec4<f32>(light * vig * glass, 1.0);
 }
 
-// The TV set: a photo of a portable CRT with a chroma-green screen, drawn over
-// the tube with the green keyed out. The key is how far green exceeds the
-// other two channels, softened so the screen's anti-aliased edge blends; the
-// despill clamps green to the larger of red and blue, which leaves the grey
-// and black plastic alone and takes the green fringe off the bezel's edge.
+// The TV set: a photo of a CRT with a chroma-green screen, drawn over the tube
+// with the green keyed out. The key is how far green exceeds the other two
+// channels, softened so the screen's anti-aliased edge blends, and it only
+// applies inside the screen box, so green things elsewhere in the photo (the
+// bedroom's soda can) stay. The despill clamps green to the larger of red and
+// blue, which leaves the grey and black plastic alone; it runs a little past
+// the box too, because the bezel's inner lip carries the green screen's
+// reflection in the photo.
 @fragment
 fn fs_frame(in: VOut) -> @location(0) vec4<f32> {
     let c = textureSampleLevel(t0, s_lin, in.uv, 0.0).rgb;
-    let key = c.g - max(c.r, c.b);
-    let a = 1.0 - smoothstep(0.12, 0.40, key);
+    let kb = v.keybox;
+    let pad = vec2<f32>(0.035, 0.045);
+    let near = all(in.uv >= kb.xy - pad) && all(in.uv <= kb.zw + pad);
+    if (!near) {
+        return vec4<f32>(srgb_to_linear(c), 1.0);
+    }
     let rgb = vec3<f32>(c.r, min(c.g, max(c.r, c.b)), c.b);
+    let inside = all(in.uv >= kb.xy) && all(in.uv <= kb.zw);
+    var a = 1.0;
+    if (inside) {
+        a = 1.0 - smoothstep(0.12, 0.40, c.g - max(c.r, c.b));
+    }
     return vec4<f32>(srgb_to_linear(rgb), a);
 }

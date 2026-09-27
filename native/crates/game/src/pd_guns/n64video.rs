@@ -93,19 +93,41 @@ const SIG_W: u32 = 1280;
 const GLOW_W: u32 = 160;
 const GLOW_H: u32 = 120;
 
-/// The TV set's photo (4:3, chroma-green screen) and the box its screen fills,
-/// in the photo's pixels: the green spans x 234..1215, y 104..808, and the box
-/// runs a few pixels past it so the raster is under the key's soft edge.
-const TV_PHOTO: &[u8] = include_bytes!("crt_screen.png");
-const TV_SIZE: [f32; 2] = [1448.0, 1086.0];
-const TV_SCREEN: [f32; 4] = [231.0, 101.0, 1219.0, 812.0];
+/// Photos of a TV set with a chroma-green screen, shown around the tube with
+/// the green keyed out. Each photo is 4:3 and is drawn over the whole 4:3
+/// tube rect.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TvSet {
+    Off,
+    /// `crt_screen.png`: the set alone on grey.
+    Plain,
+    /// `crt_screen_with_background.png`: the set in a 90s bedroom.
+    Bedroom,
+}
 
-/// Where the tube goes inside a TV set drawn over `rect`.
-fn tv_screen_rect(rect: [f32; 4]) -> [f32; 4] {
-    let (sx, sy) = (rect[2] / TV_SIZE[0], rect[3] / TV_SIZE[1]);
-    let x0 = rect[0] + TV_SCREEN[0] * sx;
-    let y0 = rect[1] + TV_SCREEN[1] * sy;
-    [x0.floor(), y0.floor(), ((TV_SCREEN[2] - TV_SCREEN[0]) * sx).ceil(), ((TV_SCREEN[3] - TV_SCREEN[1]) * sy).ceil()]
+impl TvSet {
+    pub const ALL: [TvSet; 3] = [TvSet::Plain, TvSet::Bedroom, TvSet::Off];
+    pub fn label(self) -> &'static str {
+        match self {
+            TvSet::Off => "off",
+            TvSet::Plain => "TV set",
+            TvSet::Bedroom => "TV set in a bedroom",
+        }
+    }
+    /// The photo and its screen box in photo pixels `[x0, y0, x1, y1]`. The
+    /// box is the green screen's extent (its largest connected green region:
+    /// the bedroom has other green things, e.g. the soda can) plus 3 px, so
+    /// the raster sits under the key's soft edge. Only pixels inside the box
+    /// are keyed.
+    fn photo(self) -> Option<(&'static [u8], [f32; 4])> {
+        match self {
+            TvSet::Off => None,
+            // Green spans x 234..=1215, y 104..=809.
+            TvSet::Plain => Some((include_bytes!("crt_screen.png"), [231.0, 101.0, 1219.0, 813.0])),
+            // Green spans x 381..=1079, y 138..=615.
+            TvSet::Bedroom => Some((include_bytes!("crt_screen_with_background.png"), [378.0, 135.0, 1083.0, 619.0])),
+        }
+    }
 }
 
 /// Near/far of the engine's world projection (`app::world_vp`) and PD's gun
@@ -174,9 +196,9 @@ pub struct VideoSettings {
     pub scanlines: f32,
     pub mask: Mask,
     pub mask_strength: f32,
-    /// Show the tube inside a TV set (`crt_screen.png`), its green screen
-    /// replaced by the picture.
-    pub tv_frame: bool,
+    /// Show the tube inside a photo of a TV set, its green screen replaced by
+    /// the picture.
+    pub tv: TvSet,
     pub curvature: f32,
     pub halation: f32,
     pub overscan: f32,
@@ -200,7 +222,7 @@ impl Default for VideoSettings {
             scanlines: 0.75,
             mask: Mask::ApertureGrille,
             mask_strength: 0.35,
-            tv_frame: true,
+            tv: TvSet::Plain,
             curvature: 0.06,
             halation: 0.06,
             overscan: 0.08,
@@ -221,6 +243,7 @@ struct VideoU {
     crt2: [f32; 4],
     tube: [f32; 4],
     raster: [f32; 4],
+    keybox: [f32; 4],
     ntsc: [[f32; 4]; 65],
 }
 
@@ -291,9 +314,17 @@ fn tex(device: &wgpu::Device, label: &str, w: u32, h: u32, format: wgpu::Texture
 
 const FB: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
-/// The TV set's photo as raw bytes (the key works on the photo's own values).
-fn tv_photo(device: &wgpu::Device, queue: &wgpu::Queue) -> Tex {
-    let img = image::load_from_memory(TV_PHOTO).expect("crt_screen.png").to_rgba8();
+/// A TV set's photo on the GPU (raw bytes: the key works on the photo's own
+/// values) and its screen box as a fraction of the photo.
+struct TvPhoto {
+    set: TvSet,
+    tex: Tex,
+    keybox: [f32; 4],
+}
+
+fn tv_photo(device: &wgpu::Device, queue: &wgpu::Queue, set: TvSet) -> Option<TvPhoto> {
+    let (bytes, bx) = set.photo()?;
+    let img = image::load_from_memory(bytes).expect("TV set photo").to_rgba8();
     let (w, h) = img.dimensions();
     let t = tex(device, "n64-tv-photo", w, h, FB, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
     queue.write_texture(
@@ -302,7 +333,22 @@ fn tv_photo(device: &wgpu::Device, queue: &wgpu::Queue) -> Tex {
         wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
         wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
     );
-    t
+    let (fw, fh) = (w as f32, h as f32);
+    Some(TvPhoto { set, tex: t, keybox: [bx[0] / fw, bx[1] / fh, bx[2] / fw, bx[3] / fh] })
+}
+
+/// The tube inside a TV set drawn over `rect`: the 4:3 rect that covers the
+/// photo's screen box, centred on it. The screen's glass is rarely exactly
+/// 4:3, so the picture is cropped by the bezel (as a real tube's overscan is)
+/// instead of stretched.
+fn tv_screen_rect(rect: [f32; 4], keybox: [f32; 4]) -> [f32; 4] {
+    let x0 = rect[0] + keybox[0] * rect[2];
+    let y0 = rect[1] + keybox[1] * rect[3];
+    let w = (keybox[2] - keybox[0]) * rect[2];
+    let h = (keybox[3] - keybox[1]) * rect[3];
+    let (cw, ch) = if w / h > 4.0 / 3.0 { (w, w * 3.0 / 4.0) } else { (h * 4.0 / 3.0, h) };
+    let (cx, cy) = (x0 + w * 0.5, y0 + h * 0.5);
+    [(cx - cw * 0.5).floor(), (cy - ch * 0.5).floor(), cw.ceil(), ch.ceil()]
 }
 const SIG: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
@@ -328,7 +374,8 @@ pub struct N64Video {
     glow: wgpu::RenderPipeline,
     tube: wgpu::RenderPipeline,
     frame_pipe: wgpu::RenderPipeline,
-    tv_photo: Tex,
+    /// The selected TV set's photo, loaded when first chosen.
+    tv_photo: Option<TvPhoto>,
     sig: Tex,
     glow_tex: Tex,
     targets: Option<Targets>,
@@ -347,7 +394,7 @@ pub struct N64Video {
 }
 
 impl N64Video {
-    pub fn new(device: &wgpu::Device, queue: &wgpu::Queue, present_format: wgpu::TextureFormat) -> Self {
+    pub fn new(device: &wgpu::Device, _queue: &wgpu::Queue, present_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("n64video"),
             source: wgpu::ShaderSource::Wgsl(include_str!("n64video.wgsl").into()),
@@ -440,7 +487,7 @@ impl N64Video {
             glow: pipe("fs_glow", SIG),
             tube: pipe("fs_tube", present_format),
             frame_pipe: pipe_blend("fs_frame", present_format, Some(wgpu::BlendState::ALPHA_BLENDING)),
-            tv_photo: tv_photo(device, queue),
+            tv_photo: None,
             sig: tex(device, "n64-signal", SIG_W, LINES, SIG, sampled),
             glow_tex: tex(device, "n64-glow", GLOW_W, GLOW_H, SIG, sampled),
             clear: tex(device, "n64-clear", 1, 1, FB, upload),
@@ -539,9 +586,10 @@ impl N64Video {
             flags: [s.fb16 as u32, s.dither_filter as u32, s.aa as u32, s.divot as u32],
             depth: [WORLD_NEAR_FAR.0, WORLD_NEAR_FAR.1, GUN_NEAR_FAR.0, GUN_NEAR_FAR.1],
             crt: [signal, s.scanlines, mask, s.mask_strength],
-            crt2: [s.curvature, s.halation, s.overscan, self.ntsc_gain],
+            crt2: [s.curvature, s.halation, self.overscan(s), self.ntsc_gain],
             tube: rect,
-            raster: [self.sig_lines as f32, s.sharpness, (s.crt && s.tv_frame) as u32 as f32, 0.0],
+            raster: [self.sig_lines as f32, s.sharpness, self.framed(s) as u32 as f32, 0.0],
+            keybox: self.tv_photo.as_ref().filter(|_| self.framed(s)).map_or([0.0; 4], |p| p.keybox),
             ntsc: self.ntsc_taps,
         }
     }
@@ -587,9 +635,38 @@ impl N64Video {
         rp.draw(0..3, 0..1);
     }
 
+    /// Whether this frame draws a TV set around the tube.
+    fn framed(&self, s: &VideoSettings) -> bool {
+        s.crt && s.tv != TvSet::Off && self.tv_photo.as_ref().is_some_and(|p| p.set == s.tv)
+    }
+
+    /// Load the selected TV set's photo if it isn't the one on the GPU.
+    fn ensure_tv(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, set: TvSet) {
+        if set != TvSet::Off && !self.tv_photo.as_ref().is_some_and(|p| p.set == set) {
+            self.tv_photo = tv_photo(device, queue, set);
+        }
+    }
+
+    /// The overscan to apply. Inside a TV set the bezel already crops what the
+    /// 4:3 raster has beyond the screen box (`tv_screen_rect`), and that crop
+    /// counts towards the overscan instead of adding to it.
+    fn overscan(&self, s: &VideoSettings) -> f32 {
+        match self.tv_photo.as_ref().filter(|_| self.framed(s)) {
+            Some(p) => {
+                let (w, h) = ((p.keybox[2] - p.keybox[0]) * 4.0, (p.keybox[3] - p.keybox[1]) * 3.0);
+                let crop = 1.0 - w.min(h) / w.max(h);
+                (s.overscan - crop).max(0.0)
+            }
+            None => s.overscan,
+        }
+    }
+
     /// The tube's rect for `rect`: the whole of it, or the TV set's screen.
-    fn tube_in(rect: [f32; 4], s: &VideoSettings) -> [f32; 4] {
-        if s.crt && s.tv_frame { tv_screen_rect(rect) } else { rect }
+    fn tube_in(&self, rect: [f32; 4], s: &VideoSettings) -> [f32; 4] {
+        match self.tv_photo.as_ref().filter(|_| self.framed(s)) {
+            Some(p) => tv_screen_rect(rect, p.keybox),
+            None => rect,
+        }
     }
 
     /// The CRT half (or the flat raster) from a VI-output texture to `present`.
@@ -609,10 +686,10 @@ impl N64Video {
         }
         Self::pass(encoder, &self.sig.view, &self.signal, &self.bind(device, vid, c, d, d), None);
         Self::pass(encoder, &self.glow_tex.view, &self.glow, &self.bind(device, &self.sig.view, c, d, d), None);
-        let tube = Self::tube_in(rect, s);
+        let tube = self.tube_in(rect, s);
         Self::pass(encoder, present, &self.tube, &self.bind(device, &self.sig.view, &self.glow_tex.view, d, d), Some(tube));
-        if s.tv_frame {
-            Self::pass(encoder, present, &self.frame_pipe, &self.bind(device, &self.tv_photo.view, c, d, d), Some(rect));
+        if let Some(p) = self.tv_photo.as_ref().filter(|_| self.framed(s)) {
+            Self::pass(encoder, present, &self.frame_pipe, &self.bind(device, &p.tex.view, c, d, d), Some(rect));
         }
     }
 
@@ -637,7 +714,8 @@ impl N64Video {
         self.ensure_targets(device, size.0, size.1);
         let lines = s.resolution.lines();
         self.ensure_raster(device, lines, s.sharpness);
-        let u = self.uniform(s, size, size.1.min(lines), Self::tube_in(rect, s));
+        self.ensure_tv(device, queue, s.tv);
+        let u = self.uniform(s, size, size.1.min(lines), self.tube_in(rect, s));
         queue.write_buffer(&self.buf, 0, bytemuck::bytes_of(&u));
         let t = self.targets.as_ref().unwrap();
         let hud = self.hud.as_ref().map(|(t, _, _)| &t.view).unwrap_or(&self.clear.view);
@@ -665,6 +743,7 @@ impl N64Video {
         s: &VideoSettings,
     ) {
         self.ensure_raster(device, LINES, s.sharpness);
+        self.ensure_tv(device, queue, s.tv);
         if !self.still.as_ref().is_some_and(|(_, w, h)| (*w, *h) == size) {
             let t = tex(device, "n64-still", size.0, size.1, FB, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST);
             self.still = Some((t, size.0, size.1));
@@ -677,7 +756,7 @@ impl N64Video {
             wgpu::Extent3d { width: size.0, height: size.1, depth_or_array_layers: 1 },
         );
         let lines = size.1.min(LINES);
-        let u = self.uniform(s, size, lines, Self::tube_in(rect, s));
+        let u = self.uniform(s, size, lines, self.tube_in(rect, s));
         queue.write_buffer(&self.buf, 0, bytemuck::bytes_of(&u));
         let view = t.view.clone();
         self.present(device, encoder, &view, present, rect, s);
