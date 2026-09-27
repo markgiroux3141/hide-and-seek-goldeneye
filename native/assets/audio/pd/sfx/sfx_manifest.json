@@ -9593,5 +9593,2533 @@
    "bondgun.c:8487 bgun_play_prop_hit_sound"
   ],
   "volume": 0.7087
+ },
+ "000d": {
+  "duration_s": 0.4311,
+  "envelope_baked": false,
+  "file": "000d.wav",
+  "gate_s": 0.4142,
+  "loop": null,
+  "names": [
+   "SFXNUM_000D_F_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4480,
+  "sound": "000d",
+  "source": "sfx.ctl soundArray[0xc] @ctl+0x5b8 (snd.c:1352); tbl+0x7358 len 2520; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "000e": {
+  "duration_s": 0.174,
+  "envelope_baked": false,
+  "file": "000e.wav",
+  "gate_s": 0.1462,
+  "loop": null,
+  "names": [
+   "SFXNUM_000E_F_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 1808,
+  "sound": "000e",
+  "source": "sfx.ctl soundArray[0xd] @ctl+0x680 (snd.c:1352); tbl+0x7d30 len 1017; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "000f": {
+  "duration_s": 0.4265,
+  "envelope_baked": false,
+  "file": "000f.wav",
+  "gate_s": 0.4142,
+  "loop": null,
+  "names": [
+   "SFXNUM_000F_F_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4432,
+  "sound": "000f",
+  "source": "sfx.ctl soundArray[0xe] @ctl+0x738 (snd.c:1352); tbl+0x8130 len 2493; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "0086": {
+  "duration_s": 0.3619,
+  "envelope_baked": false,
+  "file": "0086.wav",
+  "gate_s": 0.329,
+  "loop": null,
+  "names": [
+   "SFXNUM_0086_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3760,
+  "sound": "0086",
+  "source": "sfx.ctl soundArray[0x85] @ctl+0x3f50 (snd.c:1352); tbl+0x68108 len 2115; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "0087": {
+  "duration_s": 0.385,
+  "envelope_baked": false,
+  "file": "0087.wav",
+  "gate_s": 0.3533,
+  "loop": null,
+  "names": [
+   "SFXNUM_0087_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4000,
+  "sound": "0087",
+  "source": "sfx.ctl soundArray[0x86] @ctl+0x4018 (snd.c:1352); tbl+0x68950 len 2250; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "0088": {
+  "duration_s": 0.3295,
+  "envelope_baked": false,
+  "file": "0088.wav",
+  "gate_s": 0.3168,
+  "loop": null,
+  "names": [
+   "SFXNUM_0088_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3424,
+  "sound": "0088",
+  "source": "sfx.ctl soundArray[0x87] @ctl+0x40e0 (snd.c:1352); tbl+0x69220 len 1926; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "0089": {
+  "duration_s": 0.2972,
+  "envelope_baked": false,
+  "file": "0089.wav",
+  "gate_s": 0.268,
+  "loop": null,
+  "names": [
+   "SFXNUM_0089_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3088,
+  "sound": "0089",
+  "source": "sfx.ctl soundArray[0x88] @ctl+0x41a8 (snd.c:1352); tbl+0x699a8 len 1737; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "008a": {
+  "duration_s": 0.3311,
+  "envelope_baked": false,
+  "file": "008a.wav",
+  "gate_s": 0.3168,
+  "loop": null,
+  "names": [
+   "SFXNUM_008A_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3440,
+  "sound": "008a",
+  "source": "sfx.ctl soundArray[0x89] @ctl+0x4270 (snd.c:1352); tbl+0x6a078 len 1935; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "008b": {
+  "duration_s": 0.4542,
+  "envelope_baked": false,
+  "file": "008b.wav",
+  "gate_s": 0.4142,
+  "loop": null,
+  "names": [
+   "SFXNUM_008B_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4720,
+  "sound": "008b",
+  "source": "sfx.ctl soundArray[0x8a] @ctl+0x4338 (snd.c:1352); tbl+0x6a808 len 2655; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "008c": {
+  "duration_s": 0.5389,
+  "envelope_baked": false,
+  "file": "008c.wav",
+  "gate_s": 0.5239,
+  "loop": null,
+  "names": [
+   "SFXNUM_008C_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 5600,
+  "sound": "008c",
+  "source": "sfx.ctl soundArray[0x8b] @ctl+0x4400 (snd.c:1352); tbl+0x6b268 len 3150; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "008d": {
+  "duration_s": 0.3218,
+  "envelope_baked": false,
+  "file": "008d.wav",
+  "gate_s": 0.2924,
+  "loop": null,
+  "names": [
+   "SFXNUM_008D_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3344,
+  "sound": "008d",
+  "source": "sfx.ctl soundArray[0x8c] @ctl+0x44c8 (snd.c:1352); tbl+0x6beb8 len 1881; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "008e": {
+  "duration_s": 0.4496,
+  "envelope_baked": false,
+  "file": "008e.wav",
+  "gate_s": 0.4142,
+  "loop": null,
+  "names": [
+   "SFXNUM_008E_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4672,
+  "sound": "008e",
+  "source": "sfx.ctl soundArray[0x8d] @ctl+0x4590 (snd.c:1352); tbl+0x6c618 len 2628; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "008f": {
+  "duration_s": 0.5667,
+  "envelope_baked": false,
+  "file": "008f.wav",
+  "gate_s": 0.5239,
+  "loop": null,
+  "names": [
+   "SFXNUM_008F_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 5888,
+  "sound": "008f",
+  "source": "sfx.ctl soundArray[0x8e] @ctl+0x4658 (snd.c:1352); tbl+0x6d060 len 3312; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "0090": {
+  "duration_s": 0.4881,
+  "envelope_baked": false,
+  "file": "0090.wav",
+  "gate_s": 0.463,
+  "loop": null,
+  "names": [
+   "SFXNUM_0090_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 5072,
+  "sound": "0090",
+  "source": "sfx.ctl soundArray[0x8f] @ctl+0x4720 (snd.c:1352); tbl+0x6dd50 len 2853; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "0091": {
+  "duration_s": 0.4958,
+  "envelope_baked": false,
+  "file": "0091.wav",
+  "gate_s": 0.4873,
+  "loop": null,
+  "names": [
+   "SFXNUM_0091_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 5152,
+  "sound": "0091",
+  "source": "sfx.ctl soundArray[0x90] @ctl+0x47e8 (snd.c:1352); tbl+0x6e878 len 2898; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "0092": {
+  "duration_s": 0.4989,
+  "envelope_baked": false,
+  "file": "0092.wav",
+  "gate_s": 0.4873,
+  "loop": null,
+  "names": [
+   "SFXNUM_0092_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 5184,
+  "sound": "0092",
+  "source": "sfx.ctl soundArray[0x91] @ctl+0x48b0 (snd.c:1352); tbl+0x6f3d0 len 2916; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "0093": {
+  "duration_s": 0.3603,
+  "envelope_baked": false,
+  "file": "0093.wav",
+  "gate_s": 0.329,
+  "loop": null,
+  "names": [
+   "SFXNUM_0093_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3744,
+  "sound": "0093",
+  "source": "sfx.ctl soundArray[0x92] @ctl+0x4978 (snd.c:1352); tbl+0x6ff38 len 2106; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "0094": {
+  "duration_s": 0.5374,
+  "envelope_baked": false,
+  "file": "0094.wav",
+  "gate_s": 0.5239,
+  "loop": null,
+  "names": [
+   "SFXNUM_0094_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 5584,
+  "sound": "0094",
+  "source": "sfx.ctl soundArray[0x93] @ctl+0x4a40 (snd.c:1352); tbl+0x70778 len 3141; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "0095": {
+  "duration_s": 0.2587,
+  "envelope_baked": false,
+  "file": "0095.wav",
+  "gate_s": 0.2315,
+  "loop": null,
+  "names": [
+   "SFXNUM_0095_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 2688,
+  "sound": "0095",
+  "source": "sfx.ctl soundArray[0x94] @ctl+0x4b08 (snd.c:1352); tbl+0x713c0 len 1512; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "0096": {
+  "duration_s": 0.4481,
+  "envelope_baked": false,
+  "file": "0096.wav",
+  "gate_s": 0.4142,
+  "loop": null,
+  "names": [
+   "SFXNUM_0096_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4656,
+  "sound": "0096",
+  "source": "sfx.ctl soundArray[0x95] @ctl+0x4bd0 (snd.c:1352); tbl+0x719a8 len 2619; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "0097": {
+  "duration_s": 0.4004,
+  "envelope_baked": false,
+  "file": "0097.wav",
+  "gate_s": 0.3533,
+  "loop": null,
+  "names": [
+   "SFXNUM_0097_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4160,
+  "sound": "0097",
+  "source": "sfx.ctl soundArray[0x96] @ctl+0x4c98 (snd.c:1352); tbl+0x723e8 len 2340; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "0098": {
+  "duration_s": 0.3203,
+  "envelope_baked": false,
+  "file": "0098.wav",
+  "gate_s": 0.2924,
+  "loop": null,
+  "names": [
+   "SFXNUM_0098_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3328,
+  "sound": "0098",
+  "source": "sfx.ctl soundArray[0x97] @ctl+0x4d60 (snd.c:1352); tbl+0x72d10 len 1872; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "0099": {
+  "duration_s": 0.2895,
+  "envelope_baked": false,
+  "file": "0099.wav",
+  "gate_s": 0.268,
+  "loop": null,
+  "names": [
+   "SFXNUM_0099_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3008,
+  "sound": "0099",
+  "source": "sfx.ctl soundArray[0x98] @ctl+0x4e28 (snd.c:1352); tbl+0x73460 len 1692; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "009a": {
+  "duration_s": 0.3203,
+  "envelope_baked": false,
+  "file": "009a.wav",
+  "gate_s": 0.2924,
+  "loop": null,
+  "names": [
+   "SFXNUM_009A_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3328,
+  "sound": "009a",
+  "source": "sfx.ctl soundArray[0x99] @ctl+0x4ef0 (snd.c:1352); tbl+0x73b00 len 1872; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "009b": {
+  "duration_s": 0.388,
+  "envelope_baked": false,
+  "file": "009b.wav",
+  "gate_s": 0.3533,
+  "loop": null,
+  "names": [
+   "SFXNUM_009B_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4032,
+  "sound": "009b",
+  "source": "sfx.ctl soundArray[0x9a] @ctl+0x4fb8 (snd.c:1352); tbl+0x74250 len 2268; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "009c": {
+  "duration_s": 0.6144,
+  "envelope_baked": false,
+  "file": "009c.wav",
+  "gate_s": 0.5604,
+  "loop": null,
+  "names": [
+   "SFXNUM_009C_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 6384,
+  "sound": "009c",
+  "source": "sfx.ctl soundArray[0x9b] @ctl+0x5080 (snd.c:1352); tbl+0x74b30 len 3591; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "009d": {
+  "duration_s": 0.4204,
+  "envelope_baked": false,
+  "file": "009d.wav",
+  "gate_s": 0.4021,
+  "loop": null,
+  "names": [
+   "SFXNUM_009D_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4368,
+  "sound": "009d",
+  "source": "sfx.ctl soundArray[0x9c] @ctl+0x5148 (snd.c:1352); tbl+0x75938 len 2457; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "009e": {
+  "duration_s": 0.5158,
+  "envelope_baked": false,
+  "file": "009e.wav",
+  "gate_s": 0.4873,
+  "loop": null,
+  "names": [
+   "SFXNUM_009E_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 5360,
+  "sound": "009e",
+  "source": "sfx.ctl soundArray[0x9d] @ctl+0x5210 (snd.c:1352); tbl+0x762d8 len 3015; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "02aa": {
+  "duration_s": 0.3813,
+  "envelope_baked": false,
+  "file": "02aa.wav",
+  "gate_s": 0.6993,
+  "loop": null,
+  "names": [
+   "SFXNUM_02AA_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 5936,
+  "sound": "02aa",
+  "source": "sfx.ctl soundArray[0x2a9] @ctl+0x13268 (snd.c:1352); tbl+0x1b2520 len 3339; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "02ab": {
+  "duration_s": 0.2785,
+  "envelope_baked": false,
+  "file": "02ab.wav",
+  "gate_s": 0.5367,
+  "loop": null,
+  "names": [
+   "SFXNUM_02AB_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 4336,
+  "sound": "02ab",
+  "source": "sfx.ctl soundArray[0x2aa] @ctl+0x13338 (snd.c:1352); tbl+0x1b3230 len 2439; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "02ac": {
+  "duration_s": 0.4275,
+  "envelope_baked": false,
+  "file": "02ac.wav",
+  "gate_s": 0.8132,
+  "loop": null,
+  "names": [
+   "SFXNUM_02AC_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 6656,
+  "sound": "02ac",
+  "source": "sfx.ctl soundArray[0x2ab] @ctl+0x13408 (snd.c:1352); tbl+0x1b3bb8 len 3744; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "02ae": {
+  "duration_s": 0.3864,
+  "envelope_baked": false,
+  "file": "02ae.wav",
+  "gate_s": 0.7562,
+  "loop": null,
+  "names": [
+   "SFXNUM_02AE_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 6016,
+  "sound": "02ae",
+  "source": "sfx.ctl soundArray[0x2ad] @ctl+0x135a8 (snd.c:1352); tbl+0x1b5620 len 3384; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "02af": {
+  "duration_s": 0.3864,
+  "envelope_baked": false,
+  "file": "02af.wav",
+  "gate_s": 0.7562,
+  "loop": null,
+  "names": [
+   "SFXNUM_02AF_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 6016,
+  "sound": "02af",
+  "source": "sfx.ctl soundArray[0x2ae] @ctl+0x13678 (snd.c:1352); tbl+0x1b6358 len 3384; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "02b0": {
+  "duration_s": 0.3987,
+  "envelope_baked": false,
+  "file": "02b0.wav",
+  "gate_s": 0.7562,
+  "loop": null,
+  "names": [
+   "SFXNUM_02B0_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 6208,
+  "sound": "02b0",
+  "source": "sfx.ctl soundArray[0x2af] @ctl+0x13748 (snd.c:1352); tbl+0x1b7090 len 3492; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "02b1": {
+  "duration_s": 0.7214,
+  "envelope_baked": false,
+  "file": "02b1.wav",
+  "gate_s": 1.4068,
+  "loop": null,
+  "names": [
+   "SFXNUM_02B1_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 11232,
+  "sound": "02b1",
+  "source": "sfx.ctl soundArray[0x2b0] @ctl+0x13818 (snd.c:1352); tbl+0x1b7e38 len 6318; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "02b2": {
+  "duration_s": 0.6033,
+  "envelope_baked": false,
+  "file": "02b2.wav",
+  "gate_s": 1.1547,
+  "loop": null,
+  "names": [
+   "SFXNUM_02B2_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 9392,
+  "sound": "02b2",
+  "source": "sfx.ctl soundArray[0x2b1] @ctl+0x138e8 (snd.c:1352); tbl+0x1b96e8 len 5283; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "02b3": {
+  "duration_s": 0.3114,
+  "envelope_baked": false,
+  "file": "02b3.wav",
+  "gate_s": 0.5773,
+  "loop": null,
+  "names": [
+   "SFXNUM_02B3_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 4848,
+  "sound": "02b3",
+  "source": "sfx.ctl soundArray[0x2b2] @ctl+0x139b8 (snd.c:1352); tbl+0x1bab90 len 2727; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "05df": {
+  "duration_s": 0.9054,
+  "envelope_baked": false,
+  "file": "05df.wav",
+  "gate_s": 0.874,
+  "loop": null,
+  "names": [
+   "SFXNUM_05DF_MAIAN_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 11009,
+  "rate_exact": 11009.0,
+  "release_s": 0.0115,
+  "samples": 9968,
+  "sound": "05df",
+  "source": "sfx.ctl soundArray[0x5de] @ctl+0x2c188 (snd.c:1352); tbl+0x495eb0 len 5607; rate = 22018 * alCents2Ratio(keyBase 48*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "05e0": {
+  "duration_s": 0.5348,
+  "envelope_baked": false,
+  "file": "05e0.wav",
+  "gate_s": 0.4945,
+  "loop": null,
+  "names": [
+   "SFXNUM_05E0_MAIAN_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 11009,
+  "rate_exact": 11009.0,
+  "release_s": 0.0115,
+  "samples": 5888,
+  "sound": "05e0",
+  "source": "sfx.ctl soundArray[0x5df] @ctl+0x2c258 (snd.c:1352); tbl+0x497498 len 3312; rate = 22018 * alCents2Ratio(keyBase 48*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "05e1": {
+  "duration_s": 0.981,
+  "envelope_baked": false,
+  "file": "05e1.wav",
+  "gate_s": 0.9315,
+  "loop": null,
+  "names": [
+   "SFXNUM_05E1_MAIAN_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 11009,
+  "rate_exact": 11009.0,
+  "release_s": 0.0115,
+  "samples": 10800,
+  "sound": "05e1",
+  "source": "sfx.ctl soundArray[0x5e0] @ctl+0x2c328 (snd.c:1352); tbl+0x498188 len 6075; rate = 22018 * alCents2Ratio(keyBase 48*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "SFXNUM_000D_F_ARGH": {
+  "duration_s": 0.4311,
+  "envelope_baked": false,
+  "file": "000d.wav",
+  "gate_s": 0.4142,
+  "loop": null,
+  "names": [
+   "SFXNUM_000D_F_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4480,
+  "sound": "000d",
+  "source": "SFXNUM_000D_F_ARGH = 0x000d (src/include/sfx.h:41); sfx.ctl soundArray[0xc] @ctl+0x5b8 (snd.c:1352); tbl+0x7358 len 2520; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "SFXNUM_000E_F_ARGH": {
+  "duration_s": 0.174,
+  "envelope_baked": false,
+  "file": "000e.wav",
+  "gate_s": 0.1462,
+  "loop": null,
+  "names": [
+   "SFXNUM_000E_F_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 1808,
+  "sound": "000e",
+  "source": "SFXNUM_000E_F_ARGH = 0x000e (src/include/sfx.h:42); sfx.ctl soundArray[0xd] @ctl+0x680 (snd.c:1352); tbl+0x7d30 len 1017; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "SFXNUM_000F_F_ARGH": {
+  "duration_s": 0.4265,
+  "envelope_baked": false,
+  "file": "000f.wav",
+  "gate_s": 0.4142,
+  "loop": null,
+  "names": [
+   "SFXNUM_000F_F_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4432,
+  "sound": "000f",
+  "source": "SFXNUM_000F_F_ARGH = 0x000f (src/include/sfx.h:43); sfx.ctl soundArray[0xe] @ctl+0x738 (snd.c:1352); tbl+0x8130 len 2493; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "SFXNUM_0086_M_ARGH": {
+  "duration_s": 0.3619,
+  "envelope_baked": false,
+  "file": "0086.wav",
+  "gate_s": 0.329,
+  "loop": null,
+  "names": [
+   "SFXNUM_0086_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3760,
+  "sound": "0086",
+  "source": "SFXNUM_0086_M_ARGH = 0x0086 (src/include/sfx.h:162); sfx.ctl soundArray[0x85] @ctl+0x3f50 (snd.c:1352); tbl+0x68108 len 2115; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_0087_M_ARGH": {
+  "duration_s": 0.385,
+  "envelope_baked": false,
+  "file": "0087.wav",
+  "gate_s": 0.3533,
+  "loop": null,
+  "names": [
+   "SFXNUM_0087_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4000,
+  "sound": "0087",
+  "source": "SFXNUM_0087_M_ARGH = 0x0087 (src/include/sfx.h:163); sfx.ctl soundArray[0x86] @ctl+0x4018 (snd.c:1352); tbl+0x68950 len 2250; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_0088_M_ARGH": {
+  "duration_s": 0.3295,
+  "envelope_baked": false,
+  "file": "0088.wav",
+  "gate_s": 0.3168,
+  "loop": null,
+  "names": [
+   "SFXNUM_0088_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3424,
+  "sound": "0088",
+  "source": "SFXNUM_0088_M_ARGH = 0x0088 (src/include/sfx.h:164); sfx.ctl soundArray[0x87] @ctl+0x40e0 (snd.c:1352); tbl+0x69220 len 1926; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_0089_M_ARGH": {
+  "duration_s": 0.2972,
+  "envelope_baked": false,
+  "file": "0089.wav",
+  "gate_s": 0.268,
+  "loop": null,
+  "names": [
+   "SFXNUM_0089_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3088,
+  "sound": "0089",
+  "source": "SFXNUM_0089_M_ARGH = 0x0089 (src/include/sfx.h:165); sfx.ctl soundArray[0x88] @ctl+0x41a8 (snd.c:1352); tbl+0x699a8 len 1737; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_008A_M_ARGH": {
+  "duration_s": 0.3311,
+  "envelope_baked": false,
+  "file": "008a.wav",
+  "gate_s": 0.3168,
+  "loop": null,
+  "names": [
+   "SFXNUM_008A_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3440,
+  "sound": "008a",
+  "source": "SFXNUM_008A_M_ARGH = 0x008a (src/include/sfx.h:166); sfx.ctl soundArray[0x89] @ctl+0x4270 (snd.c:1352); tbl+0x6a078 len 1935; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_008B_M_ARGH": {
+  "duration_s": 0.4542,
+  "envelope_baked": false,
+  "file": "008b.wav",
+  "gate_s": 0.4142,
+  "loop": null,
+  "names": [
+   "SFXNUM_008B_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4720,
+  "sound": "008b",
+  "source": "SFXNUM_008B_M_ARGH = 0x008b (src/include/sfx.h:167); sfx.ctl soundArray[0x8a] @ctl+0x4338 (snd.c:1352); tbl+0x6a808 len 2655; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_008C_M_ARGH": {
+  "duration_s": 0.5389,
+  "envelope_baked": false,
+  "file": "008c.wav",
+  "gate_s": 0.5239,
+  "loop": null,
+  "names": [
+   "SFXNUM_008C_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 5600,
+  "sound": "008c",
+  "source": "SFXNUM_008C_M_ARGH = 0x008c (src/include/sfx.h:168); sfx.ctl soundArray[0x8b] @ctl+0x4400 (snd.c:1352); tbl+0x6b268 len 3150; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_008D_M_ARGH": {
+  "duration_s": 0.3218,
+  "envelope_baked": false,
+  "file": "008d.wav",
+  "gate_s": 0.2924,
+  "loop": null,
+  "names": [
+   "SFXNUM_008D_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3344,
+  "sound": "008d",
+  "source": "SFXNUM_008D_M_ARGH = 0x008d (src/include/sfx.h:169); sfx.ctl soundArray[0x8c] @ctl+0x44c8 (snd.c:1352); tbl+0x6beb8 len 1881; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_008E_M_ARGH": {
+  "duration_s": 0.4496,
+  "envelope_baked": false,
+  "file": "008e.wav",
+  "gate_s": 0.4142,
+  "loop": null,
+  "names": [
+   "SFXNUM_008E_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4672,
+  "sound": "008e",
+  "source": "SFXNUM_008E_M_ARGH = 0x008e (src/include/sfx.h:170); sfx.ctl soundArray[0x8d] @ctl+0x4590 (snd.c:1352); tbl+0x6c618 len 2628; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_008F_M_ARGH": {
+  "duration_s": 0.5667,
+  "envelope_baked": false,
+  "file": "008f.wav",
+  "gate_s": 0.5239,
+  "loop": null,
+  "names": [
+   "SFXNUM_008F_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 5888,
+  "sound": "008f",
+  "source": "SFXNUM_008F_M_ARGH = 0x008f (src/include/sfx.h:171); sfx.ctl soundArray[0x8e] @ctl+0x4658 (snd.c:1352); tbl+0x6d060 len 3312; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_0090_M_ARGH": {
+  "duration_s": 0.4881,
+  "envelope_baked": false,
+  "file": "0090.wav",
+  "gate_s": 0.463,
+  "loop": null,
+  "names": [
+   "SFXNUM_0090_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 5072,
+  "sound": "0090",
+  "source": "SFXNUM_0090_M_ARGH = 0x0090 (src/include/sfx.h:172); sfx.ctl soundArray[0x8f] @ctl+0x4720 (snd.c:1352); tbl+0x6dd50 len 2853; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_0091_M_ARGH": {
+  "duration_s": 0.4958,
+  "envelope_baked": false,
+  "file": "0091.wav",
+  "gate_s": 0.4873,
+  "loop": null,
+  "names": [
+   "SFXNUM_0091_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 5152,
+  "sound": "0091",
+  "source": "SFXNUM_0091_M_ARGH = 0x0091 (src/include/sfx.h:173); sfx.ctl soundArray[0x90] @ctl+0x47e8 (snd.c:1352); tbl+0x6e878 len 2898; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_0092_M_ARGH": {
+  "duration_s": 0.4989,
+  "envelope_baked": false,
+  "file": "0092.wav",
+  "gate_s": 0.4873,
+  "loop": null,
+  "names": [
+   "SFXNUM_0092_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 5184,
+  "sound": "0092",
+  "source": "SFXNUM_0092_M_ARGH = 0x0092 (src/include/sfx.h:174); sfx.ctl soundArray[0x91] @ctl+0x48b0 (snd.c:1352); tbl+0x6f3d0 len 2916; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_0093_M_ARGH": {
+  "duration_s": 0.3603,
+  "envelope_baked": false,
+  "file": "0093.wav",
+  "gate_s": 0.329,
+  "loop": null,
+  "names": [
+   "SFXNUM_0093_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3744,
+  "sound": "0093",
+  "source": "SFXNUM_0093_M_ARGH = 0x0093 (src/include/sfx.h:175); sfx.ctl soundArray[0x92] @ctl+0x4978 (snd.c:1352); tbl+0x6ff38 len 2106; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_0094_M_ARGH": {
+  "duration_s": 0.5374,
+  "envelope_baked": false,
+  "file": "0094.wav",
+  "gate_s": 0.5239,
+  "loop": null,
+  "names": [
+   "SFXNUM_0094_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 5584,
+  "sound": "0094",
+  "source": "SFXNUM_0094_M_ARGH = 0x0094 (src/include/sfx.h:176); sfx.ctl soundArray[0x93] @ctl+0x4a40 (snd.c:1352); tbl+0x70778 len 3141; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_0095_M_ARGH": {
+  "duration_s": 0.2587,
+  "envelope_baked": false,
+  "file": "0095.wav",
+  "gate_s": 0.2315,
+  "loop": null,
+  "names": [
+   "SFXNUM_0095_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 2688,
+  "sound": "0095",
+  "source": "SFXNUM_0095_M_ARGH = 0x0095 (src/include/sfx.h:177); sfx.ctl soundArray[0x94] @ctl+0x4b08 (snd.c:1352); tbl+0x713c0 len 1512; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_0096_M_ARGH": {
+  "duration_s": 0.4481,
+  "envelope_baked": false,
+  "file": "0096.wav",
+  "gate_s": 0.4142,
+  "loop": null,
+  "names": [
+   "SFXNUM_0096_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4656,
+  "sound": "0096",
+  "source": "SFXNUM_0096_M_ARGH = 0x0096 (src/include/sfx.h:178); sfx.ctl soundArray[0x95] @ctl+0x4bd0 (snd.c:1352); tbl+0x719a8 len 2619; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_0097_M_ARGH": {
+  "duration_s": 0.4004,
+  "envelope_baked": false,
+  "file": "0097.wav",
+  "gate_s": 0.3533,
+  "loop": null,
+  "names": [
+   "SFXNUM_0097_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4160,
+  "sound": "0097",
+  "source": "SFXNUM_0097_M_ARGH = 0x0097 (src/include/sfx.h:179); sfx.ctl soundArray[0x96] @ctl+0x4c98 (snd.c:1352); tbl+0x723e8 len 2340; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_0098_M_ARGH": {
+  "duration_s": 0.3203,
+  "envelope_baked": false,
+  "file": "0098.wav",
+  "gate_s": 0.2924,
+  "loop": null,
+  "names": [
+   "SFXNUM_0098_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3328,
+  "sound": "0098",
+  "source": "SFXNUM_0098_M_ARGH = 0x0098 (src/include/sfx.h:180); sfx.ctl soundArray[0x97] @ctl+0x4d60 (snd.c:1352); tbl+0x72d10 len 1872; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_0099_M_ARGH": {
+  "duration_s": 0.2895,
+  "envelope_baked": false,
+  "file": "0099.wav",
+  "gate_s": 0.268,
+  "loop": null,
+  "names": [
+   "SFXNUM_0099_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3008,
+  "sound": "0099",
+  "source": "SFXNUM_0099_M_ARGH = 0x0099 (src/include/sfx.h:181); sfx.ctl soundArray[0x98] @ctl+0x4e28 (snd.c:1352); tbl+0x73460 len 1692; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_009A_M_ARGH": {
+  "duration_s": 0.3203,
+  "envelope_baked": false,
+  "file": "009a.wav",
+  "gate_s": 0.2924,
+  "loop": null,
+  "names": [
+   "SFXNUM_009A_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 3328,
+  "sound": "009a",
+  "source": "SFXNUM_009A_M_ARGH = 0x009a (src/include/sfx.h:182); sfx.ctl soundArray[0x99] @ctl+0x4ef0 (snd.c:1352); tbl+0x73b00 len 1872; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_009B_M_ARGH": {
+  "duration_s": 0.388,
+  "envelope_baked": false,
+  "file": "009b.wav",
+  "gate_s": 0.3533,
+  "loop": null,
+  "names": [
+   "SFXNUM_009B_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4032,
+  "sound": "009b",
+  "source": "SFXNUM_009B_M_ARGH = 0x009b (src/include/sfx.h:183); sfx.ctl soundArray[0x9a] @ctl+0x4fb8 (snd.c:1352); tbl+0x74250 len 2268; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_009C_M_ARGH": {
+  "duration_s": 0.6144,
+  "envelope_baked": false,
+  "file": "009c.wav",
+  "gate_s": 0.5604,
+  "loop": null,
+  "names": [
+   "SFXNUM_009C_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 6384,
+  "sound": "009c",
+  "source": "SFXNUM_009C_M_ARGH = 0x009c (src/include/sfx.h:184); sfx.ctl soundArray[0x9b] @ctl+0x5080 (snd.c:1352); tbl+0x74b30 len 3591; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_009D_M_ARGH": {
+  "duration_s": 0.4204,
+  "envelope_baked": false,
+  "file": "009d.wav",
+  "gate_s": 0.4021,
+  "loop": null,
+  "names": [
+   "SFXNUM_009D_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 4368,
+  "sound": "009d",
+  "source": "SFXNUM_009D_M_ARGH = 0x009d (src/include/sfx.h:185); sfx.ctl soundArray[0x9c] @ctl+0x5148 (snd.c:1352); tbl+0x75938 len 2457; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_009E_M_ARGH": {
+  "duration_s": 0.5158,
+  "envelope_baked": false,
+  "file": "009e.wav",
+  "gate_s": 0.4873,
+  "loop": null,
+  "names": [
+   "SFXNUM_009E_M_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 10391,
+  "rate_exact": 10390.819,
+  "release_s": 0.0,
+  "samples": 5360,
+  "sound": "009e",
+  "source": "SFXNUM_009E_M_ARGH = 0x009e (src/include/sfx.h:186); sfx.ctl soundArray[0x9d] @ctl+0x5210 (snd.c:1352); tbl+0x762d8 len 3015; rate = 22018 * alCents2Ratio(keyBase 47*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 105/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.8268
+ },
+ "SFXNUM_02AA_JO_ARGH": {
+  "duration_s": 0.3813,
+  "envelope_baked": false,
+  "file": "02aa.wav",
+  "gate_s": 0.6993,
+  "loop": null,
+  "names": [
+   "SFXNUM_02AA_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 5936,
+  "sound": "02aa",
+  "source": "SFXNUM_02AA_JO_ARGH = 0x02aa (src/include/sfx.h:710); sfx.ctl soundArray[0x2a9] @ctl+0x13268 (snd.c:1352); tbl+0x1b2520 len 3339; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "SFXNUM_02AB_JO_ARGH": {
+  "duration_s": 0.2785,
+  "envelope_baked": false,
+  "file": "02ab.wav",
+  "gate_s": 0.5367,
+  "loop": null,
+  "names": [
+   "SFXNUM_02AB_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 4336,
+  "sound": "02ab",
+  "source": "SFXNUM_02AB_JO_ARGH = 0x02ab (src/include/sfx.h:711); sfx.ctl soundArray[0x2aa] @ctl+0x13338 (snd.c:1352); tbl+0x1b3230 len 2439; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "SFXNUM_02AC_JO_ARGH": {
+  "duration_s": 0.4275,
+  "envelope_baked": false,
+  "file": "02ac.wav",
+  "gate_s": 0.8132,
+  "loop": null,
+  "names": [
+   "SFXNUM_02AC_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 6656,
+  "sound": "02ac",
+  "source": "SFXNUM_02AC_JO_ARGH = 0x02ac (src/include/sfx.h:712); sfx.ctl soundArray[0x2ab] @ctl+0x13408 (snd.c:1352); tbl+0x1b3bb8 len 3744; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "SFXNUM_02AE_JO_ARGH": {
+  "duration_s": 0.3864,
+  "envelope_baked": false,
+  "file": "02ae.wav",
+  "gate_s": 0.7562,
+  "loop": null,
+  "names": [
+   "SFXNUM_02AE_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 6016,
+  "sound": "02ae",
+  "source": "SFXNUM_02AE_JO_ARGH = 0x02ae (src/include/sfx.h:714); sfx.ctl soundArray[0x2ad] @ctl+0x135a8 (snd.c:1352); tbl+0x1b5620 len 3384; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "SFXNUM_02AF_JO_ARGH": {
+  "duration_s": 0.3864,
+  "envelope_baked": false,
+  "file": "02af.wav",
+  "gate_s": 0.7562,
+  "loop": null,
+  "names": [
+   "SFXNUM_02AF_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 6016,
+  "sound": "02af",
+  "source": "SFXNUM_02AF_JO_ARGH = 0x02af (src/include/sfx.h:715); sfx.ctl soundArray[0x2ae] @ctl+0x13678 (snd.c:1352); tbl+0x1b6358 len 3384; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "SFXNUM_02B0_JO_ARGH": {
+  "duration_s": 0.3987,
+  "envelope_baked": false,
+  "file": "02b0.wav",
+  "gate_s": 0.7562,
+  "loop": null,
+  "names": [
+   "SFXNUM_02B0_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 6208,
+  "sound": "02b0",
+  "source": "SFXNUM_02B0_JO_ARGH = 0x02b0 (src/include/sfx.h:716); sfx.ctl soundArray[0x2af] @ctl+0x13748 (snd.c:1352); tbl+0x1b7090 len 3492; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "SFXNUM_02B1_JO_ARGH": {
+  "duration_s": 0.7214,
+  "envelope_baked": false,
+  "file": "02b1.wav",
+  "gate_s": 1.4068,
+  "loop": null,
+  "names": [
+   "SFXNUM_02B1_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 11232,
+  "sound": "02b1",
+  "source": "SFXNUM_02B1_JO_ARGH = 0x02b1 (src/include/sfx.h:717); sfx.ctl soundArray[0x2b0] @ctl+0x13818 (snd.c:1352); tbl+0x1b7e38 len 6318; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "SFXNUM_02B2_JO_ARGH": {
+  "duration_s": 0.6033,
+  "envelope_baked": false,
+  "file": "02b2.wav",
+  "gate_s": 1.1547,
+  "loop": null,
+  "names": [
+   "SFXNUM_02B2_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 9392,
+  "sound": "02b2",
+  "source": "SFXNUM_02B2_JO_ARGH = 0x02b2 (src/include/sfx.h:718); sfx.ctl soundArray[0x2b1] @ctl+0x138e8 (snd.c:1352); tbl+0x1b96e8 len 5283; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "SFXNUM_02B3_JO_ARGH": {
+  "duration_s": 0.3114,
+  "envelope_baked": false,
+  "file": "02b3.wav",
+  "gate_s": 0.5773,
+  "loop": null,
+  "names": [
+   "SFXNUM_02B3_JO_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0244,
+  "samples": 4848,
+  "sound": "02b3",
+  "source": "SFXNUM_02B3_JO_ARGH = 0x02b3 (src/include/sfx.h:719); sfx.ctl soundArray[0x2b2] @ctl+0x139b8 (snd.c:1352); tbl+0x1bab90 len 2727; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "SFXNUM_05DF_MAIAN_ARGH": {
+  "duration_s": 0.9054,
+  "envelope_baked": false,
+  "file": "05df.wav",
+  "gate_s": 0.874,
+  "loop": null,
+  "names": [
+   "SFXNUM_05DF_MAIAN_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 11009,
+  "rate_exact": 11009.0,
+  "release_s": 0.0115,
+  "samples": 9968,
+  "sound": "05df",
+  "source": "SFXNUM_05DF_MAIAN_ARGH = 0x05df (src/include/sfx.h:1531); sfx.ctl soundArray[0x5de] @ctl+0x2c188 (snd.c:1352); tbl+0x495eb0 len 5607; rate = 22018 * alCents2Ratio(keyBase 48*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "SFXNUM_05E0_MAIAN_ARGH": {
+  "duration_s": 0.5348,
+  "envelope_baked": false,
+  "file": "05e0.wav",
+  "gate_s": 0.4945,
+  "loop": null,
+  "names": [
+   "SFXNUM_05E0_MAIAN_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 11009,
+  "rate_exact": 11009.0,
+  "release_s": 0.0115,
+  "samples": 5888,
+  "sound": "05e0",
+  "source": "SFXNUM_05E0_MAIAN_ARGH = 0x05e0 (src/include/sfx.h:1532); sfx.ctl soundArray[0x5df] @ctl+0x2c258 (snd.c:1352); tbl+0x497498 len 3312; rate = 22018 * alCents2Ratio(keyBase 48*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "SFXNUM_05E1_MAIAN_ARGH": {
+  "duration_s": 0.981,
+  "envelope_baked": false,
+  "file": "05e1.wav",
+  "gate_s": 0.9315,
+  "loop": null,
+  "names": [
+   "SFXNUM_05E1_MAIAN_ARGH"
+  ],
+  "pitch": 1.0,
+  "rate": 11009,
+  "rate_exact": 11009.0,
+  "release_s": 0.0115,
+  "samples": 10800,
+  "sound": "05e1",
+  "source": "SFXNUM_05E1_MAIAN_ARGH = 0x05e1 (src/include/sfx.h:1533); sfx.ctl soundArray[0x5e0] @ctl+0x2c328 (snd.c:1352); tbl+0x498188 len 6075; rate = 22018 * alCents2Ratio(keyBase 48*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 127/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 1.0
+ },
+ "0161": {
+  "duration_s": 0.259,
+  "envelope_baked": false,
+  "file": "0161.wav",
+  "gate_s": 0.2358,
+  "loop": null,
+  "names": [
+   "SFXNUM_0161"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 4032,
+  "sound": "0161",
+  "source": "sfx.ctl soundArray[0x160] @ctl+0x9e88 (snd.c:1352); tbl+0xe5fa8 len 2268; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "0162": {
+  "duration_s": 0.3289,
+  "envelope_baked": false,
+  "file": "0162.wav",
+  "gate_s": 0.3253,
+  "loop": null,
+  "names": [
+   "SFXNUM_0162"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 5120,
+  "sound": "0162",
+  "source": "sfx.ctl soundArray[0x161] @ctl+0x9f50 (snd.c:1352); tbl+0xe6888 len 2880; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "0163": {
+  "duration_s": 0.3063,
+  "envelope_baked": false,
+  "file": "0163.wav",
+  "gate_s": 0.2765,
+  "loop": null,
+  "names": [
+   "SFXNUM_0163"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 4768,
+  "sound": "0163",
+  "source": "sfx.ctl soundArray[0x162] @ctl+0xa018 (snd.c:1352); tbl+0xe73c8 len 2682; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "0164": {
+  "duration_s": 0.2888,
+  "envelope_baked": false,
+  "file": "0164.wav",
+  "gate_s": 0.2765,
+  "loop": null,
+  "names": [
+   "SFXNUM_0164"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 4496,
+  "sound": "0164",
+  "source": "sfx.ctl soundArray[0x163] @ctl+0xa0e0 (snd.c:1352); tbl+0xe7e48 len 2529; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "0165": {
+  "duration_s": 0.1891,
+  "envelope_baked": false,
+  "file": "0165.wav",
+  "gate_s": 0.1789,
+  "loop": null,
+  "names": [
+   "SFXNUM_0165"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 2944,
+  "sound": "0165",
+  "source": "sfx.ctl soundArray[0x164] @ctl+0xa1a8 (snd.c:1352); tbl+0xe8830 len 1656; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "0166": {
+  "duration_s": 0.2405,
+  "envelope_baked": false,
+  "file": "0166.wav",
+  "gate_s": 0.2196,
+  "loop": null,
+  "names": [
+   "SFXNUM_0166"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 3744,
+  "sound": "0166",
+  "source": "sfx.ctl soundArray[0x165] @ctl+0xa270 (snd.c:1352); tbl+0xe8ea8 len 2106; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "0167": {
+  "duration_s": 0.1788,
+  "envelope_baked": false,
+  "file": "0167.wav",
+  "gate_s": 0.1626,
+  "loop": null,
+  "names": [
+   "SFXNUM_0167"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 2784,
+  "sound": "0167",
+  "source": "sfx.ctl soundArray[0x166] @ctl+0xa338 (snd.c:1352); tbl+0xe96e8 len 1566; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "0168": {
+  "duration_s": 0.1747,
+  "envelope_baked": false,
+  "file": "0168.wav",
+  "gate_s": 0.1626,
+  "loop": null,
+  "names": [
+   "SFXNUM_0168"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 2720,
+  "sound": "0168",
+  "source": "sfx.ctl soundArray[0x167] @ctl+0xa400 (snd.c:1352); tbl+0xe9d08 len 1530; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "0171": {
+  "duration_s": 0.3258,
+  "envelope_baked": false,
+  "file": "0171.wav",
+  "gate_s": 0.309,
+  "loop": null,
+  "names": [
+   "SFXNUM_0171"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 5072,
+  "sound": "0171",
+  "source": "sfx.ctl soundArray[0x170] @ctl+0xab08 (snd.c:1352); tbl+0xef060 len 2853; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "0172": {
+  "duration_s": 0.3124,
+  "envelope_baked": false,
+  "file": "0172.wav",
+  "gate_s": 0.309,
+  "loop": null,
+  "names": [
+   "SFXNUM_0172"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 4864,
+  "sound": "0172",
+  "source": "sfx.ctl soundArray[0x171] @ctl+0xabd0 (snd.c:1352); tbl+0xefb88 len 2736; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "0173": {
+  "duration_s": 0.3216,
+  "envelope_baked": false,
+  "file": "0173.wav",
+  "gate_s": 0.2846,
+  "loop": null,
+  "names": [
+   "SFXNUM_0173"
+  ],
+  "pitch": 1.0,
+  "rate": 15126,
+  "rate_exact": 15125.952,
+  "release_s": 0.0,
+  "samples": 4864,
+  "sound": "0173",
+  "source": "sfx.ctl soundArray[0x172] @ctl+0xaca0 (snd.c:1352); tbl+0xefb88 len 2736; rate = 22018 * alCents2Ratio(keyBase 53*100 +50 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "0174": {
+  "duration_s": 0.2261,
+  "envelope_baked": false,
+  "file": "0174.wav",
+  "gate_s": 0.2114,
+  "loop": null,
+  "names": [
+   "SFXNUM_0174"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 3520,
+  "sound": "0174",
+  "source": "sfx.ctl soundArray[0x173] @ctl+0xacc0 (snd.c:1352); tbl+0xf0638 len 1980; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "0175": {
+  "duration_s": 0.3381,
+  "envelope_baked": false,
+  "file": "0175.wav",
+  "gate_s": 0.3253,
+  "loop": null,
+  "names": [
+   "SFXNUM_0175"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 5264,
+  "sound": "0175",
+  "source": "sfx.ctl soundArray[0x174] @ctl+0xad88 (snd.c:1352); tbl+0xf0df8 len 2961; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "0176": {
+  "duration_s": 0.3648,
+  "envelope_baked": false,
+  "file": "0176.wav",
+  "gate_s": 0.3497,
+  "loop": null,
+  "names": [
+   "SFXNUM_0176"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 5680,
+  "sound": "0176",
+  "source": "sfx.ctl soundArray[0x175] @ctl+0xae50 (snd.c:1352); tbl+0xf1990 len 3195; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "0177": {
+  "duration_s": 0.3576,
+  "envelope_baked": false,
+  "file": "0177.wav",
+  "gate_s": 0.3497,
+  "loop": null,
+  "names": [
+   "SFXNUM_0177"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 5568,
+  "sound": "0177",
+  "source": "sfx.ctl soundArray[0x176] @ctl+0xaf18 (snd.c:1352); tbl+0xf2610 len 3132; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "0178": {
+  "duration_s": 0.2785,
+  "envelope_baked": false,
+  "file": "0178.wav",
+  "gate_s": 0.2683,
+  "loop": null,
+  "names": [
+   "SFXNUM_0178"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 4336,
+  "sound": "0178",
+  "source": "sfx.ctl soundArray[0x177] @ctl+0xafe0 (snd.c:1352); tbl+0xf3250 len 2439; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXMAP_80C4_FOOTSTEP": {
+  "config": {
+   "applies_via": "ps_create (vol%, pitch, dist: propsnd.c:772-790); snd_start_extra/snd_adjust (vol%, pan: snd.c:2030/:1935); NOT bare snd_start",
+   "dist": [
+    200.0,
+    1000.0,
+    1200.0
+   ],
+   "flags": "0",
+   "index": 4,
+   "line": "src/lib/snd.c:655",
+   "pan": -1,
+   "pitch": -1.0,
+   "volpercentage": 100
+  },
+  "duration_s": 0.259,
+  "envelope_baked": false,
+  "file": "0161.wav",
+  "gate_s": 0.2358,
+  "loop": null,
+  "names": [
+   "SFXNUM_0161"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 4032,
+  "sound": "0161",
+  "source": "SFXMAP_80C4_FOOTSTEP = 0x80c4 (src/include/sfx.h:1777); g_AudioRussMappings[0x00c4] src/lib/snd.c:372 = {0x8000 | SFXNUM_0161, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x160] @ctl+0x9e88 (snd.c:1352); tbl+0xe5fa8 len 2268; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXMAP_80C5_FOOTSTEP": {
+  "config": {
+   "applies_via": "ps_create (vol%, pitch, dist: propsnd.c:772-790); snd_start_extra/snd_adjust (vol%, pan: snd.c:2030/:1935); NOT bare snd_start",
+   "dist": [
+    200.0,
+    1000.0,
+    1200.0
+   ],
+   "flags": "0",
+   "index": 4,
+   "line": "src/lib/snd.c:655",
+   "pan": -1,
+   "pitch": -1.0,
+   "volpercentage": 100
+  },
+  "duration_s": 0.3289,
+  "envelope_baked": false,
+  "file": "0162.wav",
+  "gate_s": 0.3253,
+  "loop": null,
+  "names": [
+   "SFXNUM_0162"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 5120,
+  "sound": "0162",
+  "source": "SFXMAP_80C5_FOOTSTEP = 0x80c5 (src/include/sfx.h:1778); g_AudioRussMappings[0x00c5] src/lib/snd.c:373 = {0x8000 | SFXNUM_0162, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x161] @ctl+0x9f50 (snd.c:1352); tbl+0xe6888 len 2880; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXMAP_80C6_FOOTSTEP": {
+  "config": {
+   "applies_via": "ps_create (vol%, pitch, dist: propsnd.c:772-790); snd_start_extra/snd_adjust (vol%, pan: snd.c:2030/:1935); NOT bare snd_start",
+   "dist": [
+    200.0,
+    1000.0,
+    1200.0
+   ],
+   "flags": "0",
+   "index": 4,
+   "line": "src/lib/snd.c:655",
+   "pan": -1,
+   "pitch": -1.0,
+   "volpercentage": 100
+  },
+  "duration_s": 0.3063,
+  "envelope_baked": false,
+  "file": "0163.wav",
+  "gate_s": 0.2765,
+  "loop": null,
+  "names": [
+   "SFXNUM_0163"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 4768,
+  "sound": "0163",
+  "source": "SFXMAP_80C6_FOOTSTEP = 0x80c6 (src/include/sfx.h:1779); g_AudioRussMappings[0x00c6] src/lib/snd.c:374 = {0x8000 | SFXNUM_0163, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x162] @ctl+0xa018 (snd.c:1352); tbl+0xe73c8 len 2682; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXMAP_80C7_FOOTSTEP": {
+  "config": {
+   "applies_via": "ps_create (vol%, pitch, dist: propsnd.c:772-790); snd_start_extra/snd_adjust (vol%, pan: snd.c:2030/:1935); NOT bare snd_start",
+   "dist": [
+    200.0,
+    1000.0,
+    1200.0
+   ],
+   "flags": "0",
+   "index": 4,
+   "line": "src/lib/snd.c:655",
+   "pan": -1,
+   "pitch": -1.0,
+   "volpercentage": 100
+  },
+  "duration_s": 0.2888,
+  "envelope_baked": false,
+  "file": "0164.wav",
+  "gate_s": 0.2765,
+  "loop": null,
+  "names": [
+   "SFXNUM_0164"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 4496,
+  "sound": "0164",
+  "source": "SFXMAP_80C7_FOOTSTEP = 0x80c7 (src/include/sfx.h:1780); g_AudioRussMappings[0x00c7] src/lib/snd.c:375 = {0x8000 | SFXNUM_0164, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x163] @ctl+0xa0e0 (snd.c:1352); tbl+0xe7e48 len 2529; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXMAP_80C8_FOOTSTEP": {
+  "config": {
+   "applies_via": "ps_create (vol%, pitch, dist: propsnd.c:772-790); snd_start_extra/snd_adjust (vol%, pan: snd.c:2030/:1935); NOT bare snd_start",
+   "dist": [
+    200.0,
+    1000.0,
+    1200.0
+   ],
+   "flags": "0",
+   "index": 4,
+   "line": "src/lib/snd.c:655",
+   "pan": -1,
+   "pitch": -1.0,
+   "volpercentage": 100
+  },
+  "duration_s": 0.1891,
+  "envelope_baked": false,
+  "file": "0165.wav",
+  "gate_s": 0.1789,
+  "loop": null,
+  "names": [
+   "SFXNUM_0165"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 2944,
+  "sound": "0165",
+  "source": "SFXMAP_80C8_FOOTSTEP = 0x80c8 (src/include/sfx.h:1781); g_AudioRussMappings[0x00c8] src/lib/snd.c:376 = {0x8000 | SFXNUM_0165, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x164] @ctl+0xa1a8 (snd.c:1352); tbl+0xe8830 len 1656; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXMAP_80C9_FOOTSTEP": {
+  "config": {
+   "applies_via": "ps_create (vol%, pitch, dist: propsnd.c:772-790); snd_start_extra/snd_adjust (vol%, pan: snd.c:2030/:1935); NOT bare snd_start",
+   "dist": [
+    200.0,
+    1000.0,
+    1200.0
+   ],
+   "flags": "0",
+   "index": 4,
+   "line": "src/lib/snd.c:655",
+   "pan": -1,
+   "pitch": -1.0,
+   "volpercentage": 100
+  },
+  "duration_s": 0.2405,
+  "envelope_baked": false,
+  "file": "0166.wav",
+  "gate_s": 0.2196,
+  "loop": null,
+  "names": [
+   "SFXNUM_0166"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 3744,
+  "sound": "0166",
+  "source": "SFXMAP_80C9_FOOTSTEP = 0x80c9 (src/include/sfx.h:1782); g_AudioRussMappings[0x00c9] src/lib/snd.c:377 = {0x8000 | SFXNUM_0166, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x165] @ctl+0xa270 (snd.c:1352); tbl+0xe8ea8 len 2106; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXMAP_80CA_FOOTSTEP": {
+  "config": {
+   "applies_via": "ps_create (vol%, pitch, dist: propsnd.c:772-790); snd_start_extra/snd_adjust (vol%, pan: snd.c:2030/:1935); NOT bare snd_start",
+   "dist": [
+    200.0,
+    1000.0,
+    1200.0
+   ],
+   "flags": "0",
+   "index": 4,
+   "line": "src/lib/snd.c:655",
+   "pan": -1,
+   "pitch": -1.0,
+   "volpercentage": 100
+  },
+  "duration_s": 0.1788,
+  "envelope_baked": false,
+  "file": "0167.wav",
+  "gate_s": 0.1626,
+  "loop": null,
+  "names": [
+   "SFXNUM_0167"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 2784,
+  "sound": "0167",
+  "source": "SFXMAP_80CA_FOOTSTEP = 0x80ca (src/include/sfx.h:1783); g_AudioRussMappings[0x00ca] src/lib/snd.c:378 = {0x8000 | SFXNUM_0167, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x166] @ctl+0xa338 (snd.c:1352); tbl+0xe96e8 len 1566; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXMAP_80CB_FOOTSTEP": {
+  "config": {
+   "applies_via": "ps_create (vol%, pitch, dist: propsnd.c:772-790); snd_start_extra/snd_adjust (vol%, pan: snd.c:2030/:1935); NOT bare snd_start",
+   "dist": [
+    200.0,
+    1000.0,
+    1200.0
+   ],
+   "flags": "0",
+   "index": 4,
+   "line": "src/lib/snd.c:655",
+   "pan": -1,
+   "pitch": -1.0,
+   "volpercentage": 100
+  },
+  "duration_s": 0.1747,
+  "envelope_baked": false,
+  "file": "0168.wav",
+  "gate_s": 0.1626,
+  "loop": null,
+  "names": [
+   "SFXNUM_0168"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 2720,
+  "sound": "0168",
+  "source": "SFXMAP_80CB_FOOTSTEP = 0x80cb (src/include/sfx.h:1784); g_AudioRussMappings[0x00cb] src/lib/snd.c:379 = {0x8000 | SFXNUM_0168, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x167] @ctl+0xa400 (snd.c:1352); tbl+0xe9d08 len 1530; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXMAP_80D4_FOOTSTEP": {
+  "config": {
+   "applies_via": "ps_create (vol%, pitch, dist: propsnd.c:772-790); snd_start_extra/snd_adjust (vol%, pan: snd.c:2030/:1935); NOT bare snd_start",
+   "dist": [
+    200.0,
+    1000.0,
+    1200.0
+   ],
+   "flags": "0",
+   "index": 4,
+   "line": "src/lib/snd.c:655",
+   "pan": -1,
+   "pitch": -1.0,
+   "volpercentage": 100
+  },
+  "duration_s": 0.3258,
+  "envelope_baked": false,
+  "file": "0171.wav",
+  "gate_s": 0.309,
+  "loop": null,
+  "names": [
+   "SFXNUM_0171"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 5072,
+  "sound": "0171",
+  "source": "SFXMAP_80D4_FOOTSTEP = 0x80d4 (src/include/sfx.h:1793); g_AudioRussMappings[0x00d4] src/lib/snd.c:388 = {0x8000 | SFXNUM_0171, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x170] @ctl+0xab08 (snd.c:1352); tbl+0xef060 len 2853; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXMAP_80D5_FOOTSTEP": {
+  "config": {
+   "applies_via": "ps_create (vol%, pitch, dist: propsnd.c:772-790); snd_start_extra/snd_adjust (vol%, pan: snd.c:2030/:1935); NOT bare snd_start",
+   "dist": [
+    200.0,
+    1000.0,
+    1200.0
+   ],
+   "flags": "0",
+   "index": 4,
+   "line": "src/lib/snd.c:655",
+   "pan": -1,
+   "pitch": -1.0,
+   "volpercentage": 100
+  },
+  "duration_s": 0.3124,
+  "envelope_baked": false,
+  "file": "0172.wav",
+  "gate_s": 0.309,
+  "loop": null,
+  "names": [
+   "SFXNUM_0172"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 4864,
+  "sound": "0172",
+  "source": "SFXMAP_80D5_FOOTSTEP = 0x80d5 (src/include/sfx.h:1794); g_AudioRussMappings[0x00d5] src/lib/snd.c:389 = {0x8000 | SFXNUM_0172, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x171] @ctl+0xabd0 (snd.c:1352); tbl+0xefb88 len 2736; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXMAP_80D6_FOOTSTEP": {
+  "config": {
+   "applies_via": "ps_create (vol%, pitch, dist: propsnd.c:772-790); snd_start_extra/snd_adjust (vol%, pan: snd.c:2030/:1935); NOT bare snd_start",
+   "dist": [
+    200.0,
+    1000.0,
+    1200.0
+   ],
+   "flags": "0",
+   "index": 4,
+   "line": "src/lib/snd.c:655",
+   "pan": -1,
+   "pitch": -1.0,
+   "volpercentage": 100
+  },
+  "duration_s": 0.3216,
+  "envelope_baked": false,
+  "file": "0173.wav",
+  "gate_s": 0.2846,
+  "loop": null,
+  "names": [
+   "SFXNUM_0173"
+  ],
+  "pitch": 1.0,
+  "rate": 15126,
+  "rate_exact": 15125.952,
+  "release_s": 0.0,
+  "samples": 4864,
+  "sound": "0173",
+  "source": "SFXMAP_80D6_FOOTSTEP = 0x80d6 (src/include/sfx.h:1795); g_AudioRussMappings[0x00d6] src/lib/snd.c:390 = {0x8000 | SFXNUM_0173, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x172] @ctl+0xaca0 (snd.c:1352); tbl+0xefb88 len 2736; rate = 22018 * alCents2Ratio(keyBase 53*100 +50 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXMAP_80D7_FOOTSTEP": {
+  "config": {
+   "applies_via": "ps_create (vol%, pitch, dist: propsnd.c:772-790); snd_start_extra/snd_adjust (vol%, pan: snd.c:2030/:1935); NOT bare snd_start",
+   "dist": [
+    200.0,
+    1000.0,
+    1200.0
+   ],
+   "flags": "0",
+   "index": 4,
+   "line": "src/lib/snd.c:655",
+   "pan": -1,
+   "pitch": -1.0,
+   "volpercentage": 100
+  },
+  "duration_s": 0.2261,
+  "envelope_baked": false,
+  "file": "0174.wav",
+  "gate_s": 0.2114,
+  "loop": null,
+  "names": [
+   "SFXNUM_0174"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 3520,
+  "sound": "0174",
+  "source": "SFXMAP_80D7_FOOTSTEP = 0x80d7 (src/include/sfx.h:1796); g_AudioRussMappings[0x00d7] src/lib/snd.c:391 = {0x8000 | SFXNUM_0174, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x173] @ctl+0xacc0 (snd.c:1352); tbl+0xf0638 len 1980; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXMAP_80D8_FOOTSTEP": {
+  "config": {
+   "applies_via": "ps_create (vol%, pitch, dist: propsnd.c:772-790); snd_start_extra/snd_adjust (vol%, pan: snd.c:2030/:1935); NOT bare snd_start",
+   "dist": [
+    200.0,
+    1000.0,
+    1200.0
+   ],
+   "flags": "0",
+   "index": 4,
+   "line": "src/lib/snd.c:655",
+   "pan": -1,
+   "pitch": -1.0,
+   "volpercentage": 100
+  },
+  "duration_s": 0.3381,
+  "envelope_baked": false,
+  "file": "0175.wav",
+  "gate_s": 0.3253,
+  "loop": null,
+  "names": [
+   "SFXNUM_0175"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 5264,
+  "sound": "0175",
+  "source": "SFXMAP_80D8_FOOTSTEP = 0x80d8 (src/include/sfx.h:1797); g_AudioRussMappings[0x00d8] src/lib/snd.c:392 = {0x8000 | SFXNUM_0175, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x174] @ctl+0xad88 (snd.c:1352); tbl+0xf0df8 len 2961; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXMAP_80D9_FOOTSTEP": {
+  "config": {
+   "applies_via": "ps_create (vol%, pitch, dist: propsnd.c:772-790); snd_start_extra/snd_adjust (vol%, pan: snd.c:2030/:1935); NOT bare snd_start",
+   "dist": [
+    200.0,
+    1000.0,
+    1200.0
+   ],
+   "flags": "0",
+   "index": 4,
+   "line": "src/lib/snd.c:655",
+   "pan": -1,
+   "pitch": -1.0,
+   "volpercentage": 100
+  },
+  "duration_s": 0.3648,
+  "envelope_baked": false,
+  "file": "0176.wav",
+  "gate_s": 0.3497,
+  "loop": null,
+  "names": [
+   "SFXNUM_0176"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 5680,
+  "sound": "0176",
+  "source": "SFXMAP_80D9_FOOTSTEP = 0x80d9 (src/include/sfx.h:1798); g_AudioRussMappings[0x00d9] src/lib/snd.c:393 = {0x8000 | SFXNUM_0176, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x175] @ctl+0xae50 (snd.c:1352); tbl+0xf1990 len 3195; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXMAP_80DA_FOOTSTEP": {
+  "config": {
+   "applies_via": "ps_create (vol%, pitch, dist: propsnd.c:772-790); snd_start_extra/snd_adjust (vol%, pan: snd.c:2030/:1935); NOT bare snd_start",
+   "dist": [
+    200.0,
+    1000.0,
+    1200.0
+   ],
+   "flags": "0",
+   "index": 4,
+   "line": "src/lib/snd.c:655",
+   "pan": -1,
+   "pitch": -1.0,
+   "volpercentage": 100
+  },
+  "duration_s": 0.3576,
+  "envelope_baked": false,
+  "file": "0177.wav",
+  "gate_s": 0.3497,
+  "loop": null,
+  "names": [
+   "SFXNUM_0177"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 5568,
+  "sound": "0177",
+  "source": "SFXMAP_80DA_FOOTSTEP = 0x80da (src/include/sfx.h:1799); g_AudioRussMappings[0x00da] src/lib/snd.c:394 = {0x8000 | SFXNUM_0177, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x176] @ctl+0xaf18 (snd.c:1352); tbl+0xf2610 len 3132; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXMAP_80DB_FOOTSTEP": {
+  "config": {
+   "applies_via": "ps_create (vol%, pitch, dist: propsnd.c:772-790); snd_start_extra/snd_adjust (vol%, pan: snd.c:2030/:1935); NOT bare snd_start",
+   "dist": [
+    200.0,
+    1000.0,
+    1200.0
+   ],
+   "flags": "0",
+   "index": 4,
+   "line": "src/lib/snd.c:655",
+   "pan": -1,
+   "pitch": -1.0,
+   "volpercentage": 100
+  },
+  "duration_s": 0.2785,
+  "envelope_baked": false,
+  "file": "0178.wav",
+  "gate_s": 0.2683,
+  "loop": null,
+  "names": [
+   "SFXNUM_0178"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 4336,
+  "sound": "0178",
+  "source": "SFXMAP_80DB_FOOTSTEP = 0x80db (src/include/sfx.h:1800); g_AudioRussMappings[0x00db] src/lib/snd.c:395 = {0x8000 | SFXNUM_0178, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x177] @ctl+0xafe0 (snd.c:1352); tbl+0xf3250 len 2439; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXNUM_0161": {
+  "duration_s": 0.259,
+  "envelope_baked": false,
+  "file": "0161.wav",
+  "gate_s": 0.2358,
+  "loop": null,
+  "names": [
+   "SFXNUM_0161"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 4032,
+  "sound": "0161",
+  "source": "SFXNUM_0161 = 0x0161 (src/include/sfx.h:381); g_AudioRussMappings[0x00c4] src/lib/snd.c:372 = {0x8000 | SFXNUM_0161, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x160] @ctl+0x9e88 (snd.c:1352); tbl+0xe5fa8 len 2268; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXNUM_0162": {
+  "duration_s": 0.3289,
+  "envelope_baked": false,
+  "file": "0162.wav",
+  "gate_s": 0.3253,
+  "loop": null,
+  "names": [
+   "SFXNUM_0162"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 5120,
+  "sound": "0162",
+  "source": "SFXNUM_0162 = 0x0162 (src/include/sfx.h:382); g_AudioRussMappings[0x00c5] src/lib/snd.c:373 = {0x8000 | SFXNUM_0162, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x161] @ctl+0x9f50 (snd.c:1352); tbl+0xe6888 len 2880; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXNUM_0163": {
+  "duration_s": 0.3063,
+  "envelope_baked": false,
+  "file": "0163.wav",
+  "gate_s": 0.2765,
+  "loop": null,
+  "names": [
+   "SFXNUM_0163"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 4768,
+  "sound": "0163",
+  "source": "SFXNUM_0163 = 0x0163 (src/include/sfx.h:383); g_AudioRussMappings[0x00c6] src/lib/snd.c:374 = {0x8000 | SFXNUM_0163, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x162] @ctl+0xa018 (snd.c:1352); tbl+0xe73c8 len 2682; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXNUM_0164": {
+  "duration_s": 0.2888,
+  "envelope_baked": false,
+  "file": "0164.wav",
+  "gate_s": 0.2765,
+  "loop": null,
+  "names": [
+   "SFXNUM_0164"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 4496,
+  "sound": "0164",
+  "source": "SFXNUM_0164 = 0x0164 (src/include/sfx.h:384); g_AudioRussMappings[0x00c7] src/lib/snd.c:375 = {0x8000 | SFXNUM_0164, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x163] @ctl+0xa0e0 (snd.c:1352); tbl+0xe7e48 len 2529; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXNUM_0165": {
+  "duration_s": 0.1891,
+  "envelope_baked": false,
+  "file": "0165.wav",
+  "gate_s": 0.1789,
+  "loop": null,
+  "names": [
+   "SFXNUM_0165"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 2944,
+  "sound": "0165",
+  "source": "SFXNUM_0165 = 0x0165 (src/include/sfx.h:385); g_AudioRussMappings[0x00c8] src/lib/snd.c:376 = {0x8000 | SFXNUM_0165, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x164] @ctl+0xa1a8 (snd.c:1352); tbl+0xe8830 len 1656; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXNUM_0166": {
+  "duration_s": 0.2405,
+  "envelope_baked": false,
+  "file": "0166.wav",
+  "gate_s": 0.2196,
+  "loop": null,
+  "names": [
+   "SFXNUM_0166"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 3744,
+  "sound": "0166",
+  "source": "SFXNUM_0166 = 0x0166 (src/include/sfx.h:386); g_AudioRussMappings[0x00c9] src/lib/snd.c:377 = {0x8000 | SFXNUM_0166, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x165] @ctl+0xa270 (snd.c:1352); tbl+0xe8ea8 len 2106; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXNUM_0167": {
+  "duration_s": 0.1788,
+  "envelope_baked": false,
+  "file": "0167.wav",
+  "gate_s": 0.1626,
+  "loop": null,
+  "names": [
+   "SFXNUM_0167"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 2784,
+  "sound": "0167",
+  "source": "SFXNUM_0167 = 0x0167 (src/include/sfx.h:387); g_AudioRussMappings[0x00ca] src/lib/snd.c:378 = {0x8000 | SFXNUM_0167, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x166] @ctl+0xa338 (snd.c:1352); tbl+0xe96e8 len 1566; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXNUM_0168": {
+  "duration_s": 0.1747,
+  "envelope_baked": false,
+  "file": "0168.wav",
+  "gate_s": 0.1626,
+  "loop": null,
+  "names": [
+   "SFXNUM_0168"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 2720,
+  "sound": "0168",
+  "source": "SFXNUM_0168 = 0x0168 (src/include/sfx.h:388); g_AudioRussMappings[0x00cb] src/lib/snd.c:379 = {0x8000 | SFXNUM_0168, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x167] @ctl+0xa400 (snd.c:1352); tbl+0xe9d08 len 1530; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXNUM_0171": {
+  "duration_s": 0.3258,
+  "envelope_baked": false,
+  "file": "0171.wav",
+  "gate_s": 0.309,
+  "loop": null,
+  "names": [
+   "SFXNUM_0171"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 5072,
+  "sound": "0171",
+  "source": "SFXNUM_0171 = 0x0171 (src/include/sfx.h:397); g_AudioRussMappings[0x00d4] src/lib/snd.c:388 = {0x8000 | SFXNUM_0171, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x170] @ctl+0xab08 (snd.c:1352); tbl+0xef060 len 2853; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXNUM_0172": {
+  "duration_s": 0.3124,
+  "envelope_baked": false,
+  "file": "0172.wav",
+  "gate_s": 0.309,
+  "loop": null,
+  "names": [
+   "SFXNUM_0172"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 4864,
+  "sound": "0172",
+  "source": "SFXNUM_0172 = 0x0172 (src/include/sfx.h:398); g_AudioRussMappings[0x00d5] src/lib/snd.c:389 = {0x8000 | SFXNUM_0172, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x171] @ctl+0xabd0 (snd.c:1352); tbl+0xefb88 len 2736; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXNUM_0173": {
+  "duration_s": 0.3216,
+  "envelope_baked": false,
+  "file": "0173.wav",
+  "gate_s": 0.2846,
+  "loop": null,
+  "names": [
+   "SFXNUM_0173"
+  ],
+  "pitch": 1.0,
+  "rate": 15126,
+  "rate_exact": 15125.952,
+  "release_s": 0.0,
+  "samples": 4864,
+  "sound": "0173",
+  "source": "SFXNUM_0173 = 0x0173 (src/include/sfx.h:399); g_AudioRussMappings[0x00d6] src/lib/snd.c:390 = {0x8000 | SFXNUM_0173, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x172] @ctl+0xaca0 (snd.c:1352); tbl+0xefb88 len 2736; rate = 22018 * alCents2Ratio(keyBase 53*100 +50 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXNUM_0174": {
+  "duration_s": 0.2261,
+  "envelope_baked": false,
+  "file": "0174.wav",
+  "gate_s": 0.2114,
+  "loop": null,
+  "names": [
+   "SFXNUM_0174"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 3520,
+  "sound": "0174",
+  "source": "SFXNUM_0174 = 0x0174 (src/include/sfx.h:400); g_AudioRussMappings[0x00d7] src/lib/snd.c:391 = {0x8000 | SFXNUM_0174, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x173] @ctl+0xacc0 (snd.c:1352); tbl+0xf0638 len 1980; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXNUM_0175": {
+  "duration_s": 0.3381,
+  "envelope_baked": false,
+  "file": "0175.wav",
+  "gate_s": 0.3253,
+  "loop": null,
+  "names": [
+   "SFXNUM_0175"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 5264,
+  "sound": "0175",
+  "source": "SFXNUM_0175 = 0x0175 (src/include/sfx.h:401); g_AudioRussMappings[0x00d8] src/lib/snd.c:392 = {0x8000 | SFXNUM_0175, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x174] @ctl+0xad88 (snd.c:1352); tbl+0xf0df8 len 2961; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXNUM_0176": {
+  "duration_s": 0.3648,
+  "envelope_baked": false,
+  "file": "0176.wav",
+  "gate_s": 0.3497,
+  "loop": null,
+  "names": [
+   "SFXNUM_0176"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 5680,
+  "sound": "0176",
+  "source": "SFXNUM_0176 = 0x0176 (src/include/sfx.h:402); g_AudioRussMappings[0x00d9] src/lib/snd.c:393 = {0x8000 | SFXNUM_0176, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x175] @ctl+0xae50 (snd.c:1352); tbl+0xf1990 len 3195; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXNUM_0177": {
+  "duration_s": 0.3576,
+  "envelope_baked": false,
+  "file": "0177.wav",
+  "gate_s": 0.3497,
+  "loop": null,
+  "names": [
+   "SFXNUM_0177"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 5568,
+  "sound": "0177",
+  "source": "SFXNUM_0177 = 0x0177 (src/include/sfx.h:403); g_AudioRussMappings[0x00da] src/lib/snd.c:394 = {0x8000 | SFXNUM_0177, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x176] @ctl+0xaf18 (snd.c:1352); tbl+0xf2610 len 3132; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
+ },
+ "SFXNUM_0178": {
+  "duration_s": 0.2785,
+  "envelope_baked": false,
+  "file": "0178.wav",
+  "gate_s": 0.2683,
+  "loop": null,
+  "names": [
+   "SFXNUM_0178"
+  ],
+  "pitch": 1.0,
+  "rate": 15569,
+  "rate_exact": 15568.758,
+  "release_s": 0.0,
+  "samples": 4336,
+  "sound": "0178",
+  "source": "SFXNUM_0178 = 0x0178 (src/include/sfx.h:404); g_AudioRussMappings[0x00db] src/lib/snd.c:395 = {0x8000 | SFXNUM_0178, AUDIOCONFIG_04} (remap: snd.c:2111); sfx.ctl soundArray[0x177] @ctl+0xafe0 (snd.c:1352); tbl+0xf3250 len 2439; rate = 22018 * alCents2Ratio(keyBase 54*100 +0 - 6000) (n_sndplayer.c:633, audiomgr.c:64); volume = sampleVolume 50/127 * attackVolume 127/127 (n_sndplayer.c:253)",
+  "volume": 0.3937
  }
 }

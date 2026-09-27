@@ -24,12 +24,12 @@ use super::sim::Sim;
 const W: u32 = 960;
 const H: u32 = 540;
 
-struct Gpu {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+pub(crate) struct Gpu {
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
 }
 
-fn gpu() -> Gpu {
+pub(crate) fn gpu() -> Gpu {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
@@ -43,7 +43,7 @@ fn gpu() -> Gpu {
 
 /// Draw one frame; with a `path`, read it back and save it. Frames drawn
 /// without saving still feed the post pass's last-frame copy (the x-ray smear).
-fn render_png(g: &Gpu, pd: &mut PdRenderer, sim: &Sim, path: Option<&Path>) {
+pub(crate) fn render_png(g: &Gpu, pd: &mut PdRenderer, sim: &Sim, path: Option<&Path>) {
     let color = g.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("snap-color"),
         size: wgpu::Extent3d { width: W, height: H, depth_or_array_layers: 1 },

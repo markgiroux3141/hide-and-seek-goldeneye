@@ -173,6 +173,23 @@ pub fn bg_geometry(range: &Range, e: &Eraser) -> FxBatch {
     let xd = XrayData::new(e);
     let mut verts = Vec::new();
     let reach = Aabb::new(e.pos - Vec3::splat(xd.radius), e.pos + Vec3::splat(xd.radius));
+    // A PD stage: its own BG triangles, each drawn when any vertex is in range
+    // (no subdivision, as for the range's faces).
+    if let Some(tris) = &range.xray_tris {
+        for tri in tris.iter() {
+            let (mn, mx) = (tri[0].min(tri[1]).min(tri[2]), tri[0].max(tri[1]).max(tri[2]));
+            if mx.cmplt(reach.min).any() || mn.cmpgt(reach.max).any() {
+                continue;
+            }
+            let cols = tri.map(|p| bg_choose_xray_vtx_colour(p, &xd, e.ecol));
+            if cols.iter().all(|c| c.is_none()) {
+                continue;
+            }
+            for (p, c) in tri.iter().zip(cols) {
+                verts.push(FxVert { pos: *p, st: [0.0, 0.0], col: c.unwrap_or([0.0, 0.0, 1.0, 0.0]) });
+            }
+        }
+    }
     for (origin, u, v) in faces(range) {
         // Skip faces the eraser's box can't touch.
         let (a, b) = (origin, origin + u + v);

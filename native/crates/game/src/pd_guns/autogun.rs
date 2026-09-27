@@ -46,8 +46,13 @@ pub struct Autogun {
     pub lastaimbond60: i32,
     pub allowsoundframe: i32,
     pub shotbondsum: f32,
-    /// The current target board (`autogun->target`).
+    /// The current target (`autogun->target`): an index into the range's targets.
     pub target: Option<usize>,
+    /// When the target is a chr, which one (the range's target list is rebuilt
+    /// every frame, so the index is re-found from this).
+    pub target_chr: Option<usize>,
+    /// `autogun->nextchrtest`: the round-robin over the chrs (starts at -1).
+    pub nextchrtest: i32,
     /// `OBJFLAG_AUTOGUN_SEENTARGET`.
     pub seentarget: bool,
     /// The flash toggles this tick (`chrgunfire.visible`).
@@ -64,6 +69,8 @@ pub struct AutogunOut {
     pub bg_hit_sounds: Vec<(i32, Vec3)>,
     pub sparks: Vec<(Vec3, usize)>,
     pub board_hits: Vec<(usize, Vec3)>,
+    /// Chrs a round hit: (chr, damage, position, direction).
+    pub chr_hits: Vec<(usize, f32, Vec3, Vec3)>,
 }
 
 /// `apply_speed` (`propobj.c:3562`): move `distdone` towards `maxdist` with
@@ -202,16 +209,35 @@ impl Autogun {
         let mut spinup = false;
         let mut insight = false;
         let mut limitangle = 0.0;
+        // A chr target is found again by chr (the target list is rebuilt per frame).
+        if let Some(c) = self.target_chr {
+            self.target = range.targets.iter().position(|t| t.chr == Some(c));
+            if self.target.is_none() {
+                self.target_chr = None;
+            }
+        }
+        let chrs: Vec<usize> = (0..range.targets.len()).filter(|&i| range.targets[i].chr.is_some()).collect();
         if self.ammoquantity == 0 {
             // No target.
         } else if self.target.is_some() {
             target = self.target;
+        } else if !chrs.is_empty() {
+            // Multiplayer (`propobj.c:8676`): one chr tried per tick, round-robin
+            // over `g_MpAllChrPtrs`; the owner, the dead and the hidden aren't in
+            // the host's target list.
+            self.nextchrtest += 1;
+            if self.nextchrtest >= chrs.len() as i32 {
+                self.nextchrtest = -1;
+            } else {
+                target = Some(chrs[self.nextchrtest as usize]);
+            }
         } else {
             target = fr_choose_autogun_target(range, gunpos);
         }
         let mut goalyrot = self.yzero;
         let mut goalxrot = self.xzero;
         if let Some(t) = target {
+            let is_chr = range.targets[t].chr.is_some();
             let tp = board_pos(range, t);
             let d = tp - gunpos;
             let sqdist = d.x * d.x + d.z * d.z;
@@ -242,12 +268,17 @@ impl Autogun {
                     } else if relangleh >= dtor(180.0) {
                         relangleh -= baddtor(360.0);
                     }
-                    // A board is trackable while it faces the gun.
-                    let track = facing(tp, gunpos);
-                    // cd_test_los_oobfail with both perimeters off: clear to the board.
-                    let los = match range.raycast(gunpos, d.normalize_or_zero(), d.length()) {
-                        None => true,
-                        Some(h) => h.kind == HitKind::Target(t),
+                    // A board is trackable while it faces the gun; a live chr
+                    // always (`propobj.c:8837`).
+                    let track = is_chr || facing(tp, gunpos);
+                    // cd_test_los_oobfail(…, GEOFLAG_BLOCK_SIGHT) with both
+                    // perimeters off: clear to the target.
+                    let los = match (&range.tiles, is_chr) {
+                        (Some(tiles), true) => tiles.los(gunpos, tp),
+                        _ => match range.raycast(gunpos, d.normalize_or_zero(), d.length()) {
+                            None => true,
+                            Some(h) => h.kind == HitKind::Target(t),
+                        },
                     };
                     if relangleh <= self.ymaxleft && relangleh >= self.ymaxright && track && los {
                         self.seentarget = true;
@@ -256,6 +287,7 @@ impl Autogun {
                         goalyrot = targetangleh;
                         if self.target.is_none() {
                             self.target = Some(t);
+                            self.target_chr = range.targets[t].chr;
                         }
                     } else if self.lastseebond60 >= 0 && self.lastseebond60 > lv.lvframe60 - 120 {
                         goalyrot = self.yrot;
@@ -268,6 +300,7 @@ impl Autogun {
         }
         if !awake {
             self.target = None;
+            self.target_chr = None;
         }
         // The turret swivels left and right while firing.
         if self.firing {
@@ -451,7 +484,12 @@ pub fn autogun_tick_shoot(o: &mut WorldObj, range: &Range, lv: Lv, rng: &mut Rng
                 }
             }
         }
-        if let Some(b) = hitboard {
+        if let Some(chr) = hitboard.and_then(|b| range.targets[b].chr) {
+            // Multiplayer (`propobj.c:9186`): gset { WEAPON_RCP45 } at half
+            // damage (1.8 × 0.5), HITPART_GENERAL, the prop hit sound and blood.
+            out.chr_hits.push((chr, 1.8 * 0.5, hitpos, dir));
+            out.sounds.push((0x8076, hitpos));
+        } else if let Some(b) = hitboard {
             // fr_calculate_hit + sparks + bgun_play_prop_hit_sound.
             out.board_hits.push((b, hitpos));
             out.sparks.push((hitpos, fx::SPARKTYPE_DEFAULT));
@@ -539,6 +577,7 @@ impl super::sim::Sim {
     pub fn laptop_deploy_state(&mut self) -> Autogun {
         // min(held Laptop ammo, 200) comes out of the reserve (unlimited here).
         Autogun {
+            nextchrtest: -1,
             aimdist: 5000.0,
             ymaxleft: 12.56,
             ymaxright: -12.56,

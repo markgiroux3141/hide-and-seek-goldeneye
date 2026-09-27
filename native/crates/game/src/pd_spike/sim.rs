@@ -91,6 +91,17 @@ pub struct Globals {
     pub lvframe60: i32,
 }
 
+/// A hit on a player chr: what `chr_damage`'s player branch is handed
+/// (`chraction.c:4752`), after the hit-part scaling, for the host that owns the
+/// player (its health, shove and death live there).
+#[derive(Clone, Debug)]
+pub struct PlayerHit {
+    pub chr: usize,
+    pub damage: f32,
+    pub vector: Vec3,
+    pub attacker: Option<usize>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Shot {
     pub from: Vec3,
@@ -98,6 +109,14 @@ pub struct Shot {
     pub hit_chr: Option<usize>,
     pub shooter: usize,
     pub age: i32,
+    /// The hand that fired, and its weapon.
+    pub hand: usize,
+    pub weapon: WeaponId,
+    /// `makebeam` (`chr_shoot`): a tracer for this shot (every shot of a single-
+    /// shot gun, every other round of an automatic).
+    pub beam: bool,
+    /// The round stopped on the background (`hitsomething` with no prop).
+    pub hit_wall: bool,
 }
 
 /// Which level the match is on (`PD_LEVEL=arena|complex`).
@@ -173,6 +192,9 @@ pub struct SimConfig {
     pub waypoint_spacing: f32,
     pub level: LevelChoice,
     pub nav: NavChoice,
+    /// Human players, appended after the bots (`PROPTYPE_PLAYER` chrs, driven
+    /// from outside; see [`Chr::player`]).
+    pub humans: usize,
 }
 
 impl SimConfig {
@@ -209,6 +231,7 @@ impl SimConfig {
             waypoint_spacing: env("PD_WAYPOINTS").and_then(|v| v.parse().ok()).unwrap_or(250.0),
             level: LevelChoice::from_env(),
             nav: NavChoice::from_env(),
+            humans: 0,
         }
     }
 }
@@ -218,7 +241,7 @@ pub struct Sim {
     /// `level`; unused on Complex.
     pub arena: Arena,
     /// What the bots collide with, stand on and see through — either level.
-    pub level: TileLevel,
+    pub level: std::sync::Arc<TileLevel>,
     /// Complex's PD data (pads, PD's graph, spawns) when on Complex.
     pub stage: Option<PdStage>,
     /// Run the bot brain (`bot_tick_unpaused`). The walk harness turns it off to
@@ -238,6 +261,14 @@ pub struct Sim {
     pub config: SimConfig,
     pub frame_count: u64,
     pub feed: Vec<(i32, String)>,
+    /// Hits on player chrs this frame, drained by the host ([`PlayerHit`]).
+    pub player_hits: Vec<PlayerHit>,
+    /// Footsteps this frame (`footstep_check_default`): (chr, sound). Drained by a
+    /// host with audio; cleared every frame otherwise.
+    pub footsteps: Vec<(usize, u16)>,
+    /// Bots that took damage this frame and grunt (`chr_grunt` from `chr_damage`),
+    /// for a host with audio. Drained by the host; cleared every frame otherwise.
+    pub grunts: Vec<usize>,
 }
 
 impl Sim {
@@ -251,14 +282,14 @@ impl Sim {
         let arena = Arena::standard();
         let (level, stage, nav, other_nav, spawn_pads) = match config.level {
             LevelChoice::Arena => {
-                let level = TileLevel::new(arena.geom());
+                let level = std::sync::Arc::new(TileLevel::new(arena.geom()));
                 let nav = Waypoints::grid(&arena, config.waypoint_spacing).to_nav(&level);
                 let spawn_pads = spawn_pads(&arena);
                 (level, None, nav, None, spawn_pads)
             }
             LevelChoice::Complex => {
                 let stage = PdStage::complex()?;
-                let level = TileLevel::new(stage.geom.clone());
+                let level = std::sync::Arc::new(TileLevel::new(stage.geom.clone()));
                 let spawn_pads = stage
                     .spawn_pads
                     .iter()
@@ -290,6 +321,9 @@ impl Sim {
             config,
             frame_count: 0,
             feed: Vec::new(),
+            player_hits: Vec::new(),
+            grunts: Vec::new(),
+            footsteps: Vec::new(),
         };
         sim.reset(sim.config.bots.len());
         Ok(sim)
@@ -353,20 +387,31 @@ impl Sim {
         self.shots.clear();
         self.feed.clear();
         self.stats = SimStats::default();
+        self.player_hits.clear();
         self.frame_count = 0;
-        self.chrs = (0..n)
+        let humans = self.config.humans;
+        let total = n + humans;
+        let human_config = BotConfig { difficulty: Difficulty::Normal, weapon: None, dual: false };
+        self.chrs = (0..total)
             .map(|k| {
+                let player = k >= n;
                 let body = k % BODIES.len();
                 let (bodyheight, animscale) = BODY_INFO[body];
+                let config = if player { human_config } else { self.config.bots[k] };
                 Chr {
-                    name: format!("{} {}", BODY_NAMES[body], k + 1),
+                    name: if player {
+                        if humans == 1 { "You".to_string() } else { format!("Player {}", k - n + 1) }
+                    } else {
+                        format!("{} {}", BODY_NAMES[body], k + 1)
+                    },
                     body,
                     color: COLORS[k % COLORS.len()],
                     bodyheight,
                     animscale,
                     pos: Vec3::ZERO,
                     prevpos: Vec3::ZERO,
-                    radius: 20.0,
+                    // bond2.radius is 30 for a player (`bondwalk.c:780`).
+                    radius: if player { 30.0 } else { 20.0 },
                     height: 185.0,
                     actiontype: Act::Stand,
                     act_gopos: GoPos::default(),
@@ -380,6 +425,10 @@ impl Sim {
                     fallspeed: Vec3::ZERO,
                     floorroom: None,
                     onladder: false,
+                    cloaked: false,
+                    floortype: 0,
+                    oldframe: 0.0,
+                    lastfootsample: -1,
                     target: None,
                     damage: 0.0,
                     // `set_chr_maxdamage(CHR_SELF, 80)` × 0.1 (`gailists.c:6059`).
@@ -402,7 +451,10 @@ impl Sim {
                     firecount: [0; 2],
                     unk32c_12: 0,
                     gunpos_rendered: [None; 2],
-                    aibot: Aibot::new(self.config.bots[k], n),
+                    aibot: Aibot::new(config, total),
+                    player,
+                    player_eye_y: 0.0,
+                    player_theta: 0.0,
                     kills: 0,
                     deaths: 0,
                     suicides: 0,
@@ -449,12 +501,18 @@ impl Sim {
         self.frame_count += 1;
 
         let dt = self.g.lvupdate60;
+        self.grunts.clear();
+        self.footsteps.clear();
         for s in &mut self.shots {
             s.age += dt;
         }
         self.shots.retain(|s| s.age < SHOT_LIFETIME);
 
         for i in 0..self.chrs.len() {
+            // A player chr is moved by its own code, between frames.
+            if self.chrs[i].player {
+                continue;
+            }
             bot::bot_tick(self, i);
         }
         // With the brain off nothing kills or respawns a walker that has fallen
@@ -467,6 +525,11 @@ impl Sim {
                 }
             }
         }
+    }
+
+    /// The first player chr, if the match has one.
+    pub fn player_index(&self) -> Option<usize> {
+        self.chrs.iter().position(|c| c.player)
     }
 
     pub fn log(&mut self, line: String) {
@@ -511,9 +574,12 @@ impl Sim {
         }
         let mut shortlist: Vec<(usize, Vec3)> = Vec::new();
         let cyls = super::chraction::perims_except(self, i);
+        // The chr's own radius: 20 for a bot, 30 for a player
+        // (`scenario_choose_spawn_location(30, …)`, `player.c:527`).
+        let radius = self.chrs[i].radius;
         let adjust = |sim: &Sim, p: usize| {
             let (pad, angle) = sim.spawn_pads[p];
-            super::chraction::chr_adjust_pos_for_spawn(&sim.level, 20.0, pad, angle, &cyls)
+            super::chraction::chr_adjust_pos_for_spawn(&sim.level, radius, pad, angle, &cyls)
         };
         // Passes 1 and 2: circular from a random pad, > 10 m, not bad / not very bad.
         for pass in 0..2 {
@@ -565,7 +631,7 @@ impl Sim {
     /// dropped, if nowhere around it is clear.
     pub fn spawn_spot(&self, i: usize, pad: Vec3, angle: f32) -> Vec3 {
         let cyls = super::chraction::perims_except(self, i);
-        let spot = super::chraction::chr_adjust_pos_for_spawn(&self.level, 20.0, pad, angle, &cyls).unwrap_or(pad);
+        let spot = super::chraction::chr_adjust_pos_for_spawn(&self.level, self.chrs[i].radius, pad, angle, &cyls).unwrap_or(pad);
         drop_to_ground(&self.level, spot)
     }
 }

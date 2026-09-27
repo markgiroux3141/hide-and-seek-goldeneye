@@ -178,6 +178,18 @@ fn parse_tiles(json: &Value) -> Result<LevelGeom, String> {
             );
             poly.ladder = flag("ladder"); // GEOFLAG_LADDER
             poly.crouch = flag("aibotcrouch"); // GEOFLAG_AIBOTCROUCH
+            // The tile's `floortype` (FLOORTYPE_*).
+            poly.floortype = match t.get("floortype").and_then(Value::as_str) {
+                Some("wood") => 1,
+                Some("stone") => 2,
+                Some("carpet") => 3,
+                Some("metal") => 4,
+                Some("mud") => 5,
+                Some("water") => 6,
+                Some("dirt") => 7,
+                Some("snow") => 8,
+                _ => 0,
+            };
             poly.duck = flag("aibotduck"); // GEOFLAG_AIBOTDUCK
             geom.polys.push(poly);
         }

@@ -175,3 +175,20 @@ The panel's **AUDIO** section (under VIDEO), off by default, plays the range the
   - a 4th-order anti-alias filter at 10 kHz only takes 12 dB off 14 kHz, which leaves a loud alias at 8 kHz; hence 8th order;
   - PD's samples are close to full scale (several peak above 0 dBFS after resampling), so the renders are written as float WAVs or clamping hides the peaks.
 - **Not done:** per-voice N64 resampling (PD's RSP resampler aliases pitched-up voices on its own; a track effect only sees the mix), 16-bit output quantisation, and any comparison against a recording of a real set.
+
+## Joined with the simulants (branch `spike/pd-complex`, 2026-09-27)
+
+`SPIKE_PD_COMPLEX_FIGHT.md` puts these guns in PD's Complex against the simulant spike's bots. Changes here, all additive to the range's behaviour:
+
+- **The walk is PD's.** `bwalk_update_vertical` and `bwalk_resolve_posdelta` with their helpers replace `Range::resolve`. The range's boxes are converted to PD collision polygons (`Range::geom`), so crates and walls now collide the way PD tiles do. The 58 range tests pass unchanged.
+- **The world can be a PD stage** (`Range::for_stage`): tiles for shots, objects and floors; chr hit volumes as `Target`s with posed body-part boxes; BG triangles for the x-ray.
+- **The window is generic over `app::Host`.** The bare `Sim` is the range's host; `Host::panel` / `hud` / `overlay` / `before_render` are where a host adds its own.
+- **New sim hooks for a host:**
+  - `chr_hits` (the player's hits on chrs, for the host to apply);
+  - `host_world_models` (the BG);
+  - `host_fade` (`player_set_fade_colour`);
+  - `chr_beams` (other chrs' tracers);
+  - `walk_level` / `walk_cyls`.
+- **Blood and flesh sparks** (`sparks.c` rows 2–4) and the normal-less spark path.
+- **The Laptop sentry** targets chrs by PD's multiplayer round-robin.
+- **Player footsteps** every 150 cm, by floor type.

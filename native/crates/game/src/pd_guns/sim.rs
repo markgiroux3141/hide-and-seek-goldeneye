@@ -24,12 +24,13 @@ use super::explosions::{self, ExpOut, Explosions, Victim, VictimId};
 use super::fx::{self, Beam, Casing, FxBatch, FxKind, Sparks, Wallhit};
 use super::gset::*;
 use super::model::ModelDef;
-use super::player::{PdInput, Player};
+use super::player::{PdInput, Player, WalkEnv};
 use super::nbomb::{NbombOut, Nbombs};
 use super::props::{self, ObjCtx, ObjOut, WorldObj};
 use super::range::{HitKind, Range};
 use super::smoke::{self, Smokes};
 use super::xray::{self, Eraser};
+use crate::pd_spike::tile_level::{PerimCyl, TileLevel};
 use super::font::Canvas;
 use super::hud::{HudFonts, HudIn, HudState};
 
@@ -42,6 +43,26 @@ pub struct SoundReq {
     pub volume: f32,
     /// `Some(hand)` for the looping per-hand sounds (Reaper spin, Mauler charge).
     pub loop_hand: Option<usize>,
+}
+
+/// A chr the player's weapons hit this frame, for the host that owns the chrs
+/// to apply (`chr_hit` -> `chr_damage_by_impact`, `chr_damage_by_explosion`).
+/// The player has no chrs of its own; the chr is known by its index in the
+/// host's list (`Target::chr`).
+#[derive(Clone, Debug)]
+pub struct ChrHit {
+    pub chr: usize,
+    /// `gset_get_damage` (or the explosion's damage), before `chr_damage`'s
+    /// hit-part scaling.
+    pub damage: f32,
+    /// The shot direction (`gundir3d`), or from the blast to the chr.
+    pub dir: Vec3,
+    pub pos: Vec3,
+    pub weaponnum: i32,
+    pub explosion: bool,
+    /// The `HITPART_*` the shot found (`HITPART_GENERAL` for blasts, projectiles
+    /// and chrs without boxes).
+    pub hitpart: i32,
 }
 
 /// The range's one room's lighting (`struct room`'s `br_flash` +
@@ -254,6 +275,11 @@ pub struct Sim {
     pub bgun: Bgun,
     pub player: Player,
     pub range: Range,
+    /// What the player walks on and into: the range's boxes as PD collision
+    /// polygons ([`Range::geom`]), or a PD stage's tiles when a host swaps it.
+    pub walk_level: Arc<TileLevel>,
+    /// Other chrs' perimeters the player collides with (none in the range).
+    pub walk_cyls: Vec<PerimCyl>,
     pub beams: [Beam; 2],
     pub sparks: Sparks,
     pub wallhits: VecDeque<Wallhit>,
@@ -311,6 +337,21 @@ pub struct Sim {
     pub lvframenum: i32,
     /// Melee: `hand->unk0d0f_02` — resolve a punch against the world next tick.
     pending_melee: [bool; 2],
+    /// Models a host adds to the world pass this frame (a stage's BG, first):
+    /// (model name in [`Sim::models`], joint matrices, x-ray tint).
+    pub host_world_models: Vec<(String, Vec<glam::Mat4>, Option<[f32; 4]>)>,
+    /// Other chrs' tracers (`g_Fireslots[].beam`, `chr_update_fireslot`), set by a
+    /// host with chrs; ticked and drawn in the world pass here.
+    pub chr_beams: Vec<Beam>,
+    /// `player_set_fade_colour` from a host (the damage flash, the death fade):
+    /// colour 0..1 and alpha, drawn by `player_draw_fade` when the boost isn't.
+    pub host_fade: Option<([f32; 3], f32)>,
+    /// `footstepdist`, `foot`, and the player chr's `lastfootsample`.
+    footstepdist: f32,
+    foot: i32,
+    lastfootsample: i32,
+    /// Hits on chrs this frame, drained by the host ([`ChrHit`]).
+    pub chr_hits: Vec<ChrHit>,
     /// Shots fired / hits on boards, for the HUD.
     pub shots_fired: u32,
     pub last_hit: Option<(usize, i32)>,
@@ -349,6 +390,7 @@ impl Sim {
         }
         let mut bgun = Bgun::new(gset.clone(), bank.clone(), models.clone(), hand_model);
         let range = Range::standard();
+        let walk_level = Arc::new(TileLevel::new(range.geom()));
         let (pos, theta) = range.spawn();
         let head = (
             anim_id(&w, "ANIM_002B"),
@@ -375,6 +417,8 @@ impl Sim {
             bgun,
             player,
             range,
+            walk_level,
+            walk_cyls: Vec::new(),
             beams: [Beam::default(), Beam::default()],
             sparks: Sparks::default(),
             wallhits: VecDeque::new(),
@@ -418,6 +462,13 @@ impl Sim {
             lvframe60: 0,
             lvframenum: 0,
             pending_melee: [false; 2],
+            host_world_models: Vec::new(),
+            footstepdist: 0.0,
+            foot: 0,
+            lastfootsample: -1,
+            host_fade: None,
+            chr_beams: Vec::new(),
+            chr_hits: Vec::new(),
             shots_fired: 0,
             last_hit: None,
             casing_cooldown240: 0,
@@ -576,19 +627,22 @@ impl Sim {
             self.visionmode = VisionMode::Normal;
         }
         self.update_camera();
-        let range = &self.range;
-        let resolve = |pos: Vec3, delta: Vec3| range.resolve(pos, delta, 30.0);
+        let walk_level = self.walk_level.clone();
+        let walk_cyls = std::mem::take(&mut self.walk_cyls);
+        let env = WalkEnv { level: &walk_level, cyls: &walk_cyls };
         if self.visionmode == VisionMode::SlayerRocket {
             // bmove_tick(0, 0, 0, 1): Jo stands still while the rocket flies.
-            self.player.tick(&PdInput::default(), &mut self.bgun, lv, &resolve);
+            self.player.tick(&PdInput::default(), &mut self.bgun, lv, &env);
             self.slayer_control(input, lv);
             if let Some(s) = self.slayer {
                 self.static_alpha = (s.badrockettime as f32 / 90.0).min(1.0);
             }
         } else {
-            self.player.tick(input, &mut self.bgun, lv, &resolve);
+            self.player.tick(input, &mut self.bgun, lv, &env);
         }
+        self.walk_cyls = walk_cyls;
         self.prev_fire = input.fire;
+        self.bmove_footsteps(lv);
         self.update_camera();
         // player_update_shake (`player.c:3012`), then the retraces this frame spans.
         let intensity = self.explosions.update_shake(self.player.pos);
@@ -602,6 +656,9 @@ impl Sim {
         for h in 0..2 {
             let rng = &mut self.bgun.rng;
             self.beams[h].tick(rng, lv);
+        }
+        for b in &mut self.chr_beams {
+            b.tick(&mut self.bgun.rng, lv);
         }
         self.sparks.tick(lv);
         self.tick_casings(lv);
@@ -624,6 +681,30 @@ impl Sim {
         self.lv_update_misc_sfx(lv);
         self.lv_render_boost();
         self.draw_hud(lv);
+    }
+
+    /// The footstep half of `bmove_tick` (`bondmove.c:1933`), one player: every
+    /// 150 cm walked on the ground (not falling faster than 6 cm a tick) the other
+    /// foot lands, with the floor's sound, heard at the centre.
+    fn bmove_footsteps(&mut self, lv: Lv) {
+        let p = &self.player;
+        if (p.speedforwards == 0.0 && p.speedsideways == 0.0) || p.fallspeed < -6.0 || self.visionmode == VisionMode::SlayerRocket {
+            return;
+        }
+        let distance = (p.prevpos - p.pos).length();
+        self.footstepdist += distance;
+        if self.footstepdist < 150.0 {
+            return;
+        }
+        self.footstepdist = 0.0;
+        self.foot = 1 - self.foot;
+        let floortype = p.floorpoly.and_then(|i| self.walk_level.geom.polys.get(i)).map_or(0, |poly| poly.floortype);
+        // footstep_choose_sound(chr, distance > 10): the "index" argument is
+        // really the running flag here.
+        let sound = crate::pd_spike::chraction::footstep_choose_sound(&mut self.bgun.rng, floortype, &mut self.lastfootsample, distance > 10.0);
+        if sound != 0 && lv.lvupdate240 > 0 {
+            self.sounds.push(SoundReq { id: sound, speed: 1.0, pan: 0.0, volume: 1.0, loop_hand: None });
+        }
     }
 
     /// `bgun_draw_hud` for this frame, into a canvas the size of PD's view.
@@ -872,7 +953,7 @@ impl Sim {
             .targets
             .iter()
             .enumerate()
-            .map(|(i, t)| Victim { id: VictimId::Board(i), pos: (t.bbox.min + t.bbox.max) * 0.5, is_chr: false })
+            .map(|(i, t)| Victim { id: VictimId::Board(i), pos: (t.bbox.min + t.bbox.max) * 0.5, is_chr: t.chr.is_some() })
             .collect();
         victims.push(Victim { id: VictimId::Player, pos: self.player.pos, is_chr: true });
         let mut out = ExpOut::default();
@@ -892,6 +973,7 @@ impl Sim {
         objs.retain(|o| !o.deleting);
         let mut out = ObjOut::default();
         let campos = self.campos();
+        let mut sentry_chr_hits = Vec::new();
         {
             let mut c = ObjCtx {
                 rng: &mut self.bgun.rng,
@@ -935,6 +1017,17 @@ impl Sim {
             for (b, _) in aout.board_hits {
                 c.out.board_hits.push((b, 0.0));
             }
+            sentry_chr_hits = aout.chr_hits;
+        }
+        for (chr, damage, pos, dir) in sentry_chr_hits {
+            // chr_emit_sparks + chr_damage_by_impact(…, HITPART_GENERAL).
+            let rng = &mut self.bgun.rng;
+            if rng.random() & 4 == 0 {
+                self.sparks.create(rng, pos + dir * 42.0, dir, Vec3::ZERO, fx::SPARKTYPE_FLESH_LARGE);
+            }
+            self.sparks.create(rng, pos, dir, Vec3::ZERO, fx::SPARKTYPE_BLOOD);
+            self.sparks.create(rng, pos, dir, Vec3::ZERO, fx::SPARKTYPE_FLESH);
+            self.chr_hits.push(ChrHit { chr, damage, dir, pos, weaponnum: WEAPON_LAPTOPGUN, explosion: false, hitpart: super::range::HITPART_GENERAL });
         }
         // g_PlayersDetonatingMines is cleared once the mines have seen it.
         self.detonating_mines = false;
@@ -967,6 +1060,12 @@ impl Sim {
         }
         for (b, dmg) in out.board_hits {
             if let Some(t) = self.range.targets.get_mut(b) {
+                if let Some(chr) = t.chr {
+                    // A projectile or sentry round in a chr (`chr_damage_by_impact`).
+                    let pos = (t.bbox.min + t.bbox.max) * 0.5;
+                    self.chr_hits.push(ChrHit { chr, damage: dmg, dir: Vec3::ZERO, pos, weaponnum: 0, explosion: false, hitpart: super::range::HITPART_GENERAL });
+                    continue;
+                }
                 t.hits += 1;
                 t.damage += dmg;
                 t.flash = 1.0;
@@ -1005,8 +1104,14 @@ impl Sim {
         for wh in out.wallhits {
             self.push_wallhit(wh);
         }
-        for (victim, dmg, _dir, _first) in out.damage {
+        for (victim, dmg, dir, _first) in out.damage {
             match victim {
+                // chr_damage_by_explosion on a chr.
+                VictimId::Board(i) if self.range.targets.get(i).is_some_and(|t| t.chr.is_some()) => {
+                    let t = &self.range.targets[i];
+                    let pos = (t.bbox.min + t.bbox.max) * 0.5;
+                    self.chr_hits.push(ChrHit { chr: t.chr.unwrap(), damage: dmg, dir, pos, weaponnum: 0, explosion: true, hitpart: super::range::HITPART_GENERAL });
+                }
                 // obj_damage_by_explosion on a target board.
                 VictimId::Board(i) => {
                     if let Some(t) = self.range.targets.get_mut(i) {
@@ -1161,9 +1266,15 @@ impl Sim {
         let damage = func.as_ref().and_then(|f| f.shoot.as_ref()).map_or(0.0, |s| s.damage);
 
         if ismelee {
-            // The melee branch: sparks + a thud if anything is within reach.
+            // The melee branch: sparks + a thud if anything is within reach; a
+            // chr in reach takes the blow (`hand_inflict_melee_damage`).
             match self.range.raycast(gunpos3d, gundir3d, range) {
                 Some(hit) => {
+                    if let HitKind::Target(i) = hit.kind {
+                        if let Some(chr) = self.range.targets[i].chr {
+                            self.chr_hits.push(ChrHit { chr, damage, dir: gundir3d, pos: hit.pos, weaponnum, explosion: false, hitpart: hit.hitpart });
+                        }
+                    }
                     self.play_melee_hit_sound(weaponnum);
                     if weaponnum != WEAPON_UNARMED && weaponnum != WEAPON_TRANQUILIZER {
                         self.sparks.create(&mut self.bgun.rng, hit.pos, gundir3d, hit.normal, fx::SPARKTYPE_DEFAULT);
@@ -1191,7 +1302,11 @@ impl Sim {
             let mut blockedbyprop = false;
             while let Some(hit) = self.range.raycast_targets(origin, gundir3d, range - travelled) {
                 let HitKind::Target(i) = hit.kind else { break };
-                self.board_hit(i, damage, hit.pos, hit.normal, gunpos3d);
+                if self.range.targets[i].chr.is_some() {
+                    self.chr_hit(i, damage, hit.pos, gundir3d, weaponnum, hit.hitpart);
+                } else {
+                    self.board_hit(i, damage, hit.pos, hit.normal, gunpos3d);
+                }
                 through += 1;
                 if through >= penetration {
                     blockedbyprop = true;
@@ -1219,7 +1334,11 @@ impl Sim {
             };
             match hit.kind {
                 HitKind::Target(i) => {
-                    self.board_hit(i, damage, hit.pos, hit.normal, gunpos3d);
+                    if self.range.targets[i].chr.is_some() {
+                        self.chr_hit(i, damage, hit.pos, gundir3d, weaponnum, hit.hitpart);
+                    } else {
+                        self.board_hit(i, damage, hit.pos, hit.normal, gunpos3d);
+                    }
                     through += 1;
                     if through >= penetration {
                         self.set_hit_pos(hit.pos);
@@ -1238,6 +1357,35 @@ impl Sim {
                 }
             }
         }
+    }
+
+    /// `chr_hit` (`chr.c:4602`): the hit position, `bgun_play_prop_hit_sound`'s
+    /// chr branch (`bondgun.c:8475`), `chr_emit_sparks` (`chr.c:3658`) for a
+    /// human, and the damage for the host.
+    fn chr_hit(&mut self, i: usize, damage: f32, pos: Vec3, dir: Vec3, weaponnum: i32, hitpart: i32) {
+        let Some(chr) = self.range.targets[i].chr else { return };
+        self.set_hit_pos(pos);
+        let rand1 = self.bgun.rng.random();
+        let _rand2 = self.bgun.rng.random();
+        let func = self.bgun.hands[HAND_RIGHT].weaponfunc;
+        let id = match weaponnum {
+            WEAPON_COMBATKNIFE | props::WEAPON_BOLT => 0x05f6,
+            WEAPON_UNARMED => [0x002f, 0x0030, 0x0031][(rand1 % 3) as usize],
+            WEAPON_FALCON2 | WEAPON_FALCON2_SILENCER | WEAPON_FALCON2_SCOPE | WEAPON_DY357MAGNUM | WEAPON_DY357LX
+                if func == FUNC_SECONDARY =>
+            {
+                [0x002f, 0x0030, 0x0031][(rand1 % 3) as usize]
+            }
+            _ => 0x8076,
+        };
+        let (pan, volume) = (self.pan_of(pos), self.ps_vol(id, pos));
+        self.sounds.push(SoundReq { id, speed: 1.0, pan, volume, loop_hand: None });
+        if self.bgun.rng.random() & 4 == 0 {
+            self.sparks.create(&mut self.bgun.rng, pos + dir * 42.0, dir, Vec3::ZERO, fx::SPARKTYPE_FLESH_LARGE);
+        }
+        self.sparks.create(&mut self.bgun.rng, pos, dir, Vec3::ZERO, fx::SPARKTYPE_BLOOD);
+        self.sparks.create(&mut self.bgun.rng, pos, dir, Vec3::ZERO, fx::SPARKTYPE_FLESH);
+        self.chr_hits.push(ChrHit { chr, damage, dir, pos, weaponnum, explosion: false, hitpart });
     }
 
     /// `obj_hit` on a board: the hit counts, the prop takes a bullet hole and
@@ -1335,7 +1483,7 @@ impl Sim {
 
     /// `bgun_play_bg_hit_sound` (`bondgun.c:8741`, NTSC 1.0+ path): a ricochet
     /// from the shared table, then the surface's own hit sound.
-    fn play_bg_hit_sound(&mut self, weaponnum: i32, pos: Vec3) {
+    pub(crate) fn play_bg_hit_sound(&mut self, weaponnum: i32, pos: Vec3) {
         const RICOCHETS: [u16; 32] = [
             0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x17, 0x18, 0x19, 0x1a, 0x17, 0x18, 0x19, 0x1a, 0x1f, 0x20,
             0x20, 0x21, 0x1f, 0x20, 0x20, 0x21, 0x1f, 0x20, 0x20, 0x21, 0x23, 0x24, 0x25, 0x26,
@@ -1490,7 +1638,7 @@ impl Sim {
         }
         // Target boards: a white face, flashing red on a hit, on a dark frame.
         let mut flat = Vec::new();
-        for t in self.range.targets.iter().filter(|_| xray.is_none()) {
+        for t in self.range.boards().filter(|_| xray.is_none()) {
             let f = t.flash;
             let face = [1.0, 1.0 - 0.6 * f, 1.0 - 0.6 * f, 1.0];
             let back = [0.25, 0.22, 0.2, 1.0];
@@ -1541,6 +1689,14 @@ impl Sim {
         for (_, bs) in xlu {
             out.extend(bs);
         }
+        // Other chrs' tracers (`beams_render` of the fireslots, world space).
+        if xray.is_none() {
+            for b in &self.chr_beams {
+                if let Some(g) = b.geometry(self.campos()) {
+                    out.push(g);
+                }
+            }
+        }
         // Deployed sentries: their tracer and, on a firing tick, the flash.
         for o in &self.objs {
             if let Some(a) = &o.autogun {
@@ -1567,7 +1723,7 @@ impl Sim {
     /// The weapon objects to draw: model, joint matrices, and in x-ray the
     /// flat colour + alpha `obj_render` gives them (hidden past the eraser).
     pub fn world_models(&self) -> Vec<(String, Vec<glam::Mat4>, Option<[f32; 4]>)> {
-        let mut out = Vec::new();
+        let mut out = self.host_world_models.clone();
         let own_rocket = if self.visionmode == VisionMode::SlayerRocket { self.slayer.map(|s| s.rocket) } else { None };
         let xray = self.xray();
         for o in &self.objs {

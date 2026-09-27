@@ -356,6 +356,18 @@ fn func0f06d37c(o: &mut WorldObj, world: &Range, to: Vec3, arg3: &mut Vec3) -> b
         return true;
     }
     let radius = 10.0;
+    // A PD stage: its wall tiles (`cd_test_cylmove_*` + the volume test).
+    match world.stage_move_obj(o.pos, to, radius) {
+        Some(Ok(())) => {
+            o.pos = to;
+            return true;
+        }
+        Some(Err(n)) => {
+            *arg3 = n;
+            return false;
+        }
+        None => {}
+    }
     for s in world.solids.iter() {
         let lo = s.min - Vec3::new(radius, 0.0, radius);
         let hi = s.max + Vec3::new(radius, 0.0, radius);

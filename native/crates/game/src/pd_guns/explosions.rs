@@ -147,8 +147,8 @@ pub struct Explosion {
 
 /// What the explosion layer needs from the world (PD: rooms + `cd_*`).
 pub trait ExpWorld {
-    /// The room's bbox (`g_Rooms[exproom].bbmin/bbmax`).
-    fn room_bbox(&self) -> (Vec3, Vec3);
+    /// The bbox of the room at `pos` (`g_Rooms[exproom].bbmin/bbmax`).
+    fn room_bbox(&self, pos: Vec3) -> (Vec3, Vec3);
     /// `cd_find_room_at_pos_ycnp`: floor height and normal under `pos`, `None`
     /// outside the room. `bool` = the floor is a prop (`collisionprop`).
     fn floor_below(&self, pos: Vec3) -> Option<(f32, Vec3, bool)>;
@@ -307,7 +307,7 @@ impl Explosions {
             self.shake_total_timer = 6;
         }
         self.flashes.push(t.rangeh);
-        let (rmin, rmax) = world.room_bbox();
+        let (rmin, rmax) = world.room_bbox(pos);
         let mut exp = Explosion {
             pos,
             ty,
