@@ -58,6 +58,17 @@ pub struct RayHit {
 /// The obstacle edge a failed move reports (`cd_get_edge`).
 pub type Edge = (Vec3, Vec3);
 
+/// What PD's collision globals hold after a failed test: the obstacle's edge
+/// (`cd_get_edge`), the fraction of the move that fits (`cd_get_distance`, when
+/// `cd_has_distance`), and which perimeter it was (`cd_get_obstacle_prop`; `None`
+/// for the background).
+#[derive(Clone, Copy, Debug)]
+pub struct CdObstacle {
+    pub edge: Edge,
+    pub dist: Option<f32>,
+    pub cyl: Option<usize>,
+}
+
 #[derive(Clone, Copy, Debug)]
 enum Hit {
     Tile { poly: usize, vertexindex: usize },
@@ -340,11 +351,25 @@ impl TileLevel {
     /// `closest` keeps the nearest crossing (the `findclosest` variants) instead of
     /// the first; either way the edge of the reported crossing comes back.
     fn atob_cyl(&self, frompos: Vec3, topos: Vec3, ymax: f32, ymin: f32, cyls: &[PerimCyl], closest: bool) -> Option<Edge> {
-        let mut best: Option<(f32, Edge)> = None;
-        let mut consider = |end: Vec3, edge: Edge| -> bool {
+        self.atob_cyl_obstacle(frompos, topos, ymax, ymin, cyls, closest).map(|(e, _)| e)
+    }
+
+    /// [`Self::atob_cyl`], also naming the perimeter that was hit (PD's
+    /// `cd_get_obstacle_prop`) - `None` for a wall tile.
+    fn atob_cyl_obstacle(
+        &self,
+        frompos: Vec3,
+        topos: Vec3,
+        ymax: f32,
+        ymin: f32,
+        cyls: &[PerimCyl],
+        closest: bool,
+    ) -> Option<(Edge, Option<usize>)> {
+        let mut best: Option<(f32, Edge, Option<usize>)> = None;
+        let mut consider = |end: Vec3, edge: Edge, cyl: Option<usize>| -> bool {
             let sq = (end - frompos).length_squared();
-            if best.map_or(true, |(b, _)| sq < b) {
-                best = Some((sq, edge));
+            if best.map_or(true, |(b, _, _)| sq < b) {
+                best = Some((sq, edge, cyl));
             }
             !closest
         };
@@ -359,19 +384,19 @@ impl TileLevel {
                 continue;
             }
             if let Some((end, edge)) = self.cylpath_tile(poly, frompos, topos, ymax, ymin) {
-                if consider(end, edge) {
-                    return best.map(|b| b.1);
+                if consider(end, edge, None) {
+                    return best.map(|b| (b.1, b.2));
                 }
             }
         }
-        for c in cyls {
+        for (k, c) in cyls.iter().enumerate() {
             if let Some((end, edge)) = Self::cylpath_cyl(c, frompos, topos, ymax, ymin) {
-                if consider(end, edge) {
-                    return best.map(|b| b.1);
+                if consider(end, edge, Some(k)) {
+                    return best.map(|b| (b.1, b.2));
                 }
             }
         }
-        best.map(|b| b.1)
+        best.map(|b| (b.1, b.2))
     }
 
     /// `cd_test_cylmove_oobok` (`collision.c:3576`): any wall on the swept line.
@@ -417,6 +442,115 @@ impl TileLevel {
             None if !self.in_bounds(topos, radius) => (CdResult::Error, None),
             None => (CdResult::NoCollision, None),
         }
+    }
+
+    /// `cd_test_cylmove_oobfail_findclosest_finddist` (`collision.c:3640`): as
+    /// [`Self::cd_test_cylmove_oobfail_findclosest`], and on a collision also the
+    /// fraction of the move that fits before the cylinder meets the edge
+    /// (`cd_set_obstacle_distance`, `collision.c:180`).
+    pub fn cd_test_cylmove_oobfail_findclosest_finddist(
+        &self,
+        frompos: Vec3,
+        topos: Vec3,
+        radius: f32,
+        ymax: f32,
+        ymin: f32,
+        cyls: &[PerimCyl],
+    ) -> (CdResult, Option<CdObstacle>) {
+        match self.atob_cyl_obstacle(frompos, topos, ymax, ymin, cyls, true) {
+            Some((edge, cyl)) => {
+                let diff = Vec2::new(topos.x - frompos.x, topos.z - frompos.z);
+                let dist = func0f1579cc(
+                    Vec2::new(frompos.x, frompos.z),
+                    radius,
+                    Vec2::new(edge.0.x, edge.0.z),
+                    Vec2::new(edge.1.x, edge.1.z),
+                    diff,
+                );
+                (CdResult::Collision, Some(CdObstacle { edge, dist: Some(dist), cyl }))
+            }
+            None if !self.in_bounds(topos, radius) => (CdResult::Error, None),
+            None => (CdResult::NoCollision, None),
+        }
+    }
+
+    /// `cd_test_volume_fromdir` (`collision.c:2536`): the volume test at `topos`
+    /// collecting up to 20 touched wall edges and perimeters
+    /// (`cd_volumefromdir_collect`, `:1614`), then the one the move from `frompos`
+    /// meets first (`cd_volumefromdir_finalise`, `:1659`), with that fraction.
+    ///
+    /// Unlike `cd_volume_collect_tilei`, the fromdir collector only takes edges
+    /// within `radius` (`cd_volumefromdir_collect_tilei`, `:1340`): a centre inside
+    /// a wall tile's outline with no edge in reach touches nothing.
+    pub fn cd_test_volume_fromdir(
+        &self,
+        frompos: Vec3,
+        topos: Vec3,
+        radius: f32,
+        ymax: f32,
+        ymin: f32,
+        cyls: &[PerimCyl],
+    ) -> (CdResult, Option<CdObstacle>) {
+        const MAX: usize = 20;
+        // (edge, perimeter index, perimeter circle) per collision, in collection order.
+        let mut collisions: Vec<(Edge, Option<usize>, Option<(f32, f32, f32)>)> = Vec::new();
+        'bg: for &poly in &self.walls {
+            if !self.tile_in_range(poly, topos, radius, true, ymax, ymin) {
+                continue;
+            }
+            let v = &self.geom.polys[poly].verts;
+            for i in 0..v.len() {
+                let next = (i + 1) % v.len();
+                if v[i].x == v[next].x && v[i].z == v[next].z {
+                    continue;
+                }
+                let dist = cd_pos_get_dist_to_line(v[i].x, v[i].z, v[next].x, v[next].z, topos.x, topos.z).abs();
+                if dist <= radius
+                    && (cd_pos_get_dist_to_vtx(v[i].x, v[i].z, topos.x, topos.z) <= radius
+                        || cd_pos_get_dist_to_vtx(v[next].x, v[next].z, topos.x, topos.z) <= radius
+                        || cd_pos_get_side(v[i].x, v[i].z, v[next].x, v[next].z, topos.x, topos.z))
+                {
+                    if collisions.len() < MAX {
+                        collisions.push(((v[i], v[next]), None, None));
+                    } else {
+                        break 'bg;
+                    }
+                }
+            }
+        }
+        for (k, c) in cyls.iter().enumerate() {
+            let vertical = topos.y + ymax >= c.ymin && topos.y + ymin <= c.ymax;
+            let (xd, zd, f16) = (topos.x - c.x, topos.z - c.z, radius + c.radius);
+            if vertical && xd * xd + zd * zd <= f16 * f16 && collisions.len() < MAX {
+                collisions.push(((Vec3::ZERO, Vec3::ZERO), Some(k), Some((c.x, c.z, c.radius))));
+            }
+        }
+        if collisions.is_empty() {
+            return (CdResult::NoCollision, None);
+        }
+        let from2 = Vec2::new(frompos.x, frompos.z);
+        let diff = Vec2::new(topos.x - frompos.x, topos.z - frompos.z);
+        let mut best: Option<(f32, usize)> = None;
+        for (i, (edge, _, cyl)) in collisions.iter().enumerate() {
+            let value = match cyl {
+                // A perimeter: the swept radius grows by its radius, the "edge" is its centre.
+                Some((x, z, r)) => func0f1579cc(from2, r + radius, Vec2::new(*x, *z), Vec2::new(*x, *z), diff),
+                None => func0f1579cc(from2, radius, Vec2::new(edge.0.x, edge.0.z), Vec2::new(edge.1.x, edge.1.z), diff),
+            };
+            if best.map_or(true, |(b, _)| value < b) {
+                best = Some((value, i));
+            }
+        }
+        let (dist, i) = best.unwrap();
+        let (edge, k, cyl) = collisions[i];
+        let edge = match cyl {
+            Some((x, z, r)) => {
+                let (a, b) = cd_pos_get_cyl_edge(x, z, r, frompos.x, frompos.z);
+                (Vec3::new(a.x, frompos.y, a.y), Vec3::new(b.x, frompos.y, b.y))
+            }
+            None => edge,
+        };
+        (CdResult::Collision, Some(CdObstacle { edge, dist: Some(dist), cyl: k }))
     }
 
     /// SUBSTITUTION for PD's room membership: a point is inside the level when a
@@ -777,6 +911,95 @@ fn func0f1577f0(a0: Vec2, a1: Vec2, a2: Vec2, a3: Vec2) -> f32 {
         return 1.0;
     }
     a
+}
+
+/// `func0f1578c8` (`collisionutils.c:34`): how far along the unit direction `dir`
+/// a circle of `radius` at `centre` travels before it touches the point `vtx`;
+/// `f32::MAX` if it never does.
+fn func0f1578c8(centre: Vec2, radius: f32, dir: Vec2, vtx: Vec2) -> f32 {
+    let mult1 = vtx.x - centre.x;
+    let mult2 = vtx.y - centre.y;
+    let value1 = mult2 * dir.x - mult1 * dir.y;
+    let mut value2 = mult1 * dir.x + mult2 * dir.y;
+    let sp24 = (radius - value1) * (radius + value1);
+    if sp24 < 0.0 {
+        return f32::MAX;
+    }
+    value2 -= sp24.sqrt();
+    if value2 < 0.0 {
+        if value2 * value2 + value1 * value1 <= radius * radius {
+            return 0.0;
+        }
+        return f32::MAX;
+    }
+    value2
+}
+
+/// `func0f1579cc` (`collisionutils.c:68`): the fraction (0..1) of the move `diff`
+/// a circle of `radius` at `centre` makes before it meets the edge `v1 -> v2`
+/// (its line pushed out by the radius on the circle's side, or an end point);
+/// 1 when it never does.
+pub fn func0f1579cc(centre: Vec2, radius: f32, v1: Vec2, v2: Vec2, diff: Vec2) -> f32 {
+    let spac = (diff.x * diff.x + diff.y * diff.y).sqrt();
+    if spac == 0.0 {
+        return 1.0;
+    }
+    let spa0 = diff * (1.0 / spac);
+    let (mut v1, mut v2) = (v1, v2);
+    let sp98 = v2.x - v1.x;
+    let sp9c = v2.y - v1.y;
+    let sp94 = (sp98 * sp98 + sp9c * sp9c).sqrt();
+    let sp60;
+    if sp94 == 0.0 {
+        // `goto handlezero`: a zero-length edge is its end point.
+        sp60 = func0f1578c8(centre, radius, spa0, v2);
+    } else {
+        let sp90 = 1.0 / sp94;
+        let mut sp88 = sp9c * sp90;
+        let mut sp8c = -sp98 * sp90;
+        let mut sp84 = radius * sp88;
+        let mut sp80 = radius * sp8c;
+        if sp84 * (centre.x - v1.x) + sp80 * (centre.y - v1.y) < 0.0 {
+            sp84 = -sp84;
+            sp80 = -sp80;
+        }
+        let sp78 = v1.x + sp84;
+        let sp7c = v1.y + sp80;
+        let sp70 = v2.x + sp84;
+        let sp74 = v2.y + sp80;
+        let mut sp68 = diff.y * sp78 - sp7c * diff.x;
+        let sp6c = centre.x * diff.y - centre.y * diff.x;
+        let mut sp64 = diff.y * sp70 - sp74 * diff.x;
+        if sp64 < sp68 {
+            std::mem::swap(&mut sp64, &mut sp68);
+            std::mem::swap(&mut v1, &mut v2);
+            sp88 = -sp88;
+            sp8c = -sp8c;
+        }
+        if sp64 == sp68 {
+            let a = func0f1578c8(centre, radius, spa0, v1);
+            let b = func0f1578c8(centre, radius, spa0, v2);
+            sp60 = a.min(b);
+        } else if sp64 < sp6c {
+            sp60 = func0f1578c8(centre, radius, spa0, v2);
+        } else if sp6c < sp68 {
+            sp60 = func0f1578c8(centre, radius, spa0, v1);
+        } else {
+            let sp58 = sp88 * (centre.x - v1.x) + sp8c * (centre.y - v1.y);
+            let sp54 = sp88 * (centre.x + diff.x - v1.x) + sp8c * (centre.y + diff.y - v1.y);
+            if sp58 == sp54 {
+                return 1.0;
+            }
+            sp60 = (sp58 - radius) * spac / (sp58 - sp54);
+        }
+    }
+    if spac < sp60 {
+        return 1.0;
+    }
+    if sp60 < 0.0 {
+        return 0.0;
+    }
+    sp60 * (1.0 / spac)
 }
 
 #[cfg(test)]

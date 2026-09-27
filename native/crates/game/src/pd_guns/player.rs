@@ -22,10 +22,42 @@ use super::bgun::*;
 use super::gset::*;
 use super::model::{player_head_modeldef, Model};
 use super::pdmtx;
+use crate::pd_spike::chraction::bmove_dampen_shotspeed;
 use crate::pd_spike::pdmath::{baddtor, baddtor2};
+use crate::pd_spike::tile_level::{CdObstacle, CdResult, Edge, PerimCyl, TileLevel};
 
 /// `PLAYER_DEFAULT_FOV`.
 pub const PLAYER_DEFAULT_FOV: f32 = 60.0;
+
+/// What the walk collides with: the level as PD's collision tiles see it (the
+/// range's boxes are converted to the same polygons, `Range::geom`) and every
+/// other chr's perimeter cylinder (`CDTYPE_ALL`; the player's own is left out,
+/// as `prop_set_perim_enabled(prop, false)` does).
+///
+/// SUBSTITUTION: PD tests only the tiles of the rooms the player is in or moves
+/// through (`los_find_intersecting_rooms_exhaustive`, `bmove_find_entered_rooms_by_pos`);
+/// every polygon is a candidate here, rejected by bounding box.
+pub struct WalkEnv<'a> {
+    pub level: &'a TileLevel,
+    pub cyls: &'a [PerimCyl],
+}
+
+/// The collision results PD keeps in globals after a test that collided
+/// (`cd_get_edge`, `cd_has_distance` / `cd_get_distance`). The obstacle prop
+/// (`cd_get_obstacle_prop`) only matters for pushing, which a free-for-all never does.
+#[derive(Clone, Copy, Debug, Default)]
+struct CdGlobals {
+    edge: Option<Edge>,
+    dist: Option<f32>,
+}
+
+impl CdGlobals {
+    fn set(&mut self, o: Option<CdObstacle>) {
+        if let Some(o) = o {
+            *self = CdGlobals { edge: Some(o.edge), dist: o.dist };
+        }
+    }
+}
 
 /// One tick's controls, already mapped from keys/mouse (or a pad).
 #[derive(Clone, Debug, Default)]
@@ -81,14 +113,48 @@ const HEADANIM_RESTING: i32 = 0;
 const HEADANIM_MOVING: i32 = 1;
 
 pub struct Player {
+    /// `prop->pos`: the eye, `vv_manground` + the eye height.
     pub pos: Vec3,
     /// `vv_theta`, degrees; forward = (-sin, 0, cos).
     pub theta: f32,
     /// `vv_verta`, degrees, positive up.
     pub verta: f32,
     pub eyeheight: f32,
+    /// `vv_headheight`: the top of the collision cylinder above `manground`
+    /// (the eye height in multiplayer, `player.c:1495`).
+    pub headheight: f32,
+    /// `bond2.radius`.
+    pub radius: f32,
+    /// `vv_manground`: the smoothed height the feet are at.
     pub manground: f32,
+    /// `vv_ground`: the floor under the cylinder this frame.
     pub ground: f32,
+    /// `sumground`: the low-pass behind `manground` going up steps and ramps.
+    pub sumground: f32,
+    /// `bdeltapos.y`: the fall speed (cm per tick, negative down).
+    pub fallspeed: f32,
+    pub isfalling: bool,
+    pub fallstart: i32,
+    pub onladder: bool,
+    pub ladderupdown: f32,
+    laddernormal: Vec3,
+    /// The floor polygon and its room (`floorroom`).
+    pub floorpoly: Option<usize>,
+    pub floorroom: Option<u16>,
+    /// Landing: `crouchtime240`, `crouchfall`, `sumcrouch` (the dip after a fall).
+    crouchtime240: i32,
+    crouchfall: f32,
+    sumcrouch: f32,
+    /// `bondshotspeed`: the shove from being shot (`chr_damage`), in the same
+    /// per-tick units as a bot's.
+    pub shotspeed: Vec3,
+    /// `bondprevpos`.
+    pub prevpos: Vec3,
+    /// `player_die(true)` was asked for this frame: fell for 4 s, or out of the world.
+    pub die_request: bool,
+    /// The fall speed of a landing this frame (for the footstep sounds).
+    pub landed: Option<f32>,
+    cd: CdGlobals,
 
     pub speedtheta: f32,
     pub speedthetacontrol: f32,
@@ -167,12 +233,32 @@ impl Player {
         let head = Model::new(Arc::new(player_head_modeldef()));
         let (walk, run, hold) = head_anims;
         let mut p = Player {
-            pos,
+            pos: pos + Vec3::Y * 159.0,
             theta,
             verta: 0.0,
             eyeheight: 159.0,
+            headheight: 159.0,
+            radius: 30.0,
             manground: pos.y,
             ground: pos.y,
+            sumground: pos.y / 0.045_499_98,
+            // bwalk_init: bdeltapos.y = -0.0001.
+            fallspeed: -0.0001,
+            isfalling: false,
+            fallstart: 0,
+            onladder: false,
+            ladderupdown: 0.0,
+            laddernormal: Vec3::ZERO,
+            floorpoly: None,
+            floorroom: None,
+            crouchtime240: 0,
+            crouchfall: 0.0,
+            sumcrouch: 0.0,
+            shotspeed: Vec3::ZERO,
+            prevpos: pos,
+            die_request: false,
+            landed: None,
+            cd: CdGlobals::default(),
             speedtheta: 0.0,
             speedthetacontrol: 0.0,
             speedverta: 0.0,
@@ -537,18 +623,244 @@ impl Player {
         }
     }
 
-    /// `bmove_tick` for walk mode: input, the gun state machines, then walking.
-    /// `resolve` is the collision stand-in for `bwalk_resolve_posdelta`: given a
-    /// position and a horizontal delta, return the position actually reached.
-    pub fn tick(&mut self, input: &PdInput, bgun: &mut Bgun, lv: Lv, resolve: &dyn Fn(Vec3, Vec3) -> Vec3) {
+    /// Stand the player on the floor at `ground` (`player_spawn` →
+    /// `bwalk_init`): feet there, the eye above, nothing carried over.
+    pub fn place(&mut self, ground: Vec3, theta: f32) {
+        self.manground = ground.y;
+        self.ground = ground.y;
+        self.sumground = ground.y / 0.045_499_98;
+        self.pos = Vec3::new(ground.x, ground.y + self.eyeheight, ground.z);
+        self.prevpos = self.pos;
+        self.theta = theta;
+        self.verta = 0.0;
+        self.fallspeed = -0.0001;
+        self.isfalling = false;
+        self.onladder = false;
+        self.shotspeed = Vec3::ZERO;
+        self.speedforwards = 0.0;
+        self.speedsideways = 0.0;
+        self.speedstrafe = 0.0;
+        self.speedgo = 0.0;
+        self.speedtheta = 0.0;
+        self.speedthetacontrol = 0.0;
+        self.speedverta = 0.0;
+        self.crouchtime240 = 0;
+        self.crouchfall = 0.0;
+        self.sumcrouch = 0.0;
+        self.crouchheight = 0.0;
+        self.die_request = false;
+        self.resetheadpos = true;
+        self.resetheadrot = true;
+    }
+
+    /// Put the crouch straight at `offset` (−90 squat, −45 duck, 0 stand), as if
+    /// `bwalk_update_crouch_offset` had finished getting there (a harness and
+    /// spawn helper; PD tweens it).
+    pub fn set_crouch_offset(&mut self, offset: f32) {
+        self.crouchoffset = offset;
+        self.crouchspeed = 0.0;
+        self.update_crouch_offset_real();
+    }
+
+    /// `bmove_tick` for walk mode: input, the gun state machines, then walking
+    /// (`bwalk_tick`, `bondwalk.c:1791`).
+    pub fn tick(&mut self, input: &PdInput, bgun: &mut Bgun, lv: Lv, env: &WalkEnv) {
+        self.die_request = false;
+        self.landed = None;
         self.bmove_process_input(input, bgun, lv);
-        // bwalk_tick (bondwalk.c:1791)
-        let prev = self.pos;
+        // bwalk_update_prev_pos
+        self.prevpos = self.pos;
         self.bwalk_update_theta(lv);
         self.bmove_update_look();
-        self.bwalk_update_horizontal(bgun, lv, resolve);
-        self.bwalk_update_vertical(lv);
-        let _ = prev;
+        self.bwalk_update_horizontal(bgun, lv, env);
+        self.bwalk_update_vertical(lv, env);
+    }
+
+    /// `player_get_bbox` (`player.c:5193`), walk mode: radius, then the absolute
+    /// top and bottom of the collision cylinder. The bottom is 30 cm above the feet,
+    /// so anything lower is stepped onto rather than walked into.
+    pub fn player_get_bbox(&self) -> (f32, f32, f32) {
+        let ymin = self.manground + 30.0;
+        let ymax = (self.manground + self.headheight + self.crouchoffsetrealsmall).max(self.manground + 80.0);
+        (self.radius, ymax, ymin)
+    }
+
+    /// `player_update_perim_info` (`player.c:5160`): the cylinder other chrs
+    /// collide with and shoot at.
+    pub fn perim(&self) -> PerimCyl {
+        let ymax = (self.manground + self.headheight + self.crouchoffsetrealsmall).max(self.manground + 80.0);
+        PerimCyl { x: self.pos.x, z: self.pos.z, radius: self.radius, ymin: self.manground, ymax }
+    }
+
+    /// `bwalk_try_move_upwards` (`bondwalk.c:189`).
+    fn bwalk_try_move_upwards(&mut self, env: &WalkEnv, amount: f32) -> CdResult {
+        let newpos = self.pos + Vec3::Y * amount;
+        let (radius, ymax, ymin) = self.player_get_bbox();
+        let ymin = ymin - 0.1;
+        let result = env.level.cd_test_volume_simple(newpos, radius, ymax - self.pos.y, ymin - self.pos.y, env.cyls);
+        if result == CdResult::NoCollision {
+            self.pos.y = newpos.y;
+        }
+        result
+    }
+
+    /// `bwalk_try_delta_nopush` (`bondwalk.c:236`): try moving by `delta`; on
+    /// success (and `apply`) take the move and the turn.
+    fn bwalk_try_delta_nopush(&mut self, env: &WalkEnv, delta: Vec3, rotateamount: f32, apply: bool, extrawidth: f32) -> CdResult {
+        let mut result = CdResult::NoCollision;
+        let mut dstpos = self.pos;
+        if delta != Vec3::ZERO {
+            dstpos += delta;
+            let (radius, ymax, ymin) = self.player_get_bbox();
+            let radius = radius + extrawidth;
+            let (xdiff, zdiff) = (dstpos.x - self.pos.x, dstpos.z - self.pos.z);
+            let halfradius = radius * 0.5;
+            let (rymax, rymin) = (ymax - self.pos.y, ymin - self.pos.y);
+            let level = env.level;
+            if xdiff > halfradius || zdiff > halfradius || xdiff < -halfradius || zdiff < -halfradius {
+                let (r, o) = level.cd_test_cylmove_oobfail_findclosest_finddist(self.pos, dstpos, radius, rymax, rymin, env.cyls);
+                result = r;
+                if r == CdResult::Error {
+                    self.cd = CdGlobals::default();
+                }
+                self.cd.set(o);
+                if result == CdResult::NoCollision {
+                    let (r, o) = level.cd_test_volume_fromdir(self.pos, dstpos, radius, rymax, rymin, env.cyls);
+                    result = r;
+                    self.cd.set(o);
+                }
+            } else {
+                let (r, o) = level.cd_test_volume_fromdir(self.pos, dstpos, radius, rymax, rymin, env.cyls);
+                result = r;
+                self.cd.set(o);
+            }
+        }
+        if result == CdResult::NoCollision && apply {
+            // BADRTOD4(rotateamount)
+            let mut degrees = self.theta + rotateamount * 360.0 / crate::pd_spike::pdmath::M_BADTAU;
+            while degrees < 0.0 {
+                degrees += 360.0;
+            }
+            while degrees >= 360.0 {
+                degrees -= 360.0;
+            }
+            self.theta = degrees;
+            self.pos = dstpos;
+        }
+        result
+    }
+
+    /// `bwalk_try_delta` (`bondwalk.c:378`). Its obstacle reactions are doors
+    /// (none here), pushable chrs (only teammates in multiplayer, and a
+    /// free-for-all has none) and pushable objects (none), so it is the nopush
+    /// test.
+    fn bwalk_try_delta(&mut self, env: &WalkEnv, delta: Vec3, rotateamount: f32, apply: bool, extrawidth: f32) -> CdResult {
+        self.bwalk_try_delta_nopush(env, delta, rotateamount, apply, extrawidth)
+    }
+
+    /// `bwalk_try_fulldelta` (`bondwalk.c:526`).
+    fn bwalk_try_fulldelta(&mut self, env: &WalkEnv, delta: Vec3) -> (CdResult, Edge) {
+        let result = self.bwalk_try_delta(env, delta, 0.0, true, 0.0);
+        let edge = if result == CdResult::Collision { self.cd.edge.unwrap_or((self.pos, self.pos)) } else { (Vec3::ZERO, Vec3::ZERO) };
+        (result, edge)
+    }
+
+    /// `bwalk_try_quarterdelta` (`bondwalk.c:541`): a quarter of the way to the
+    /// obstacle the last test met. A collision with a *different* edge is
+    /// reported (with that edge); anything else that fails is an error.
+    fn bwalk_try_quarterdelta(&mut self, env: &WalkEnv, delta: Vec3, prevedge: Edge) -> (CdResult, Edge) {
+        let mut edge = (Vec3::ZERO, Vec3::ZERO);
+        if let Some(distance) = self.cd.dist {
+            let quarter = delta * distance / 4.0;
+            let result = self.bwalk_try_delta(env, quarter, 0.0, true, 0.0);
+            if result == CdResult::NoCollision {
+                return (CdResult::NoCollision, edge);
+            }
+            if result == CdResult::Collision {
+                edge = self.cd.edge.unwrap_or(edge);
+                if prevedge.0 != edge.0 || prevedge.1 != edge.1 {
+                    return (CdResult::Collision, edge);
+                }
+            }
+        }
+        (CdResult::Error, edge)
+    }
+
+    /// `bwalk_try_slide_along_edge` (`bondwalk.c:588`): the move projected onto the edge.
+    fn bwalk_try_slide_along_edge(&mut self, env: &WalkEnv, delta: Vec3, e: Edge) -> CdResult {
+        let (v1, v2) = e;
+        if v1.x != v2.x || v1.z != v2.z {
+            let mut edgedir = Vec3::new(v2.x - v1.x, 0.0, v2.z - v1.z);
+            let tmp = (edgedir.x * edgedir.x + edgedir.z * edgedir.z).sqrt();
+            edgedir.x *= 1.0 / tmp;
+            edgedir.z *= 1.0 / tmp;
+            let tmp = delta.x * edgedir.x + delta.z * edgedir.z;
+            let newdelta = Vec3::new(edgedir.x * tmp, 0.0, edgedir.z * tmp);
+            return self.bwalk_try_delta(env, newdelta, 0.0, true, 0.0);
+        }
+        CdResult::Error
+    }
+
+    /// `bwalk_try_slide_along_corner` (`bondwalk.c:616`): if the destination is
+    /// within a radius of one of the edge's ends, the move projected onto the
+    /// perpendicular to (end − pos): rounding the corner.
+    fn bwalk_try_slide_along_corner(&mut self, env: &WalkEnv, delta: Vec3, e: Edge) -> CdResult {
+        let (radius, _, _) = self.player_get_bbox();
+        let pos = self.pos;
+        let round = |this: &mut Self, vtx: Vec3| -> Option<CdResult> {
+            if vtx.x != pos.x || vtx.z != pos.z {
+                let (mut x, mut z) = (-(vtx.z - pos.z), vtx.x - pos.x);
+                let tmp = (x * x + z * z).sqrt();
+                x *= 1.0 / tmp;
+                z *= 1.0 / tmp;
+                let tmp = delta.x * x + delta.z * z;
+                let newdelta = Vec3::new(x * tmp, 0.0, z * tmp);
+                if this.bwalk_try_delta(env, newdelta, 0.0, true, 0.0) == CdResult::NoCollision {
+                    return Some(CdResult::NoCollision);
+                }
+            }
+            None
+        };
+        let near = |vtx: Vec3| {
+            let (x, z) = (vtx.x - (pos.x + delta.x), vtx.z - (pos.z + delta.z));
+            x * x + z * z <= radius * radius
+        };
+        if near(e.0) {
+            if let Some(r) = round(self, e.0) {
+                return r;
+            }
+        } else if near(e.1) {
+            if let Some(r) = round(self, e.1) {
+                return r;
+            }
+        }
+        CdResult::Collision
+    }
+
+    /// `bwalk_resolve_posdelta` (`bondwalk.c:1257`): the full move; else a
+    /// quarter of the way to the obstacle, then slide along its edge or round its
+    /// corner (only when not leaning); against a second, nearer obstacle, the
+    /// same with both edges.
+    fn bwalk_resolve_posdelta(&mut self, env: &WalkEnv, delta: Vec3, notrleaning: bool) {
+        let (r, edge_a) = self.bwalk_try_fulldelta(env, delta);
+        if r != CdResult::Collision {
+            return;
+        }
+        let (result, edge_b) = self.bwalk_try_quarterdelta(env, delta, edge_a);
+        if result != CdResult::Collision {
+            if notrleaning && self.bwalk_try_slide_along_edge(env, delta, edge_a) != CdResult::NoCollision {
+                self.bwalk_try_slide_along_corner(env, delta, edge_a);
+            }
+        } else {
+            let (_, _edge_c) = self.bwalk_try_quarterdelta(env, delta, edge_b);
+            if notrleaning
+                && self.bwalk_try_slide_along_edge(env, delta, edge_b) != CdResult::NoCollision
+                && self.bwalk_try_slide_along_edge(env, delta, edge_a) != CdResult::NoCollision
+                && self.bwalk_try_slide_along_corner(env, delta, edge_b) != CdResult::NoCollision
+            {
+                self.bwalk_try_slide_along_corner(env, delta, edge_a);
+            }
+        }
     }
 
     /// `bmove_process_input` (`bondmove.c:695`), CONTROLMODE_PC + mouse.
@@ -1020,14 +1332,16 @@ impl Player {
         self.crouchoffsetrealsmall = self.crouchoffsetreal;
     }
 
-    /// `bwalk_update_crouch_offset` (`bondwalk.c:1197`) with `apply_speed`.
-    fn update_crouch_offset(&mut self, bgun: &mut Bgun, lv: Lv) {
+    /// `bwalk_update_crouch_offset` (`bondwalk.c:1197`) with `apply_speed`. Rising
+    /// into a ceiling is refused: the offset stays and the crouch goes down a level.
+    fn update_crouch_offset(&mut self, bgun: &mut Bgun, lv: Lv, env: &WalkEnv) {
         let target = match bgun.p.crouchpos {
             CROUCHPOS_SQUAT => -90.0,
             CROUCHPOS_DUCK => -45.0,
             _ => 0.0,
         };
         if target != self.crouchoffset {
+            let prev = (self.crouchoffset, self.crouchoffsetreal, self.crouchoffsetrealsmall);
             // apply_speed(&crouchoffset, target, &crouchspeed, 0.5, 0.5, 5.0)
             let (accel, decel, maxspeed) = (0.5f32, 0.5f32, 5.0f32);
             let mut speed = self.crouchspeed;
@@ -1062,6 +1376,12 @@ impl Player {
             }
             self.crouchspeed = speed;
             self.update_crouch_offset_real();
+            if self.bwalk_try_move_upwards(env, 0.0) == CdResult::Collision {
+                // Crouch adjustment is blocked by the ceiling; bwalk_adjust_crouch_pos(-1).
+                (self.crouchoffset, self.crouchoffsetreal, self.crouchoffsetrealsmall) = prev;
+                self.crouchspeed = 0.0;
+                bgun.p.crouchpos = (bgun.p.crouchpos - 1).clamp(CROUCHPOS_SQUAT, CROUCHPOS_STAND);
+            }
         }
         if target == self.crouchoffset {
             self.crouchspeed = 0.0;
@@ -1070,7 +1390,7 @@ impl Player {
     }
 
     /// `bwalk_update_horizontal` (`bondwalk.c:1425`).
-    fn bwalk_update_horizontal(&mut self, bgun: &mut Bgun, lv: Lv, resolve: &dyn Fn(Vec3, Vec3) -> Vec3) {
+    fn bwalk_update_horizontal(&mut self, bgun: &mut Bgun, lv: Lv, env: &WalkEnv) {
         let lv60 = lv.lvupdate60freal;
         let spc0 = (self.eyeheight - 159.0) / 353.333_3 + 1.0;
         // bwalk_apply_crouch_speed
@@ -1085,7 +1405,19 @@ impl Player {
             }
             _ => {}
         }
-        self.update_crouch_offset(bgun, lv);
+        self.update_crouch_offset(bgun, lv, env);
+
+        // bmove_shotspeed_to_lateral (bondmove.c:1877): being shot shoves.
+        let (sintheta, costheta) = baddtor2(self.theta).sin_cos();
+        let (shotforwards, shotsideways) = if self.shotspeed.x != 0.0 || self.shotspeed.z != 0.0 {
+            bmove_dampen_shotspeed(&mut self.shotspeed, lv60);
+            (
+                self.shotspeed.z * costheta + -self.shotspeed.x * sintheta,
+                -self.shotspeed.x * costheta - self.shotspeed.z * sintheta,
+            )
+        } else {
+            (0.0, 0.0)
+        };
 
         let th = self.theta_vec();
         let mut tmp1 = -self.swaytarget * th.z * spc0;
@@ -1117,8 +1449,8 @@ impl Player {
             spb0 *= spa8;
         }
 
-        let speedsideways = (self.speedsideways * 0.8).abs();
-        let speedforwards = self.speedforwards.abs();
+        let speedsideways = ((self.speedsideways + shotsideways) * 0.8).abs();
+        let speedforwards = (self.speedforwards + shotforwards).abs();
         let speedtheta = (self.speedtheta * 0.8).abs();
         let mut heartrate = speedforwards.max(speedsideways).max(speedtheta);
         if dist >= 0.1 && heartrate < 0.8 {
@@ -1134,9 +1466,9 @@ impl Player {
         let bondbreathing = *br;
 
         let mult = self.headanims[HEADANIM_MOVING as usize].translateperframe * 0.5 * lv60;
-        let spe0 = (self.speedsideways * spc0) * mult;
+        let spe0 = (self.speedsideways * spc0 + shotsideways) * mult;
         // bmove_update_head (bondmove.c:2071)
-        let fwd = self.speedforwards * spc0;
+        let fwd = self.speedforwards * spc0 + shotforwards;
         self.bhead_adjust_animation(heartrate);
         let newspeedforwards = if heartrate != 0.0 { fwd / heartrate } else { 0.0 };
         let crouchpos = bgun.p.crouchpos;
@@ -1152,11 +1484,65 @@ impl Player {
         spcc.x += spb4;
         spcc.z += spb0;
 
+        // Ladders (bondwalk.c:1614): the part of the move into the ladder becomes
+        // climbing (ladderupdown, applied by bwalk_update_vertical) and the rest
+        // is slowed to 30 %.
+        if self.onladder {
+            let n = self.laddernormal.normalize_or_zero();
+            self.laddernormal = n;
+            let sp74 = -(spcc.x * n.x + spcc.z * n.z);
+            if -4.0 * lv60 < sp74 {
+                if sp74 < 0.0 {
+                    spcc.x += sp74 * n.x;
+                    spcc.z += sp74 * n.z;
+                    self.ladderupdown = sp74 * 0.3;
+                } else {
+                    let (radius, ymax, _) = self.player_get_bbox();
+                    if env
+                        .level
+                        .cd_find_ladder(self.pos, radius * 1.1, ymax - self.pos.y, self.manground - self.pos.y + 1.0)
+                        .is_none()
+                    {
+                        self.ladderupdown = 0.0;
+                    } else {
+                        spcc.x += sp74 * n.x;
+                        spcc.z += sp74 * n.z;
+                        self.ladderupdown = sp74 * 0.3;
+                    }
+                }
+                spcc.x *= 0.3;
+                spcc.z *= 0.3;
+            } else {
+                self.ladderupdown = 0.0;
+            }
+        }
+
         let before = self.pos;
-        // bwalk_resolve_posdelta — substituted (see Range::resolve).
-        self.pos = resolve(self.pos, spcc);
-        let xdelta = self.pos.x - before.x;
-        let zdelta = self.pos.z - before.z;
+        self.bwalk_resolve_posdelta(env, spcc, self.swaytarget == 0.0);
+        // Deltas from bondprevpos (bwalk_tick's start; the turn doesn't move).
+        let xdelta = self.pos.x - self.prevpos.x;
+        let zdelta = self.pos.z - self.prevpos.z;
+        // A blocked shove loses the blocked part (bondwalk.c:1700).
+        for (k, (d, want)) in [(xdelta, spcc.x), (zdelta, spcc.z)].into_iter().enumerate() {
+            let a = if k == 0 { 0 } else { 2 };
+            let s = &mut self.shotspeed[a];
+            if d >= 0.0 {
+                if *s > 0.0 {
+                    if want >= 0.0 && d < want {
+                        *s *= d / want;
+                    }
+                } else if want < 0.0 {
+                    *s = 0.0;
+                }
+            } else if *s < 0.0 {
+                if want <= 0.0 && want < d {
+                    *s *= d / want;
+                }
+            } else if want > 0.0 {
+                *s = 0.0;
+            }
+        }
+        let (xdelta, zdelta) = (self.pos.x - before.x, self.pos.z - before.z);
         // Blocked movement bleeds speed (bondwalk.c:1736).
         let sp54 = -xdelta * th.z + zdelta * th.x;
         let sp50 = xdelta * th.x + zdelta * th.z;
@@ -1199,11 +1585,146 @@ impl Player {
         bgun.bgun_set_adjust_pos(v360 * 0.017_450_513);
     }
 
-    /// The end of `bwalk_update_vertical` (`bondwalk.c:1129`): eye height from the
-    /// head bob and crouch. The floor is flat in the range (no falling, stairs).
-    fn bwalk_update_vertical(&mut self, lv: Lv) {
-        let _ = lv;
-        self.crouchheight = 0.0;
+    /// `bwalk_update_vertical` (`bondwalk.c:739`), NTSC final: ladders, the
+    /// ground under the cylinder, stepping up (a low-pass on `manground`, at most
+    /// 50 cm below the ground, refused by a ceiling), falling (PD's gravity, landing
+    /// exactly on the ground), the landing dip, and the eye height.
+    ///
+    /// Not ported: lifts and escalators (Complex has none), `GEOFLAG_DIE` floors
+    /// (not in the generic input), the counter-op radius fix, landing on a chr in a
+    /// lift, and turbo mode.
+    fn bwalk_update_vertical(&mut self, lv: Lv, env: &WalkEnv) {
+        let level = env.level;
+        let (radius, ymax, _ymin) = self.player_get_bbox();
+        let lv60 = lv.lvupdate60freal;
+
+        // On a ladder? (A second, lower probe keeps the player "near" one without
+        // taking the ground from under it: onladder2.)
+        let mut onladder = level.cd_find_ladder(self.pos, radius * 1.2, ymax - self.pos.y, self.manground - self.pos.y + 1.0);
+        let mut onladder2 = false;
+        if onladder.is_none() {
+            if let Some(n) = level.cd_find_ladder(self.pos, radius * 1.1, ymax - self.pos.y, self.manground - self.pos.y - 10.0) {
+                onladder2 = true;
+                self.laddernormal = n;
+            }
+        }
+        if let Some(n) = onladder {
+            self.laddernormal = n;
+        }
+
+        // cd_find_ground_at_cyl_ctfril from the eye.
+        let (mut ground, floorpoly) = level.cd_find_ground_at_cyl(self.pos, self.radius);
+        self.floorpoly = floorpoly;
+        self.floorroom = floorpoly.and_then(|p| level.geom.polys[p].room);
+        if ground < -30000.0 {
+            ground = -30000.0;
+        }
+
+        // Ladders
+        if self.onladder {
+            if self.ladderupdown >= 0.0 || (ground <= self.manground && ground <= self.manground + self.ladderupdown) {
+                // Still on the ladder.
+                if self.bwalk_try_move_upwards(env, self.ladderupdown) == CdResult::NoCollision {
+                    self.manground += self.ladderupdown;
+                }
+            } else if self.bwalk_try_move_upwards(env, ground - self.manground) == CdResult::NoCollision {
+                self.manground = ground;
+                onladder = None;
+            }
+        }
+        self.onladder = onladder.is_some();
+        if self.onladder {
+            self.ground = self.manground;
+        } else if !onladder2 {
+            self.ground = ground;
+        }
+
+        // Standing on flat ground, or going up stairs, ledges or ramps.
+        if self.fallspeed >= 0.0 || self.ground > self.manground {
+            self.sumground = self.manground / 0.045_499_98;
+            for _ in 0..lv.lvupdate240 {
+                self.sumground = self.sumground * 0.9545 + self.ground;
+            }
+            if self.manground < self.ground {
+                // Feet are lower than the ground.
+                let sumground = (self.sumground * 0.045_499_98).max(self.ground - 50.0);
+                if self.bwalk_try_move_upwards(env, sumground - self.manground) == CdResult::NoCollision {
+                    self.manground = sumground;
+                }
+            }
+        }
+
+        if self.manground > self.ground {
+            // Not standing on the ground: falling.
+            let fallspeed = self.fallspeed;
+            let mut newmanground = self.manground;
+            let multiplier = 0.277_777_777;
+            let mut newfallspeed = fallspeed - lv60 * multiplier;
+            newmanground += lv60 * (fallspeed + newfallspeed) * 0.5;
+            let mut fallspeed = newfallspeed;
+            if newmanground < self.ground {
+                newfallspeed = self.manground - self.ground;
+                newmanground = self.ground;
+                fallspeed = -(self.fallspeed * self.fallspeed + (((newfallspeed + newfallspeed) * 0.277_777_777) / 60.0) * 60.0).sqrt();
+            }
+            if self.bwalk_try_move_upwards(env, newmanground - self.manground) == CdResult::NoCollision {
+                self.manground = newmanground;
+                self.fallspeed = fallspeed;
+                if !self.isfalling {
+                    self.isfalling = true;
+                    self.fallstart = lv.lvframe60;
+                } else if lv.lvframe60 - self.fallstart > 240 {
+                    // Falling for 4 seconds.
+                    self.die_request = true;
+                }
+            } else {
+                // Not falling (something is in the way).
+                self.fallspeed = 0.0;
+                self.isfalling = false;
+                if self.manground <= -30000.0 {
+                    self.die_request = true;
+                }
+            }
+        } else {
+            self.isfalling = false;
+            if self.manground <= -30000.0 {
+                self.die_request = true;
+            }
+        }
+
+        if self.fallspeed < 0.0 && self.manground <= self.ground {
+            // Landing after a fall: the harder, the deeper the dip.
+            self.isfalling = false;
+            if self.fallspeed < -13.333_333 {
+                self.crouchtime240 = 60;
+                self.crouchfall = -90.0;
+            } else if self.fallspeed < -5.0 {
+                self.crouchtime240 = 60;
+                self.crouchfall = (-5.0 - self.fallspeed) * -90.0 / 8.333_333;
+            }
+            if self.fallspeed < -6.0 {
+                self.landed = Some(self.fallspeed);
+            }
+            self.fallspeed = 0.0;
+        }
+
+        // The dip: hold crouchfall for crouchtime240, then let it back to 0.
+        for _ in 0..lv.lvupdate240 {
+            if self.crouchtime240 > 0 {
+                self.sumcrouch = self.sumcrouch * 0.9456 + self.crouchfall;
+                self.crouchtime240 -= 1;
+            } else {
+                if self.crouchfall < 0.0 {
+                    self.crouchfall -= -1.125;
+                    if self.crouchfall >= 0.0 {
+                        self.crouchfall = 0.0;
+                    }
+                }
+                self.sumcrouch = self.sumcrouch * 0.9456 + self.crouchfall;
+            }
+        }
+
+        self.crouchheight = self.sumcrouch * 0.054_400_027;
         let vv_height = (self.headpos.y / self.standheight) * self.eyeheight;
         let mut eyeheight = vv_height + self.crouchoffsetrealsmall + self.crouchheight * self.eyeheight * 0.006_289_308;
         if eyeheight < 30.0 {

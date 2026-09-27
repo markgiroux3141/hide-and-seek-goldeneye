@@ -63,6 +63,112 @@ pub fn chr_tick(sim: &mut Sim, i: usize) {
         }
     }
     chr_tick_shots(sim, i);
+    footstep_check_default(sim, i);
+}
+
+/// `g_FootstepAnims` (`footstep.c:34`): the animations with footfalls, and the
+/// two frames the feet land on.
+const FOOTSTEP_ANIMS: [(u16, f32, f32); 34] = [
+    (0x002b, 8.0, 25.0),
+    (0x0029, 5.0, 14.0),
+    (0x006b, 8.0, 25.0),
+    (0x0028, 27.0, 8.0),
+    (0x002a, 18.0, 6.0), // ANIM_RUNNING_TWOHANDGUN
+    (0x0052, 8.0, 25.0),
+    (0x0053, 25.0, 8.0),
+    (0x0054, 25.0, 8.0),
+    (0x0055, 7.0, 18.0),
+    (0x0056, 7.0, 18.0),
+    (0x0057, 18.0, 7.0),
+    (0x0058, 15.0, 5.0),
+    (0x0059, 8.0, 20.0), // ANIM_RUNNING_ONEHANDGUN
+    (0x005a, 6.0, 15.0),
+    (0x006c, 25.0, 8.0),
+    (0x006d, 25.0, 8.0),
+    (0x006e, 8.0, 19.0),
+    (0x006f, 21.0, 8.0),
+    (0x0070, 15.0, 5.0),
+    (0x0071, 15.0, 5.0),
+    (0x0072, 23.0, 8.0),
+    (0x0073, 8.0, 19.0),
+    (0x0093, 23.0, 10.0),
+    (0x0094, 15.0, 5.0),
+    (0x005f, 14.0, 1.0),
+    (0x0016, 29.0, 10.0),
+    (0x0018, 24.0, 46.0),
+    (0x001b, 10.0, 28.0),
+    (0x001d, 13.0, 2.0),
+    (0x001e, 12.0, 1.0),
+    (0x005c, 19.0, 42.0),
+    (0x005d, 15.0, 5.0),
+    (0x005e, 4.0, 12.0),
+    (0x0392, 5.0, 20.0),
+];
+
+/// `footstep_is_running` (`footstep.c:70`).
+fn footstep_is_running(animnum: u16) -> bool {
+    matches!(
+        animnum,
+        0x1d | 0x1e | 0x29 | 0x2a | 0x55 | 0x56 | 0x57 | 0x58 | 0x59 | 0x5a | 0x5d | 0x5e | 0x5f | 0x6e | 0x6f | 0x70 | 0x71 | 0x73 | 0x93 | 0x94
+    )
+}
+
+/// `g_FootstepSounds` (`footstep.c:14`): 8 per floor type (none, wood, stone,
+/// carpet, metal, mud, water, dirt, snow); 0 = none.
+pub const FOOTSTEP_SOUNDS: [u16; 72] = [
+    0, 0, 0, 0, 0, 0, 0, 0, //
+    0x80dc, 0x80dd, 0x80e0, 0x80e1, 0x80de, 0x80df, 0x80e2, 0x80e3, //
+    0x80c4, 0x80c5, 0x80c8, 0x80c9, 0x80c6, 0x80c7, 0x80ca, 0x80cb, //
+    0x80e6, 0x80e7, 0x80ea, 0x80eb, 0x80e8, 0x80e9, 0x80ec, 0x80ed, //
+    0x80d4, 0x80d5, 0x80d8, 0x80d9, 0x80d6, 0x80d7, 0x80da, 0x80db, //
+    0x80ee, 0x80ef, 0x80f2, 0x80f3, 0x80f0, 0x80f1, 0x80f4, 0x80f5, //
+    0x80e4, 0x80e5, 0x80e4, 0x80e5, 0x80e4, 0x80e5, 0x80e4, 0x80e5, //
+    0x80cc, 0x80cd, 0x80d0, 0x80d1, 0x80ce, 0x80cf, 0x80d2, 0x80d3, //
+    0x8187, 0x8188, 0x818b, 0x818c, 0x8189, 0x818a, 0x818d, 0x818e,
+];
+
+/// `footstep_choose_sound` (`footstep.c:100`), non-Skedar: a random one of the
+/// floor's walking or running pair-set, never the same sample twice in a row.
+/// Returns 0 for none.
+pub fn footstep_choose_sound(rng: &mut super::pdmath::Rng, floortype: u8, lastfootsample: &mut i32, running: bool) -> u16 {
+    let floortype = if floortype <= 8 { floortype as i32 } else { 0 };
+    if floortype == 0 {
+        // FLOORTYPE_DEFAULT's row is all -1: nothing plays (the index loop below
+        // still runs in PD; with every entry -1 it makes no difference).
+        return 0;
+    }
+    let mut index;
+    loop {
+        let rand = (rng.random() % 8) as i32;
+        index = (if running { 2 } else { 0 }) + (rand & 5) + floortype * 8;
+        if index != *lastfootsample {
+            break;
+        }
+    }
+    *lastfootsample = index;
+    FOOTSTEP_SOUNDS[index as usize]
+}
+
+/// `footstep_check_default` (`footstep.c:155`): while one human plays, a chr
+/// whose animation is in `g_FootstepAnims` makes a footstep when its frame passes
+/// either footfall frame.
+fn footstep_check_default(sim: &mut Sim, i: usize) {
+    let c = &mut sim.chrs[i];
+    let Some(anim) = c.model.animnum else { return };
+    let frame = c.model.frame;
+    let prevframe = c.oldframe;
+    c.oldframe = frame;
+    let Some(&(animnum, f1, f2)) = FOOTSTEP_ANIMS.iter().find(|a| a.0 == anim.0) else { return };
+    let footstep = (frame >= f1 && prevframe < f1) || (frame >= f2 && prevframe < f2);
+    if !footstep {
+        return;
+    }
+    let (floortype, mut last) = (c.floortype, c.lastfootsample);
+    let sound = footstep_choose_sound(&mut sim.rng, floortype, &mut last, footstep_is_running(animnum));
+    sim.chrs[i].lastfootsample = last;
+    if sound != 0 {
+        sim.footsteps.push((i, sound));
+    }
 }
 
 /// `chr_update_position`, bot branch (`chr.c:521-1023`, the non-ladder,
@@ -142,6 +248,9 @@ fn chr_update_position(sim: &mut Sim, i: usize) {
     }
     c.ground = ground;
     c.floorroom = floorpoly.and_then(|p| level.geom.polys[p].room);
+    if let Some(p) = floorpoly {
+        c.floortype = level.geom.polys[p].floortype;
+    }
 
     let mut m = manground;
     let mut die = false;
@@ -727,6 +836,9 @@ pub fn chr_is_target_in_fov(c: &Chr, target_pos: Vec3, degrees256: u8) -> bool {
 /// chr's cylinder (`chr->ground + height - 20`) to the target's prop position,
 /// against `GEOFLAG_BLOCK_SIGHT`. Other chrs never block sight.
 pub fn chr_has_los_to_chr(sim: &Sim, i: usize, target: usize) -> bool {
+    if bot::bot_is_target_invisible(sim, i, target) {
+        return false;
+    }
     let c = &sim.chrs[i];
     let eye = Vec3::new(c.pos.x, c.ground + c.height - 20.0, c.pos.z);
     sim.level.los(eye, sim.chrs[target].prop_pos())
@@ -738,15 +850,25 @@ pub fn chr_has_los_to_chr(sim: &Sim, i: usize, target: usize) -> bool {
 /// bots, so there is **no horizontal correction** (`aimendsideback = 0`) — the
 /// barrel points where the body faces, zeroing error included. Only the vertical
 /// aim is computed, from the chr's root to the target's.
+///
+/// A player target's `prop->pos` is its eye, so a bot aims `0.4 ×` the eye height
+/// below it (`chraction.c:9123`: `relaimy -= eyeheight * (0.4 + 0.05 *
+/// RANDOMFRAC() * arg4)`, `arg4` = 0 from `bot_tick`): `player` carries the
+/// player's eye height and that `RANDOMFRAC()`.
 pub fn chr_calculate_aimend(
     c: &mut Chr,
     target_pos: Vec3,
     animcfg: Option<&'static AttackAnimConfig>,
     hasleftgun: bool,
     hasrightgun: bool,
+    player: Option<(f32, f32)>,
 ) {
     let from = c.prop_pos();
-    let rel = target_pos - from;
+    let mut rel = target_pos - from;
+    if let Some((eyeheight, randomfrac)) = player {
+        let arg4 = 0.0;
+        rel.y -= eyeheight * (0.4 + 0.05 * randomfrac * arg4);
+    }
     let mut shootroty = rel.y.atan2((rel.x * rel.x + rel.z * rel.z).sqrt());
     if shootroty >= dtor(180.0) {
         shootroty -= turn();
@@ -915,16 +1037,20 @@ fn chr_shoot(sim: &mut Sim, i: usize, hand: usize) {
     let Some(w) = weapons::get(wid) else { return };
     let tickspershot = bot::weapon_get_num_ticks_per_shot(w);
     let mut shotdue = false;
+    let mut makebeam = false;
     {
         let c = &mut sim.chrs[i];
         if tickspershot <= 0 {
             shotdue = true;
+            makebeam = true;
         } else {
             c.firecount[hand] += g.lvupdate60;
             if c.firecount[hand] >= tickspershot {
                 c.firecount[hand] = 0;
                 c.unk32c_12 ^= 1 << hand;
                 shotdue = true;
+                // An automatic draws a tracer every other round (`chr_shoot`).
+                makebeam = c.unk32c_12 & (1 << hand) != 0;
             }
         }
     }
@@ -964,7 +1090,9 @@ fn chr_shoot(sim: &mut Sim, i: usize, hand: usize) {
                 Some((t, j)) if t < wall_t => (gunpos + dir * t, Some(j)),
                 _ => (gunpos + dir * wall_t, None),
             };
-            sim.shots.push(Shot { from: gunpos, to: end, hit_chr, age: 0, shooter: i });
+            let hit_wall = hit_chr.is_none() && wall.is_some();
+            // Every spike weapon is on `chr_shoot`'s beam list.
+            sim.shots.push(Shot { from: gunpos, to: end, hit_chr, age: 0, shooter: i, hand, weapon: wid, beam: makebeam, hit_wall });
             if let Some(j) = hit_chr {
                 chr_damage(sim, j, w.damage, dir, Some(i), false);
             }
@@ -1020,6 +1148,21 @@ pub fn chr_punch_inflict_damage(sim: &mut Sim, i: usize, damage: f32, range: f32
 /// multiplayer: no stun, no hit animation — a shove, a flinch, and death at
 /// `maxdamage`. Bullets arrive as `HITPART_GENERAL` (×0.5, then the torso ×2).
 pub fn chr_damage(sim: &mut Sim, victim: usize, damage: f32, vector: Vec3, attacker: Option<usize>, blunt: bool) {
+    chr_damage_hitpart(sim, victim, damage, vector, attacker, blunt, HITPART_GENERAL);
+}
+
+pub const HITPART_HEAD: i32 = 8;
+pub const HITPART_TORSO: i32 = 15;
+pub const HITPART_GUN: i32 = 100;
+pub const HITPART_HAT: i32 = 110;
+pub const HITPART_GENERAL: i32 = 200;
+pub const HITPART_GENERALHALF: i32 = 201;
+
+/// [`chr_damage`] with the body part the shot found (`chraction.c:4706`):
+/// `HITPART_GENERAL` becomes the torso at half damage (`GENERALHALF` a quarter),
+/// then the head takes ×4 (the multiplayer `headshotdamagescale` is 1), the torso
+/// ×2, a gun or hat nothing, everything else ×1.
+pub fn chr_damage_hitpart(sim: &mut Sim, victim: usize, damage: f32, vector: Vec3, attacker: Option<usize>, blunt: bool, hitpart: i32) {
     let mut damage = damage;
     if sim.chrs[victim].is_dead() {
         return;
@@ -1034,9 +1177,28 @@ pub fn chr_damage(sim: &mut Sim, victim: usize, damage: f32, vector: Vec3, attac
             damage *= 0.7;
         }
     }
-    // HITPART_GENERAL → torso at half damage, then torso doubles it.
-    damage *= 0.5;
-    damage += damage;
+    let mut hitpart = hitpart;
+    if hitpart == HITPART_GENERAL {
+        // Halve the damage because it's doubled for torso below.
+        hitpart = HITPART_TORSO;
+        damage *= 0.5;
+    } else if hitpart == HITPART_GENERALHALF {
+        hitpart = HITPART_TORSO;
+        damage *= 0.25;
+    }
+    if hitpart == HITPART_HEAD {
+        damage *= 4.0;
+    } else if hitpart == HITPART_TORSO {
+        damage += damage;
+    } else if hitpart == HITPART_GUN || hitpart == HITPART_HAT {
+        damage = 0.0;
+    }
+
+    // A player victim: the rest is the player's (`chraction.c:4752`).
+    if sim.chrs[victim].player {
+        sim.player_hits.push(super::sim::PlayerHit { chr: victim, damage, vector, attacker });
+        return;
+    }
 
     // `chr_flinch_body` only calls random() when a flinch actually starts.
     let flinch_roll = if sim.chrs[victim].flinchcnt < 0 { sim.rng.random() } else { 0 };
@@ -1046,6 +1208,8 @@ pub fn chr_damage(sim: &mut Sim, victim: usize, damage: f32, vector: Vec3, attac
         c.aibot.shotspeed.z += vector.z * 0.75;
         if damage > 0.0 {
             c.damage += damage;
+            sim.grunts.push(victim);
+            let c = &mut sim.chrs[victim];
             chr_flinch_body(c, flinch_roll);
             if c.damage >= c.maxdamage {
                 chr_die(sim, victim, attacker);

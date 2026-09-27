@@ -72,6 +72,9 @@ pub struct ModelDef {
     /// The first BBOX node's box (`model_find_bbox_rodata`): xmin, xmax, ymin,
     /// ymax, zmin, zmax in model units.
     pub bbox: Option<[f32; 6]>,
+    /// Where this model's texture PNGs are, when not the guns' own folder (a
+    /// stage's BG exports its textures beside it).
+    pub tex_dir: Option<std::path::PathBuf>,
 }
 
 impl ModelDef {
@@ -115,6 +118,7 @@ impl ModelDef {
         let bbox = f.nodes.iter().find_map(|n| n.bbox);
         ModelDef {
             bbox,
+            tex_dir: None,
             name: f.name.clone(),
             nodes,
             parts,
@@ -514,5 +518,6 @@ pub fn player_head_modeldef() -> ModelDef {
         batches: vec![],
         file: None,
         bbox: None,
+        tex_dir: None,
     }
 }

@@ -219,6 +219,9 @@ pub struct SparkType {
 /// (orange bg hit, Farsight), 0x17 (green bg hit), 0x18 (tranquilizer).
 pub const SPARKTYPE_DEFAULT: usize = 0;
 pub const SPARKTYPE_ELECTRICAL: usize = 1;
+pub const SPARKTYPE_BLOOD: usize = 2;
+pub const SPARKTYPE_FLESH: usize = 3;
+pub const SPARKTYPE_FLESH_LARGE: usize = 4;
 pub const SPARKTYPE_PROJECTILE: usize = 0x10;
 pub const SPARKTYPE_BGHIT_ORANGE: usize = 0x16;
 pub const SPARKTYPE_BGHIT_GREEN: usize = 0x17;
@@ -243,6 +246,47 @@ pub fn spark_type(t: usize) -> SparkType {
     };
     match t {
         SPARKTYPE_ELECTRICAL => SparkType { col0: 0x80ffffff, ..base },
+        // Rows 0x02-0x04 (`sparks.c:38`). A human body's blood colour
+        // (`chr_get_blood_colour`) is the table's own.
+        SPARKTYPE_BLOOD => SparkType {
+            unk00: 40,
+            unk02: -1,
+            unk04: 30,
+            unk06: 30,
+            weight: 2.0,
+            maxage: 35,
+            unk12: 35,
+            numsparks: 5,
+            col0: 0x301010ff,
+            col1: 0x401010ff,
+            ..base
+        },
+        SPARKTYPE_FLESH => SparkType {
+            unk00: 40,
+            unk02: -1,
+            unk04: 300,
+            unk06: 200,
+            weight: 0.15,
+            maxage: 5,
+            unk12: 5,
+            numsparks: 4,
+            col0: 0xffffff40,
+            col1: 0x560011a0,
+            ..base
+        },
+        SPARKTYPE_FLESH_LARGE => SparkType {
+            unk00: 10,
+            unk02: 1,
+            unk04: 1200,
+            unk06: 400,
+            weight: 0.15,
+            maxage: 5,
+            unk12: 5,
+            numsparks: 5,
+            col0: 0xa0a0e000,
+            col1: 0xffffffff,
+            ..base
+        },
         SPARKTYPE_PROJECTILE => SparkType { unk00: 50, weight: 1.0, unk12: 30, numsparks: 10, ..base },
         SPARKTYPE_BGHIT_ORANGE => SparkType { maxage: 120, unk12: 120, numsparks: 30, col0: 0xff8080ff, col1: 0xffff80ff, ..base },
         SPARKTYPE_BGHIT_GREEN => SparkType { col0: 0x4fff4fff, ..base },
@@ -328,10 +372,17 @@ impl Sparks {
         let ty = spark_type(typenum);
         let gi = self.next_group;
         self.next_group = (self.next_group + 1) % self.groups.len();
-        let n = normal.normalize_or_zero();
-        let refl = dir + n * (-2.0 * dir.dot(n));
-        let l = refl.length();
-        let grouppos = refl * (ty.unk02 as f32 / if l == 0.0 { 1.0 } else { l });
+        let grouppos = if normal != Vec3::ZERO {
+            let n = normal.normalize_or_zero();
+            let refl = dir + n * (-2.0 * dir.dot(n));
+            let l = refl.length();
+            refl * (ty.unk02 as f32 / if l == 0.0 { 1.0 } else { l })
+        } else if (-1..2).contains(&ty.unk02) {
+            // No surface (`chr_emit_sparks` passes NULL): along the shot.
+            dir * 10.0 * ty.unk02 as f32
+        } else {
+            Vec3::ZERO
+        };
         let start = self.next;
         for _ in 0..ty.numsparks {
             // sparkgroup_ensure_free_spark_slot

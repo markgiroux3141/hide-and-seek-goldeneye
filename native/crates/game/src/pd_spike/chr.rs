@@ -121,6 +121,10 @@ pub struct Aibot {
     pub numwaystepstotarget: i32,
     /// Spawn fade-in: render alpha × `(120 - fadeintimer60) / 120` (`chr.c:3393`).
     pub fadeintimer60: i32,
+    /// `aibot->canseecloaked`: on only while one chr is polled, after a rare roll.
+    pub canseecloaked: bool,
+    /// `aibot->targetcloaktimer60`: how long a cloaked target stays visible.
+    pub targetcloaktimer60: i32,
 }
 
 impl Aibot {
@@ -175,6 +179,8 @@ impl Aibot {
             chrrooms: vec![None; nchrs],
             numwaystepstotarget: 0,
             fadeintimer60: 0,
+            canseecloaked: false,
+            targetcloaktimer60: 0,
         }
     }
 }
@@ -218,6 +224,13 @@ pub struct Chr {
     pub floorroom: Option<u16>,
     /// `chr->onladder`.
     pub onladder: bool,
+    /// `CHRHFLAG_CLOAKED`: only the player cloaks here (the RC-P120).
+    pub cloaked: bool,
+    /// `chr->floortype` (the floor underfoot, `FLOORTYPE_*`), `chr->oldframe` and
+    /// `chr->lastfootsample`: what `footstep_check_default` reads and keeps.
+    pub floortype: u8,
+    pub oldframe: f32,
+    pub lastfootsample: i32,
 
     pub target: Option<usize>,
     pub damage: f32,
@@ -250,6 +263,16 @@ pub struct Chr {
 
     pub aibot: Aibot,
 
+    /// `PROPTYPE_PLAYER`: a human, moved, turned and fired by the player code
+    /// (`crate::pd_guns`), never by `bot_tick`. Bots see it, target it, shoot it and
+    /// collide with it like any chr; its `aibot` is unused.
+    pub player: bool,
+    /// A player's `prop->pos.y`: the eye (`bwalk_update_vertical`). Players have
+    /// no animated root.
+    pub player_eye_y: f32,
+    /// A player's `vv_theta` in radians (`chr_get_theta` for a player).
+    pub player_theta: f32,
+
     pub kills: u32,
     pub deaths: u32,
     pub suicides: u32,
@@ -272,6 +295,9 @@ impl Chr {
     }
 
     pub fn root_height(&self) -> f32 {
+        if self.player {
+            return self.player_eye_y - self.pos.y;
+        }
         let Some(a) = self.model.animnum else { return 100.0 };
         let track = ROOT_Y[anims::index_of(a)];
         let n = track.len() as i32;
@@ -284,8 +310,11 @@ impl Chr {
         Vec2::new(self.pos.x, self.pos.z)
     }
 
-    /// `chr_get_theta` for a bot: `aibot->lookangle`.
+    /// `chr_get_theta`: `aibot->lookangle` for a bot, `vv_theta` for a player.
     pub fn theta(&self) -> f32 {
+        if self.player {
+            return self.player_theta;
+        }
         self.aibot.lookangle
     }
 

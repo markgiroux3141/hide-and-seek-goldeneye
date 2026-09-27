@@ -121,3 +121,15 @@ For a readable per-second timeline:
 ```
 cargo test --release -p game pd_spike::tests::probe -- --ignored --nocapture
 ```
+
+## A human player (branch `spike/pd-complex`, 2026-09-27)
+
+`SPIKE_PD_COMPLEX_FIGHT.md` adds a player chr (`SimConfig::humans`, `Chr::player`). `bot_tick` skips it and a host moves it. Also ported for it:
+
+- `chr_calculate_aimend`'s player branch: bots aim at eye − 0.4 × eye height;
+- `chr_damage` with hit parts (`chr_damage_hitpart`), with player victims handed to the host (`Sim::player_hits`);
+- `bot_is_target_invisible`, `canseecloaked`, `targetcloaktimer60` and `zerocloakspeed` (the player can cloak);
+- `footstep_check_default`, with floor types on `GeomPoly` from the tiles' `floortype`;
+- the effects half of `chr_shoot`, whose records now carry the hand, the weapon, `makebeam` and wall hits.
+
+Spawn uses the chr's own radius (30 for a player). The bot-only matches and their seeded A/B tests are unchanged.

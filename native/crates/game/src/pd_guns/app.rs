@@ -13,6 +13,9 @@
 //! previous, B tap reload / hold gun function, C-left/right strafe, C-up/down
 //! look (aimed: crouch, lean on C-left/right, zoom on the sniper/Farsight),
 //! Start toggles the F1 panel.
+//!
+//! The window is generic over a [`Host`]: the range itself (a bare [`Sim`]), or
+//! a match that owns a `Sim` plus other things to draw (`crate::pd_complex`).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -72,7 +75,60 @@ struct Sfx {
     volume: f32,
 }
 
-pub struct App {
+/// What the window runs: the guns' [`Sim`] and whatever world it sits in.
+pub trait Host {
+    fn sim(&self) -> &Sim;
+    fn sim_mut(&mut self) -> &mut Sim;
+    fn title(&self) -> &'static str;
+    /// One PD frame of `lvupdate240` quarter-ticks.
+    fn frame(&mut self, input: &PdInput, lvupdate240: i32);
+    /// The GPU is up: upload what the engine draws, register models with the PD
+    /// renderer (before `load_models`).
+    fn gpu_ready(&mut self, renderer: &mut Renderer);
+    /// Just before this frame renders: the engine-side draws (characters).
+    fn before_render(&mut self, _renderer: &mut Renderer, _vp: Mat4) {}
+    /// The host's own section at the top of the panel.
+    fn panel(&mut self, _ui: &mut egui::Ui) {}
+    /// Extra HUD in PD pixels, drawn over the gun HUD in both video modes.
+    fn hud(&self, _cv: &mut Canvas) {}
+    /// Text lines drawn over the picture (the normal view only).
+    fn overlay(&self, _painter: &egui::Painter, _screen: egui::Rect) {}
+}
+
+/// The firing range: the bare sim, its boxes drawn by the engine.
+impl Host for Sim {
+    fn sim(&self) -> &Sim {
+        self
+    }
+    fn sim_mut(&mut self) -> &mut Sim {
+        self
+    }
+    fn title(&self) -> &'static str {
+        "PD RANGE — Perfect Dark guns spike"
+    }
+    fn frame(&mut self, input: &PdInput, lvupdate240: i32) {
+        Sim::frame(self, input, lvupdate240);
+    }
+    fn gpu_ready(&mut self, renderer: &mut Renderer) {
+        let mut region = Region::new(0);
+        region.brushes = self.range.brushes();
+        let (_, tex) = region.evaluate_both(&[]);
+        renderer.set_region_textured(0, &tex);
+    }
+    fn panel(&mut self, ui: &mut egui::Ui) {
+        let hits: u32 = self.range.boards().map(|t| t.hits).sum();
+        ui.label(format!("board hits {hits}"));
+        if ui.button("clear targets").clicked() {
+            for t in &mut self.range.targets {
+                t.hits = 0;
+                t.damage = 0.0;
+            }
+            self.wallhits.clear();
+        }
+    }
+}
+
+pub struct App<H: Host> {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     pd: Option<PdRenderer>,
@@ -82,7 +138,7 @@ pub struct App {
     sfx: HashMap<u16, Sfx>,
     loops: HashMap<usize, u64>,
 
-    sim: Sim,
+    host: H,
     hand_model: usize,
     rate: Rate,
     acc: f32,
@@ -225,8 +281,14 @@ fn merge_pad(inp: &mut PdInput, n: N64State, invert_aim: bool) {
 
 pub fn run() {
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn,engine=info,game=info")).try_init();
+    let sim = Sim::new(HAND_MODELS[0]).unwrap_or_else(|e| panic!("pd_range: {e} — export with tools/pd-assets/pd_fpgun.py all"));
+    run_host(sim);
+}
+
+/// Open the window around `host` and run it.
+pub fn run_host<H: Host>(host: H) {
     let event_loop = EventLoop::new().expect("create event loop");
-    let mut app = App::new();
+    let mut app = App::new(host);
     event_loop.run_app(&mut app).expect("run app");
 }
 
@@ -253,9 +315,8 @@ fn load_sfx() -> HashMap<u16, Sfx> {
     out
 }
 
-impl App {
-    fn new() -> Self {
-        let sim = Sim::new(HAND_MODELS[0]).unwrap_or_else(|e| panic!("pd_range: {e} — export with tools/pd-assets/pd_fpgun.py all"));
+impl<H: Host> App<H> {
+    fn new(host: H) -> Self {
         App {
             window: None,
             renderer: None,
@@ -265,7 +326,7 @@ impl App {
             audio: AudioManager::new(),
             sfx: load_sfx(),
             loops: HashMap::new(),
-            sim,
+            host,
             hand_model: 0,
             rate: Rate::Hz60,
             acc: 0.0,
@@ -307,15 +368,6 @@ impl App {
             let _ = w.set_cursor_grab(CursorGrabMode::None);
             w.set_cursor_visible(true);
             self.captured = false;
-        }
-    }
-
-    fn upload_range(&mut self) {
-        let mut region = Region::new(0);
-        region.brushes = self.sim.range.brushes();
-        let (_, tex) = region.evaluate_both(&[]);
-        if let Some(r) = self.renderer.as_mut() {
-            r.set_region_textured(0, &tex);
         }
     }
 
@@ -366,7 +418,7 @@ impl App {
         let mut n = 0;
         while self.acc >= frame_dt && n < 6 {
             let inp = self.input(n == 0);
-            self.sim.frame(&inp, self.rate.lvupdate240());
+            self.host.frame(&inp, self.rate.lvupdate240());
             self.acc -= frame_dt;
             n += 1;
             self.flush_sounds();
@@ -377,8 +429,8 @@ impl App {
     }
 
     fn flush_sounds(&mut self) {
-        let reqs: Vec<SoundReq> = std::mem::take(&mut self.sim.sounds);
-        let stops: Vec<usize> = std::mem::take(&mut self.sim.stop_loops);
+        let reqs: Vec<SoundReq> = std::mem::take(&mut self.host.sim_mut().sounds);
+        let stops: Vec<usize> = std::mem::take(&mut self.host.sim_mut().stop_loops);
         let Some(audio) = self.audio.as_mut() else { return };
         let track = self.tv_track.as_ref().filter(|_| self.tv_audio.active()).map(|(id, _)| *id);
         for h in stops {
@@ -422,11 +474,6 @@ impl App {
         }
     }
 
-    /// The engine's world view-projection (metres), with `vi_shake` applied.
-    fn world_vp(&self, aspect: f32) -> Mat4 {
-        world_vp(&self.sim, aspect)
-    }
-
     fn ui(&mut self) -> Option<EguiFrame> {
         let window = self.window.as_ref()?.clone();
         let state = self.egui_state.as_mut()?;
@@ -434,15 +481,14 @@ impl App {
         let mut select: Option<(i32, bool)> = None;
         let mut hand_model = self.hand_model;
         let mut rate = self.rate;
-        let mut show_panel = self.show_panel;
+        let show_panel = self.show_panel;
         let mut always_sight = self.always_sight;
         let mut invert_pad_aim = self.invert_pad_aim;
         let mut grid = self.grid;
-        let mut brightness = self.sim.room.br_settled_regional;
-        let mut sens = self.sim.player.mouse_sens;
-        let mut reset_targets = false;
+        let mut brightness = self.host.sim().room.br_settled_regional;
+        let mut sens = self.host.sim().player.mouse_sens;
         let mut restock = false;
-        let sim = &self.sim;
+        let host = &mut self.host;
         let captured = self.captured;
         let fps = self.fps;
         let pad_connected = self.pads.as_ref().is_some_and(|p| p.connected());
@@ -452,6 +498,7 @@ impl App {
         let mut panel_px = 0.0f32;
 
         let out = self.egui_ctx.run(raw, |ctx| {
+            let sim = host.sim();
             let screen = ctx.screen_rect();
             let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Background, egui::Id::new("pdhud")));
             let p = &sim.bgun.p;
@@ -483,7 +530,9 @@ impl App {
 
             // PD's gun HUD (bgun_draw_hud), drawn by the sim in PD pixels and
             // scaled up without filtering.
-            if let Some(cv) = sim.hud.as_ref().filter(|_| !video.n64) {
+            if let Some(hud) = sim.hud.as_ref().filter(|_| !video.n64) {
+                let mut cv = Canvas { w: hud.w, h: hud.h, px: hud.px.clone() };
+                host.hud(&mut cv);
                 let img = egui::ColorImage::from_rgba_premultiplied([cv.w, cv.h], &cv.rgba8());
                 let tex = match hud_tex.take() {
                     Some(mut t) => {
@@ -494,6 +543,9 @@ impl App {
                 };
                 painter.image(tex.id(), screen, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
                 hud_tex = Some(tex);
+            }
+            if !video.n64 {
+                host.overlay(&painter, screen);
             }
             if !captured {
                 painter.text(
@@ -508,9 +560,9 @@ impl App {
             if show_panel {
                 let panel = egui::SidePanel::left("pdguns").resizable(false).default_width(250.0).show(ctx, |ui| {
                     egui::ScrollArea::vertical().id_salt("pdpanel").show(ui, |ui| {
-                    ui.heading("PD RANGE");
-                    ui.label(egui::RichText::new("Perfect Dark's guns, ported").weak());
                     ui.label(format!("{fps:.0} fps"));
+                    host.panel(ui);
+                    let sim = host.sim();
                     ui.label(if pad_connected { "N64 pad connected" } else { "no pad" });
                     ui.separator();
                     egui::ComboBox::from_label("rate").selected_text(rate.label()).show_ui(ui, |ui| {
@@ -532,16 +584,11 @@ impl App {
                     video_panel(ui, &mut video);
                     ui.separator();
                     audio_panel(ui, &mut tv_audio);
-                    ui.horizontal(|ui| {
-                        if ui.button("clear targets").clicked() {
-                            reset_targets = true;
-                        }
-                        // Deploying the Laptop or the Dragon's self-destruct takes
-                        // it out of the inventory (inv_remove_item_by_num).
-                        if ui.button("restock weapons").clicked() {
-                            restock = true;
-                        }
-                    });
+                    // Deploying the Laptop or the Dragon's self-destruct takes
+                    // it out of the inventory (inv_remove_item_by_num).
+                    if ui.button("restock weapons").clicked() {
+                        restock = true;
+                    }
                     ui.separator();
                     ui.label("Weapons");
                     egui::ScrollArea::vertical().max_height(280.0).show(ui, |ui| {
@@ -571,8 +618,6 @@ impl App {
                     row(ui, "crouch", format!("{}", sim.bgun.p.crouchpos));
                     row(ui, "fov", format!("{:.1}", sim.player.zoominfovy));
                     row(ui, "shots", format!("{}", sim.shots_fired));
-                    let hits: u32 = sim.range.targets.iter().map(|t| t.hits).sum();
-                    row(ui, "board hits", format!("{hits}"));
                     row(ui, "smoke/exp", format!("{} / {}", sim.smokes.live(), sim.explosions.live()));
                     row(ui, "blast dmg", format!("{:.2} (you)", sim.player_damage));
                     ui.separator();
@@ -609,8 +654,8 @@ C-lt/rt strafe · C-up/dn look · Start panel",
         self.video = video;
         self.set_tv_audio(tv_audio);
         self.panel_px = panel_px;
-        self.sim.player.mouse_sens = sens;
-        self.sim.room.br_settled_regional = brightness;
+        self.host.sim_mut().player.mouse_sens = sens;
+        self.host.sim_mut().room.br_settled_regional = brightness;
         if grid != self.grid {
             self.grid = grid;
             if let Some(r) = self.renderer.as_mut() {
@@ -618,27 +663,19 @@ C-lt/rt strafe · C-up/dn look · Start panel",
             }
         }
         if restock {
-            self.sim.restock();
-        }
-        if reset_targets {
-            for t in &mut self.sim.range.targets {
-                t.hits = 0;
-                t.damage = 0.0;
-            }
-            self.sim.wallhits.clear();
+            self.host.sim_mut().restock();
         }
         if hand_model != self.hand_model {
             self.hand_model = hand_model;
-            self.sim.bgun.hand_model = HAND_MODELS[hand_model].to_string();
+            let sim = self.host.sim_mut();
+            sim.bgun.hand_model = HAND_MODELS[hand_model].to_string();
             // Re-instantiate the models on the next load by re-equipping.
-            let w = self.sim.bgun.bgun_get_weapon_num(HAND_RIGHT);
-            let def = self.sim.models.get(HAND_MODELS[hand_model]).cloned();
+            let def = sim.models.get(HAND_MODELS[hand_model]).cloned();
             for h in 0..2 {
-                if self.sim.bgun.hands[h].handmodel.is_some() {
-                    self.sim.bgun.hands[h].handmodel = def.clone().map(super::model::Model::new);
+                if sim.bgun.hands[h].handmodel.is_some() {
+                    sim.bgun.hands[h].handmodel = def.clone().map(super::model::Model::new);
                 }
             }
-            let _ = w;
         }
         Some(EguiFrame { textures_delta: out.textures_delta, paint_jobs, pixels_per_point: out.pixels_per_point })
     }
@@ -663,15 +700,16 @@ C-lt/rt strafe · C-up/dn look · Start panel",
             if let Some(pd) = self.pd.as_mut() {
                 pd.three_point = three_point;
             }
-            self.sim.aspect = if n64 { n64video::N64_W as f32 / n64video::N64_H as f32 } else { r.aspect() };
+            self.host.sim_mut().aspect = if n64 { n64video::N64_W as f32 / n64video::N64_H as f32 } else { r.aspect() };
         }
         self.step(dt);
         let egui_frame = self.ui();
         let hud = if n64 { self.n64_hud() } else { None };
         let (Some(renderer), Some(pd), Some(nv)) = (self.renderer.as_mut(), self.pd.as_mut(), self.n64v.as_mut()) else { return };
-        let aspect = self.sim.aspect;
-        let vp = world_vp(&self.sim, aspect);
-        let sim = &self.sim;
+        let aspect = self.host.sim().aspect;
+        let vp = world_vp(self.host.sim(), aspect);
+        self.host.before_render(renderer, vp);
+        let sim = self.host.sim();
         let video = self.video;
         let panel_px = self.panel_px;
         renderer.render_with_hook(vp, egui_frame, &mut |h| {
@@ -689,16 +727,17 @@ C-lt/rt strafe · C-up/dn look · Start panel",
                 nv.run(h.device, h.queue, h.encoder, h.color, h.depth, (h.width, h.height), h.present, rect, &video);
             }
         });
-        let _ = self.world_vp(aspect);
     }
 
     /// N64 video's HUD layer (see [`n64_hud_canvas`]).
     fn n64_hud(&self) -> Option<Canvas> {
-        Some(n64_hud_canvas(&self.sim, self.always_sight))
+        let mut cv = n64_hud_canvas(self.host.sim(), self.always_sight);
+        self.host.hud(&mut cv);
+        Some(cv)
     }
 
     fn weapon_by_index(&self, i: usize) -> Option<(i32, bool)> {
-        self.sim.bgun.p.inventory.get(i).map(|&(w, _)| (w, false))
+        self.host.sim().bgun.p.inventory.get(i).map(|&(w, _)| (w, false))
     }
 }
 
@@ -710,28 +749,28 @@ pub fn world_vp(sim: &Sim, aspect: f32) -> Mat4 {
     shake * Mat4::perspective_rh(p.fovy.to_radians(), aspect, 0.05, 300.0) * view_m
 }
 
-impl ApplicationHandler for App {
+impl<H: Host> ApplicationHandler for App<H> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
         }
         let attrs = Window::default_attributes()
-            .with_title("PD RANGE — Perfect Dark guns spike")
+            .with_title(self.host.title())
             .with_inner_size(winit::dpi::LogicalSize::new(1600.0, 900.0));
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let mut renderer = pollster::block_on(Renderer::new(window.clone()));
         renderer.set_grid_mode(self.grid);
         renderer.set_crosshair_offset(None);
         renderer.set_lighting(&[], ([1.0, 1.0, 1.0], 1.0), false);
+        self.host.gpu_ready(&mut renderer);
         let (device, queue, cf, df) = renderer.gpu();
         let mut pd = PdRenderer::new(device, queue, cf, df);
-        pd.load_models(device, queue, &self.sim);
+        pd.load_models(device, queue, self.host.sim());
         self.n64v = Some(N64Video::new(device, queue, cf));
         self.egui_state = Some(egui_winit::State::new(self.egui_ctx.clone(), egui::ViewportId::ROOT, &*window, None, None, None));
         self.renderer = Some(renderer);
         self.pd = Some(pd);
         self.window = Some(window);
-        self.upload_range();
         self.last = Instant::now();
     }
 
@@ -821,8 +860,9 @@ impl ApplicationHandler for App {
                 };
                 // Aiming a manual-zoom gun, a notch is a quarter second of
                 // C-up / C-down held; otherwise it cycles weapons.
-                let w = self.sim.bgun.bgun_get_weapon_num(HAND_RIGHT);
-                let zooms = self.buttons.contains(&MouseButton::Right) && self.sim.gset.has_aim_flag(w, INVAIMFLAG_MANUALZOOM);
+                let sim = self.host.sim();
+                let w = sim.bgun.bgun_get_weapon_num(HAND_RIGHT);
+                let zooms = self.buttons.contains(&MouseButton::Right) && sim.gset.has_aim_flag(w, INVAIMFLAG_MANUALZOOM);
                 if zooms {
                     if y != 0.0 {
                         self.zoom_hold = 15 * y.signum() as i32;
@@ -1129,7 +1169,7 @@ fn canvas_sight_maian(cv: &mut Canvas, x: i32, y: i32, hasprop: bool) {
 
 /// A gouraud-shaded triangle (vertex colours as RGBA words), sampled at pixel
 /// centres and blended XLU.
-fn shade_tri(cv: &mut Canvas, v: [(f32, f32, u32); 3]) {
+pub(crate) fn shade_tri(cv: &mut Canvas, v: [(f32, f32, u32); 3]) {
     let col = v.map(|(_, _, c)| {
         let (rgb, a) = split(c);
         [rgb[0], rgb[1], rgb[2], a]

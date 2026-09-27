@@ -27,6 +27,11 @@ use super::sim::Sim;
 use super::thirdperson::{self, WieldMode};
 use super::{botcmd, weapons};
 
+/// A player's `vv_eyeheight` in multiplayer: its body's `g_HeadsAndBodies[].height`
+/// (`player.c:1485`), 159 for Joanna. Not the current eye offset: crouching lowers
+/// `prop->pos`, not this.
+pub const PLAYER_EYEHEIGHT: f32 = 159.0;
+
 /// `BOTDIFF_*`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Difficulty {
@@ -64,24 +69,43 @@ pub struct BotDifficulty {
     pub maxzerospeed: f32,
     pub zerotime60: f32,
     pub turnunzeromult: f32,
+    pub zerocloakspeed: f32,
     pub forcezerominspeed: f32,
 }
 
-const fn bd(shootdelay60: i32, minz: f32, maxz: f32, zerotime60: f32, turnunzeromult: f32, forcez: f32) -> BotDifficulty {
+const fn bd(shootdelay60: i32, minz: f32, maxz: f32, zerotime60: f32, turnunzeromult: f32, zerocloak: f32, forcez: f32) -> BotDifficulty {
     // Angles are in degrees here and converted with BADDTOR2 at use.
-    BotDifficulty { shootdelay60, minzerospeed: minz, maxzerospeed: maxz, zerotime60, turnunzeromult, forcezerominspeed: forcez }
+    BotDifficulty { shootdelay60, minzerospeed: minz, maxzerospeed: maxz, zerotime60, turnunzeromult, zerocloakspeed: zerocloak, forcezerominspeed: forcez }
 }
 
-/// `g_BotDifficulties` (`bot.c:98`). `zerocloakspeed` and `dizzyamount` are left
-/// out: there is no cloak and no tranquiliser here.
+/// `g_BotDifficulties` (`bot.c:98`). `dizzyamount` is left out: there is no
+/// tranquiliser here.
 pub const G_BOT_DIFFICULTIES: [BotDifficulty; 6] = [
-    bd(90, 15.0, 30.0, 600.0, 10.0, 20.0),
-    bd(60, 7.0, 14.0, 360.0, 10.0, 8.0),
-    bd(30, 4.0, 8.0, 180.0, 4.0, 5.0),
-    bd(15, 1.5, 4.0, 90.0, 2.0, 2.0),
-    bd(0, 0.0, 2.0, 45.0, 1.0, 0.0),
-    bd(0, 0.0, 0.0, 0.0, 0.0, 0.0),
+    bd(90, 15.0, 30.0, 600.0, 10.0, 40.0, 20.0),
+    bd(60, 7.0, 14.0, 360.0, 10.0, 28.5, 8.0),
+    bd(30, 4.0, 8.0, 180.0, 4.0, 20.0, 5.0),
+    bd(15, 1.5, 4.0, 90.0, 2.0, 14.0, 2.0),
+    bd(0, 0.0, 2.0, 45.0, 1.0, 10.0, 0.0),
+    bd(0, 0.0, 0.0, 0.0, 0.0, 8.0, 0.0),
 ];
+
+/// `bot_is_target_invisible` (`bot.c:1405`): a cloaked chr can't be seen unless
+/// it is this bot's target and was in sight within `targetcloaktimer60` (2 s), or
+/// the bot's rare `canseecloaked` roll is on while it looks at it (±45/256 turn).
+pub fn bot_is_target_invisible(sim: &Sim, bot: usize, other: usize) -> bool {
+    let o = &sim.chrs[other];
+    if !o.cloaked {
+        return false;
+    }
+    let b = &sim.chrs[bot];
+    if b.target == Some(other) && b.aibot.targetcloaktimer60 > 0 {
+        return false;
+    }
+    if b.aibot.canseecloaked && chraction::chr_is_target_in_fov(b, o.prop_pos(), 32) {
+        return false;
+    }
+    true
+}
 
 /// `chr_is_target_in_fov(chr, 45, false)` — the trigger cone, in radians either
 /// side of `theta`. 45 is in 256ths of a turn (`D256TOR`), i.e. ±63.3°.
@@ -124,6 +148,12 @@ pub fn bot_tick(sim: &mut Sim, i: usize) {
         // Calculate target angle
         let about = bot_is_about_to_attack(sim, i);
         let target_pos = sim.chrs[i].target.map(|t| sim.chrs[t].prop_pos());
+        // A player target: its eye height, and the RANDOMFRAC() chr_calculate_aimend
+        // draws for it (only reached with a target and a gun).
+        let aim_player = match sim.chrs[i].target {
+            Some(t) if sim.chrs[t].player && !sim.chrs[i].aibot.ismeleeweapon => Some((PLAYER_EYEHEIGHT, sim.rng.randomfrac())),
+            _ => None,
+        };
         let g = sim.g;
         let c = &mut sim.chrs[i];
         let oldangle = c.theta();
@@ -188,7 +218,7 @@ pub fn bot_tick(sim: &mut Sim, i: usize) {
             let left = c.has_weapon_in(HAND_LEFT);
             let right = c.has_weapon_in(HAND_RIGHT);
             let cfg = c.aibot.attackanimconfig;
-            chraction::chr_calculate_aimend(c, target_pos.unwrap(), cfg, left, right);
+            chraction::chr_calculate_aimend(c, target_pos.unwrap(), cfg, left, right, aim_player);
         } else {
             chraction::chr_reset_aimend(c);
         }
@@ -588,6 +618,7 @@ pub fn botact_reload(c: &mut Chr, hand: usize) {
 /// `bot_set_target` (`bot.c:1358`).
 pub fn bot_set_target(sim: &mut Sim, i: usize, target: Option<usize>) {
     let g = sim.g;
+    let other_cloaked = target.is_some_and(|t| sim.chrs[t].cloaked);
     let c = &mut sim.chrs[i];
     if let Some(t) = target {
         c.aibot.targetinsight = c.aibot.chrsinsight[t];
@@ -614,6 +645,16 @@ pub fn bot_set_target(sim: &mut Sim, i: usize, target: Option<usize>) {
             c.aibot.shootdelaytimer60 = 0;
         }
     }
+    // `bot.c:1392`: an uncloaked target in sight keeps two seconds of memory.
+    if c.aibot.targetinsight && target.is_some() {
+        if !other_cloaked {
+            c.aibot.targetcloaktimer60 = 120;
+        } else if c.aibot.targetcloaktimer60 > 0 {
+            c.aibot.targetcloaktimer60 -= g.lvupdate60;
+        }
+    } else {
+        c.aibot.targetcloaktimer60 = 0;
+    }
 }
 
 /// `bot_update_zero_angle` (`bot.c:1461`).
@@ -621,6 +662,7 @@ pub fn bot_update_zero_angle(sim: &mut Sim, i: usize) {
     let g = sim.g;
     let c = &sim.chrs[i];
     let needs_roll = c.aibot.random3ttl60 - g.lvupdate60 <= 0;
+    let target_cloaked = c.target.is_some_and(|t| sim.chrs[t].cloaked);
     let (r1, r2) = if needs_roll { (sim.rng.random(), sim.rng.random()) } else { (0, 0) };
     let c = &mut sim.chrs[i];
     let d = c.aibot.config.difficulty.tuning();
@@ -655,6 +697,10 @@ pub fn bot_update_zero_angle(sim: &mut Sim, i: usize) {
         minspeed = baddtor2(d.minzerospeed) * frac;
         maxspeed = baddtor2(d.maxzerospeed) * frac;
     }
+    // A cloaked target: at least `zerocloakspeed` (`bot.c:1505`).
+    if target_cloaked && maxspeed < baddtor2(d.zerocloakspeed) {
+        maxspeed = baddtor2(d.zerocloakspeed);
+    }
     if maxspeed < baddtor2(d.forcezerominspeed) {
         maxspeed = baddtor2(d.forcezerominspeed);
     }
@@ -678,10 +724,13 @@ pub fn bot_choose_general_target(sim: &mut Sim, i: usize) {
     let q = (sim.chrs[i].aibot.queryplayernum + 1) % n;
     sim.chrs[i].aibot.queryplayernum = q;
     if q != i {
-        // (The canseecloaked roll consumes a random number in PD.)
-        let _ = sim.rng.random();
+        // Once every 4 minutes per chr on average (`bot.c:1610`).
+        if sim.rng.random() % (4 * 60 * 60) < (n as u32) * g.lvupdate60.max(0) as u32 {
+            sim.chrs[i].aibot.canseecloaked = true;
+        }
         let dist = sim.chrs[i].prop_pos().distance(sim.chrs[q].prop_pos());
         let insight = chraction::chr_has_los_to_chr(sim, i, q);
+        sim.chrs[i].aibot.canseecloaked = false;
         // SUBSTITUTION: `chr_has_los_to_chr` hands back the final room of its sight
         // ray (found through portals); without portals, the polled chr's own room.
         let room = chraction::chr_rooms(sim, q).first().copied();
@@ -717,9 +766,11 @@ pub fn bot_choose_general_target(sim: &mut Sim, i: usize) {
 
     // (MA_AIBOTATTACK with attackingplayernum is Kaze/scenario only.)
 
-    // Invalidate a dead target
+    // Invalidate a dead target, or one out of sight and invisible (cloaked).
     if let Some(t) = sim.chrs[i].target {
         if sim.chrs[t].is_dead() {
+            sim.chrs[i].target = None;
+        } else if !sim.chrs[i].aibot.targetinsight && bot_is_target_invisible(sim, i, t) {
             sim.chrs[i].target = None;
         }
     }
@@ -738,11 +789,11 @@ pub fn bot_choose_general_target(sim: &mut Sim, i: usize) {
                     bot_set_target(sim, i, Some(k));
                     return;
                 }
-                if matches!(diff, Difficulty::Meat | Difficulty::Easy) {
+                if !bot_is_target_invisible(sim, i, k) && matches!(diff, Difficulty::Meat | Difficulty::Easy) {
                     bot_set_target(sim, i, Some(k));
                     return;
                 }
-                if closestavailable.is_none() {
+                if !bot_is_target_invisible(sim, i, k) && closestavailable.is_none() {
                     closestavailable = Some(k);
                 }
             }

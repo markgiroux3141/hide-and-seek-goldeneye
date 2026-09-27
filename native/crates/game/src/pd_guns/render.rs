@@ -619,9 +619,10 @@ impl PdRenderer {
             usage: wgpu::BufferUsages::INDEX,
         });
         let file_textures = def.file.as_ref().map(|f| f.textures.clone()).unwrap_or_default();
+        let dir = def.tex_dir.clone().unwrap_or_else(tex_dir);
         let mut materials = Vec::new();
         for m in &def.materials {
-            materials.push(self.build_material(device, queue, m, &file_textures));
+            materials.push(self.build_material(device, queue, m, &file_textures, &dir));
         }
         GpuModel { def, vbuf, ibuf, batches, materials, star_verts }
     }
@@ -632,6 +633,7 @@ impl PdRenderer {
         queue: &wgpu::Queue,
         m: &Material,
         textures: &HashMap<String, data::TextureRef>,
+        dir: &std::path::Path,
     ) -> GpuMaterial {
         let mut view = self.white.clone();
         let mut size = [1.0f32, 1.0];
@@ -641,7 +643,7 @@ impl PdRenderer {
         let mut ul = [0.0f32, 0.0];
         if let Some(t) = &m.texture {
             if let Some(tr) = textures.get(&t.id.to_string()) {
-                let path = tex_dir().join(&tr.file);
+                let path = dir.join(&tr.file);
                 if let Some((v, w, h)) = self.texture(device, queue, &path, t.mipmap) {
                     view = v;
                     size = [w as f32, h as f32];
@@ -1292,6 +1294,9 @@ impl PdRenderer {
         if let Some((alpha, scale, fade)) = sim.boost_fx {
             fx.zoom_blurs.push((alpha, scale, scale));
             fx.fade = Some(([1.0, 1.0, 1.0], fade));
+        }
+        if fx.fade.is_none() {
+            fx.fade = sim.host_fade.filter(|(_, a)| *a > 0.0);
         }
         fx.zoom_blurs.truncate(2);
         fx
