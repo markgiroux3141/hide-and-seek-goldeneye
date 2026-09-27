@@ -25,7 +25,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{CursorGrabMode, Window, WindowId};
 
-use engine::audio::AudioManager;
+use engine::audio::{AudioManager, TrackId};
 use engine::platform::gamepad::{Gamepads, PadAxis};
 use engine::geometry::csg_runtime::Region;
 use engine::render::renderer::{EguiFrame, Renderer};
@@ -34,6 +34,7 @@ use super::bgun::*;
 use super::font::{split, Canvas};
 use super::gset::*;
 use super::n64video::{self, Mask, N64Video, Preset, Resolution, Signal, TvSet, VideoSettings};
+use super::tvaudio::{AudioSettings, SpeakerPreset, TvLink};
 use super::player::PdInput;
 use super::render::PdRenderer;
 use super::sim::{Sim, SoundReq, HAND_MODELS};
@@ -110,6 +111,11 @@ pub struct App {
     /// N64 video + CRT (the VIDEO section of the panel).
     video: VideoSettings,
     n64v: Option<N64Video>,
+    /// The N64 mix + TV speaker (the AUDIO section of the panel).
+    tv_audio: AudioSettings,
+    /// Its sub-track, made the first time something in it is switched on.
+    /// Until then (and whenever it's all off) voices play on the main track.
+    tv_track: Option<(TrackId, TvLink)>,
     /// The left panel's width in physical pixels (0 when hidden): the tube
     /// is centred in the rest of the window.
     panel_px: f32,
@@ -282,6 +288,8 @@ impl App {
             hud_tex: None,
             video: VideoSettings::default(),
             n64v: None,
+            tv_audio: AudioSettings::default(),
+            tv_track: None,
             panel_px: 0.0,
             pads: Gamepads::new(),
             n64: N64State::default(),
@@ -372,6 +380,7 @@ impl App {
         let reqs: Vec<SoundReq> = std::mem::take(&mut self.sim.sounds);
         let stops: Vec<usize> = std::mem::take(&mut self.sim.stop_loops);
         let Some(audio) = self.audio.as_mut() else { return };
+        let track = self.tv_track.as_ref().filter(|_| self.tv_audio.active()).map(|(id, _)| *id);
         for h in stops {
             if let Some(id) = self.loops.remove(&h) {
                 audio.stop_voice(id);
@@ -386,13 +395,30 @@ impl App {
                 continue;
             }
             let looping = r.loop_hand.is_some();
-            if let Some(id) = audio.play_voice(&s.file, s.volume * r.volume, r.speed as f64, r.pan, looping) {
+            if let Some(id) = audio.play_voice_on(track, &s.file, s.volume * r.volume, r.speed as f64, r.pan, looping) {
                 if let Some(h) = r.loop_hand {
                     if let Some(old) = self.loops.insert(h, id) {
                         audio.stop_voice(old);
                     }
                 }
             }
+        }
+    }
+
+    /// Apply the AUDIO section. The sub-track is only made once something in it
+    /// is switched on, so a session that never touches it plays exactly as before.
+    fn set_tv_audio(&mut self, s: AudioSettings) {
+        if s == self.tv_audio {
+            return;
+        }
+        self.tv_audio = s;
+        match (&self.tv_track, self.audio.as_mut()) {
+            (Some((_, link)), _) => link.set(s),
+            (None, Some(audio)) if s.active() => {
+                let (link, dsp) = TvLink::new(s);
+                self.tv_track = audio.add_dsp_track(dsp).map(|id| (id, link));
+            }
+            _ => {}
         }
     }
 
@@ -422,6 +448,7 @@ impl App {
         let pad_connected = self.pads.as_ref().is_some_and(|p| p.connected());
         let mut hud_tex = self.hud_tex.take();
         let mut video = self.video;
+        let mut tv_audio = self.tv_audio;
         let mut panel_px = 0.0f32;
 
         let out = self.egui_ctx.run(raw, |ctx| {
@@ -503,6 +530,8 @@ impl App {
                     ui.checkbox(&mut grid, "grid walls");
                     ui.separator();
                     video_panel(ui, &mut video);
+                    ui.separator();
+                    audio_panel(ui, &mut tv_audio);
                     ui.horizontal(|ui| {
                         if ui.button("clear targets").clicked() {
                             reset_targets = true;
@@ -578,6 +607,7 @@ C-lt/rt strafe · C-up/dn look · Start panel",
         self.invert_pad_aim = invert_pad_aim;
         self.hud_tex = hud_tex;
         self.video = video;
+        self.set_tv_audio(tv_audio);
         self.panel_px = panel_px;
         self.sim.player.mouse_sens = sens;
         self.sim.room.br_settled_regional = brightness;
@@ -994,6 +1024,44 @@ fn video_panel(ui: &mut egui::Ui, v: &mut VideoSettings) {
             *v = VideoSettings { n64: true, ..VideoSettings::default() };
         }
     });
+}
+
+/// The panel's AUDIO section: the N64's 22020 Hz mix, and a cheap TV's speaker.
+fn audio_panel(ui: &mut egui::Ui, a: &mut AudioSettings) {
+    ui.label(egui::RichText::new("AUDIO").strong());
+    ui.checkbox(&mut a.n64, "N64 mix (22020 Hz)");
+    ui.add_enabled_ui(a.n64, |ui| {
+        ui.indent("n64audio", |ui| {
+            ui.checkbox(&mut a.dac_filter, "DAC filter (off = raw hold)");
+        });
+    });
+    ui.checkbox(&mut a.tv, "TV speaker");
+    ui.add_enabled_ui(a.tv, |ui| {
+        ui.indent("tvspeaker", |ui| {
+            ui.horizontal(|ui| {
+                for p in SpeakerPreset::ALL {
+                    if ui.small_button(p.label()).clicked() {
+                        p.apply(a);
+                    }
+                }
+            });
+            ui.add(egui::Slider::new(&mut a.mix, 0.0..=1.0).text("mix"));
+            ui.checkbox(&mut a.mono, "mono");
+            ui.add(egui::Slider::new(&mut a.low_cut, 60.0..=800.0).logarithmic(true).text("low cut Hz"));
+            ui.add(egui::Slider::new(&mut a.high_cut, 2000.0..=12000.0).logarithmic(true).text("high cut Hz"));
+            ui.add(egui::Slider::new(&mut a.box_hz, 800.0..=4000.0).logarithmic(true).text("boxy mids Hz"));
+            ui.add(egui::Slider::new(&mut a.box_db, 0.0..=12.0).text("boxy mids dB"));
+            ui.add(egui::Slider::new(&mut a.drive, 0.0..=1.0).text("overdrive"));
+            ui.add(egui::Slider::new(&mut a.squash, 0.0..=1.0).text("compressor"));
+            ui.add(egui::Slider::new(&mut a.cabinet, 0.0..=1.0).text("cabinet"));
+            ui.add(egui::Slider::new(&mut a.volume_db, -12.0..=12.0).text("volume dB"));
+            ui.checkbox(&mut a.whine, "15.7 kHz flyback whine");
+            ui.add_enabled(a.whine, egui::Slider::new(&mut a.whine_db, -70.0..=-20.0).text("whine dB"));
+        });
+    });
+    if ui.small_button("reset audio").clicked() {
+        *a = AudioSettings::default();
+    }
 }
 
 /// `gDPHudRectangle` (`gbiex.h:101`) at `g_UiScaleX` 1: both corners inclusive,

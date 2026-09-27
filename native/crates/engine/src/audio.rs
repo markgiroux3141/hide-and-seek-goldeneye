@@ -20,8 +20,50 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use kira::effect::Effect;
 use kira::sound::static_sound::{StaticSoundData, StaticSoundHandle};
-use kira::{AudioManager as KiraManager, AudioManagerSettings, DefaultBackend, Decibels, Panning, PlaybackRate, Tween};
+use kira::track::{TrackBuilder, TrackHandle};
+use kira::{AudioManager as KiraManager, AudioManagerSettings, DefaultBackend, Decibels, Frame, Panning, PlaybackRate, Tween};
+
+/// A caller-owned stereo effect for a mixer sub-track ([`AudioManager::add_dsp_track`]).
+/// It runs on the audio thread, once per output frame, after the track's voices
+/// are summed. Don't allocate or lock in [`Self::frame`] / [`Self::on_block`];
+/// [`Self::init`] runs on the calling thread and may allocate.
+pub trait TrackDsp: Send + 'static {
+    /// The output sample rate: once before the first block, and again if the
+    /// device changes rate.
+    fn init(&mut self, _sample_rate: u32) {}
+    /// Once per block (a few ms of frames), before its frames: pick up new settings here.
+    fn on_block(&mut self) {}
+    /// One stereo frame in, one out.
+    fn frame(&mut self, l: f32, r: f32) -> (f32, f32);
+}
+
+/// Adapts a [`TrackDsp`] to kira's effect trait. Generic, so `frame` inlines.
+struct DspEffect<T>(T);
+
+impl<T: TrackDsp> Effect for DspEffect<T> {
+    fn init(&mut self, sample_rate: u32, _internal_buffer_size: usize) {
+        self.0.init(sample_rate);
+    }
+    fn on_change_sample_rate(&mut self, sample_rate: u32) {
+        self.0.init(sample_rate);
+    }
+    fn on_start_processing(&mut self) {
+        self.0.on_block();
+    }
+    fn process(&mut self, input: &mut [Frame], _dt: f64, _info: &kira::info::Info) {
+        for f in input {
+            let (l, r) = self.0.frame(f.left, f.right);
+            f.left = l;
+            f.right = r;
+        }
+    }
+}
+
+/// A mixer sub-track made by [`AudioManager::add_dsp_track`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrackId(usize);
 
 /// Convert a linear amplitude gain (the JS `GainNode` model: 1.0 = unchanged,
 /// 0.5 = half) to the decibels kira wants: `dB = 20·log10(amplitude)`. Clamped
@@ -45,6 +87,8 @@ pub struct AudioManager {
     /// Voices started by [`Self::play_voice`] that the caller may stop (loops).
     voices: HashMap<u64, StaticSoundHandle>,
     next_voice: u64,
+    /// Sub-tracks from [`Self::add_dsp_track`], indexed by [`TrackId`].
+    tracks: Vec<TrackHandle>,
     /// `native/assets/audio/`, resolved once from the engine crate's manifest dir.
     root: PathBuf,
 }
@@ -72,6 +116,7 @@ impl AudioManager {
             music: None,
             voices: HashMap::new(),
             next_voice: 1,
+            tracks: Vec::new(),
             root,
         })
     }
@@ -119,6 +164,28 @@ impl AudioManager {
     /// and stereo pan (-1 left .. 1 right). Returns a voice id for
     /// [`Self::stop_voice`]; one-shots are forgotten once they finish.
     pub fn play_voice(&mut self, name: &str, volume: f32, rate: f64, pan: f32, looping: bool) -> Option<u64> {
+        self.play_voice_on(None, name, volume, rate, pan, looping)
+    }
+
+    /// Add a mixer sub-track (routed into the main track) whose summed voices
+    /// pass through `dsp`. Play onto it with [`Self::play_voice_on`].
+    pub fn add_dsp_track<T: TrackDsp>(&mut self, dsp: T) -> Option<TrackId> {
+        let builder = TrackBuilder::new().with_built_effect(Box::new(DspEffect(dsp)));
+        match self.manager.add_sub_track(builder) {
+            Ok(handle) => {
+                self.tracks.push(handle);
+                Some(TrackId(self.tracks.len() - 1))
+            }
+            Err(e) => {
+                log::warn!("audio: add sub-track failed: {e}");
+                None
+            }
+        }
+    }
+
+    /// [`Self::play_voice`] onto a sub-track (`None` = the main track, exactly
+    /// as `play_voice`).
+    pub fn play_voice_on(&mut self, track: Option<TrackId>, name: &str, volume: f32, rate: f64, pan: f32, looping: bool) -> Option<u64> {
         if !self.sounds.contains_key(name) {
             self.load(name);
         }
@@ -131,7 +198,11 @@ impl AudioManager {
             data = data.loop_region(..);
         }
         self.voices.retain(|_, h| h.state() != kira::sound::PlaybackState::Stopped);
-        match self.manager.play(data) {
+        let played = match track.and_then(|t| self.tracks.get_mut(t.0)) {
+            Some(t) => t.play(data),
+            None => self.manager.play(data),
+        };
+        match played {
             Ok(handle) => {
                 let id = self.next_voice;
                 self.next_voice += 1;
